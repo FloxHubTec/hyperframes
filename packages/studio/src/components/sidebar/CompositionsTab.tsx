@@ -471,7 +471,7 @@ export const CompositionsTab = memo(function CompositionsTab({
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-4 gap-2">
         <p className="text-xs text-neutral-600 text-center">
-          No compositions yet — a composition is an HTML scene in your project
+          No compositions yet: a composition is an HTML scene in your project
         </p>
         <button
           type="button"
