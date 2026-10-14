@@ -275,3 +275,49 @@ describe("RenderQueue FFmpeg gate", () => {
     expect(exportButtonIn(host).disabled).toBe(false);
   });
 });
+
+function mountGifQueue() {
+  localStorage.setItem("hf-studio-render-settings", JSON.stringify({ format: "gif" }));
+  const onStartRender: Mock<StartRenderHandler> = vi.fn();
+  return { onStartRender, host: mountRenderQueue(onStartRender) };
+}
+
+function enterGifLoop(host: HTMLElement, value: string) {
+  const input = host.querySelector<HTMLInputElement>('input[type="number"]');
+  if (!input) throw new Error("missing loop count");
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  return input;
+}
+
+describe("GIF export controls", () => {
+  it("offers GIF, persists the selection, and exports with infinite looping", async () => {
+    const onStartRender: Mock<StartRenderHandler> = vi.fn();
+    const host = mountRenderQueue(onStartRender);
+    await chooseByArrowing(triggerFor(host, "Format"), 3);
+    expect(getPersistedRenderSettings().format).toBe("gif");
+    const input = host.querySelector<HTMLInputElement>('input[type="number"]');
+    expect(input?.value).toBe("0");
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenCalledWith("gif", "standard", "auto", 30, false, 0);
+  });
+
+  it("restores GIF settings and exports a finite loop count", () => {
+    const { host, onStartRender } = mountGifQueue();
+    enterGifLoop(host, "3");
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenCalledWith("gif", "standard", "auto", 30, false, 3);
+  });
+
+  it.each(["", "-1", "1.5", "65536"])("blocks export for invalid GIF loop count %j", (value) => {
+    const { host, onStartRender } = mountGifQueue();
+    const input = enterGifLoop(host, value);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(exportButtonIn(host).disabled).toBe(true);
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).not.toHaveBeenCalled();
+  });
+});

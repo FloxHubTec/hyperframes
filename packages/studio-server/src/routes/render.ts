@@ -20,6 +20,7 @@ const RENDER_MIME: Record<string, string> = {
   ".mp4": "video/mp4",
   ".webm": "video/webm",
   ".mov": "video/quicktime",
+  ".gif": "image/gif",
 };
 const RENDER_EXTENSIONS = Object.keys(RENDER_MIME);
 const RENDER_ARTIFACT_EXTENSIONS = [...RENDER_EXTENSIONS, ".meta.json"];
@@ -111,9 +112,14 @@ export function registerRenderRoutes(api: Hono, adapter: StudioApiAdapter): void
       previewMotionBlur?: boolean;
       pageMotionBlur?: unknown;
     };
-    const VALID_FORMATS = new Set(["mp4", "webm", "mov"]);
-    const FORMAT_EXT: Record<string, string> = { mp4: ".mp4", webm: ".webm", mov: ".mov" };
-    const format = VALID_FORMATS.has(body.format ?? "") ? (body.format as string) : "mp4";
+    const VALID_FORMATS = ["mp4", "webm", "mov", "gif"] as const;
+    const FORMAT_EXT: Record<string, string> = {
+      mp4: ".mp4",
+      webm: ".webm",
+      mov: ".mov",
+      gif: ".gif",
+    };
+    const format = VALID_FORMATS.find((value) => value === body.format) ?? "mp4";
 
     // Default to 30 fps when unset or unparseable. The route stays lenient on
     // invalid fps values (matching the lenient handling of `resolution` and
@@ -171,7 +177,7 @@ export function registerRenderRoutes(api: Hono, adapter: StudioApiAdapter): void
     const jobState = adapter.startRender({
       project,
       outputPath,
-      format: format as "mp4" | "webm" | "mov",
+      format,
       fps,
       quality,
       jobId,
@@ -346,14 +352,14 @@ export function registerRenderRoutes(api: Hono, adapter: StudioApiAdapter): void
     const rendersDir = adapter.rendersDir(project);
     if (!existsSync(rendersDir)) return c.json({ renders: [] });
     const files = readdirSync(rendersDir)
-      .filter((f) => f.endsWith(".mp4") || f.endsWith(".webm") || f.endsWith(".mov"))
+      .filter((f) => RENDER_EXTENSIONS.some((extension) => f.endsWith(extension)))
       .flatMap((f) => {
         const fp = resolveWithinProject(rendersDir, f);
         return fp && !isPrivateProjectFile(project.dir, fp) ? [{ f, fp }] : [];
       })
       .map(({ f, fp }) => {
         const stat = statSync(fp);
-        const rid = f.replace(/\.(mp4|webm|mov)$/, "");
+        const rid = f.replace(/\.(mp4|webm|mov|gif)$/, "");
         const metaPath = join(rendersDir, `${rid}.meta.json`);
         let status: "complete" | "failed" = "complete";
         let durationMs: number | undefined;
