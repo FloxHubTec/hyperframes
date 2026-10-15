@@ -5,15 +5,39 @@ import { parseNumeric, parseStartExpression } from "./compositionContract.js";
 
 /** Minimal structural DOM shape the reference resolver needs. */
 export interface RefResolverEl {
+  readonly id: string;
+  readonly parentElement: RefResolverEl | null;
   getAttribute(name: string): string | null;
+  hasAttribute(name: string): boolean;
+  closest(selector: string): RefResolverEl | null;
+  querySelectorAll(selector: string): Iterable<RefResolverEl>;
 }
 export interface RefResolverDoc {
   getElementById(id: string): RefResolverEl | null;
   querySelector(selector: string): RefResolverEl | null;
 }
 
-// By `id`, then `data-composition-id`. The reference grammar allows only `[A-Za-z0-9_.:-]`, so no CSS.escape.
-function findReferenceTargetEl(doc: RefResolverDoc, refId: string): RefResolverEl | null {
+function compositionScopeOf(el: RefResolverEl): RefResolverEl | null {
+  return (
+    (el.hasAttribute("data-composition-id") ? el.parentElement : el)?.closest(
+      "[data-composition-id]",
+    ) ?? null
+  );
+}
+
+// By `id` in the clip's own composition, then document-wide by `id`, then `data-composition-id`.
+// The reference grammar allows only `[A-Za-z0-9_.:-]`, so no CSS.escape.
+function findReferenceTargetEl(
+  doc: RefResolverDoc,
+  refId: string,
+  from: RefResolverEl,
+): RefResolverEl | null {
+  const scope = compositionScopeOf(from);
+  if (scope) {
+    for (const candidate of scope.querySelectorAll("[id]")) {
+      if (candidate.id === refId && compositionScopeOf(candidate) === scope) return candidate;
+    }
+  }
   return doc.getElementById(refId) ?? doc.querySelector(`[data-composition-id="${refId}"]`);
 }
 
@@ -40,7 +64,7 @@ export function resolveReferencedStart(
       startCache.set(el, value);
       return value;
     }
-    const target = findReferenceTargetEl(doc, expression.refId);
+    const target = findReferenceTargetEl(doc, expression.refId, el);
     if (!target) {
       startCache.set(el, 0);
       return 0;
