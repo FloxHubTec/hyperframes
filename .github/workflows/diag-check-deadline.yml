@@ -1,0 +1,86 @@
+# Diagnostic only, removed with its PR: time each step of the check-deadline profile test on Windows.
+name: Diagnose check deadline on Windows
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/diag-check-deadline.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: check deadline x30 (${{ matrix.load }})
+    runs-on: windows-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        load: [solo, loaded]
+    steps:
+      - name: Disable Windows Defender real-time monitoring
+        shell: pwsh
+        continue-on-error: true
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install FFmpeg
+        uses: ./.github/actions/install-ffmpeg-windows
+
+      - name: Set FFMPEG_BIN for bun install
+        shell: pwsh
+        run: |
+          $path = (Get-Command ffmpeg.exe).Source
+          "FFMPEG_BIN=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        shell: pwsh
+        run: bun install --frozen-lockfile --linker=hoisted
+
+      - name: Build test prerequisites
+        shell: pwsh
+        run: |
+          bun run --filter '@hyperframes/{parsers,lint,studio-server}' build
+          bun run --cwd packages/core build
+
+      - name: Prepare browser for process tests
+        shell: pwsh
+        run: node --import tsx packages/cli/scripts/prepare-process-test-browser.mjs
+
+      - name: Run the profile test 30 times
+        shell: bash
+        env:
+          LOAD: ${{ matrix.load }}
+        run: |
+          marks="$RUNNER_TEMP/marks.txt"
+          if [ "$LOAD" = loaded ]; then
+            # The merge-queue lane runs the engine and cli suites at once; keep that load on.
+            (while true; do bun run --filter @hyperframes/engine --filter @hyperframes/cli test -- --maxWorkers=2 >/dev/null 2>&1; done) &
+            load_pid=$!
+            sleep 60
+          fi
+          failures=0
+          cd packages/cli
+          for i in $(seq 1 30); do
+            : > "$marks"
+            start=$(date +%s%3N)
+            if HF_DIAG_MARKS="$marks" npx vitest run src/utils/checkDeadline.process.test.ts -t "distinct profiles" --maxWorkers=2 > "$RUNNER_TEMP/out.txt" 2>&1; then result=PASS; else result=FAIL; failures=$((failures + 1)); fi
+            echo "::group::run $i $result $(( $(date +%s%3N) - start )) ms"
+            cat "$marks"
+            if [ "$result" = FAIL ]; then sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/out.txt" | grep -E "Expected|Received|message|Error" | head -20; fi
+            echo "::endgroup::"
+            echo "run $i $result"
+          done
+          [ -n "${load_pid:-}" ] && kill "$load_pid" || true
+          echo "FAILURES: $failures of 30"
