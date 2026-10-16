@@ -217,6 +217,7 @@ import {
   resolveCaptureJpegQuality,
 } from "./render/captureImageFormat.js";
 import { assertMotionBlurSupported } from "./render/motionBlurRoute.js";
+import { assertOutputScaleSupported } from "./render/outputScaleRoute.js";
 
 export function sampleDirectoryBytes(dir: string): number {
   let total = 0;
@@ -4276,6 +4277,7 @@ async function executeRenderPipeline(input: {
       // Every route the render can end up on passes through here, including the ones a
       // replan lands on, so this is where motion blur's one supported-route answer belongs.
       assertMotionBlurSupported(job.config.motionBlur, capturePlan.kind);
+      assertOutputScaleSupported(deviceScaleFactor, capturePlan.kind);
       workerCount = capturePlan.workerCount;
       captureForceScreenshot = capturePlan.forceScreenshot;
       useStreamingEncode = capturePlan.kind === "sdr_streaming";

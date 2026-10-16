@@ -1949,6 +1949,15 @@ describe("checkRenderResolutionPreflight", () => {
       expect(result).toBeUndefined();
     });
 
+    it("never adapts `--resolution 4k` to another tier: a 1922×1080 composition is refused, not rendered at 480p", async () => {
+      const result = await checkRenderResolutionPreflight(
+        comp(1922, 1080),
+        "landscape-4k",
+        agnostic,
+      );
+      expect(result?.kind).toBeDefined();
+    });
+
     it("does NOT auto-clear when the flag was explicit (orientation-locked preset stays strict)", async () => {
       // The negative case: `--resolution landscape` on a portrait comp — the
       // user explicitly asked for landscape orientation, and the mismatch is

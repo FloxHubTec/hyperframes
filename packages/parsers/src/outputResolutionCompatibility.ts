@@ -73,13 +73,11 @@ export function suggestMatchingPreset(
   );
   if (aspectMatches.length === 0) return undefined;
 
-  // Prefer the aspect-matching preset in the same resolution tier as the chosen
-  // one so we don't silently change 4K → HD (or vice versa). Tier is keyed
-  // off the suffix (`-4k`, `-720p`, …) rather than long-side pixels: a 4K *square* (2160×2160)
-  // has a shorter long side than 4K landscape (3840), so a pixel-based compare
-  // would fail to recognise `square-4k` as the 4K peer and downgrade to `square`.
-  const sameTier = aspectMatches.find((preset) => tierOf(preset) === tierOf(chosen));
-  return sameTier ?? aspectMatches[0];
+  // Only the aspect-matching preset in the chosen tier, never another tier: callers apply this
+  // automatically, and a 4K request must not become HD or 480p. Tier is keyed off the suffix
+  // (`-4k`, `-720p`, …) rather than long-side pixels: a 4K *square* (2160×2160) has a shorter long
+  // side than 4K landscape (3840), so a pixel-based compare would miss `square-4k` as the 4K peer.
+  return aspectMatches.find((preset) => tierOf(preset) === tierOf(chosen));
 }
 
 /** `landscape-4k` → `-4k`, `portrait` → `` (1080p). */
