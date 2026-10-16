@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        load: [solo, loaded]
+        load: [loaded, loaded2]
     steps:
       - name: Disable Windows Defender real-time monitoring
         shell: pwsh
@@ -64,7 +64,7 @@ jobs:
           LOAD: ${{ matrix.load }}
         run: |
           marks="$RUNNER_TEMP/marks.txt"
-          if [ "$LOAD" = loaded ]; then
+          if [ "$LOAD" != solo ]; then
             # The merge-queue lane runs the engine and cli suites at once; keep that load on.
             (while true; do bun run --filter @hyperframes/engine --filter @hyperframes/cli test -- --maxWorkers=2 >/dev/null 2>&1; done) &
             load_pid=$!

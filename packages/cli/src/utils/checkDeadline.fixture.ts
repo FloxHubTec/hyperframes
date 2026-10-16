@@ -10,6 +10,21 @@ const mark = (event: string) => {
   if (file) appendFileSync(file, `${String(Date.now() - T0).padStart(6)} ${event}\n`);
 };
 mark(`fixture-start epoch=${T0}`);
+{
+  const { Server } = await import("node:http");
+  const emit = Server.prototype.emit;
+  Server.prototype.emit = function (this: InstanceType<typeof Server>, event: string, ...rest: unknown[]) {
+    if (event === "connection") mark("server connection");
+    if (event === "request") mark(`server request ${(rest[0] as { url?: string }).url}`);
+    return emit.call(this, event, ...rest);
+  } as typeof emit;
+  let last = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    if (now - last > 300) mark(`event-loop-lag ${now - last - 100}`);
+    last = now;
+  }, 100).unref();
+}
 
 // Accelerate the hang after the independent authored marker confirms browser startup.
 // Production still budgets startup; the unit test verifies that shared deadline.
@@ -86,7 +101,7 @@ puppeteer.launch = async (options) => {
     cdp.on("Page.lifecycleEvent", (e) => mark(`lifecycle ${e.name}`));
     cdp.on("Inspector.targetCrashed", () => mark("renderer-crashed"));
     page.on("request", (r) => mark(`request ${r.resourceType()} ${r.url().slice(0, 100)}`));
-    page.on("response", (r) => mark(`response ${r.status()} ${r.url().slice(0, 100)}`));
+    page.on("response", (r) => mark(`response ${r.status()} ${r.url().slice(0, 100)} timing=${JSON.stringify(r.timing())}`));
     page.on("requestfailed", (r) => mark(`requestfailed ${r.failure()?.errorText} ${r.url().slice(0, 100)}`));
     page.on("domcontentloaded", () => mark("event domcontentloaded"));
     page.on("load", () => mark("event load"));
