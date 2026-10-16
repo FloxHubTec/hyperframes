@@ -360,8 +360,9 @@ function stylesheetCanvasZoomHits(
   const hits: CanvasZoomHit[] = [];
   for (const style of styles) {
     const ruleWithBody = /([^{}]+)\{([^{}]*)\}/g;
+    const content = stripCssComments(style.content);
     let match: RegExpExecArray | null;
-    while ((match = ruleWithBody.exec(stripCssComments(style.content))) !== null) {
+    while ((match = ruleWithBody.exec(content)) !== null) {
       const hit = canvasZoomInRule(match[1] ?? "", match[2] ?? "", rootId, rootClasses);
       if (hit) hits.push(hit);
     }
