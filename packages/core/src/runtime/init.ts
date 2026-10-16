@@ -1415,6 +1415,10 @@ export function initSandboxRuntimeModular(): void {
 
   // Sub-composition timelines the runtime nested into the root: the host composition id, and where.
   const autoNested = new WeakMap<object, { hostId: string; parent: unknown; at: number }>();
+  // The producer's tween-batching stub registers stand-ins for timelines; GSAP's parents and
+  // children are the timelines behind them, so compare those.
+  const gsapTimelineOf = (timeline: object): object =>
+    (timeline as { __hfReal?: object }).__hfReal ?? timeline;
   // The composite that holds the children of a root with no timeline, and how many it holds.
   let missingRootComposite: { timeline: RuntimeTimelineLike; size: number } | null = null;
 
@@ -1470,16 +1474,20 @@ export function initSandboxRuntimeModular(): void {
     ): void => {
       const at = resolveCompositionStartSeconds(candidate.compositionId);
       parent.add(candidate.timeline, at);
-      autoNested.set(candidate.timeline, { hostId: candidate.compositionId, parent, at });
+      autoNested.set(gsapTimelineOf(candidate.timeline), {
+        hostId: candidate.compositionId,
+        parent,
+        at,
+      });
     };
     /** Placed by the runtime in `root` and still there; under another root a re-run script owns its place. */
     const placedIn = (
       root: RuntimeTimelineLike,
       candidate: { compositionId: string; timeline: RuntimeTimelineLike },
     ) => {
-      const nested = candidate.timeline as RuntimeTimelineLike & RuntimeTimelineChildLike;
+      const nested = gsapTimelineOf(candidate.timeline) as RuntimeTimelineChildLike;
       const placed = autoNested.get(nested);
-      return placed && placed.parent === root && nested.parent === (root as unknown)
+      return placed && placed.parent === root && nested.parent === gsapTimelineOf(root)
         ? placed
         : null;
     };
@@ -1550,7 +1558,9 @@ export function initSandboxRuntimeModular(): void {
       if (!parent || typeof parent.getChildren !== "function") return [];
       try {
         const held = parent.getChildren(true, true, true);
-        return Array.isArray(held) ? candidates.filter((c) => held.includes(c.timeline)) : [];
+        return Array.isArray(held)
+          ? candidates.filter((c) => held.includes(gsapTimelineOf(c.timeline)))
+          : [];
       } catch {
         return [];
       }
@@ -1573,7 +1583,7 @@ export function initSandboxRuntimeModular(): void {
         if (!Array.isArray(existingChildren)) return none;
         const addedIds: string[] = [];
         for (const candidate of candidates) {
-          if (existingChildren.includes(candidate.timeline)) {
+          if (existingChildren.includes(gsapTimelineOf(candidate.timeline))) {
             followHostStart(rootTimeline, candidate);
             continue;
           }
