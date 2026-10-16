@@ -1415,8 +1415,7 @@ export function initSandboxRuntimeModular(): void {
 
   // Sub-composition timelines the runtime nested into the root: the host composition id, and where.
   const autoNested = new WeakMap<object, { hostId: string; parent: unknown; at: number }>();
-  // The producer's tween-batching stub registers stand-ins for timelines; GSAP's parents and
-  // children are the timelines behind them, so compare those.
+  // The producer's GSAP stub registers stand-ins; GSAP's tree holds the timelines behind them.
   const gsapTimelineOf = (timeline: object): object =>
     (timeline as { __hfReal?: object }).__hfReal ?? timeline;
   // The composite that holds the children of a root with no timeline, and how many it holds.
