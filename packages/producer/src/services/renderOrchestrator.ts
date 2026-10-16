@@ -1669,7 +1669,7 @@ export function scanElementTags(html: string): ElementTagScan {
   // the count this gate reads. Converges: every iteration strictly shortens
   // the string or changes nothing and exits.
   let markup = html;
-  for (let previous = ""; markup !== previous; ) {
+  for (let previous = ""; markup !== previous;) {
     previous = markup;
     markup = markup.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
   }
@@ -2122,7 +2122,7 @@ export function shouldPreferSingleWorkerDrawElement(args: {
    * telemetry and keep the probe session alive through the heaviest stage.
    */
   layeredOrEffectRoute: boolean;
-  /** deviceScaleFactor > 1 — the engine's supersampling gate blocks DE. */
+  /** deviceScaleFactor other than 1 — the engine's supersampling gate blocks DE. */
   supersampling: boolean;
   /**
    * The probe session already ran the engine's init-time DE gates and DE did
@@ -2559,7 +2559,7 @@ export function resolveParallelCaptureMode(args: {
   forceScreenshot: boolean;
   deviceScaleFactor?: number;
 }): "screenshot" | "beginframe" {
-  const supersampling = (args.deviceScaleFactor ?? 1) > 1;
+  const supersampling = (args.deviceScaleFactor ?? 1) !== 1;
   return args.headlessShell && args.platform === "linux" && !args.forceScreenshot && !supersampling
     ? "beginframe"
     : "screenshot";
@@ -3643,7 +3643,7 @@ async function executeRenderPipeline(input: {
       minFrames: deSingleMinFrames,
       singleWorkerStreamingOk: shouldUseStreamingEncode(cfg, outputFormat, 1, job.duration),
       layeredOrEffectRoute: hasHdrContent || compiled.hasShaderTransitions,
-      supersampling: deviceScaleFactor > 1,
+      supersampling: deviceScaleFactor !== 1,
       probeDeGated:
         probeSession !== null &&
         probeSession.captureMode !== "drawelement" &&
@@ -3736,7 +3736,7 @@ async function executeRenderPipeline(input: {
       totalFrames,
       minFrames: deParallelMinFrames,
       layeredOrEffectRoute: hasHdrContent || compiled.hasShaderTransitions,
-      supersampling: deviceScaleFactor > 1,
+      supersampling: deviceScaleFactor !== 1,
       probeDeGated:
         probeSession !== null &&
         probeSession.captureMode !== "drawelement" &&
@@ -4492,8 +4492,8 @@ async function executeRenderPipeline(input: {
               outputFormat,
               streamingEncoderOptions: {
                 fps: job.config.fps,
-                width,
-                height,
+                width: captureCompositionWidth ?? width,
+                height: captureCompositionHeight ?? height,
                 codec: preset.codec,
                 preset: preset.preset,
                 quality: effectiveQuality,
@@ -4595,8 +4595,8 @@ async function executeRenderPipeline(input: {
                 outputFormat,
                 streamingEncoderOptions: {
                   fps: job.config.fps,
-                  width,
-                  height,
+                  width: captureCompositionWidth ?? width,
+                  height: captureCompositionHeight ?? height,
                   codec: preset.codec,
                   preset: preset.preset,
                   quality: effectiveQuality,

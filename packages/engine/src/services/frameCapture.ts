@@ -907,18 +907,18 @@ async function waitForCloseWithTimeout(promise: Promise<unknown>): Promise<boole
  * screenshots carry a real alpha channel (Chrome resets the override on every
  * navigation, so this must run after page load).
  *
- * drawElement is also skipped when supersampling (deviceScaleFactor > 1):
+ * drawElement is also skipped when scaling (deviceScaleFactor other than 1):
  * `drawElementImage` reads the canvas at CSS pixels and has no equivalent of
  * `Page.captureScreenshot`'s clip+scale, so it would silently capture at 1x and
  * drop the requested supersample. Such renders fall through to the screenshot
- * path (preMode already forces "screenshot" for DPR > 1).
+ * path (preMode already forces "screenshot" for DPR other than 1).
  */
 async function initDrawElementOrTransparentBackground(
   session: CaptureSession,
   page: Page,
   logInitPhase: (phase: string) => void,
 ): Promise<void> {
-  const supersampling = (session.options.deviceScaleFactor ?? 1) > 1;
+  const supersampling = (session.options.deviceScaleFactor ?? 1) !== 1;
   // forceScreenshot is an explicit routing decision made upstream (render-mode
   // compat hints like raw requestAnimationFrame, alpha formats, low-memory) —
   // drawElement must not override it. Concretely: an rAF-compat comp on
@@ -948,7 +948,7 @@ async function initDrawElementOrTransparentBackground(
     session.deFallbackTrigger = "supersampling";
     console.log(
       "[engine] --experimental-fast-capture disabled for this render: drawElementImage " +
-        "ignores deviceScaleFactor, so supersampled (DPR > 1) output uses screenshot capture.",
+        "ignores deviceScaleFactor, so scaled (DPR other than 1) output uses screenshot capture.",
     );
   }
   if ((session.config?.useDrawElement ?? false) && !supersampling && forceScreenshot) {
@@ -1286,8 +1286,8 @@ export async function createCaptureSession(
   // (the captured surface is sized by the OS window in CSS pixels regardless
   // of `Emulation.setDeviceMetricsOverride`'s DPR). When supersampling we
   // need explicit clip+scale on `Page.captureScreenshot`, so fall back to
-  // the screenshot path for any DPR > 1.
-  const supersampling = (options.deviceScaleFactor ?? 1) > 1;
+  // the screenshot path for any DPR other than 1.
+  const supersampling = (options.deviceScaleFactor ?? 1) !== 1;
   const requestedGpuMode = config?.browserGpuMode ?? DEFAULT_CONFIG.browserGpuMode;
   const resolvedGpuMode = await resolveBrowserGpuMode(requestedGpuMode, {
     chromePath: headlessShell ?? undefined,
