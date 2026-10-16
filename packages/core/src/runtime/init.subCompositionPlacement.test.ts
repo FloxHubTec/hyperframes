@@ -199,6 +199,29 @@ describe("runtime sub-composition placement", () => {
     expect(window.__player?.getDuration()).toBe(9);
   });
 
+  it("keeps the scene in one root after a tween first renders, when the root's own timeline is empty", async () => {
+    const runFrames = stubFrames();
+    document.body.innerHTML =
+      `<div data-composition-id="main" data-root="true" data-duration="10">` +
+      `<div id="host" class="clip" data-composition-id="scene" data-start="1" data-duration="9">` +
+      `<div id="s"></div></div></div>`;
+    const scene = gsap
+      .timeline({ paused: true })
+      .fromTo("#s", { x: -100 }, { x: 0, duration: 0.5, ease: "none" }, 0.5)
+      .to({}, { duration: 9 }, 0);
+    const root = gsap.timeline({ paused: true });
+    window.__timelines = { main: root, scene } as unknown as Record<string, RuntimeTimelineLike>;
+    initSandboxRuntimeModular();
+    window.__player?.seek(1.2);
+    const bound = scene.parent;
+
+    window.__player?.seek(3);
+    await runFrames(6);
+
+    expect(scene.parent).toBe(bound);
+    expect(shownX()).toBe(0);
+  });
+
   it("binds a root timeline that registers after the runtime started on its children", async () => {
     const runFrames = stubFrames();
     loadWithoutRootTimeline(`<div id="r"></div>`);
