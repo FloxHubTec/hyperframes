@@ -170,7 +170,7 @@ export function computeAudioResidualRmsDb(
         4,
       )}s, snapshot=${snapshotDur.seconds.toFixed(4)}s (Δ=${delta.toFixed(
         4,
-      )}s > ${TOLERANCE_SECONDS}s) — amix=duration=shortest would hide the trailing difference`,
+      )}s > ${TOLERANCE_SECONDS}s): amix=duration=shortest would hide the trailing difference`,
     };
   }
 
@@ -200,7 +200,7 @@ export function computeAudioResidualRmsDb(
       "null",
       "-",
     ],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", windowsHide: true },
   );
 
   // `spawnSync` swallows `ENOENT`, signal kills, and non-zero exits
@@ -318,7 +318,7 @@ function probeAudioDuration(file: string): { seconds: number; error?: string } {
       "--",
       file,
     ],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", windowsHide: true },
   );
   if (proc.error) {
     return {

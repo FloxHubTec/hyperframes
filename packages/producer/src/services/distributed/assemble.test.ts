@@ -35,7 +35,7 @@ import {
   renderProvenanceArgs,
 } from "@hyperframes/engine";
 import type { ChunkSliceJson } from "../render/stages/freezePlan.js";
-import { assemble } from "./assemble.js";
+import { assemble, cfrRateControlArgs } from "./assemble.js";
 import type { DistributedFormat } from "./shared.js";
 
 let runRoot: string;
@@ -550,6 +550,50 @@ describe("assemble()", () => {
     TIMEOUT_MS,
   );
 
+  it("cfr re-encode keeps the chunks' rate control", () => {
+    expect(cfrRateControlArgs({})).toEqual(["-preset", "medium", "-crf", "18"]);
+    expect(cfrRateControlArgs({ quality: "high" })).toEqual(["-preset", "slow", "-crf", "15"]);
+    expect(cfrRateControlArgs({ quality: "standard", crf: 12 })).toEqual([
+      "-preset",
+      "medium",
+      "-crf",
+      "12",
+    ]);
+    expect(cfrRateControlArgs({ bitrate: "10M" })).toEqual(["-preset", "medium", "-b:v", "10M"]);
+    expect(cfrRateControlArgs({ crf: 12, bitrate: "10M" })).toEqual([
+      "-preset",
+      "medium",
+      "-crf",
+      "12",
+    ]);
+  });
+
+  it(
+    "cfr:true output size follows the locked crf",
+    async () => {
+      if (!hasFfmpeg) {
+        console.warn("[assemble.test] skipping cfr crf test — ffmpeg not available on this host");
+        return;
+      }
+      const sizeAt = async (crf: number) => {
+        const chunks: ChunkSliceJson[] = [{ index: 0, startFrame: 0, endFrame: 10 }];
+        const planDir = buildPlanDir("mp4", chunks, 10, false);
+        writeFileSync(
+          join(planDir, "meta", "encoder.json"),
+          JSON.stringify({ encoder: "libx264-software", quality: "standard", crf }),
+          "utf-8",
+        );
+        const chunkPath = join(planDir, "chunk-0.mp4");
+        makeMp4Chunk(chunkPath, 10);
+        const outputPath = join(planDir, `output-crf${crf}.mp4`);
+        await assemble(planDir, [chunkPath], null, outputPath, { cfr: true });
+        return statSync(outputPath).size;
+      };
+      expect(await sizeAt(10)).toBeGreaterThan(await sizeAt(40));
+    },
+    TIMEOUT_MS,
+  );
+
   it(
     "cfr:true rejects non-mp4 formats with a clear error",
     async () => {
@@ -755,6 +799,32 @@ describe("assemble()", () => {
         renderer: PROVENANCE_RENDERER_NAME,
         version: PROVENANCE_VERSION,
       });
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    "stops ffmpeg at FFMPEG_PROCESS_TIMEOUT_MS and says it timed out",
+    async () => {
+      if (!hasFfmpeg) return;
+      const chunks: ChunkSliceJson[] = [
+        { index: 0, startFrame: 0, endFrame: 5 },
+        { index: 1, startFrame: 5, endFrame: 10 },
+      ];
+      const planDir = buildPlanDir("mp4", chunks, 10, false);
+      const chunkPaths = [join(planDir, "chunk-0.mp4"), join(planDir, "chunk-1.mp4")];
+      for (const chunkPath of chunkPaths) makeMp4Chunk(chunkPath, 5);
+
+      const previous = process.env.FFMPEG_PROCESS_TIMEOUT_MS;
+      process.env.FFMPEG_PROCESS_TIMEOUT_MS = "1";
+      try {
+        await expect(
+          assemble(planDir, chunkPaths, null, join(planDir, "output.mp4")),
+        ).rejects.toThrow(/FFmpeg timed out after 1 ms/);
+      } finally {
+        if (previous === undefined) delete process.env.FFMPEG_PROCESS_TIMEOUT_MS;
+        else process.env.FFMPEG_PROCESS_TIMEOUT_MS = previous;
+      }
     },
     TIMEOUT_MS,
   );

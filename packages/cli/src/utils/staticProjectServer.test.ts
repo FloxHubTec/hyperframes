@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { serveStaticProjectHtml, type StaticProjectServer } from "./staticProjectServer.js";
+import { Server } from "node:http";
+import {
+  inProcessAnswer,
+  serveStaticProjectHtml,
+  type StaticProjectServer,
+} from "./staticProjectServer.js";
 
 // `serveStaticProjectHtml` reaches these two studio-server helpers via a
 // absolute module regardless of which file's relative specifier reaches it).
@@ -146,6 +151,36 @@ describe("serveStaticProjectHtml range support", () => {
     expect(await res.text()).toBe("abcdef");
   });
 
+  it.each([undefined, "invalid", "items=0-1"])(
+    "serves an empty asset with Range %j and keeps serving the project",
+    async (range) => {
+      const { url } = await serveWith(Buffer.alloc(0));
+      const res = await fetch(`${url}tone.wav`, {
+        headers: range === undefined ? {} : { Range: range },
+        signal: AbortSignal.timeout(1500),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-length")).toBe("0");
+      expect(res.headers.get("accept-ranges")).toBe("bytes");
+      expect(res.headers.get("content-range")).toBeNull();
+      expect(await res.text()).toBe("");
+      const project = await fetch(url);
+      expect(project.status).toBe(200);
+      expect(await project.text()).toContain("<html></html>");
+    },
+  );
+
+  it.each(["bytes=0-", "bytes=0-0", "bytes=-1"])(
+    "rejects the unsatisfiable range %s on an empty asset",
+    async (range) => {
+      const { url } = await serveWith(Buffer.alloc(0));
+      const res = await fetch(`${url}tone.wav`, { headers: { Range: range } });
+      expect(res.status).toBe(416);
+      expect(res.headers.get("content-range")).toBe("bytes */0");
+      expect(await res.text()).toBe("");
+    },
+  );
+
   it("streams a small slice out of a large file without buffering the whole thing", async () => {
     // 8MB file, ask for 4 bytes deep inside it. The handler must createReadStream
     // the [start,end] window only, not readFileSync the whole 8MB and slice.
@@ -203,6 +238,18 @@ describe("serveStaticProjectHtml asset roots", () => {
 
     const res = await fetch(`${server.url}a.txt`);
     expect(await res.text()).toBe("PROJECT");
+  });
+
+  it("serves a file whose name has a bare percent sign", async () => {
+    const projectDir = mk();
+    writeFileSync(join(projectDir, "100%.png"), "PERCENT");
+    writeFileSync(join(projectDir, "50% off.png"), "SALE");
+    server = await serveStaticProjectHtml(projectDir, "<html></html>", undefined, []);
+
+    const bare = await fetch(`${server.url}100%.png`);
+    expect(bare.status).toBe(200);
+    expect(await bare.text()).toBe("PERCENT");
+    expect(await (await fetch(`${server.url}50%%20off.png`)).text()).toBe("SALE");
   });
 
   it("404s a path present in no root", async () => {
@@ -369,5 +416,55 @@ describe("serveStaticProjectHtml transparent media proxies", () => {
     const res = await fetch(`${server.url}image.png?hf-proxy=h264`);
     expect(res.status).toBe(404);
     expect(mocks.resolveProxy).not.toHaveBeenCalled();
+  });
+});
+
+describe("serveStaticProjectHtml when a sandbox refuses listen()", () => {
+  const refuse = (code: string) =>
+    vi.spyOn(Server.prototype, "listen").mockImplementation(function (this: Server) {
+      process.nextTick(() =>
+        this.emit("error", Object.assign(new Error(`listen ${code}`), { code })),
+      );
+      return this;
+    });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("answers the project in this process, Range included, with nothing listening", async () => {
+    const listen = refuse("EPERM");
+    dir = mkdtempSync(join(tmpdir(), "hf-static-"));
+    writeFileSync(join(dir, "tone.wav"), Buffer.from("0123456789", "utf-8"));
+    server = await serveStaticProjectHtml(dir, "<html><body>composition</body></html>");
+
+    expect(listen).toHaveBeenCalledOnce();
+    expect(server.port).toBe(0);
+    expect(inProcessAnswer(server.url)).toBe(server.answer);
+    const page = await server.answer!({ method: "GET", path: "/", headers: {} });
+    expect(page.status).toBe(200);
+    expect(page.body.toString()).toContain("composition");
+    const slice = await server.answer!({
+      method: "GET",
+      path: "/tone.wav",
+      headers: { range: "bytes=2-5" },
+    });
+    expect(slice.status).toBe(206);
+    expect(slice.headers["content-range"]).toBe("bytes 2-5/10");
+    expect(slice.body.toString()).toBe("2345");
+    expect(
+      (await server.answer!({ method: "GET", path: "/missing.png", headers: {} })).status,
+    ).toBe(404);
+
+    const url = server.url;
+    await server.close();
+    server = undefined;
+    expect(inProcessAnswer(url)).toBeUndefined();
+  });
+
+  it("still fails on a bind error that is not a refusal", async () => {
+    refuse("EADDRINUSE");
+    dir = mkdtempSync(join(tmpdir(), "hf-static-"));
+    await expect(serveStaticProjectHtml(dir, "<html></html>")).rejects.toMatchObject({
+      code: "EADDRINUSE",
+    });
   });
 });

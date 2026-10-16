@@ -104,7 +104,57 @@ window.__contrastAuditPrepare = function () {
   var CLIP_PROBE_COLS = [0.05, 0.25, 0.5, 0.75, 0.95];
   var CLIP_PROBE_ROWS = [0.25, 0.5, 0.75];
 
-  function paintsAnyProbePoint(el, rect) {
+  var compositionBoxPaint = new WeakMap();
+  var COMPOSITION_BOX_TAGS = new Set(["DIV", "SECTION"]);
+
+  function hasContainerPaint(style) {
+    var background = parseColor(style.backgroundColor);
+    if (
+      style.backgroundColor &&
+      style.backgroundColor !== "transparent" &&
+      (!background || background[3] > 0)
+    )
+      return true;
+    if (
+      ["backgroundImage", "boxShadow", "filter", "backdropFilter"].some(function (property) {
+        return style[property] && style[property] !== "none";
+      })
+    )
+      return true;
+    if (parseFloat(style.outlineWidth) > 0 && style.outlineStyle !== "none") return true;
+    return ["Top", "Right", "Bottom", "Left"].some(function (side) {
+      return (
+        parseFloat(style["border" + side + "Width"]) > 0 &&
+        style["border" + side + "Style"] !== "none"
+      );
+    });
+  }
+
+  function isUnpaintedCompositionBox(el) {
+    if (!el || !el.matches("[data-composition-id], [data-hf-inner-root]")) return false;
+    if (!el.closest("[data-composition-id]")) return false;
+    if (
+      el.namespaceURI !== "http://www.w3.org/1999/xhtml" ||
+      !COMPOSITION_BOX_TAGS.has(el.tagName) ||
+      el.shadowRoot
+    )
+      return false;
+    if (compositionBoxPaint.has(el)) return !compositionBoxPaint.get(el);
+    var painted =
+      Array.from(el.childNodes).some(function (child) {
+        return child.nodeType === 3 && (child.textContent || "").trim().length > 0;
+      }) || hasContainerPaint(getComputedStyle(el));
+    if (!painted) {
+      painted = ["::before", "::after"].some(function (pseudo) {
+        var content = getComputedStyle(el, pseudo).content;
+        return content && content !== "none" && content !== "normal";
+      });
+    }
+    compositionBoxPaint.set(el, !!painted);
+    return !painted;
+  }
+
+  function paintsAnyProbePoint(el, rect, skipCompositionBoxes) {
     // Keep probe resolution aligned with layout-audit.browser.js. Edge strips
     // narrower than the nearest probe point are treated as clipped away to
     // avoid noisy typewriter pre-reveal contrast reports.
@@ -112,8 +162,14 @@ window.__contrastAuditPrepare = function () {
       for (var ri = 0; ri < CLIP_PROBE_ROWS.length; ri++) {
         var x = rect.left + rect.width * CLIP_PROBE_COLS[ci];
         var y = rect.top + rect.height * CLIP_PROBE_ROWS[ri];
-        var hit = document.elementFromPoint(x, y);
-        if (hit === el || el.contains(hit)) return true;
+        var hits =
+          skipCompositionBoxes && typeof document.elementsFromPoint === "function"
+            ? document.elementsFromPoint(x, y)
+            : [document.elementFromPoint(x, y)];
+        for (var hit of hits) {
+          if (hit === el || el.contains(hit)) return true;
+          if (!skipCompositionBoxes || !isUnpaintedCompositionBox(hit)) break;
+        }
       }
     }
     return false;
@@ -135,7 +191,7 @@ window.__contrastAuditPrepare = function () {
   function isIntentionallyOccluded(el, rect) {
     if (typeof document.elementFromPoint !== "function") return false;
     if (!el.closest || !el.closest("[data-layout-allow-occlusion]")) return false;
-    return !paintsAnyProbePoint(el, rect);
+    return !paintsAnyProbePoint(el, rect, true);
   }
 
   var out = [];
@@ -230,6 +286,16 @@ window.__contrastAuditPrepare = function () {
     var fontWeight = Number(cs.fontWeight) || 400;
     var large = fontSize >= 24 || (fontSize >= 19 && fontWeight >= 700);
 
+    // Glyphs sit on this element's own fill. The bounding box also contains
+    // border-radius corners and neighbouring pixels, and those read as the
+    // panel behind a circular avatar. An opaque background with no image is
+    // the fill; pixel sampling stays for transparent text.
+    var ownBg = null;
+    if ((cs.backgroundImage || "none") === "none") {
+      var parsedOwnBg = parseColor(cs.backgroundColor || "");
+      if (parsedOwnBg && parsedOwnBg[3] >= 0.99) ownBg = parsedOwnBg;
+    }
+
     // Hide this element's OWN text paint so the caller's next screenshot
     // reveals the true pixels behind the glyphs. Layout-neutral: color/fill
     // never affect box geometry. `!important` beats any non-!important rule
@@ -285,6 +351,7 @@ window.__contrastAuditPrepare = function () {
       fontSize: fontSize,
       fontWeight: fontWeight,
       large: large,
+      ownBg: ownBg,
       bbox: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
     });
   }
@@ -409,15 +476,21 @@ window.__contrastAuditFinish = async function (imgBase64, time, candidates) {
     }
     if (rr.length === 0) continue;
 
-    // A transparent sampled backdrop is supplied by the downstream editor,
-    // not this composition. WCAG contrast cannot be inferred until that live
-    // video/image is known, so do not invent an opaque browser default and
-    // hard-fail an otherwise valid alpha overlay.
-    if (median(aa) < 255) continue;
-
-    var bgR = median(rr),
-      bgG = median(gg),
+    var bgR, bgG, bgB;
+    if (c.ownBg && c.ownBg.length >= 4 && c.ownBg[3] >= 0.99) {
+      bgR = c.ownBg[0];
+      bgG = c.ownBg[1];
+      bgB = c.ownBg[2];
+    } else {
+      // A transparent sampled backdrop is supplied by the downstream editor,
+      // not this composition. WCAG contrast cannot be inferred until that live
+      // video/image is known, so do not invent an opaque browser default and
+      // hard-fail an otherwise valid alpha overlay.
+      if (median(aa) < 255) continue;
+      bgR = median(rr);
+      bgG = median(gg);
       bgB = median(bb);
+    }
 
     // Composite foreground alpha over the measured background
     var fg = c.fg;

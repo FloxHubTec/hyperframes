@@ -1,3 +1,5 @@
+import postcss from "postcss";
+import type { SourceLocation } from "../sourceCoordinates";
 import { FONT_ALIAS_KEYS, resolveAliasDisplayName } from "@hyperframes/parsers/composition";
 import type { LintContext, HyperframeLintFinding } from "../context";
 import { isRegistrySourceFile, isRegistryInstalledFile } from "./composition";
@@ -180,14 +182,14 @@ export const fontRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
         severity: "warning",
         message:
           `Font ${aliased.length === 1 ? "family" : "families"} will be substituted at render time: ${aliased.join(", ")}. ` +
-          "In distributed/Lambda rendering system-font capture is disabled — these fonts will fall " +
+          "In distributed/Lambda rendering system-font capture is disabled, so these fonts will fall " +
           "back to OS defaults. Embed explicit @font-face declarations instead.",
       },
     ];
   },
 
   // font_family_without_font_face
-  ({ styles, source, rawSource, options }) => {
+  ({ styles, source, rawSource, options, locate }) => {
     if (isRegistrySourceFile(options.filePath) || isRegistryInstalledFile(rawSource)) return [];
     const findings: HyperframeLintFinding[] = [];
     const declared = extractFontFaceFamilies(styles);
@@ -203,6 +205,7 @@ export const fontRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
     if (undeclared.length === 0) return findings;
 
     findings.push({
+      ...uniqueFontLocation(styles, undeclared, locate),
       code: "font_family_without_font_face",
       severity: "error",
       message:
@@ -213,9 +216,40 @@ export const fontRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
         "Add @font-face { font-family: '...'; src: url('capture/assets/fonts/...woff2'); } " +
         "for each font family, pointing to the captured .woff2 files. For an OS-bundled " +
         "system font (e.g. Hiragino Sans, Microsoft YaHei) that has no downloadable file, " +
-        "use src: local('Exact Font Name') instead — the declaration alone satisfies this " +
+        "use src: local('Exact Font Name') instead. The declaration alone satisfies this " +
         "check without needing a font file.",
     });
     return findings;
   },
 ];
+
+/** Aggregate diagnostics get a location only when exactly one declaration supplies their evidence. */
+function uniqueFontLocation(
+  styles: LintContext["styles"],
+  families: string[],
+  locate: LintContext["locate"],
+): SourceLocation {
+  const locations: SourceLocation[] = [];
+  for (const style of styles) {
+    try {
+      postcss.parse(style.content).walkDecls(/^font-family$/i, (decl) => {
+        let parent: postcss.AnyNode | undefined = decl.parent;
+        while (parent) {
+          if (parent.type === "atrule" && parent.name.toLowerCase() === "font-face") return;
+          parent = parent.parent;
+        }
+        if (
+          !decl.value
+            .split(",")
+            .some((part) => families.includes(normalizeUsedFontName(part) ?? ""))
+        )
+          return;
+        locations.push(locate(style, decl.source?.start?.offset));
+      });
+    } catch {
+      // The CSS syntax rule reports malformed styles; a guessed declaration is not useful.
+      return {};
+    }
+  }
+  return locations.length === 1 ? locations[0]! : {};
+}

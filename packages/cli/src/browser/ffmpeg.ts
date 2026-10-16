@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { detectLinuxDistro, ffmpegInstallCommand } from "./linuxDeps.js";
+import { runCancellableProcess } from "../utils/cancellableProcess.js";
 
 export { FFMPEG_PATH_ENV, FFPROBE_PATH_ENV } from "@hyperframes/parsers/ff-binaries";
 
@@ -34,10 +35,22 @@ export function detectH264EncoderMode(ffmpegPath: string, gpuRequested: boolean)
   const encoders = execFileSync(ffmpegPath, ["-hide_banner", "-encoders"], {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
-    timeout: 5000,
+    timeout: FIRST_LAUNCH_TIMEOUT_MS,
     windowsHide: true,
   });
   return resolveH264EncoderMode(encoders, gpuRequested);
+}
+
+export async function detectH264EncoderModeForRender(
+  ffmpegPath: string,
+  gpuRequested: boolean,
+  signal: AbortSignal,
+): Promise<H264EncoderMode> {
+  const result = await runCancellableProcess(ffmpegPath, ["-hide_banner", "-encoders"], {
+    signal,
+    timeoutMs: FIRST_LAUNCH_TIMEOUT_MS,
+  });
+  return resolveH264EncoderMode(result.stdout, gpuRequested);
 }
 
 // `configuredMustExist`: the CLI surfaces an install hint when a binary is
@@ -51,6 +64,7 @@ export function findFFprobe(): string | undefined {
   return findFfBinary("ffprobe", { configuredMustExist: true });
 }
 
+export const FIRST_LAUNCH_TIMEOUT_MS = 60_000;
 const FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html";
 
 /**

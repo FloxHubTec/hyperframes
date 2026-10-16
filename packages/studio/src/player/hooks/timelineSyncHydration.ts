@@ -9,17 +9,17 @@
  * an argument, so each is callable — and readable — on its own.
  */
 
-import { createTimelineDomNodeResolver } from "../lib/timelineElementHelpers";
+import { createTimelineDomNodeResolver, findClipElementById } from "../lib/timelineElementHelpers";
 import { usePlayerStore } from "../store/playerStore";
 import type { TimelineElement, DomClipChild, SubCompositionHostState } from "../store/playerStore";
 import { resolveCssStackingContextId } from "@hyperframes/core/runtime/stacking-context";
+import { LOOP_INFLATED_TIMELINE_SECONDS } from "@hyperframes/core/runtime/composition-length";
 import type { ClipTree } from "@hyperframes/core/runtime/clipTree";
 import { HF_AUDIO_GROUP_ATTR } from "@hyperframes/core/audio-groups";
 import { groupInfoFor } from "../lib/timelineGroupInfo";
 import type { PlaybackAdapter, ClipManifestClip, IframeWindow } from "../lib/playbackTypes";
 import {
   buildStandaloneRootTimelineElement,
-  createImplicitTimelineLayersFromDOM,
   createTimelineElementFromManifestClip,
   getTimelineElementSelector,
   parseTimelineFromDOM,
@@ -32,7 +32,7 @@ import { inspectStudioRuntimeMessage } from "../lib/runtimeProtocol";
 
 /** Reject non-finite, non-positive, and absurdly large (loop-inflated) values. */
 export function sanitizeDurationSeconds(value: number): number {
-  return Number.isFinite(value) && value > 0 && value < 7200 ? value : 0;
+  return Number.isFinite(value) && value > 0 && value < LOOP_INFLATED_TIMELINE_SECONDS ? value : 0;
 }
 
 /**
@@ -129,7 +129,7 @@ export function collectSubCompositionDomChildren(
   if (!iframeDoc) return out;
   for (const clip of clips) {
     if (clip.kind !== "composition" || !clip.id) continue;
-    const hostEl = iframeDoc.getElementById(clip.id);
+    const hostEl = findClipElementById(iframeDoc, clip);
     if (!hostEl) continue;
     const innerRoot = hostEl.querySelector("[data-hf-inner-root]") ?? hostEl;
     collectHostDomChildren(clip.id, innerRoot, clip.id, parentMap, out);
@@ -173,7 +173,7 @@ export function collectSubCompositionHostState(
   if (!iframeDoc) return out;
   for (const clip of clips) {
     if (clip.kind !== "composition" || !clip.id) continue;
-    const hostEl = iframeDoc.getElementById(clip.id);
+    const hostEl = findClipElementById(iframeDoc, clip);
     if (!hostEl) continue;
     for (const el of Array.from(hostEl.querySelectorAll("[id]"))) {
       const state = readSubCompositionHostState(el);
@@ -215,27 +215,24 @@ export function buildTimelineElementsFromClips(
 }
 
 /**
- * The clamped manifest elements plus the layers that exist only in the DOM.
- * Both halves need the same resolved duration, which is why they land together.
- */
-export function withImplicitDomLayers(
-  els: readonly TimelineElement[],
-  iframeDoc: Document | null,
-  effectiveDuration: number,
-): TimelineElement[] {
-  const clamped = clampElementsToDuration(els, effectiveDuration);
-  if (!iframeDoc || effectiveDuration <= 0) return clamped;
-  return [
-    ...clamped,
-    ...createImplicitTimelineLayersFromDOM(iframeDoc, effectiveDuration, clamped),
-  ];
-}
-
-/**
  * Drop elements that start past the composition's end and trim the ones that
  * straddle it. A non-positive duration means "not known yet" — pass through
  * untouched rather than clamping everything to nothing.
  */
+/** Commits the manifest elements, including none. An empty manifest carries a 1s floor, not a duration. */
+export function syncManifestTimeline(
+  els: readonly TimelineElement[],
+  manifestDuration: number,
+  storeDuration: number,
+  sync: (els: TimelineElement[], duration?: number) => void,
+): void {
+  const hasDuration = manifestDuration > 0 && els.length > 0;
+  sync(
+    clampElementsToDuration(els, hasDuration ? manifestDuration : storeDuration),
+    hasDuration ? manifestDuration : undefined,
+  );
+}
+
 function clampElementsToDuration(
   els: readonly TimelineElement[],
   effectiveDuration: number,

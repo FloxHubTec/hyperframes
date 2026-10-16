@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { createWaapiAdapter } from "./waapi";
+import { PendingPauseAnimation } from "./pendingPauseAnimation.test-helpers";
 
 describe("waapi adapter", () => {
   const originalDocument = (globalThis as { document?: unknown }).document;
@@ -66,6 +67,17 @@ describe("waapi adapter", () => {
 
     expect(mockAnim.pause).toHaveBeenCalled();
     expect(mockAnim.currentTime).toBe(2500); // seconds → ms
+  });
+
+  it("holds the sought time on the first frame of a running animation", () => {
+    const animation = new PendingPauseAnimation();
+    document.getAnimations = vi.fn(() => [animation as unknown as Animation]);
+
+    createWaapiAdapter().seek({ time: 1 });
+    animation.nextFrame();
+
+    expect(animation.currentTime).toBe(1000);
+    expect(animation.pauseCalls).toBe(1);
   });
 
   it("seek clamps negative time to 0", () => {
@@ -162,6 +174,21 @@ describe("waapi adapter", () => {
     adapter.seek({ time: 0.3 });
 
     expect(getAnimations).toHaveBeenCalledTimes(1);
+  });
+
+  it("seek takes new animations from the pass's shared page list instead of scanning", () => {
+    const existing = makeAnimation();
+    const getAnimations = setAnimations([existing]);
+    const adapter = createWaapiAdapter();
+    adapter.discover();
+    getAnimations.mockClear();
+
+    const late = makeAnimation();
+    adapter.seek({ time: 0.5, pageAnimations: () => [existing, late] as unknown as Animation[] });
+
+    expect(getAnimations).not.toHaveBeenCalled();
+    expect(existing.currentTime).toBe(500);
+    expect(late.pause).toHaveBeenCalled();
   });
 
   it("tracks WAAPI animations created after an empty discover via Element.animate", () => {

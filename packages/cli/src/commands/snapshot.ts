@@ -1,3 +1,22 @@
+import { reportArtifacts } from "../utils/toolContext.js";
+import { withProjectLock } from "../utils/projectLock.js";
+import {
+  parseSnapshotRange,
+  sampleSnapshotRange,
+  resolveSnapshotCompositionRange,
+  type SnapshotRange,
+} from "./snapshotSampling.js";
+import { captureArtifactRevision } from "../utils/artifactCapture.js";
+import { randomUUID } from "node:crypto";
+import {
+  artifactDirectory,
+  finishSnapshotRun,
+  retainSnapshotOutput,
+  forgetRecordedArtifacts,
+  recordArtifacts,
+  type ArtifactCapture,
+} from "@hyperframes/studio-server/history";
+import { pngDimensions } from "../utils/pngDimensions.js";
 import { failCommand } from "../utils/commandResult.js";
 // fallow-ignore-file complexity
 import { defineCommand } from "citty";
@@ -14,6 +33,14 @@ import {
   seekCompositionTimeline,
   type ZoomTarget,
 } from "../capture/captureCompositionFrame.js";
+import {
+  isClipVisibleAt,
+  isInClipWindow,
+  readElementRateSpec,
+  sourceTimeAt,
+  timeAtSourceTime,
+  type RateSpec,
+} from "@hyperframes/core";
 import { resolveProject } from "../utils/project.js";
 import {
   definitiveEntryMismatchComposition,
@@ -24,9 +51,12 @@ import { formatLintFindings } from "../utils/lintFormat.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { serveStaticProjectHtml } from "../utils/staticProjectServer.js";
 import { c } from "../ui/colors.js";
-import { findFFmpeg, getFFmpegInstallHint } from "../browser/ffmpeg.js";
+import { writeCaptureFileSync } from "../capture/captureFile.js";
+import { runCancellableProcess } from "../utils/cancellableProcess.js";
+import { findFFmpeg, findFFprobe, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import { parseAngle, type Camera } from "./motionShotLayout.js";
 import type { Example } from "./_examples.js";
+import { loadOptionalPackage } from "../utils/optionalPackages.js";
 import { resolveLocalBrowserGpuMode, type BrowserGpuMode } from "../browser/gpuPolicy.js";
 
 // Runs IN THE BROWSER (serialized into page.evaluate). Tilt the whole stage so
@@ -73,28 +103,39 @@ export function formatSnapshotTimestamp(time: number): string {
   return `${Number(time.toFixed(3))}s`;
 }
 
-/** Keep an exact clip-end snapshot aligned with the renderer's inclusive media
- * window. This intentionally differs from the live player's exclusive-end
- * visibility so an explicit end-boundary review does not become blank. FFmpeg
- * cannot decode at a source's exclusive duration, so sample one nominal 30fps
- * frame inside the source. This also clamps clips whose configured media window
- * extends beyond the source. An infinite clip duration intentionally never
- * enters the end-boundary branch. */
+/** --keep names a still by its millisecond label, so two distinct times may not share one. */
+function assertDistinctKeepNames(times: number[]): void {
+  const timeByLabel = new Map<string, number>();
+  for (const time of times) {
+    const label = formatSnapshotTimestamp(time);
+    const other = timeByLabel.get(label);
+    if (other !== undefined && other !== time) {
+      throw new Error(
+        `--keep would name both ${other} and ${time} at-${label}.png; pass times at least 1 ms apart`,
+      );
+    }
+    timeByLabel.set(label, time);
+  }
+}
+
+/** Shows media by the runtime's visibility rule. A clip held at the composition end, or past the end of a source
+ * shorter than its slot, samples one nominal 30fps frame inside the source; FFmpeg has no frame at or past its end. */
 export function resolveSnapshotVideoFrameTime(input: {
   globalTime: number;
   clipStart: number;
   clipDuration: number;
   relativeTime: number;
   sourceDuration: number;
+  compositionDuration: number;
 }): number | null {
-  const { globalTime, clipStart, clipDuration, relativeTime, sourceDuration } = input;
+  const { globalTime, clipStart, clipDuration, sourceDuration, compositionDuration } = input;
   const clipEnd = clipStart + clipDuration;
-  const clipEndTolerance = 1e-9;
-  if (globalTime < clipStart || globalTime > clipEnd + clipEndTolerance || relativeTime < 0)
-    return null;
-
-  const atClipEnd = Math.abs(globalTime - clipEnd) <= clipEndTolerance;
-  if (!atClipEnd) return relativeTime;
+  if (!isClipVisibleAt(globalTime, clipStart, clipEnd, compositionDuration)) return null;
+  const relativeTime =
+    globalTime < clipStart ? Math.max(0, input.relativeTime) : input.relativeTime;
+  if (relativeTime < 0) return null;
+  const pastSource = sourceDuration > 0 && relativeTime >= sourceDuration;
+  if (isInClipWindow(globalTime, clipStart, clipEnd) && !pastSource) return relativeTime;
 
   const sourceEnd = sourceDuration > 0 ? sourceDuration : relativeTime;
   return Math.max(0, Math.min(relativeTime, sourceEnd - 1 / 30));
@@ -109,16 +150,22 @@ export function resolveSnapshotVideoClipStart(input: {
   return input.runtimeResolvedStart ?? input.authoredStart;
 }
 
-/** Match runtime/render timing: authored data-playback-rate wins over the
- * browser default, then the effective rate is clamped to the supported range. */
-export function resolveSnapshotVideoPlaybackRate(input: {
+/** Match runtime/render timing: a `rate` lane in data-automation wins, then the authored
+ * data-playback-rate, then the browser default, all through the runtime's own reader. */
+export function resolveSnapshotVideoRateSpec(input: {
   authoredRate: string | undefined;
+  authoredAutomation?: string | undefined;
   defaultRate: number;
-}): number {
+}): RateSpec {
   const authoredRate = Number.parseFloat(input.authoredRate ?? "");
-  const rawRate =
-    Number.isFinite(authoredRate) && authoredRate > 0 ? authoredRate : input.defaultRate;
-  return Number.isFinite(rawRate) && rawRate > 0 ? Math.max(0.1, Math.min(5, rawRate)) : 1;
+  const attrs: Record<string, string | undefined> = {
+    "data-playback-rate":
+      Number.isFinite(authoredRate) && authoredRate > 0
+        ? input.authoredRate
+        : String(input.defaultRate),
+    "data-automation": input.authoredAutomation,
+  };
+  return readElementRateSpec({ getAttribute: (name) => attrs[name] ?? null });
 }
 
 export function requireSnapshotFfmpeg(ffmpegPath: string | undefined): string {
@@ -128,39 +175,203 @@ export function requireSnapshotFfmpeg(ffmpegPath: string | undefined): string {
   );
 }
 
-/**
- * Extract a single frame from a video file at `timeSeconds` via FFmpeg.
- * Used to work around Chrome-headless's inability to reliably seek
- * <video> elements during snapshot capture.
- */
-async function extractVideoFrameToBuffer(
+interface SnapshotCompositePage {
+  evaluate<T>(callback: () => T): Promise<Awaited<T>>;
+  screenshot(options: {
+    type: "jpeg";
+    quality: number;
+    clip: { x: number; y: number; width: number; height: number };
+  }): Promise<Uint8Array>;
+}
+
+/** Recapture canvas composites once the decoded video overlays have been injected. */
+export async function recaptureSnapshotComposite(page: SnapshotCompositePage): Promise<void> {
+  const hasPageComposite = await page.evaluate(async () => {
+    const runtimeWindow = window as Window & {
+      __hf_page_composite_prepare?: () => Promise<boolean>;
+      __hf_page_composite_resolve?: () => boolean;
+    };
+    if (typeof runtimeWindow.__hf_page_composite_resolve !== "function") return false;
+    await runtimeWindow.__hf_page_composite_prepare?.();
+    return true;
+  });
+  if (hasPageComposite) {
+    // The 1×1 screenshot forces Chrome to publish updated subtree paint records
+    // after injection, so resolve can consume them without a fixed delay.
+    await page.screenshot({
+      type: "jpeg",
+      quality: 1,
+      clip: { x: 0, y: 0, width: 1, height: 1 },
+    });
+    await page.evaluate(() => {
+      const runtimeWindow = window as Window & {
+        __hf_page_composite_resolve?: () => boolean;
+      };
+      runtimeWindow.__hf_page_composite_resolve?.();
+    });
+  }
+}
+
+export function containingSourceFrameIndex(timestamps: readonly number[], time: number): number {
+  if (!Number.isFinite(time)) return -1;
+  const tolerance = 16 * Number.EPSILON * Math.max(1, Math.abs(time));
+  let index = -1;
+  for (const [i, timestamp] of timestamps.entries()) {
+    if (timestamp > time + tolerance) break;
+    index = i;
+  }
+  return index;
+}
+
+/** Keyframe seek plus the decoded-time threshold that selects the frame containing `time`, or null. */
+async function probeContainingSourceFrameSeek(
+  videoPath: string,
+  time: number,
+  holdLastFrame: boolean,
+): Promise<{ seek?: number; select?: number } | null> {
+  const ffprobe = findFFprobe();
+  // Without ffprobe, fall back to a plain seek: the first frame at or after `time`.
+  if (!ffprobe) return { seek: time };
+  // Packet timestamps need no decode, so a late sample costs a demux, not a decode from the start.
+  const probe = async (
+    readIntervals: string,
+    entries: string,
+  ): Promise<Record<string, unknown> | null> => {
+    try {
+      const { stdout } = await runCancellableProcess(
+        ffprobe,
+        [
+          ...["-v", "error", "-select_streams", "v:0", "-read_intervals", readIntervals],
+          ...["-show_entries", entries, "-of", "json", "--", videoPath],
+        ],
+        { timeoutMs: FFMPEG_EXTRACT_TIMEOUT_MS, maxBufferBytes: 32 * 1024 * 1024 },
+      );
+      const parsed: unknown = JSON.parse(stdout);
+      return typeof parsed === "object" && parsed !== null
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      // An unreadable source blanks this one video, as a failed ffmpeg extraction does.
+      return null;
+    }
+  };
+  const data = await probe("%+#1", "stream=time_base,start_pts:format=start_time,duration");
+  if (data === null || !Array.isArray(data.streams)) return null;
+  const stream: unknown = data.streams[0];
+  if (
+    typeof stream !== "object" ||
+    stream === null ||
+    !("time_base" in stream) ||
+    typeof stream.time_base !== "string"
+  )
+    return null;
+  const [numerator, denominator] = stream.time_base.split("/");
+  const timeBase = Number(numerator) / Number(denominator);
+  if (!Number.isFinite(timeBase) || timeBase <= 0) return null;
+  const format = "format" in data ? data.format : null;
+  const start =
+    typeof format === "object" && format !== null && "start_time" in format
+      ? Number(format.start_time)
+      : 0;
+  const duration =
+    typeof format === "object" && format !== null && "duration" in format
+      ? Number(format.duration)
+      : NaN;
+  if (!holdLastFrame && Number.isFinite(duration) && time >= duration) return null;
+  const formatStart = Number.isFinite(start) ? start : 0;
+  // format.start_time is rounded to microseconds; when the video sets it, use its exact start_pts.
+  const startPts =
+    "start_pts" in stream && typeof stream.start_pts === "number" ? stream.start_pts : NaN;
+  const startTicks =
+    Math.abs(startPts * timeBase - formatStart) <= 1e-6 ? startPts : formatStart / timeBase;
+  // An absolute end: edit-list preroll packets start before the video, so a relative window can stop short.
+  const packetData = await probe(`%${startTicks * timeBase + time + 1}`, "packet=pts,dts,flags");
+  if (packetData === null || !Array.isArray(packetData.packets)) return null;
+  const packets: { pts: number; dts: number; key: boolean }[] = [];
+  for (const packet of packetData.packets) {
+    if (typeof packet !== "object" || packet === null) return null;
+    const pts = "pts" in packet ? packet.pts : "dts" in packet ? packet.dts : undefined;
+    if (typeof pts !== "number") return null;
+    const dts = "dts" in packet && typeof packet.dts === "number" ? packet.dts : pts;
+    const key = "flags" in packet && typeof packet.flags === "string" && packet.flags.includes("K");
+    packets.push({ pts: (pts - startTicks) * timeBase, dts: (dts - startTicks) * timeBase, key });
+  }
+  // Packets arrive in decode order; B-frames make that differ from presentation order.
+  const timestamps = packets.map((packet) => packet.pts).sort((a, b) => a - b);
+  // Before the video's first frame (audio leads it), hold that frame, as the engine does.
+  const index = Math.max(0, containingSourceFrameIndex(timestamps, time));
+  if (timestamps.length === 0 || !Number.isFinite(time)) return null;
+  const frame = timestamps[index]!;
+  const previous = timestamps[index - 1] ?? frame - 0.001;
+  const mid = (previous + frame) / 2;
+  // Demuxers land on a keyframe of their choosing (MPEG-TS often a later one), so observe where a
+  // seek lands; a seek to exactly that keyframe trims its leading frames, so it is `start_t`.
+  const ffmpeg = findFFmpeg();
+  const landing = async (seek: number) => {
+    const raw = ffmpeg ? await probeSeekLanding(ffmpeg, videoPath, seek) : null;
+    return raw === null ? null : raw - startTicks * timeBase;
+  };
+  const candidates = packets.filter(
+    (packet) => packet.key && packet.pts > 0 && packet.pts <= frame,
+  );
+  for (const candidate of candidates.reverse().slice(0, 3)) {
+    const landed = await landing(candidate.pts);
+    if (landed === null) break;
+    if (landed <= 0 || landed > frame) continue;
+    const again = Math.abs(landed - candidate.pts) < 1e-6 ? landed : await landing(landed);
+    if (again !== null && Math.abs(again - landed) < 1e-6)
+      return { seek: landed, select: mid - landed };
+  }
+  // No seek: the first frame FFmpeg emits is the first one at or after the file start.
+  return { select: mid - (timestamps.find((t) => t >= 0) ?? frame) };
+}
+
+/** Raw stream time of the packet an input seek to `seek` lands on, read without decoding. */
+async function probeSeekLanding(
+  ffmpeg: string,
+  videoPath: string,
+  seek: number,
+): Promise<number | null> {
+  try {
+    const { stdout } = await runCancellableProcess(
+      ffmpeg,
+      [
+        ...["-v", "error", "-copyts", "-noaccurate_seek", "-ss", String(seek), "-i", videoPath],
+        ...["-map", "0:v:0", "-c", "copy", "-frames:v", "1", "-f", "framecrc", "-"],
+      ],
+      { timeoutMs: FFMPEG_EXTRACT_TIMEOUT_MS, maxBufferBytes: 1024 * 1024 },
+    );
+    const base = /^#tb 0: (\d+)\/(\d+)/m.exec(stdout);
+    const row = /^0,\s*-?\d+,\s*(-?\d+),/m.exec(stdout);
+    if (!base || !row) return null;
+    return (Number(row[1]) * Number(base[1])) / Number(base[2]);
+  } catch {
+    return null;
+  }
+}
+
+export async function extractVideoFrameToBuffer(
   videoPath: string,
   timeSeconds: number,
   useVp9AlphaDecoder = false,
-  accurateSeek = false,
+  holdLastFrame = false,
 ): Promise<Buffer | null> {
   const tmp = mkdtempSync(join(tmpdir(), "hf-snapshot-frame-"));
   const outPath = join(tmp, "frame.png");
   try {
     const ffmpegPath = requireSnapshotFfmpeg(findFFmpeg());
-    // `-ss` before `-i` performs a fast keyframe seek; adequate for snapshot accuracy
-    // (±1 frame) and orders of magnitude faster than the decode-and-scan alternative.
-    // `accurateSeek` puts `-ss` after `-i` (decode from the start) for frame-exact
-    // reference pairs, where ±1 frame would read as a real mismatch.
-    const args = ["-hide_banner", "-loglevel", "error"];
-    if (useVp9AlphaDecoder) {
-      args.push("-c:v", "libvpx-vp9");
-    }
-    const seek = ["-ss", String(Math.max(0, timeSeconds))];
-    args.push(
-      ...(accurateSeek ? ["-i", videoPath, ...seek] : [...seek, "-i", videoPath]),
-      "-frames:v",
-      "1",
-      "-q:v",
-      "2",
-      "-y",
-      outPath,
+    const seek = await probeContainingSourceFrameSeek(
+      videoPath,
+      Math.max(0, timeSeconds),
+      holdLastFrame,
     );
+    if (seek === null) return null;
+    const args = ["-hide_banner", "-loglevel", "error"];
+    if (useVp9AlphaDecoder) args.push("-c:v", "libvpx-vp9");
+    if (seek.seek !== undefined) args.push("-ss", String(seek.seek));
+    args.push("-i", videoPath, "-map", "0:v:0");
+    if (seek.select !== undefined) args.push("-vf", `select=gte(t-start_t\\,${seek.select})`);
+    args.push("-frames:v", "1", "-q:v", "2", "-y", outPath);
     const result = await runFfmpegOnce(ffmpegPath, args, FFMPEG_EXTRACT_TIMEOUT_MS);
     if (result.code !== 0 || result.timedOut || !existsSync(outPath)) return null;
     return readFileSync(outPath);
@@ -260,6 +471,8 @@ async function captureSnapshots(
   projectDir: string,
   opts: {
     frames?: number;
+    range?: SnapshotRange;
+    composition?: string;
     timeout?: number;
     at?: number[];
     outputDir?: string;
@@ -271,10 +484,23 @@ async function captureSnapshots(
     browserGpuMode?: BrowserGpuMode;
     /** Reference video: save its frame at each captured time plus a render|reference pair. */
     against?: string;
+    /** Add to outputDir without clearing it; name each still by its time, not its place in the run. */
+    keep?: boolean;
   },
 ): Promise<string[]> {
   const { bundleWithLocalizedFonts } = await import("../utils/bundleWithLocalizedFonts.js");
 
+  const capture = await captureArtifactRevision(projectDir).catch(warnSnapshotsNotRecorded);
+  const invocation = randomUUID();
+  const artifacts: Array<{
+    id: string;
+    image: string;
+    time: number;
+    metadata: Record<string, unknown>;
+  }> = [];
+  const replaced: string[] = [];
+  const warnings: string[] = [];
+  let completed = false;
   const numFrames = opts.frames ?? 5;
 
   // Localize fonts (embed remote @font-face as data URIs, matching the render
@@ -285,13 +511,18 @@ async function captureSnapshots(
   const savedPaths: string[] = [];
 
   try {
-    const { browser: chromeBrowser, page } = await openSettledCompositionPage(html, server.url, {
+    const {
+      browser: chromeBrowser,
+      page,
+      renderReadyTimedOut,
+    } = await openSettledCompositionPage(html, server.url, {
       renderReadyTimeoutMs: opts.timeout ?? 5000,
       renderReadyWarningSuffix: "snapshots may be inaccurate",
       browserGpuMode: opts.browserGpuMode,
     });
 
     try {
+      if (renderReadyTimedOut) warnings.push("Render readiness timed out");
       // Font verification — split into loaded / errored / unused. Only status
       // "error" is a real failure; a face still "unloaded"/"loading" after
       // document.fonts.ready + the settle wait was simply never requested by any
@@ -326,6 +557,9 @@ async function captureSnapshots(
         }
       }
 
+      if (fontReport.errored.length)
+        warnings.push(`Fonts failed: ${fontReport.errored.join(", ")}`);
+
       const duration = await page.evaluate(() => {
         const win = window as any;
         if (typeof win.__player?.getDuration === "function") {
@@ -341,13 +575,38 @@ async function captureSnapshots(
         return [];
       }
 
-      // Calculate seek positions — explicit timestamps or evenly spaced, always
-      // including a readable end-of-timeline frame (FINDING [7]).
-      const { times: positions, appendedTail } = computeSnapshotTimes(duration, {
-        frames: numFrames,
-        at: opts.at,
-        includeEnd: opts.includeEnd,
-      });
+      let range = opts.range;
+      if (opts.composition) {
+        const timing = await page.evaluate(() => ({
+          html: document.documentElement.outerHTML,
+          durations: Object.fromEntries(
+            Object.entries((window as any).__timelines ?? {}).map(([id, timeline]) => [
+              id,
+              Number((timeline as any).duration?.()),
+            ]),
+          ),
+        }));
+        range = resolveSnapshotCompositionRange(
+          timing.html,
+          timing.durations,
+          opts.composition,
+          duration,
+        );
+      }
+      const { times: positions, appendedTail } = range
+        ? {
+            times: sampleSnapshotRange(range, numFrames, duration, !!opts.composition),
+            appendedTail: false,
+          }
+        : computeSnapshotTimes(duration, {
+            frames: numFrames,
+            at: opts.at,
+            includeEnd: opts.includeEnd,
+          });
+      if (range)
+        console.log(
+          `   Sampling ${positions.length} frames within ${range[0]}–${range[1]}s${opts.composition ? ` (composition ${opts.composition})` : ""}`,
+        );
       if (appendedTail) {
         console.log(
           `   ${c.dim(`Note: added an end-of-timeline frame at ${positions[positions.length - 1]!.toFixed(2)}s. Short beats between your --at times may still be skipped — pass them explicitly.`)}`,
@@ -361,13 +620,15 @@ async function captureSnapshots(
           ? `(${orbitStageSource()})(${JSON.stringify(opts.angle)})`
           : null;
 
-      const snapshotDir = opts.outputDir ?? join(projectDir, "snapshots");
+      const snapshotDir = opts.outputDir ?? artifactDirectory(projectDir, "snapshots");
       mkdirSync(snapshotDir, { recursive: true });
       try {
         const { readdirSync } = await import("node:fs");
-        for (const file of readdirSync(snapshotDir)) {
+        for (const file of opts.keep ? [] : readdirSync(snapshotDir)) {
           if (/\.(png|jpg|jpeg)$/i.test(file)) {
-            rmSync(join(snapshotDir, file), { force: true });
+            const path = resolve(snapshotDir, file);
+            replaced.push(path);
+            rmSync(path, { force: true });
           }
         }
       } catch {
@@ -407,6 +668,7 @@ async function captureSnapshots(
         // <video data-start> will screenshot black (chrome-headless ignores
         // programmatic currentTime writes). Say so instead of silently
         // shipping black frames (two wild Windows reports).
+        warnings.push("Video frame extraction engine unavailable");
         console.warn(
           `   ${c.warn("⚠")} @hyperframes/engine unavailable — <video> elements will appear black in snapshots. Verify media via a draft render's extracted frames instead.`,
         );
@@ -431,7 +693,7 @@ async function captureSnapshots(
       for (let i = 0; i < positions.length; i++) {
         const time = positions[i]!;
 
-        await seekCompositionTimeline(page, time);
+        await seekCompositionTimeline(page, time, { exactTime: true });
 
         if (cameraExpr) await page.evaluate(cameraExpr);
 
@@ -453,6 +715,7 @@ async function captureSnapshots(
                 src: v.currentSrc || v.src,
                 authoredStart,
                 authoredRate: v.dataset.playbackRate,
+                authoredAutomation: v.dataset.automation,
                 defaultRate: v.defaultPlaybackRate,
                 runtimeResolvedStart:
                   runtimeResolvedStart !== undefined && Number.isFinite(runtimeResolvedStart)
@@ -466,15 +729,19 @@ async function captureSnapshots(
               };
             });
           });
+          const compositionDuration = duration;
           const active = candidates.flatMap((candidate) => {
             const start = resolveSnapshotVideoClipStart(candidate);
-            const playbackRate = resolveSnapshotVideoPlaybackRate(candidate);
+            const playbackRate = resolveSnapshotVideoRateSpec(candidate);
             const duration =
               candidate.authoredDuration ??
               (candidate.srcDuration > 0
-                ? Math.max(0, (candidate.srcDuration - candidate.mediaStart) / playbackRate)
+                ? Math.max(
+                    0,
+                    timeAtSourceTime(playbackRate, candidate.srcDuration - candidate.mediaStart),
+                  )
                 : Number.POSITIVE_INFINITY);
-            let relTime = (time - start) * playbackRate + candidate.mediaStart;
+            let relTime = sourceTimeAt(playbackRate, time - start) + candidate.mediaStart;
             if (
               candidate.loop &&
               candidate.srcDuration > candidate.mediaStart &&
@@ -491,6 +758,7 @@ async function captureSnapshots(
               clipDuration: duration,
               relativeTime: relTime,
               sourceDuration: candidate.srcDuration,
+              compositionDuration,
             });
             return frameTime === null
               ? []
@@ -534,6 +802,7 @@ async function captureSnapshots(
               ffmpegInput,
               Math.max(0, v.relTime),
               useVp9AlphaDecoder,
+              v.srcDuration > 0 && v.relTime >= v.srcDuration - 1,
             );
             if (!png) continue;
             updates.push({
@@ -544,6 +813,7 @@ async function captureSnapshots(
 
           if (active.length > 0 && updates.length < active.length) {
             const missed = active.length - updates.length;
+            warnings.push(`${missed} video frames missing at ${time}s`);
             console.warn(
               `   ${c.warn("⚠")} ${missed}/${active.length} active <video> frame(s) could not be extracted at ${time.toFixed(1)}s — those videos will appear black/stale in this snapshot`,
             );
@@ -559,17 +829,23 @@ async function captureSnapshots(
               active.map((a) => a.id),
             );
           } catch {
+            warnings.push(`Video injection failed at ${time}s`);
             console.warn(
               `   ${c.warn("⚠")} video frame injection failed at ${time.toFixed(1)}s — <video> elements will appear black/stale in this snapshot`,
             );
           }
         }
 
+        await recaptureSnapshotComposite(page);
+
         const timeLabel = formatSnapshotTimestamp(time);
-        const index = String(i).padStart(2, "0");
-        const filename = `frame-${index}-at-${timeLabel}.png`;
+        const slot = opts.keep
+          ? `at-${timeLabel}`
+          : `${String(i).padStart(2, "0")}-at-${timeLabel}`;
+        const filename = opts.keep ? `${slot}.png` : `frame-${slot}.png`;
         const framePath = join(snapshotDir, filename);
 
+        let crop: { x: number; y: number; width: number; height: number } | undefined;
         if (opts.zoom) {
           // Clip screenshot at a raised deviceScaleFactor — never CSS zoom or
           // viewport resizing — so the composition's own layout is untouched.
@@ -579,32 +855,50 @@ async function captureSnapshots(
           }));
           const region = await resolveCropRegion(page, opts.zoom, canvas);
           if (!region) {
+            warnings.push(`Crop target unavailable at ${time}s`);
             console.error(
               `   ${c.warn("⚠")} --zoom target has no visible box at ${time.toFixed(1)}s — frame skipped`,
             );
             continue;
           }
+          crop = region;
           const buffer = await captureRegionCrop(
             page,
             region,
             opts.zoomScale ?? DEFAULT_ZOOM_SCALE,
           );
-          writeFileSync(framePath, buffer);
+          writeCaptureFileSync(framePath, buffer);
         } else {
-          await page.screenshot({ path: framePath, type: "png", omitBackground: true });
+          writeCaptureFileSync(
+            framePath,
+            await page.screenshot({ type: "png", omitBackground: true }),
+          );
         }
+        artifacts.push({
+          id: `${invocation}-${i}`,
+          image: resolve(framePath),
+          time,
+          metadata: {
+            ...pngDimensions(framePath),
+            crop,
+            zoom: opts.zoom,
+            zoomScale: opts.zoom ? (opts.zoomScale ?? DEFAULT_ZOOM_SCALE) : 1,
+            angle: opts.angle,
+            browserGpuMode: opts.browserGpuMode,
+          },
+        });
         if (opts.against) {
           // Frame-exact reference frame beside the render, so a rebuild can be
           // checked against its footage without hand-rolled ffmpeg + montage.
-          const refPng = await extractVideoFrameToBuffer(opts.against, time, false, true);
+          const refPng = await extractVideoFrameToBuffer(opts.against, time);
           if (!refPng) {
             console.error(
               `   ${c.warn("⚠")} --against has no frame at ${timeLabel} — reference pair skipped`,
             );
           } else {
-            const refPath = join(snapshotDir, `ref-${index}-at-${timeLabel}.png`);
-            writeFileSync(refPath, refPng);
-            const pairPath = join(snapshotDir, `pair-${index}-at-${timeLabel}.jpg`);
+            const refPath = join(snapshotDir, `ref-${slot}.png`);
+            writeCaptureFileSync(refPath, refPng);
+            const pairPath = join(snapshotDir, `pair-${slot}.jpg`);
             const { createContactSheet } = await import("../capture/contactSheet.js");
             await createContactSheet([framePath, refPath], pairPath, {
               cols: 2,
@@ -621,14 +915,59 @@ async function captureSnapshots(
         const rel = relative(projectDir, framePath);
         savedPaths.push(rel.startsWith("..") || isAbsolute(rel) ? framePath : rel);
       }
+      completed = true;
     } finally {
       await chromeBrowser.close();
     }
   } finally {
     await server.close();
+    const recorded = capture
+      ? await recordSnapshotArtifacts(
+          projectDir,
+          capture,
+          artifacts,
+          opts.zoom,
+          warnings,
+          completed,
+        )
+      : false;
+    if (!recorded) {
+      const paths = [...replaced, ...artifacts.map((artifact) => artifact.image)];
+      if (paths.length > 0) await forgetRecordedArtifacts(projectDir, paths).catch(() => undefined);
+    }
   }
 
   return savedPaths;
+}
+
+function warnSnapshotsNotRecorded(error: unknown): undefined {
+  console.warn(`   ${c.warn("⚠")} Snapshots were not recorded: ${normalizeErrorMessage(error)}`);
+  return undefined;
+}
+
+async function recordSnapshotArtifacts(
+  projectDir: string,
+  capture: ArtifactCapture,
+  artifacts: Array<{ id: string; image: string; time: number; metadata: Record<string, unknown> }>,
+  zoom: ZoomTarget | undefined,
+  warnings: string[],
+  completed: boolean,
+): Promise<boolean> {
+  const records = await recordArtifacts(
+    projectDir,
+    capture,
+    artifacts.map((artifact) => ({
+      kind: "snapshot",
+      scope: zoom ? "crop" : "full",
+      ...artifact,
+      metadata: { ...artifact.metadata, warnings, partial: !completed || warnings.length > 0 },
+    })),
+  ).catch(warnSnapshotsNotRecorded);
+  const record = records?.[0];
+  if (!record) return false;
+  console.log(`   Revision: ${record.revision ?? "none"} (${record.attribution})`);
+  console.log(`   State: ${join(projectDir, ".hyperframes", "video-state.json")}`);
+  return true;
 }
 
 export default defineCommand({
@@ -645,7 +984,8 @@ export default defineCommand({
     output: {
       type: "string",
       alias: "o",
-      description: "Directory to write snapshots into (default: <project>/snapshots)",
+      description:
+        "Directory to write snapshots into (default: unique directory under <project>/.hyperframes/artifacts/snapshots)",
     },
     frames: {
       type: "string",
@@ -654,7 +994,18 @@ export default defineCommand({
     },
     at: {
       type: "string",
-      description: "Comma-separated timestamps in seconds (e.g., --at 3.0,10.5,18.0)",
+      description:
+        "Comma-separated timestamps in seconds (e.g., --at 3.0,10.5,18.0). Each is captured at that exact instant, not snapped to a frame.",
+    },
+    range: {
+      type: "string",
+      description:
+        "Root-timeline range START,END in seconds; sample --frames evenly within it, without adding the full-video tail",
+    },
+    composition: {
+      type: "string",
+      description:
+        "data-composition-id to sample; take --frames within its effective root-timeline interval, without adding the full-video tail",
     },
     timeout: {
       type: "string",
@@ -671,6 +1022,12 @@ export default defineCommand({
       description:
         "Always include a readable end-of-timeline frame (default: true). Pass --no-end to capture only your exact --at times.",
       default: true,
+    },
+    keep: {
+      type: "boolean",
+      description:
+        "Add to --output instead of clearing it, naming each still at-<seconds>s.png (at-0s, at-1.5s, at-12.25s: no trailing zeros), so snapshotting one moment again replaces only that still. Times less than 1 ms apart share a name, so one run may not pass two of them. No contact sheet.",
+      default: false,
     },
     zoom: {
       type: "string",
@@ -706,6 +1063,13 @@ export default defineCommand({
     },
   },
   async run({ args }) {
+    if ([args.at, args.range, args.composition].filter((value) => value !== undefined).length > 1)
+      throw new Error("Use only one of --at, --range, or --composition");
+    const frames = parseInt(args.frames as string, 10) || 5;
+    const range = args.range === undefined ? undefined : parseSnapshotRange(String(args.range));
+    const composition =
+      args.composition === undefined ? undefined : String(args.composition).trim();
+    if (composition === "") throw new Error("--composition requires a composition ID");
     const project = resolveProject(args.dir);
     const lintResult = await lintProject(project.dir);
     if (hasDefinitiveEntryMismatch(lintResult)) {
@@ -734,7 +1098,6 @@ export default defineCommand({
       console.log("");
       failCommand();
     }
-    const frames = parseInt(args.frames as string, 10) || 5;
     const timeout = parseInt(args.timeout as string, 10) || 5000;
     const atTimestamps = args.at
       ? String(args.at)
@@ -742,6 +1105,7 @@ export default defineCommand({
           .map((s) => parseFloat(s.trim()))
           .filter((n) => !isNaN(n))
       : undefined;
+    if (args.keep === true && atTimestamps) assertDistinctKeepNames(atTimestamps);
     // Gemini frame analysis runs by default (silently skipped if
     // GEMINI_API_KEY is not set). `--describe "custom question"` overrides
     // the default prompt with a targeted question. `--describe false` opts
@@ -771,157 +1135,183 @@ export default defineCommand({
         : "";
     console.log(`${c.accent("◆")}  Capturing ${label} from ${c.accent(project.name)}${angleLabel}`);
 
+    let managedSnapshotDir: string | undefined;
     try {
       const snapshotDir = args.output
         ? resolve(String(args.output))
-        : join(project.dir, "snapshots");
-      const paths = await captureSnapshots(project.dir, {
-        frames,
-        timeout,
-        at: atTimestamps,
-        outputDir: snapshotDir,
-        angle: camera,
-        includeEnd: args.end !== false,
-        zoom: zoomTarget,
-        zoomScale,
-        autoProxy: args.proxy as boolean | undefined,
-        browserGpuMode: resolveLocalBrowserGpuMode(args["browser-gpu"] as boolean | undefined),
-        against,
-      });
-
-      if (paths.length === 0) {
-        console.log(
-          `\n${c.error("✗")} Could not determine composition duration — no frames captured`,
+        : artifactDirectory(project.dir, "snapshots");
+      if (!args.output) managedSnapshotDir = snapshotDir;
+      if (args.output) retainSnapshotOutput(project.dir, snapshotDir);
+      await withProjectLock(project.dir, "snapshot", async () => {
+        const paths = await captureSnapshots(project.dir, {
+          frames,
+          range,
+          composition,
+          timeout,
+          at: atTimestamps,
+          outputDir: snapshotDir,
+          angle: camera,
+          includeEnd: args.end !== false,
+          zoom: zoomTarget,
+          zoomScale,
+          autoProxy: args.proxy as boolean | undefined,
+          browserGpuMode: resolveLocalBrowserGpuMode(args["browser-gpu"] as boolean | undefined),
+          against,
+          keep: args.keep === true,
+        });
+        reportArtifacts(
+          "snapshot",
+          "frame",
+          paths.map((path) => resolve(project.dir, path)),
         );
-        failCommand();
-      }
 
-      console.log(
-        `\n${c.success("◇")}  ${paths.length} snapshots saved to ${args.output ? snapshotDir : "snapshots/"}`,
-      );
-      for (const p of paths) {
-        console.log(`   ${p}`);
-      }
-      if (against) {
-        console.log(
-          `   ${c.dim("ref-*.png + pair-*.jpg")} beside each frame (reference frame, render | reference sheet)`,
-        );
-      }
-
-      // Generate contact sheet for quick AI review
-      try {
-        const { createSnapshotContactSheet } = await import("../capture/contactSheet.js");
-        const sheets = await createSnapshotContactSheet(
-          snapshotDir,
-          join(snapshotDir, "contact-sheet.jpg"),
-        );
-        if (sheets.length > 0) {
-          const label =
-            sheets.length === 1 ? "contact-sheet.jpg" : `contact-sheet-1..${sheets.length}.jpg`;
-          console.log(`   ${c.dim(label)} (grid view for AI review)`);
+        if (paths.length === 0) {
+          console.log(
+            `\n${c.error("✗")} Could not determine composition duration — no frames captured`,
+          );
+          failCommand();
         }
-      } catch {
-        /* non-critical */
-      }
 
-      // Gemini vision descriptions. Runs by default — see describeArg
-      // resolution above. `null` means the user explicitly opted out with
-      // `--describe false`; missing GEMINI_API_KEY logs a skip and continues.
-      if (describeArg !== null) {
+        console.log(`\n${c.success("◇")}  ${paths.length} snapshots saved to ${snapshotDir}`);
+        for (const p of paths) {
+          console.log(`   ${p}`);
+        }
+        if (against) {
+          console.log(
+            `   ${c.dim("ref-*.png + pair-*.jpg")} beside each frame (reference frame, render | reference sheet)`,
+          );
+        }
+
+        // Generate contact sheet for quick AI review; a --keep folder mixes runs, so it gets none.
         try {
-          const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-          if (!geminiKey) {
-            console.log(`   ${c.dim("--describe: GEMINI_API_KEY not set, skipping")}`);
-          } else if (paths.length > 0) {
-            console.log(`   ${c.dim("Describing frames with Gemini vision...")}`);
-            const { GoogleGenAI } = await import("@google/genai");
-            const ai = new GoogleGenAI({ apiKey: geminiKey });
-            const model = process.env.HYPERFRAMES_GEMINI_MODEL || "gemini-3.1-flash-lite-preview";
-            const customQuestion =
-              describeArg === "true"
-                ? "Describe this video composition frame in 1-2 sentences. Be specific and factual: what elements are visible, what text appears, is the frame blank/black/loading, what is the composition. Flag any obvious problems."
-                : describeArg;
-
-            const descriptions: string[] = [
-              `# Snapshot Frame Descriptions`,
-              ``,
-              `**Question asked:** ${customQuestion}`,
-              ``,
-              `Compare each description against your storyboard spec. A "black frame" or "loading screen" for a content beat is a bug.`,
-              ``,
-            ];
-
-            // Scale down PNGs before sending to stay under Gemini's 4 MB inline
-            // limit. Full 1920×1080 PNGs are typically 3-6 MB. Use sharp if
-            // available; otherwise skip files over the limit.
-            type SharpFn = (buf: Buffer) => {
-              resize: (w: number) => { jpeg: () => { toBuffer: () => Promise<Buffer> } };
-            };
-            let sharpFn: SharpFn | null = null;
-            try {
-              const s = await import("sharp");
-              sharpFn = (s.default ?? s) as unknown as SharpFn;
-            } catch {
-              /* sharp not installed — fall back to size check */
-            }
-
-            const results = await Promise.allSettled(
-              paths.map(async (p) => {
-                const filename = basename(p);
-                const filePath = join(snapshotDir, filename);
-                if (!existsSync(filePath)) return { filename, desc: "file not found" };
-                const raw = readFileSync(filePath);
-                let imageData: Buffer;
-                let mimeType = "image/png";
-                if (sharpFn) {
-                  imageData = await sharpFn(raw).resize(960).jpeg().toBuffer();
-                  mimeType = "image/jpeg";
-                } else {
-                  if (raw.length > 3_800_000)
-                    return {
-                      filename,
-                      desc: "file too large for Gemini — install sharp to enable auto-resize",
-                    };
-                  imageData = raw;
-                }
-                const base64 = imageData.toString("base64");
-                const response = await ai.models.generateContent({
-                  model,
-                  contents: [
-                    {
-                      role: "user",
-                      parts: [{ inlineData: { mimeType, data: base64 } }, { text: customQuestion }],
-                    },
-                  ],
-                  config: { maxOutputTokens: 250 },
-                });
-                return { filename, desc: response.text?.trim() || "no description" };
-              }),
-            );
-
-            for (const result of results) {
-              if (result.status === "fulfilled") {
-                descriptions.push(`## ${result.value.filename}`, `${result.value.desc}`, ``);
-              } else {
-                // Log first failure so Gemini issues are visible rather than silent
-                const errMsg = normalizeErrorMessage(result.reason);
-                descriptions.push(`## (error)`, `Gemini call failed: ${errMsg.slice(0, 120)}`, ``);
-              }
-            }
-
-            const descPath = join(snapshotDir, "descriptions.md");
-            writeFileSync(descPath, descriptions.join("\n"));
-            console.log(`   ${c.dim("descriptions.md")} (Gemini frame analysis)`);
+          const { createSnapshotContactSheet } = await import("../capture/contactSheet.js");
+          const sheets =
+            args.keep === true
+              ? []
+              : await createSnapshotContactSheet(
+                  snapshotDir,
+                  join(snapshotDir, "contact-sheet.jpg"),
+                );
+          reportArtifacts("snapshot", "contact-sheet", sheets);
+          for (const sheet of sheets) {
+            console.log(`   ${resolve(sheet)} (grid view for AI review)`);
           }
-        } catch (descErr) {
-          const msg = normalizeErrorMessage(descErr);
-          console.log(`   ${c.dim(`--describe failed: ${msg.slice(0, 80)}`)}`);
+        } catch (err) {
+          console.warn(
+            `   ${c.warn("⚠")} Contact sheet skipped: ${normalizeErrorMessage(err)}. Individual snapshot PNGs are still available.`,
+          );
         }
-      }
+
+        // Gemini vision descriptions. Runs by default — see describeArg
+        // resolution above. `null` means the user explicitly opted out with
+        // `--describe false`; missing GEMINI_API_KEY logs a skip and continues.
+        if (describeArg !== null) {
+          try {
+            const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+            if (!geminiKey) {
+              if (args.describe !== undefined)
+                console.log(`   ${c.dim("--describe: GEMINI_API_KEY not set, skipping")}`);
+            } else if (paths.length > 0) {
+              console.log(`   ${c.dim("Describing frames with Gemini vision...")}`);
+              const { GoogleGenAI } = await loadOptionalPackage("@google/genai", "--describe");
+              const ai = new GoogleGenAI({ apiKey: geminiKey });
+              const model = process.env.HYPERFRAMES_GEMINI_MODEL || "gemini-3.1-flash-lite-preview";
+              const customQuestion =
+                describeArg === "true"
+                  ? "Describe this video composition frame in 1-2 sentences. Be specific and factual: what elements are visible, what text appears, is the frame blank/black/loading, what is the composition. Flag any obvious problems."
+                  : describeArg;
+
+              const descriptions: string[] = [
+                `# Snapshot Frame Descriptions`,
+                ``,
+                `**Question asked:** ${customQuestion}`,
+                ``,
+                `Compare each description against your storyboard spec. A "black frame" or "loading screen" for a content beat is a bug.`,
+                ``,
+              ];
+
+              // Scale down PNGs before sending to stay under Gemini's 4 MB inline
+              // limit. Full 1920×1080 PNGs are typically 3-6 MB. Use sharp if
+              // available; otherwise skip files over the limit.
+              type SharpFn = (buf: Buffer) => {
+                resize: (w: number) => { jpeg: () => { toBuffer: () => Promise<Buffer> } };
+              };
+              let sharpFn: SharpFn | null = null;
+              try {
+                const s = await import("sharp");
+                sharpFn = (s.default ?? s) as unknown as SharpFn;
+              } catch {
+                /* sharp not installed — fall back to size check */
+              }
+
+              const results = await Promise.allSettled(
+                paths.map(async (p) => {
+                  const filename = basename(p);
+                  const filePath = join(snapshotDir, filename);
+                  if (!existsSync(filePath)) return { filename, desc: "file not found" };
+                  const raw = readFileSync(filePath);
+                  let imageData: Buffer;
+                  let mimeType = "image/png";
+                  if (sharpFn) {
+                    imageData = await sharpFn(raw).resize(960).jpeg().toBuffer();
+                    mimeType = "image/jpeg";
+                  } else {
+                    if (raw.length > 3_800_000)
+                      return {
+                        filename,
+                        desc: "file too large for Gemini — install sharp to enable auto-resize",
+                      };
+                    imageData = raw;
+                  }
+                  const base64 = imageData.toString("base64");
+                  const response = await ai.models.generateContent({
+                    model,
+                    contents: [
+                      {
+                        role: "user",
+                        parts: [
+                          { inlineData: { mimeType, data: base64 } },
+                          { text: customQuestion },
+                        ],
+                      },
+                    ],
+                    config: { maxOutputTokens: 250 },
+                  });
+                  return { filename, desc: response.text?.trim() || "no description" };
+                }),
+              );
+
+              for (const result of results) {
+                if (result.status === "fulfilled") {
+                  descriptions.push(`## ${result.value.filename}`, `${result.value.desc}`, ``);
+                } else {
+                  // Log first failure so Gemini issues are visible rather than silent
+                  const errMsg = normalizeErrorMessage(result.reason);
+                  descriptions.push(
+                    `## (error)`,
+                    `Gemini call failed: ${errMsg.slice(0, 120)}`,
+                    ``,
+                  );
+                }
+              }
+
+              const descPath = join(snapshotDir, "descriptions.md");
+              writeFileSync(descPath, descriptions.join("\n"));
+              console.log(`   ${c.dim("descriptions.md")} (Gemini frame analysis)`);
+            }
+          } catch (descErr) {
+            const msg = normalizeErrorMessage(descErr);
+            console.log(`   ${c.dim(`--describe failed: ${msg}`)}`);
+          }
+        }
+      });
     } catch (err) {
       const msg = normalizeErrorMessage(err);
       console.error(`\n${c.error("✗")} Snapshot failed: ${msg}`);
       failCommand();
+    } finally {
+      if (managedSnapshotDir)
+        await finishSnapshotRun(project.dir, managedSnapshotDir).catch(warnSnapshotsNotRecorded);
     }
   },
 });

@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { extname, join, posix } from "node:path";
@@ -22,6 +23,11 @@ const PACKAGES_DIR = join(ROOT, "packages");
 const DEP_FIELDS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
 const RUNTIME_IMPORT_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".json", ".wasm", ".node"]);
 const PACKED_JAVASCRIPT_FILE_PATTERN = /\.(?:js|mjs|cjs)$/;
+const SIZE_BUDGETS_FILE = "scripts/package-size-budgets.json";
+// A budget sits 5% above the measured size; a package that shrinks 15% below
+// its budget fails until the budget follows it down, so budgets only ratchet down.
+const SIZE_BUDGET_HEADROOM = 1.05;
+const SIZE_BUDGET_RATCHET = 0.85;
 
 function listWorkspacePackageDirs() {
   return readdirSync(PACKAGES_DIR)
@@ -329,6 +335,62 @@ export function renderBrowserConsumer(specifiers) {
   ].join("\n");
 }
 
+/** Name every typed export in a type-only import: a bare `import "x"` lets tsc skip unresolved targets. */
+export function renderTypeConsumer(specifiers) {
+  return `${specifiers
+    .map(
+      (specifier, index) =>
+        `import type * as packedTypes${index} from ${JSON.stringify(specifier)};`,
+    )
+    .join("\n")}\nexport {};\n`;
+}
+
+/** Strict Node ESM, with declarations checked: skipLibCheck hides unresolvable imports inside .d.ts files. */
+export const CONSUMER_TSCONFIG = {
+  compilerOptions: {
+    target: "ES2022",
+    module: "NodeNext",
+    moduleResolution: "NodeNext",
+    lib: ["ESNext", "DOM", "DOM.Iterable"],
+    types: ["node"],
+    strict: true,
+    skipLibCheck: false,
+    noEmit: true,
+  },
+  include: ["consumer.ts"],
+};
+
+/** Count tsc errors by the installed package they come from, so a failure names its owner. */
+export function countTypeErrorsByPackage(output) {
+  const counts = {};
+  for (const line of output.split("\n")) {
+    const match = /^(\S+?)\(\d+,\d+\): error TS\d+/.exec(line);
+    if (!match) continue;
+    const owner = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(match[1])?.[1] ?? match[1];
+    counts[owner] = (counts[owner] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function typecheckPackedConsumer(fixtureDir) {
+  try {
+    execFileSync(process.execPath, [join(fixtureDir, "node_modules", "typescript", "bin", "tsc")], {
+      cwd: fixtureDir,
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+  } catch (error) {
+    const output = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+    const counts = Object.entries(countTypeErrorsByPackage(output))
+      .map(([owner, count]) => `${owner}: ${count}`)
+      .join(", ");
+    throw new Error(
+      `Packed declarations fail a NodeNext consumer (module/moduleResolution nodenext, skipLibCheck false). ` +
+        `Errors by package: ${counts || "unknown"}\n${output.split("\n").slice(0, 20).join("\n")}`,
+    );
+  }
+}
+
 function writeConsumerFixture(packDir, packedWorkspaces) {
   const fixtureDir = join(packDir, "consumer");
   mkdirSync(fixtureDir);
@@ -350,6 +412,9 @@ function writeConsumerFixture(packDir, packedWorkspaces) {
     readFileSync(join(ROOT, "packages/studio/package.json"), "utf8"),
   );
   dependencies.vite = studioPackage.devDependencies.vite;
+  // Studio's declarations name React types; a React consumer brings these itself.
+  dependencies["@types/react"] = studioPackage.devDependencies["@types/react"];
+  dependencies["@types/react-dom"] = studioPackage.devDependencies["@types/react-dom"];
   writeFileSync(
     join(fixtureDir, "package.json"),
     JSON.stringify(
@@ -371,30 +436,11 @@ function writeConsumerFixture(packDir, packedWorkspaces) {
   );
 
   const contracts = listPackedExportContracts(packedWorkspaces);
-  const typeImports = contracts
+  const typedSpecifiers = contracts
     .filter(({ typechecked }) => typechecked)
-    .map(({ specifier }) => `import ${JSON.stringify(specifier)};`)
-    .join("\n");
-  writeFileSync(join(fixtureDir, "consumer.ts"), `${typeImports}\n`);
-  writeFileSync(
-    join(fixtureDir, "tsconfig.json"),
-    JSON.stringify(
-      {
-        compilerOptions: {
-          target: "ES2022",
-          module: "NodeNext",
-          moduleResolution: "NodeNext",
-          lib: ["ES2022", "DOM", "DOM.Iterable"],
-          strict: true,
-          skipLibCheck: true,
-          noEmit: true,
-        },
-        include: ["consumer.ts"],
-      },
-      null,
-      2,
-    ),
-  );
+    .map(({ specifier }) => specifier);
+  writeFileSync(join(fixtureDir, "consumer.ts"), renderTypeConsumer(typedSpecifiers));
+  writeFileSync(join(fixtureDir, "tsconfig.json"), JSON.stringify(CONSUMER_TSCONFIG, null, 2));
 
   const specifiers = contracts.map(({ specifier }) => specifier);
   const nodeSpecifiers = contracts
@@ -435,11 +481,7 @@ function verifyPackedConsumer(packDir, packedWorkspaces) {
     encoding: "utf8",
     stdio: "pipe",
   });
-  execFileSync(process.execPath, [join(fixtureDir, "node_modules", "typescript", "bin", "tsc")], {
-    cwd: fixtureDir,
-    encoding: "utf8",
-    stdio: "pipe",
-  });
+  typecheckPackedConsumer(fixtureDir);
   const smokeOutput = execFileSync("node", ["consumer-smoke.mjs"], {
     cwd: fixtureDir,
     encoding: "utf8",
@@ -463,8 +505,53 @@ function verifyPackedConsumer(packDir, packedWorkspaces) {
   }
   console.log(smokeOutput.trim());
   console.log(
-    "Verified clean packed consumer install, Node execution, TypeScript/Vite resolution, and CLI startup.",
+    "Verified clean packed consumer install, Node execution, NodeNext declaration check, Vite resolution, and CLI startup.",
   );
+}
+
+function measurePackedSize(filename) {
+  return {
+    packed: statSync(filename).size,
+    unpacked: execFileSync("tar", ["-xOf", filename], { cwd: ROOT, maxBuffer: 1 << 30 }).length,
+  };
+}
+
+export function listPackageSizeIssues(name, sizes, budget) {
+  const suggest = (bytes) => Math.ceil(bytes * SIZE_BUDGET_HEADROOM);
+  if (!budget) {
+    return [
+      `${name} has no size budget: add "${name}": { "packed": ${suggest(sizes.packed)}, "unpacked": ${suggest(sizes.unpacked)} } to ${SIZE_BUDGETS_FILE}`,
+    ];
+  }
+  return ["packed", "unpacked"].flatMap((kind) => {
+    if (!Number.isFinite(budget[kind]) || budget[kind] <= 0) {
+      return [`${name} has an invalid ${kind} budget in ${SIZE_BUDGETS_FILE}: use a byte count.`];
+    }
+    if (sizes[kind] > budget[kind]) {
+      return [
+        `${name} ${kind} size ${sizes[kind]} bytes is over its budget of ${budget[kind]}. Keep source maps, tests and unused assets out of the tarball; raise the budget in ${SIZE_BUDGETS_FILE} only with the reason in the PR.`,
+      ];
+    }
+    if (sizes[kind] < budget[kind] * SIZE_BUDGET_RATCHET) {
+      return [
+        `${name} ${kind} size ${sizes[kind]} bytes is well under its budget of ${budget[kind]}: lower it to ${suggest(sizes[kind])} in ${SIZE_BUDGETS_FILE} so the saving stays.`,
+      ];
+    }
+    return [];
+  });
+}
+
+function verifyPackageSizes(packedWorkspaces) {
+  const budgets = JSON.parse(readFileSync(join(ROOT, SIZE_BUDGETS_FILE), "utf8"));
+  const issues = packedWorkspaces.flatMap(({ filename, packedPackage }) =>
+    listPackageSizeIssues(
+      packedPackage.name,
+      measurePackedSize(filename),
+      budgets[packedPackage.name],
+    ),
+  );
+  if (issues.length > 0) throw new Error(`Package size budgets:\n${issues.join("\n")}`);
+  console.log(`Verified ${packedWorkspaces.length} packages are within their size budgets.`);
 }
 
 function packAndVerifyWorkspace(workspace, packDir) {
@@ -486,6 +573,7 @@ function main() {
       .map((workspace) => packAndVerifyWorkspace(workspace, packDir))
       .filter(Boolean);
     verifyPackedConsumer(packDir, packedWorkspaces);
+    verifyPackageSizes(packedWorkspaces);
   } finally {
     rmSync(packDir, { force: true, recursive: true });
   }

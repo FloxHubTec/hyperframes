@@ -10,16 +10,22 @@ import {
 } from "../capture/captureCompositionFrame.js";
 import { DEFAULT_CHECK_OPTIONS, runAuditGrid } from "./checkPipeline.js";
 import {
+  matchComponentFindings,
   captureOverviewShot,
+  keepBrokenImageAborts,
   preResolveHostileMediaProxies,
+  dropFailedProxyEchoes,
   runBrowserCheck,
+  collectSeekClock,
 } from "./checkBrowser.js";
 import type { ProjectDir } from "./project.js";
 
 const mocks = vi.hoisted(() => ({
   bundleWithLocalizedFonts: vi.fn(async () => "<html></html>"),
   serverClose: vi.fn(async () => undefined),
-  resolveProxy: vi.fn<(projectDir: string, absoluteSourcePath: string) => Promise<string>>(),
+  resolveProxy:
+    vi.fn<(projectDir: string, absoluteSourcePath: string, variant?: string) => Promise<string>>(),
+  FfmpegUnavailableError: class FfmpegUnavailableError extends Error {},
   scanProjectMediaCodecMap: vi.fn<
     (...args: unknown[]) => Promise<
       Record<
@@ -73,7 +79,11 @@ vi.mock("@hyperframes/studio-server/media-codec-map", async (importOriginal) => 
   proxyVariantFor: (facts: { hasAlpha?: boolean }) => (facts.hasAlpha ? "vp8" : "h264"),
 }));
 vi.mock("@hyperframes/studio-server/proxy-transcoder", () => ({
-  resolveProxy: mocks.resolveProxy,
+  FfmpegUnavailableError: mocks.FfmpegUnavailableError,
+  resolveProxies: (projectDir: string, sources: Array<{ sourcePath: string; variant: string }>) =>
+    Promise.allSettled(
+      sources.map(({ sourcePath, variant }) => mocks.resolveProxy(projectDir, sourcePath, variant)),
+    ),
 }));
 
 const PROJECT: ProjectDir = {
@@ -83,6 +93,7 @@ const PROJECT: ProjectDir = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -99,9 +110,12 @@ afterEach(() => {
 function installSessionMock(page: ReturnType<typeof fakePage>): void {
   const browser = Object.assign(Object.create(null), {
     close: vi.fn(async () => undefined),
+    process: () => ({ exitCode: 0, signalCode: null }),
   });
   vi.mocked(openSettledCompositionPage).mockImplementation(
     async (_html: string, _url: string, options: OpenSettledCompositionPageOptions) => {
+      options.onBrowser?.(browser);
+      options.onBrowserReady?.();
       await options.beforeNavigate?.(page);
       return { page, browser, renderReadyTimedOut: false };
     },
@@ -358,6 +372,40 @@ it("carries validate's clip-duration audit into the runtime findings", async () 
   ]);
 });
 
+it("reports each video whose browser-playable copy could not be made as a warning finding", async () => {
+  mountCanvasFixture();
+  mocks.scanProjectMediaCodecMap.mockResolvedValue({
+    "/media/hlg.mp4": {
+      codecName: "hevc",
+      browserHostile: true,
+      representativeMime: null,
+      hasAlpha: false,
+    },
+  });
+  mocks.resolveProxy.mockRejectedValue(
+    new Error("HDR proxying requires ffmpeg zscale/tonemap filters (libzimg)"),
+  );
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  installSessionMock(fakePage());
+
+  const result = await runBrowserCheck(
+    PROJECT,
+    { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: false },
+    { kind: "none" },
+    runAuditGrid,
+  );
+
+  expect(result.runtimeFindings).toContainEqual(
+    expect.objectContaining({
+      code: "media_proxy_failed",
+      severity: "warning",
+      message: expect.stringContaining(
+        "media/hlg.mp4: HDR proxying requires ffmpeg zscale/tonemap filters (libzimg)",
+      ),
+    }),
+  );
+});
+
 it("surfaces the runtime's media-proxy-fallback console.info line as an info finding, ignoring unrelated info logs", async () => {
   vi.spyOn(Date, "now").mockReturnValue(100);
   mountCanvasFixture();
@@ -448,7 +496,7 @@ it("surfaces the runtime's web-audio-bypass console.info line as its own info fi
     "info",
     '[hyperframes] runtime_web_audio_bypass: "https://cdn.example.com/track.mp3" ' +
       "(cross_origin_no_cors): Web Audio capture withheld; the track plays through native " +
-      "HTMLMediaElement output. Native playback cannot reproduce: fx-chain — proxy or download " +
+      "HTMLMediaElement output. Native playback cannot reproduce: fx-chain. Fix: proxy or download " +
       "the asset to a same-origin URL to keep it.",
   );
   const authorInfo = fakeConsoleMessage("info", "debug runtime_web_audio_bypass lookalike");
@@ -526,6 +574,164 @@ it("elevates and deduplicates WebGPU validation warnings while preserving ordina
   );
 });
 
+describe("collectSeekClock", () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, "__timelines");
+    Reflect.deleteProperty(window, "__hfSeekClocks");
+  });
+
+  const seekPage = { evaluate: async (fn: () => unknown) => fn() } as unknown as Parameters<
+    typeof collectSeekClock
+  >[0];
+
+  it("skips a custom clock whose time() returns null instead of reading it as 0", async () => {
+    Reflect.set(window, "__timelines", {
+      root: { duration: () => 9, seek() {}, time: () => null },
+      card: { duration: () => 9, seek() {}, time: () => 3 },
+    });
+
+    const clocks = await collectSeekClock(seekPage);
+
+    expect(clocks.map((clock) => clock.time)).toEqual([3]);
+  });
+});
+
+describe("keepBrokenImageAborts", () => {
+  const draft = (url: string, abortedImage: boolean) => ({
+    code: "request_failed",
+    severity: "error" as const,
+    message: `Failed to load ${url}`,
+    time: 0,
+    url,
+    abortedImage,
+  });
+
+  it("keeps an aborted image only when it is still broken, and every other failure", () => {
+    const swappedPast = draft("http://h/seq/0004.png", true);
+    const stuck = draft("http://h/plate.png", true);
+    const missing = draft("http://h/gone.png", false);
+    const kept = keepBrokenImageAborts(
+      [swappedPast, stuck, missing],
+      new Set(["http://h/plate.png"]),
+    );
+    expect(kept).toEqual([stuck, missing]);
+  });
+
+  it("reports an aborted image a page still shows broken, not one swapped away or one that decodes", async () => {
+    const base = "http://127.0.0.1:3000/assets";
+    mountCanvasFixture(
+      `<img id="stuck" src="${base}/plate.png"><img id="fine" src="${base}/seq/0012.png">`,
+    );
+    const stuck = document.getElementById("stuck") as HTMLImageElement;
+    const fine = document.getElementById("fine") as HTMLImageElement;
+    stuck.decode = () => Promise.reject(new Error("broken"));
+    fine.decode = () => Promise.resolve();
+    const aborted = (url: string) => ({
+      url: () => url,
+      failure: () => ({ errorText: "net::ERR_ABORTED" }),
+      resourceType: () => "image",
+    });
+    const page = fakePage();
+    page.on = vi.fn((event: string, handler: (request: ReturnType<typeof aborted>) => void) => {
+      if (event !== "requestfailed") return;
+      for (const url of ["seq/0004.png", "seq/0012.png", "plate.png"])
+        handler(aborted(`${base}/${url}`));
+    });
+    installSessionMock(page);
+
+    const result = await runBrowserCheck(
+      PROJECT,
+      { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: false },
+      { kind: "none" },
+      runAuditGrid,
+    );
+
+    const failed = result.runtimeFindings.filter((finding) => finding.code === "request_failed");
+    expect(failed.map((finding) => finding.message)).toEqual([
+      "Failed to load assets/plate.png: net::ERR_ABORTED",
+    ]);
+  });
+
+  it("does not report an aborted image whose reload is still pending at the cap", async () => {
+    const url = "http://127.0.0.1:3000/assets/slow.png";
+    mountCanvasFixture(`<img id="slow" src="${url}">`);
+    (document.getElementById("slow") as HTMLImageElement).decode = () => new Promise(() => {});
+    const page = fakePage();
+    page.on = vi.fn((event: string, handler: (request: unknown) => void) => {
+      if (event !== "requestfailed") return;
+      handler({
+        url: () => url,
+        failure: () => ({ errorText: "net::ERR_ABORTED" }),
+        resourceType: () => "image",
+      });
+    });
+    installSessionMock(page);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const checked = runBrowserCheck(
+        PROJECT,
+        { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: false },
+        { kind: "none" },
+        runAuditGrid,
+      );
+      await vi.runAllTimersAsync();
+      const result = await checked;
+      expect(result.runtimeFindings.filter((finding) => finding.code === "request_failed")).toEqual(
+        [],
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("dropFailedProxyEchoes", () => {
+  it("keeps one finding for a failed proxy and drops the preview's repeats of it", () => {
+    const at = (code: string, message: string, url?: string) =>
+      ({ code, severity: "info", message, time: 0, url }) as const;
+    const failed = at("media_proxy_failed", "Could not make a copy of media/a.mov");
+    const unrelated502 = at(
+      "http_error",
+      "502 loading media/b.mov",
+      "http://127.0.0.1:3000/media/b.mov?hf-proxy=h264",
+    );
+    const originalMissing = at(
+      "http_error",
+      "404 loading media/a.mov",
+      "http://127.0.0.1:3000/media/a.mov",
+    );
+
+    const kept = dropFailedProxyEchoes(
+      [
+        failed,
+        at(
+          "http_error",
+          "502 loading media/my clip.mov",
+          "http://127.0.0.1:3000/media/my%20clip.mov?hf-proxy=h264",
+        ),
+        at(
+          "http_error",
+          "502 loading media/a.mov",
+          "http://127.0.0.1:3000/media/a.mov?hf-proxy=h264",
+        ),
+        at(
+          "media_proxy_fallback",
+          '[hyperframes] runtime_media_proxy_fallback: "media/a.mov" uses a codec (prores)',
+        ),
+        at(
+          "media_proxy_unavailable",
+          '[hyperframes] runtime_media_proxy_unavailable: "http://127.0.0.1:3000/media/a.mov" (proxy_playback_failed): x',
+        ),
+        unrelated502,
+        originalMissing,
+      ],
+      new Set(["/media/a.mov", "/media/my clip.mov"]),
+    );
+
+    expect(kept).toEqual([failed, unrelated502, originalMissing]);
+  });
+});
+
 describe("preResolveHostileMediaProxies", () => {
   const dirs: string[] = [];
   const mkProjectDir = (): string => {
@@ -594,7 +800,7 @@ describe("preResolveHostileMediaProxies", () => {
     expect(mocks.resolveProxy).not.toHaveBeenCalled();
   });
 
-  it("swallows a resolveProxy rejection instead of throwing", async () => {
+  it("returns a resolveProxy rejection as a warning instead of throwing", async () => {
     const projectDir = mkProjectDir();
     mocks.scanProjectMediaCodecMap.mockResolvedValue({
       "/clip.mp4": {
@@ -605,14 +811,92 @@ describe("preResolveHostileMediaProxies", () => {
       },
     });
     mocks.resolveProxy.mockRejectedValue(new Error("ffmpeg exited with code 1"));
-    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    await expect(
-      preResolveHostileMediaProxies(projectDir, "<html></html>"),
-    ).resolves.toBeUndefined();
-    expect(infoSpy).toHaveBeenCalledWith(
+    await expect(preResolveHostileMediaProxies(projectDir, "<html></html>")).resolves.toEqual({
+      findings: [
+        expect.objectContaining({
+          code: "media_proxy_failed",
+          severity: "warning",
+          message: expect.stringContaining("clip.mp4: ffmpeg exited with code 1"),
+        }),
+      ],
+      failedPaths: new Set(["/clip.mp4"]),
+    });
+    expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("media proxy pre-resolve: 0/1 ready, 1 failed"),
     );
+  });
+
+  it("reports an unusable ffmpeg once for every video, without promising a working render", async () => {
+    const projectDir = mkProjectDir();
+    const hevc = {
+      codecName: "hevc",
+      browserHostile: true,
+      representativeMime: null,
+      hasAlpha: false,
+    };
+    mocks.scanProjectMediaCodecMap.mockResolvedValue({ "/a.mp4": hevc, "/b.mp4": hevc });
+    mocks.resolveProxy.mockRejectedValue(
+      new mocks.FfmpegUnavailableError("ffmpeg binary not found"),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const { findings } = await preResolveHostileMediaProxies(projectDir, "<html></html>");
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.message).toContain("copies of a.mp4, b.mp4: ffmpeg binary not found");
+    expect(findings[0]?.message).not.toContain("render");
+  });
+
+  // `check --json` stdout must stay pure JSON, so these lines belong on stderr.
+  it("writes the pre-resolve summary to stderr and leaves stdout untouched", async () => {
+    const projectDir = mkProjectDir();
+    mocks.scanProjectMediaCodecMap.mockResolvedValue({
+      "/clip.mp4": {
+        codecName: "hevc",
+        browserHostile: true,
+        representativeMime: null,
+        hasAlpha: false,
+      },
+    });
+    mocks.resolveProxy.mockResolvedValue("/cache/clip.mp4");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await preResolveHostileMediaProxies(projectDir, "<html></html>");
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\[hyperframes\] media proxy pre-resolve: 1\/1 ready, 0 failed \(\d+ms\)$/,
+      ),
+    );
+    expect(infoSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("writes a scan failure to stderr and leaves stdout untouched", async () => {
+    const projectDir = mkProjectDir();
+    mocks.scanProjectMediaCodecMap.mockRejectedValue(new Error("ffprobe not found"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await expect(preResolveHostileMediaProxies(projectDir, "<html></html>")).resolves.toEqual({
+      findings: [],
+      failedPaths: new Set(),
+    });
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[hyperframes] media proxy pre-resolve: scan failed (ffprobe not found)",
+    );
+    expect(infoSpy).not.toHaveBeenCalled();
+    expect(stdoutSpy).not.toHaveBeenCalled();
+    expect(mocks.resolveProxy).not.toHaveBeenCalled();
   });
 
   it("pre-resolves an alpha VP9 asset through the Chromium-compatible VP8 proxy", async () => {
@@ -719,3 +1003,35 @@ function fakePage() {
     }),
   });
 }
+
+describe("component output membership", () => {
+  it("includes descendants and either side of a collision; keeps unresolved findings", () => {
+    document.body.innerHTML =
+      '<section id="selected"><span id="child"></span></section><section id="other"><span id="outside"></span></section>';
+    const finding = (selector: string, containerSelector?: string) => ({
+      code: "content_overlap",
+      severity: "error" as const,
+      selector,
+      containerSelector,
+      sourceFile: "index.html",
+      dataAttributes: {},
+      bbox: { x: 0, y: 0, width: 1, height: 1 },
+      time: 1,
+      message: "collision",
+    });
+    expect(
+      matchComponentFindings({
+        components: ["#selected"],
+        findings: [
+          finding("#child"),
+          finding("#outside", "#child"),
+          finding("#outside", "#other"),
+          finding("#gone"),
+        ],
+      }),
+    ).toEqual([true, true, false, true]);
+    expect(() => matchComponentFindings({ components: ["#missing"], findings: [] })).toThrow(
+      "matched nothing",
+    );
+  });
+});

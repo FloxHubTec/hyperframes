@@ -38,8 +38,11 @@ import { dirname, join } from "node:path";
 import {
   appendRenderProvenanceArgs,
   applyFaststart,
+  describeFfmpegFailure,
+  getEncoderPreset,
   MIXED_AUDIO_FILENAME,
   muxVideoWithAudio,
+  resolveConfig,
   runFfmpeg,
 } from "@hyperframes/engine";
 import { fpsToFfmpegArg } from "@hyperframes/core";
@@ -47,7 +50,7 @@ import { defaultLogger, type ProducerLogger } from "../../logger.js";
 import { formatExportFrameName } from "../../utils/paths.js";
 import { padOrTrimAudioToVideoFrameCount } from "../render/audioPadTrim.js";
 import { encoderFailureError } from "../render/encoderInterruption.js";
-import type { ChunkSliceJson } from "../render/stages/freezePlan.js";
+import type { ChunkSliceJson, LockedRenderConfig } from "../render/stages/freezePlan.js";
 import { DISTRIBUTED_RENDER_CAPABILITIES, readPlanProtocolV1 } from "./planProtocol.js";
 import { validatePlanV2MaterializedTarget } from "./planV2.js";
 import type { DistributedFormat } from "./shared.js";
@@ -77,6 +80,16 @@ interface PlanJsonForAssemble {
     height: number;
     format: DistributedFormat;
   };
+}
+
+type CfrRateControlSource = Partial<Pick<LockedRenderConfig, "quality" | "crf" | "bitrate">>;
+
+export function cfrRateControlArgs(locked: CfrRateControlSource): string[] {
+  const preset = getEncoderPreset(locked.quality ?? "standard", "mp4");
+  if (locked.crf == null && locked.bitrate) {
+    return ["-preset", preset.preset, "-b:v", locked.bitrate];
+  }
+  return ["-preset", preset.preset, "-crf", String(locked.crf ?? preset.quality)];
 }
 
 /**
@@ -110,7 +123,7 @@ export async function assemble(
      * duration lands on the requested `frameCount / fps` to ms
      * precision, with no PTS-derived drift). Trade-off: ~2-5x the
      * stitch time for a 60s 1080p clip plus second-generation H.264
-     * quality loss (negligible at `-crf 18` but non-zero). Default
+     * quality loss (at the chunks' own CRF or bitrate, non-zero). Default
      * `false` preserves the existing `-c copy` behavior. mp4 only
      * (libx264); webm / mov pass through unchanged because their
      * stream-copy paths don't exhibit the same avg-frame-rate drift.
@@ -122,6 +135,7 @@ export async function assemble(
   const log = options?.logger ?? defaultLogger;
   const abortSignal = options?.abortSignal;
   const cfr = options?.cfr === true;
+  const { ffmpegProcessTimeout } = resolveConfig();
 
   // ── 1. Validate planDir manifest matches chunkPaths shape ──────────────
   const planJsonPath = join(planDir, "plan.json");
@@ -181,10 +195,13 @@ export async function assemble(
       const remuxArgs = ["-i", chunkPaths[0]!, "-c", "copy", "-r", fpsArg];
       appendRenderProvenanceArgs(remuxArgs, concatOutputPath);
       remuxArgs.push("-y", concatOutputPath);
-      const remuxResult = await runFfmpeg(remuxArgs, { signal: abortSignal });
+      const remuxResult = await runFfmpeg(remuxArgs, {
+        signal: abortSignal,
+        timeout: ffmpegProcessTimeout,
+      });
       if (!remuxResult.success) {
         throw encoderFailureError("[assemble] ffmpeg single-chunk remux failed", {
-          error: `exit ${remuxResult.exitCode}: ${remuxResult.stderr.slice(-400)}`,
+          error: describeFfmpegFailure(remuxResult, ffmpegProcessTimeout),
           failureReason: remuxResult.failureReason,
         });
       }
@@ -216,10 +233,13 @@ export async function assemble(
       ];
       appendRenderProvenanceArgs(concatArgs, concatOutputPath);
       concatArgs.push("-y", concatOutputPath);
-      const concatResult = await runFfmpeg(concatArgs, { signal: abortSignal });
+      const concatResult = await runFfmpeg(concatArgs, {
+        signal: abortSignal,
+        timeout: ffmpegProcessTimeout,
+      });
       if (!concatResult.success) {
         throw encoderFailureError("[assemble] ffmpeg concat-copy failed", {
-          error: `exit ${concatResult.exitCode}: ${concatResult.stderr.slice(-400)}`,
+          error: describeFfmpegFailure(concatResult, ffmpegProcessTimeout),
           failureReason: concatResult.failureReason,
         });
       }
@@ -257,9 +277,9 @@ export async function assemble(
       if (!existsSync(encoderJsonPath)) {
         throw new Error(`[assemble] planDir missing meta/encoder.json: ${encoderJsonPath}`);
       }
-      const encoderJson = JSON.parse(readFileSync(encoderJsonPath, "utf-8")) as {
-        encoder?: string;
-      };
+      const encoderJson = JSON.parse(
+        readFileSync(encoderJsonPath, "utf-8"),
+      ) as CfrRateControlSource & { encoder?: string };
       if (encoderJson.encoder === "libx265-software") {
         throw new Error(
           `[assemble] cfr=true is not yet supported with codec: "h265". The ` +
@@ -273,10 +293,7 @@ export async function assemble(
         concatOutputPath,
         "-c:v",
         "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "18",
+        ...cfrRateControlArgs(encoderJson),
         "-pix_fmt",
         "yuv420p",
         "-fps_mode",
@@ -286,10 +303,13 @@ export async function assemble(
       ];
       appendRenderProvenanceArgs(cfrArgs, cfrOutputPath);
       cfrArgs.push("-y", cfrOutputPath);
-      const cfrResult = await runFfmpeg(cfrArgs, { signal: abortSignal });
+      const cfrResult = await runFfmpeg(cfrArgs, {
+        signal: abortSignal,
+        timeout: ffmpegProcessTimeout,
+      });
       if (!cfrResult.success) {
         throw encoderFailureError("[assemble] ffmpeg cfr re-encode failed", {
-          error: `exit ${cfrResult.exitCode}: ${cfrResult.stderr.slice(-400)}`,
+          error: describeFfmpegFailure(cfrResult, ffmpegProcessTimeout),
           failureReason: cfrResult.failureReason,
         });
       }
@@ -310,6 +330,7 @@ export async function assemble(
         audioPath,
         outputPath: paddedAudioPath,
         signal: abortSignal,
+        timeoutMs: ffmpegProcessTimeout,
       });
       if (!padTrimResult.success) {
         throw encoderFailureError("[assemble] audio pad/trim failed", padTrimResult);
@@ -336,9 +357,7 @@ export async function assemble(
         normalizedAudioPath,
         muxOutputPath,
         abortSignal,
-        {
-          audioCodec: "aac",
-        },
+        { audioCodec: "aac", ffmpegProcessTimeout },
         { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen },
       );
       if (!muxResult.success) {
@@ -352,7 +371,7 @@ export async function assemble(
       muxOutputPath,
       outputPath,
       abortSignal,
-      undefined,
+      { ffmpegProcessTimeout },
       {
         num: plan.dimensions.fpsNum,
         den: plan.dimensions.fpsDen,

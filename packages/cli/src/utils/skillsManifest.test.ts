@@ -10,6 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,6 +88,33 @@ describe("hashSkillBundle", () => {
       "scripts/y.mjs": "export const y = 1;",
     });
     expect(hashSkillBundle(dir).files).toBe(3);
+  });
+
+  it("ignores Python bytecode a skill script leaves behind, but not a real edit", () => {
+    const dir = writeSkill("a", {
+      "SKILL.md": "hello",
+      "scripts/lib/auth.py": "x = 1\n",
+    });
+    const clean = hashSkillBundle(dir);
+    mkdirSync(join(dir, "scripts/lib/__pycache__"));
+    writeFileSync(join(dir, "scripts/lib/__pycache__/auth.cpython-312.pyc"), "\x00bytecode");
+    writeFileSync(join(dir, "scripts/lib/stray.pyc"), "\x00bytecode");
+    expect(hashSkillBundle(dir)).toEqual(clean);
+
+    writeFileSync(join(dir, "scripts/lib/auth.py"), "x = 2\n");
+    expect(hashSkillBundle(dir).hash).not.toBe(clean.hash);
+  });
+
+  it("ignores dependency installs, OS files, and editor swap files", () => {
+    const dir = writeSkill("a", { "SKILL.md": "hello", "scripts/run.mjs": "run();" });
+    const clean = hashSkillBundle(dir);
+    writeSkill("a", {
+      "node_modules/dep/index.js": "module.exports = 1;",
+      "scripts/.DS_Store": "",
+      "scripts/.run.mjs.swp": "swap",
+      "SKILL.md~": "backup",
+    });
+    expect(hashSkillBundle(dir)).toEqual(clean);
   });
 
   it("normalises CRLF so a Windows checkout is not flagged as different", () => {
@@ -777,6 +805,13 @@ describe("checkSkills canonical bypass of the in-repo manifest shortcut", () => 
     const res = await checkSkills({ cwd: project, home, canonical: true });
     expect(res.skills.map((s) => s.name)).not.toContain("retired-skill");
     expect(res.skills.map((s) => s.name)).toContain("kept");
+    // The background check runs this with no console; git must not open one on Windows.
+    expect(vi.mocked(execFile)).toHaveBeenCalledWith(
+      "git",
+      expect.arrayContaining(["ls-remote"]),
+      expect.objectContaining({ windowsHide: true }),
+      expect.any(Function),
+    );
   });
 
   it("canonical:true still honors an explicit local `source` override", async () => {

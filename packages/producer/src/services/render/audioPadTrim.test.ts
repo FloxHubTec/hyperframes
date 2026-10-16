@@ -307,6 +307,7 @@ describe("padOrTrimAudioToVideoFrameCount", () => {
 
     expect(result.success).toBe(true);
     expect(captured.args).toHaveLength(1);
+    expect(result).not.toHaveProperty("audioLoweredDb");
   });
 
   it("attenuates the duration-normalized artifact with AAC correction headroom", async () => {
@@ -331,6 +332,25 @@ describe("padOrTrimAudioToVideoFrameCount", () => {
     const correctionArgs = calls[1]!;
     expect(correctionArgs[correctionArgs.indexOf("-af") + 1]).toBe("volume=-3.000dB");
     expect(correctionArgs[correctionArgs.indexOf("-t") + 1]).toBe("3.000000");
+  });
+
+  it("keeps the end of a long correction failure, where ffmpeg says what went wrong", async () => {
+    const { input } = harness({
+      video: { frameCount: 90, fpsNum: 30, fpsDen: 1 },
+      audio: { durationSeconds: 3 },
+    });
+    const banner = Array.from({ length: 12 }, (_, i) => `  metadata line ${i}: value`).join("\n");
+    const cause = "Error while filtering: the real ffmpeg cause";
+    let runs = 0;
+    input.probeAudioTruePeakDbfs = async () => 1.5;
+    input.runFfmpeg = async () =>
+      ++runs === 1 ? { success: true } : { success: false, error: `[FFmpeg] ${banner}\n${cause}` };
+
+    const result = await padOrTrimAudioToVideoFrameCount(input);
+
+    expect(result.success).toBe(false);
+    expect(result.error!.length).toBeGreaterThan(240);
+    expect(result.error).toContain(cause);
   });
 
   it("uses correction headroom to converge within three AAC passes", async () => {
@@ -360,6 +380,7 @@ describe("padOrTrimAudioToVideoFrameCount", () => {
 
       expect(result.success, result.error).toBe(true);
       expect(corrections).toEqual([-1.5, -2.4, -2.94]);
+      expect(result.audioLoweredDb).toBe(2.94);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

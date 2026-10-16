@@ -4,6 +4,7 @@ import {
   ensureAudioGroupInertStyle,
   HF_AUDIO_GROUP_ATTR,
   isMemberGroupHidden,
+  readMasterFxChain,
   resolveAudioGroups,
   resolveCarveSourceIds,
   resolveGroupElement,
@@ -67,9 +68,12 @@ describe("resolveAudioGroups", () => {
     expect(resolveAudioGroups(document)[0].memberIds).toEqual(["vo-1"]);
   });
 
-  it("ignores a data-audio-group on a video element (audio only in v1)", () => {
-    document.body.innerHTML = `<video id="v-1" data-audio-group="voiceover"></video>`;
-    expect(resolveAudioGroups(document)).toEqual([]);
+  it("groups an audible video and ignores a muted or silent one", () => {
+    document.body.innerHTML = `
+      <video id="v-1" data-has-audio="true" data-audio-group="voiceover"></video>
+      <video id="v-2" muted data-audio-group="voiceover"></video>
+      <video id="v-3" data-has-audio="false" data-audio-group="voiceover"></video>`;
+    expect(resolveAudioGroups(document).map((g) => g.memberIds)).toEqual([["v-1"]]);
   });
 
   it("reads the group element's fx chain, automation, volume and hidden", () => {
@@ -115,11 +119,12 @@ describe("audioGroupOf", () => {
     expect(audioGroupOf(document.getElementById("vo-1") as Element)).toBeNull();
   });
 
-  it("ignores video membership so preview matches the audio-only render", () => {
-    document.body.innerHTML = `<video id="v-1" data-audio-group="voiceover"></video>`;
-    const el = document.getElementById("v-1") as Element;
-    expect(audioGroupOf(el)).toBeNull();
-    expect(resolveAudioGroups(document)).toEqual([]);
+  it("reads an audible video's membership and ignores a muted video's", () => {
+    document.body.innerHTML = `
+      <video id="v-1" data-has-audio="true" data-audio-group="voiceover"></video>
+      <video id="v-2" muted data-audio-group="voiceover"></video>`;
+    expect(audioGroupOf(document.getElementById("v-1") as Element)).toBe("voiceover");
+    expect(audioGroupOf(document.getElementById("v-2") as Element)).toBeNull();
   });
 
   it("normalizes an empty membership attribute to null", () => {
@@ -299,5 +304,29 @@ describe("ensureAudioGroupInertStyle", () => {
     ensureAudioGroupInertStyle(document);
     ensureAudioGroupInertStyle(document);
     expect(document.querySelectorAll("#__hf-audio-group-inert")).toHaveLength(1);
+  });
+});
+
+describe("readMasterFxChain", () => {
+  const CHAIN = `{&quot;version&quot;:1,&quot;nodes&quot;:[]}`;
+
+  it("reads the chain off the top-level composition root", () => {
+    document.body.innerHTML = `<div data-composition-id="main" data-fx-chain="${CHAIN}"></div>`;
+    expect(readMasterFxChain(document)).toBe('{"version":1,"nodes":[]}');
+  });
+
+  it("is undefined when the root carries none", () => {
+    document.body.innerHTML = `<div data-composition-id="main"><audio id="a"></audio></div>`;
+    expect(readMasterFxChain(document)).toBeUndefined();
+  });
+
+  it("ignores a chain on a nested composition root", () => {
+    document.body.innerHTML = `<div data-composition-id="main"><div data-composition-id="inner" data-fx-chain="${CHAIN}"></div></div>`;
+    expect(readMasterFxChain(document)).toBeUndefined();
+  });
+
+  it("ignores a chain on a clip", () => {
+    document.body.innerHTML = `<div data-composition-id="main"><audio id="a" data-fx-chain="${CHAIN}"></audio></div>`;
+    expect(readMasterFxChain(document)).toBeUndefined();
   });
 });

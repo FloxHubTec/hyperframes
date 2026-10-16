@@ -55,6 +55,11 @@ const fullObservability: NonNullable<RenderPerfSummary["observability"]> = {
     protocolTimeoutMs: 300_000,
     pageNavigationTimeoutMs: 60_000,
     playerReadyTimeoutMs: 45_000,
+    adaptersUsed: ["gsap"],
+    audioCount: 2,
+    imageCount: 3,
+    rootBodyMismatch: true,
+    rootBodyDeltaPxBucket: "11-50",
   },
   extraction: {
     videoCount: 6,
@@ -211,6 +216,15 @@ describe("studioRenderTelemetry", () => {
       expect(p.observabilityExtractCacheMisses).toBe(6);
       expect(p.observabilityInitDurationMs).toBe(1234);
       expect(p.observabilityInitTweenCount).toBe(42);
+      // capture.audioCount / imageCount / rootBodyMismatch / adaptersUsed are the
+      // only source for these on a studio render, since no drawElement resolves here.
+      // events.ts's trackRenderComplete falls back to captureXxx precisely because
+      // this path only ever supplies these, never the direct field.
+      expect(p.captureAdaptersUsed).toEqual(["gsap"]);
+      expect(p.captureAudioCount).toBe(2);
+      expect(p.captureImageCount).toBe(3);
+      expect(p.captureRootBodyMismatch).toBe(true);
+      expect(p.captureRootBodyDeltaPxBucket).toBe("11-50");
     });
 
     it("omits all perf-derived fields when perfSummary is undefined", () => {
@@ -243,6 +257,14 @@ describe("studioRenderTelemetry", () => {
       const p = trackRenderComplete.mock.calls[0]![0];
       expect(p.speedRatio).toBeUndefined();
     });
+  });
+
+  it("forwards the render's CPU use on both events", () => {
+    const cpu = { cpuBusyAvgPct: 57, cpuBusyPeakPct: 90, cpuCoresBusyPeak: 2 };
+    emitStudioRenderComplete(opts, 5000, fullPerf, cpu);
+    emitStudioRenderError(opts, 100, "encode", new Error("x"), undefined, cpu);
+    expect(trackRenderComplete.mock.calls[0]![0]).toMatchObject(cpu);
+    expect(trackRenderError.mock.calls[0]![0]).toMatchObject(cpu);
   });
 
   describe("emitStudioRenderError", () => {
@@ -336,5 +358,17 @@ describe("studioRenderTelemetry", () => {
       emitStudioRenderComplete({ ...opts, telemetryOptOut: flag }, 5000, fullPerf);
       expect(trackRenderComplete).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("studio render telemetry: GPU encoding", () => {
+  it("reports whether the render asked for GPU encoding, on success and on failure", () => {
+    trackRenderComplete.mockClear();
+    trackRenderError.mockClear();
+    emitStudioRenderComplete({ ...opts, useGpu: true }, 1000, undefined);
+    emitStudioRenderError({ ...opts, useGpu: true }, 1000, "capture", new Error("x"), undefined);
+    emitStudioRenderComplete(opts, 1000, undefined);
+    expect(trackRenderComplete.mock.calls.map(([props]) => props.gpu)).toEqual([true, false]);
+    expect(trackRenderError.mock.calls[0]?.[0]).toMatchObject({ gpu: true });
   });
 });

@@ -1,5 +1,7 @@
-import type { CommandDef } from "citty";
-import { assertKnownFlags } from "./reject-unknown-flags.js";
+import { parseArgs } from "citty";
+import type { ArgsDef, CommandContext, CommandDef } from "citty";
+import { resolveExtraPositionals } from "./reject-extra-positionals.js";
+import { assertKnownFlags, guardSwallowedFlagValues } from "./reject-unknown-flags.js";
 
 // citty types subcommands as `CommandDef<any>` (SubCommandsDef); mirror that so
 // each command's specific args type is accepted without per-command generics.
@@ -8,16 +10,21 @@ type AnyCommandDef = CommandDef<any>;
 /**
  * Wrap a lazy command loader so leaf commands and nested subcommands share the
  * unknown-flag guard. Errors propagate unchanged to the executable boundary,
- * which is the sole command-failure telemetry reporter.
+ * which reports them.
  */
 export function trackCommandFailures(
   load: () => Promise<AnyCommandDef>,
 ): () => Promise<AnyCommandDef> {
-  return () => load().then((cmd) => wrapCommand(cmd));
+  return () => load().then((cmd) => wrapCommand(cmd, commandName(cmd)));
+}
+
+function commandName(cmd: AnyCommandDef): string {
+  const name = (cmd.meta as { name?: unknown } | undefined)?.name;
+  return typeof name === "string" ? name : "";
 }
 
 /**
- * Wrap a resolved command's `run` (assert-flags) AND
+ * Wrap a resolved command's `run` (assert flags and positional count) AND
  * recursively wrap every entry in its `subCommands`. Two HF#2033 fixes live
  * here:
  *   1. `assertKnownFlags` runs in the wrapped command, so an unknown-flag
@@ -26,7 +33,7 @@ export function trackCommandFailures(
  *      `lambda/*`, `capture/*`, `skills`). Without it, a nested command's
  *      unknown flags would bypass the leaf's guard.
  */
-function wrapCommand(cmd: AnyCommandDef): AnyCommandDef {
+function wrapCommand(cmd: AnyCommandDef, path: string): AnyCommandDef {
   const run = cmd.run;
   // Nothing to wrap (no run, no nested subcommands) — preserve identity.
   if (typeof run !== "function" && !cmd.subCommands) return cmd;
@@ -53,7 +60,9 @@ function wrapCommand(cmd: AnyCommandDef): AnyCommandDef {
         cmd.subCommands != null &&
         firstPositional != null &&
         Object.prototype.hasOwnProperty.call(cmd.subCommands, firstPositional);
-      if (!delegatesToSub) assertKnownFlags(cmd, rawArgs);
+      if (!delegatesToSub) guardLeafFlags(cmd, path, ctx, rawArgs);
+      // Groups read `args._[0]` to pick fallback help, so only leaves get the count check.
+      if (!cmd.subCommands) resolveExtraPositionals(cmd, path, ctx?.args);
       return await run(ctx);
     };
   }
@@ -64,12 +73,26 @@ function wrapCommand(cmd: AnyCommandDef): AnyCommandDef {
       // (possibly async) loader. Normalize to a loader that resolves then wraps.
       wrappedSubs[name] = () =>
         Promise.resolve(typeof sub === "function" ? (sub as () => unknown)() : sub).then((c) =>
-          wrapCommand(c as AnyCommandDef),
+          wrapCommand(c as AnyCommandDef, `${path} ${name}`),
         );
     }
     wrapped.subCommands = wrappedSubs;
   }
   return wrapped;
+}
+
+// citty built ctx.args before this ran; re-parse when the swallow guard rewrites rawArgs.
+function guardLeafFlags(
+  cmd: AnyCommandDef,
+  path: string,
+  ctx: CommandContext<any>,
+  rawArgs: string[],
+): void {
+  assertKnownFlags(cmd, rawArgs);
+  const guarded = guardSwallowedFlagValues(cmd, path, rawArgs);
+  if (!guarded.rewritten) return;
+  ctx.rawArgs = guarded.rawArgs;
+  ctx.args = parseArgs(guarded.rawArgs, (cmd.args ?? {}) as ArgsDef);
 }
 
 /**
