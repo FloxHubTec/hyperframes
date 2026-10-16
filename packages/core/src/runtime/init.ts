@@ -3865,7 +3865,6 @@ export function initSandboxRuntimeModular(): void {
     state.mediaForceSyncNextTick = true;
     const tl = state.capturedTimeline;
     pauseTimelineIfPossible(tl);
-    // A click or scrub jumps back over tweens; play ticks and render captures move forward.
     const pageAnimations = seekTimelineAndAdapters(state.currentTime, { showHiddenClips: true });
     runAdapters("pause", 0, pageAnimations);
     if (options?.keepPlaying && wasPlaying) {
@@ -4396,7 +4395,6 @@ export function initSandboxRuntimeModular(): void {
     opts?: { activateChildren?: boolean; suppressEvents?: boolean; showHiddenClips?: boolean },
   ): () => Animation[] {
     const suppressEvents = opts?.suppressEvents === true;
-    // Only GSAP's renders see hidden clips shown; the adapters below may capture the page.
     const hideClipsAgain = opts?.showHiddenClips ? showHiddenClips() : null;
     if (tl) {
       // #10: when data-duration exceeds the timeline's intrinsic length the

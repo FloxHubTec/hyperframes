@@ -19,8 +19,6 @@ export const CLIP_HIDDEN_ATTR = "data-hf-clip-hidden";
 const CONTENTS_ATTR = "data-hf-hidden-clip-contents";
 const HIDE_HIDDEN_CLIP_CONTENTS = `[${CLIP_HIDDEN_ATTR}][style*="visibility: hidden"] * { visibility: hidden !important; }`;
 
-/** Shows off-screen clips for a timeline render, so a tween reading a style for the first time reads what the page
- * authored, not the clip's hiding, which a set rewound past would otherwise write back for good. Returns the undo. */
 export function showHiddenClips(): () => void {
   const hidden = Array.from(document.querySelectorAll<HTMLElement>(`[${CLIP_HIDDEN_ATTR}]`));
   for (const el of hidden) el.style.visibility = "visible";
