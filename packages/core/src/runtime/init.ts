@@ -10,6 +10,7 @@ import {
   CLIP_HIDDEN_ATTR,
   revealTimedClipsAfterFirstPass,
   SKIPPED_CLIP,
+  showHiddenClips,
   skipsHiddenImages,
 } from "./timedClipHide";
 import {
@@ -3864,7 +3865,8 @@ export function initSandboxRuntimeModular(): void {
     state.mediaForceSyncNextTick = true;
     const tl = state.capturedTimeline;
     pauseTimelineIfPossible(tl);
-    const pageAnimations = seekTimelineAndAdapters(state.currentTime);
+    // A click or scrub jumps back over tweens; play ticks and render captures move forward.
+    const pageAnimations = seekTimelineAndAdapters(state.currentTime, { showHiddenClips: true });
     runAdapters("pause", 0, pageAnimations);
     if (options?.keepPlaying && wasPlaying) {
       transport.play();
@@ -4371,7 +4373,7 @@ export function initSandboxRuntimeModular(): void {
    */
   function seekTimelineAndAdapters(
     t: number,
-    opts?: { activateChildren?: boolean; suppressEvents?: boolean },
+    opts?: { activateChildren?: boolean; suppressEvents?: boolean; showHiddenClips?: boolean },
   ): () => Animation[] {
     const tl = state.capturedTimeline;
     // Critical for a sub-composition whose data-start is at or near 0: it is added
@@ -4391,9 +4393,11 @@ export function initSandboxRuntimeModular(): void {
   function seekRootChildrenAndAdapters(
     tl: RuntimeTimelineLike | null,
     t: number,
-    opts?: { activateChildren?: boolean; suppressEvents?: boolean },
+    opts?: { activateChildren?: boolean; suppressEvents?: boolean; showHiddenClips?: boolean },
   ): () => Animation[] {
     const suppressEvents = opts?.suppressEvents === true;
+    // Only GSAP's renders see hidden clips shown; the adapters below may capture the page.
+    const hideClipsAgain = opts?.showHiddenClips ? showHiddenClips() : null;
     if (tl) {
       // #10: when data-duration exceeds the timeline's intrinsic length the
       // engine requests frames past the last tween. Seeking a paused GSAP
@@ -4442,6 +4446,7 @@ export function initSandboxRuntimeModular(): void {
     // the deterministic adapters, syncTimedElementVisibility, the hf-timelines-built
     // handler and __hfReseekGpu. It only ever moved the state the seek left behind.
     seekStandaloneRegisteredTimelines(t, opts);
+    hideClipsAgain?.();
     const pageAnimations = pageAnimationsForOnePass();
     for (const adapter of state.deterministicAdapters) {
       if (adapter.name === "gsap" && tl) continue;

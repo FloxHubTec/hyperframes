@@ -513,6 +513,22 @@ describe("initSandboxRuntimeModular", () => {
       }
     });
 
+    it("shows a clip's child again after a seek skipped past the GSAP set that hides it at the clip's end", () => {
+      document.body.innerHTML =
+        `<div data-composition-id="main" data-root="true" data-start="0" data-duration="10" data-width="1920" data-height="1080">` +
+        `<div id="line" style="position: absolute" data-start="2" data-duration="2"><div id="words"></div></div>` +
+        `</div>`;
+      const tl = gsap.timeline({ paused: true });
+      tl.set("#words", { visibility: "hidden" }, 3.9);
+      window.__timelines = { main: tl as unknown as RuntimeTimelineLike };
+      initSandboxRuntimeModular();
+      const words = document.getElementById("words")!;
+      // The set first renders on this jump, while its clip is off screen.
+      window.__player?.seek(6);
+      window.__player?.seek(3);
+      expect(getComputedStyle(words).visibility).toBe("visible");
+    });
+
     it("keeps a hidden scene's contents hidden when a rewound GSAP set marks one visible inline", () => {
       hideTimedClipsUntilFirstPass();
       try {
