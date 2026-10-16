@@ -371,6 +371,9 @@ describe("shadow reload readiness and failure", () => {
     expect(getApi().iframeRef.current).toBe(live);
     expect(live.style.visibility).toBe("");
     expect(onPreviewReloadFailed).toHaveBeenCalledWith(expect.stringContaining("too long"));
+    expect(onPreviewReloadFailed).toHaveBeenCalledWith(
+      expect.stringContaining("still waiting for the page and its runtime to load"),
+    );
     expect(consoleError).toHaveBeenCalled();
     unmount(root);
   });
@@ -395,6 +398,48 @@ describe("shadow reload readiness and failure", () => {
     act(() => void vi.advanceTimersByTime(1));
     expect(getApi().previewSlots).toEqual([{ gen: 0, role: "live" }]);
     expect(onPreviewReloadFailed).toHaveBeenCalledWith(expect.stringContaining("too long"));
+    expect(onPreviewReloadFailed).toHaveBeenCalledWith(
+      expect.stringContaining("still waiting for the page and its runtime to load"),
+    );
+    unmount(root);
+  });
+
+  it("names the timeline when a shadow's runtime runs but never reports a length", () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const onPreviewReloadFailed = vi.fn();
+    const { getApi, gen, root } = beginReload({ onPreviewReloadFailed });
+    const lengthless = makeFakeIframe(makeAdapterWindow({ duration: 0 }).win);
+    act(() => {
+      getApi().setShadowIframeNode(lengthless);
+      getApi().onShadowIframeLoad(gen);
+      getApi().onShadowReadyChange(gen, true);
+    });
+
+    act(() => void vi.advanceTimersByTime(FULL_WAIT_MS));
+
+    expect(onPreviewReloadFailed).toHaveBeenCalledWith(
+      expect.stringContaining("still waiting for its timeline to be ready"),
+    );
+    unmount(root);
+  });
+
+  it("names the loaders when a shadow with a ready timeline never clears them", () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const onPreviewReloadFailed = vi.fn();
+    const { getApi, gen, root } = beginReload({ onPreviewReloadFailed });
+    const shadow = makeShadowWithSpies();
+    act(() => {
+      getApi().setShadowIframeNode(shadow.iframe);
+      getApi().onShadowIframeLoad(gen);
+    });
+
+    act(() => void vi.advanceTimersByTime(FULL_WAIT_MS));
+
+    expect(onPreviewReloadFailed).toHaveBeenCalledWith(
+      expect.stringContaining("still waiting for its loaders to clear"),
+    );
     unmount(root);
   });
 

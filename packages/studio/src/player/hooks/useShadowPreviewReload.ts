@@ -104,6 +104,12 @@ export function useShadowPreviewReload({
   const failShadow = useCallback(
     (gen: number, cause: string) => {
       if (gen !== shadowGenRef.current) return;
+      const shadowWin = shadowIframeRef.current?.contentWindow as IframeWindow | null | undefined;
+      const waitingFor = !shadowWin?.__player
+        ? "the page and its runtime to load"
+        : pendingCommitRef.current?.gen !== gen
+          ? "its timeline to be ready"
+          : "its loaders to clear";
       shadowGenRef.current += 1;
       stopPendingShadow();
       shadowIframeRef.current = null;
@@ -111,8 +117,8 @@ export function useShadowPreviewReload({
       pendingSeekRef.current = null;
       setPreviewSlots(planShadowDiscard);
       setPreviewReloading(false);
-      const message = `The preview did not reload (${cause}). The previous preview is still showing.`;
-      logReload("shadow-failed", { cause });
+      const message = `The preview did not reload (${cause}). It was still waiting for ${waitingFor}. The previous preview is still showing.`;
+      logReload("shadow-failed", { cause, waitingFor });
       console.error(`[studio] ${message}`);
       onReloadFailedRef.current?.(message);
     },
