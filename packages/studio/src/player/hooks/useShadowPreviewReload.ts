@@ -35,6 +35,14 @@ function restoreSeekPainted(iframe: HTMLIFrameElement | null): Promise<void> | u
   return win?.__hfWaitForSeekCompletion?.().catch(() => {});
 }
 
+function shadowHasPlayer(iframe: HTMLIFrameElement | null): boolean {
+  try {
+    return Boolean((iframe?.contentWindow as IframeWindow | null | undefined)?.__player);
+  } catch {
+    return false; // a cross-origin shadow throws SecurityError, and its runtime is out of reach anyway
+  }
+}
+
 function isDocumentHidden(): boolean {
   return typeof document !== "undefined" && document.visibilityState === "hidden";
 }
@@ -104,8 +112,7 @@ export function useShadowPreviewReload({
   const failShadow = useCallback(
     (gen: number, cause: string) => {
       if (gen !== shadowGenRef.current) return;
-      const shadowWin = shadowIframeRef.current?.contentWindow as IframeWindow | null | undefined;
-      const waitingFor = !shadowWin?.__player
+      const waitingFor = !shadowHasPlayer(shadowIframeRef.current)
         ? "the page and its runtime to load"
         : pendingCommitRef.current?.gen !== gen
           ? "its timeline to be ready"

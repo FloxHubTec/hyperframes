@@ -520,6 +520,31 @@ describe("shadow reload readiness and failure", () => {
     unmount(root);
   });
 
+  it("still drops and reports a shadow whose window throws on access", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const onPreviewReloadFailed = vi.fn();
+    const { getApi, live, gen, root } = beginReload({ onPreviewReloadFailed });
+    const crossOrigin = makeFakeIframe(
+      Object.defineProperty({}, "__player", {
+        get: () => {
+          throw new DOMException("Blocked a frame", "SecurityError");
+        },
+      }),
+    );
+    act(() => getApi().setShadowIframeNode(crossOrigin));
+
+    act(() => getApi().onShadowError(gen, "Composition timeline not found after 8s"));
+
+    expect(getApi().previewSlots).toEqual([{ gen: 0, role: "live" }]);
+    expect(getApi().iframeRef.current).toBe(live);
+    expect(isPreviewChanging()).toBe(false);
+    expect(onPreviewReloadFailed).toHaveBeenCalledTimes(1);
+    expect(onPreviewReloadFailed).toHaveBeenCalledWith(
+      expect.stringContaining("still waiting for the page and its runtime to load"),
+    );
+    unmount(root);
+  });
+
   it("drops a shadow whose document reports an error and reports the cause", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const onPreviewReloadFailed = vi.fn();
