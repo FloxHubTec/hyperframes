@@ -471,6 +471,24 @@ describe("installPageFunctionGuard", () => {
 });
 
 describe("DENSE_GEOMETRY_SEEK_OPTIONS", () => {
+  // A 79 s project of 1080p H.264 clips: each of the 600 dense seeks waited ~185 ms for a video frame it never reads,
+  // so `check` ran past its deadline.
+  it("does not wait for the seek barrier's media frames, while the audit seek still does", async () => {
+    const settled = async (options: Parameters<typeof seekCompositionTimeline>[2]) => {
+      const { page, evaluate } = fakeSeekPage();
+      evaluate.mockImplementation(async (pageFunction) =>
+        String(pageFunction).includes("__hfWaitForSeekCompletion") ? new Promise(() => {}) : undefined,
+      );
+      let done = false;
+      void seekCompositionTimeline(page, 3, options).then(() => (done = true));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return done;
+    };
+
+    expect(await settled(DENSE_GEOMETRY_SEEK_OPTIONS)).toBe(true);
+    expect(await settled(AUDIT_SEEK_OPTIONS)).toBe(false);
+  });
+
   it("is genuinely geometry-only — no post-seek settle waits at the 600-sample cap", () => {
     // Dense pass must not inherit AUDIT's post-seek waits — geometry is valid synchronously after setTime, and waits multiply by sample count.
     expect(DENSE_GEOMETRY_SEEK_OPTIONS.animationFrameSettle).toBe("none");
