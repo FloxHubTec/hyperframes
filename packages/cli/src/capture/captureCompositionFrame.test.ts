@@ -27,7 +27,7 @@ function fakeSeekPage() {
   const evaluate = vi.fn(
     async (
       _pageFunction: Parameters<CompositionSeekPage["evaluate"]>[0],
-      _value?: number,
+      _value?: Parameters<CompositionSeekPage["evaluate"]>[1],
       _fallbackToBridgeAndTimelines?: boolean,
     ): Promise<unknown> => undefined,
   );
@@ -108,7 +108,7 @@ describe("seekCompositionTimeline", () => {
     expect(waitForFunction).not.toHaveBeenCalled();
     expect(evaluate).toHaveBeenCalledTimes(4);
     expect(evaluate).toHaveBeenNthCalledWith(1, expect.any(Function), 1.25, false, false);
-    expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function));
+    expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function), { videoFrames: true });
     expect(evaluate.mock.calls[2]?.[0]).toContain("window.setTimeout(finish, 100)");
     // Post-seek font settle: a seek can reveal glyphs whose unicode-range
     // subsets only start loading after the next layout (CJK snapshot reports).
@@ -230,7 +230,7 @@ describe("seekCompositionTimeline", () => {
 
     expect(evaluate).toHaveBeenCalledTimes(4);
     expect(evaluate).toHaveBeenNthCalledWith(1, expect.any(Function), 4, true, false);
-    expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function));
+    expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function), { videoFrames: true });
     expect(evaluate).toHaveBeenNthCalledWith(3, expect.any(Function));
     expect(evaluate).toHaveBeenNthCalledWith(4, expect.any(Function), 500);
   });
@@ -472,22 +472,23 @@ describe("installPageFunctionGuard", () => {
 
 describe("DENSE_GEOMETRY_SEEK_OPTIONS", () => {
   // A 79 s project of 1080p H.264 clips: each of the 600 dense seeks waited ~185 ms for a video frame it never reads,
-  // so `check` ran past its deadline.
-  it("does not wait for the seek barrier's media frames, while the audit seek still does", async () => {
-    const outcome = (options: Parameters<typeof seekCompositionTimeline>[2]) => {
+  // so `check` ran past its deadline. Frame sources and hf-seek work can move the DOM, so those still hold it.
+  it("skips only the seek barrier's video-frame holds, while the audit seek waits for all", async () => {
+    const barrierCalls = async (options: Parameters<typeof seekCompositionTimeline>[2]) => {
       const { page, evaluate } = fakeSeekPage();
-      let askedForBarrier = () => {};
-      const barrier = new Promise<string>((resolve) => (askedForBarrier = () => resolve("waits")));
-      evaluate.mockImplementation(async (pageFunction) => {
-        if (!String(pageFunction).includes("__hfWaitForSeekCompletion")) return undefined;
-        askedForBarrier();
-        return new Promise(() => {});
-      });
-      return Promise.race([seekCompositionTimeline(page, 3, options).then(() => "done"), barrier]);
+      const barrier = vi.fn(async (_options?: { videoFrames?: boolean }) => {});
+      vi.stubGlobal("window", { __hfWaitForSeekCompletion: barrier });
+      evaluate.mockImplementation(async (pageFunction, value) =>
+        typeof pageFunction === "function" && typeof value === "object"
+          ? Reflect.apply(pageFunction, undefined, [value])
+          : undefined,
+      );
+      await seekCompositionTimeline(page, 3, options);
+      return barrier.mock.calls;
     };
 
-    expect(await outcome(DENSE_GEOMETRY_SEEK_OPTIONS)).toBe("done");
-    expect(await outcome(AUDIT_SEEK_OPTIONS)).toBe("waits");
+    expect(await barrierCalls(DENSE_GEOMETRY_SEEK_OPTIONS)).toEqual([[{ videoFrames: false }]]);
+    expect(await barrierCalls(AUDIT_SEEK_OPTIONS)).toEqual([[{ videoFrames: true }]]);
   });
 
   it("is genuinely geometry-only — no post-seek settle waits at the 600-sample cap", () => {
