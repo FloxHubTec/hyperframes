@@ -3865,7 +3865,7 @@ export function initSandboxRuntimeModular(): void {
     state.mediaForceSyncNextTick = true;
     const tl = state.capturedTimeline;
     pauseTimelineIfPossible(tl);
-    const pageAnimations = seekTimelineAndAdapters(state.currentTime, { showHiddenClips: true });
+    const pageAnimations = seekTimelineAndAdapters(state.currentTime);
     runAdapters("pause", 0, pageAnimations);
     if (options?.keepPlaying && wasPlaying) {
       transport.play();
@@ -4236,6 +4236,7 @@ export function initSandboxRuntimeModular(): void {
   // Reuse a completed seek only for the exact requested time and captured timeline.
   // Paused players and host ticks can share the frame without suppressing a newer time.
   let lastTransportSeekTime = Number.NaN;
+  let tweensRenderedThrough = { revision: Number.NaN, time: Number.NEGATIVE_INFINITY };
   let lastTransportSeekTimeline: RuntimeTimelineLike | null = null;
   let pausedSeekDeferredByManualGesture = false;
   // Set while the transport is parked (see scheduleNextTransportFrame).
@@ -4372,7 +4373,7 @@ export function initSandboxRuntimeModular(): void {
    */
   function seekTimelineAndAdapters(
     t: number,
-    opts?: { activateChildren?: boolean; suppressEvents?: boolean; showHiddenClips?: boolean },
+    opts?: { activateChildren?: boolean; suppressEvents?: boolean },
   ): () => Animation[] {
     const tl = state.capturedTimeline;
     // Critical for a sub-composition whose data-start is at or near 0: it is added
@@ -4392,10 +4393,15 @@ export function initSandboxRuntimeModular(): void {
   function seekRootChildrenAndAdapters(
     tl: RuntimeTimelineLike | null,
     t: number,
-    opts?: { activateChildren?: boolean; suppressEvents?: boolean; showHiddenClips?: boolean },
+    opts?: { activateChildren?: boolean; suppressEvents?: boolean },
   ): () => Animation[] {
     const suppressEvents = opts?.suppressEvents === true;
-    const hideClipsAgain = opts?.showHiddenClips ? showHiddenClips() : null;
+    const revision = readCompositionTimingRevision();
+    if (revision !== tweensRenderedThrough.revision)
+      tweensRenderedThrough = { revision, time: Number.NEGATIVE_INFINITY };
+    const jumped = !(Math.abs(t - lastTransportSeekTime) <= 1.5 / state.canonicalFps);
+    const firstRenders = jumped && t > tweensRenderedThrough.time;
+    const hideClipsAgain = firstRenders ? showHiddenClips() : null;
     if (tl) {
       // #10: when data-duration exceeds the timeline's intrinsic length the
       // engine requests frames past the last tween. Seeking a paused GSAP
@@ -4445,6 +4451,7 @@ export function initSandboxRuntimeModular(): void {
     // handler and __hfReseekGpu. It only ever moved the state the seek left behind.
     seekStandaloneRegisteredTimelines(t, opts);
     hideClipsAgain?.();
+    tweensRenderedThrough.time = Math.max(tweensRenderedThrough.time, t);
     const pageAnimations = pageAnimationsForOnePass();
     for (const adapter of state.deterministicAdapters) {
       if (adapter.name === "gsap" && tl) continue;
