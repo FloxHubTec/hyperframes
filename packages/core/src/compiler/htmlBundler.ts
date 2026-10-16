@@ -11,6 +11,7 @@ import {
   type CompositionStyle,
 } from "./scriptRuns";
 import {
+  countPageRoot,
   executableScripts,
   isJavaScriptType,
   planCompositionAssembly,
@@ -553,6 +554,7 @@ function countBundledAuthoredCompositionIds(hosts: Element[]): Map<string, numbe
     if (!authoredCompositionId) continue;
     counts.set(authoredCompositionId, (counts.get(authoredCompositionId) || 0) + 1);
   }
+  countPageRoot(counts, hosts);
   return counts;
 }
 
