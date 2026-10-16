@@ -1,5 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { resolveProjectMock, runAndCaptureStdio } from "./deprecationTestHarness.js";
+import {
+  fakeCdpSession,
+  resolveProjectMock,
+  runAndCaptureStdio,
+} from "./deprecationTestHarness.js";
 
 const browser = vi.hoisted(() => ({
   close: vi.fn(async () => undefined),
@@ -7,12 +11,8 @@ const browser = vi.hoisted(() => ({
     setViewport: async () => undefined,
     on: () => undefined,
     goto: async () => undefined,
-    createCDPSession: async () => ({
-      send: async () => undefined,
-      on: () => undefined,
-      detach: async () => undefined,
-    }),
     evaluate: async () => undefined,
+    createCDPSession: fakeCdpSession,
   })),
 }));
 

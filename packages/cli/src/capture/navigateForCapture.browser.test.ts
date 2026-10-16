@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import puppeteer, { type Browser } from "puppeteer-core";
@@ -20,9 +21,9 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  await browser?.close();
+  const closed = once(server.close(), "close");
   server.closeAllConnections();
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await Promise.all([browser?.close(), closed]);
 });
 
 it("settles when Chrome sends the document request, before the server answers", async () => {
