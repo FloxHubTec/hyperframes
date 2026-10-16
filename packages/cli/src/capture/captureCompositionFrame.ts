@@ -18,6 +18,7 @@ import { windowsChromeCrashRemediation } from "../browser/windowsCrash.js";
 import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { resolveDiagnosticNavigationTimeoutMs } from "../utils/renderArgs.js";
+import { gotoWhenSent } from "./navigateForCapture.js";
 
 const SHADER_TRANSITIONS_TIMEOUT_MS = 90_000;
 const CAPTURE_SETTLE_MS = 1500;
@@ -265,10 +266,11 @@ export async function openSettledCompositionPage(
     await page.setViewport(viewport);
     if (answer) await answerPageInProcess(page, url, answer);
     await options.beforeNavigate?.(page);
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: resolveDiagnosticNavigationTimeoutMs(process.env, options.navigationTimeoutMs),
-    });
+    await gotoWhenSent(
+      page,
+      url,
+      resolveDiagnosticNavigationTimeoutMs(process.env, options.navigationTimeoutMs),
+    );
     await assertWebGpuAdapterAvailable(page, requiresWebGpu, softwareWebGpu);
     const renderReadyTimedOut = !(await waitForCompositionSettle(page, options));
     return { browser: chromeBrowser, page, renderReadyTimedOut };

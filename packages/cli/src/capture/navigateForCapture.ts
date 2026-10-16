@@ -1,4 +1,5 @@
-import { isNavigationTimeoutError } from "./captureTimeout.js";
+import { TimeoutError, type CDPSession, type HTTPResponse, type Page } from "puppeteer-core";
+import { isNavigationTimeoutError, withRemainingBudget } from "./captureTimeout.js";
 
 export { isNavigationTimeoutError };
 
@@ -60,4 +61,70 @@ export async function navigateForCapture<TResponse>(
     networkIdleTimeoutMs,
     fellBackFromNetworkIdle: true,
   };
+}
+
+/** How long a cold Chrome may take to send a page's first request: puppeteer's launch default. */
+export const FIRST_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Opens `url` to DOMContentLoaded within `timeoutMs`, counted from when Chrome sends the document
+ * request. A cold Chrome on a loaded machine can take seconds to send it; that has its own cap.
+ */
+export async function gotoWhenSent(
+  page: Page,
+  url: string,
+  timeoutMs: number,
+  firstRequestTimeoutMs = FIRST_REQUEST_TIMEOUT_MS,
+): Promise<HTTPResponse | null> {
+  const cdp = await page.createCDPSession();
+  try {
+    await cdp.send("Network.enable");
+    const sent = documentRequestSent(cdp);
+    const navigation = page.goto(url, { waitUntil: "domcontentloaded", timeout: 0 });
+    // Awaited below; this only keeps an early timeout from leaving its rejection unhandled.
+    navigation.catch(() => undefined);
+    await withRemainingBudget(
+      Promise.race([sent, navigation]),
+      firstRequestTimeoutMs,
+      "sending the page request",
+      () =>
+        new TimeoutError(
+          `Navigation timeout: Chrome did not send the page request within ${firstRequestTimeoutMs} ms`,
+        ),
+    );
+    return await withRemainingBudget(
+      navigation,
+      timeoutMs,
+      "loading the page",
+      () => new TimeoutError(`Navigation timeout of ${timeoutMs} ms exceeded`),
+    );
+  } finally {
+    await cdp.detach().catch(() => undefined);
+  }
+}
+
+/** Settles once Chrome has sent the document request, or answered it without the network. */
+export function documentRequestSent(cdp: CDPSession): Promise<void> {
+  const documents = new Set<string>();
+  const sent = new Set<string>();
+  return new Promise((resolve) => {
+    const settle = (requestId: string) => {
+      if (documents.has(requestId) && sent.has(requestId)) resolve();
+    };
+    cdp.on("Network.requestWillBeSent", ({ requestId, type }) => {
+      if (type === "Document") documents.add(requestId);
+      settle(requestId);
+    });
+    // ExtraInfo carries the headers Chrome sent and may arrive before requestWillBeSent.
+    // A request answered without the network (intercepted in process) gets only a response.
+    for (const event of [
+      "Network.requestWillBeSentExtraInfo",
+      "Network.responseReceived",
+    ] as const) {
+      cdp.on(event, ({ requestId }) => {
+        sent.add(requestId);
+        settle(requestId);
+      });
+    }
+  });
 }

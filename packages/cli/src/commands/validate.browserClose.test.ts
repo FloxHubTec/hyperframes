@@ -7,6 +7,11 @@ const browser = vi.hoisted(() => ({
     setViewport: async () => undefined,
     on: () => undefined,
     goto: async () => undefined,
+    createCDPSession: async () => ({
+      send: async () => undefined,
+      on: () => undefined,
+      detach: async () => undefined,
+    }),
     evaluate: async () => undefined,
   })),
 }));
