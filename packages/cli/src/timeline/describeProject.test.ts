@@ -554,14 +554,8 @@ describe("absolute main-timeline time", () => {
     );
     const timeline = await describeProject(join(dir, "index.html"));
     const rows = allRows(timeline);
-    const clip = childrenOf(
-      timeline,
-      rows.find((r) => r.id === "a")!,
-    )[0]!;
-    const sfx = childrenOf(
-      timeline,
-      rows.find((r) => r.id === "b")!,
-    )[0]!;
+    const clip = childrenOf(timeline, rows.find((r) => r.id === "a")!)[0]!;
+    const sfx = childrenOf(timeline, rows.find((r) => r.id === "b")!)[0]!;
     expect(clip).toMatchObject({ absStart: 0, absEnd: 5.27 });
     expect(sfx).toMatchObject({ absStart: 5.2, absEnd: 5.6 });
     expect(sfx.absStart).toBeLessThan(clip.absEnd);
