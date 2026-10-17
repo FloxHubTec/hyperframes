@@ -418,11 +418,9 @@ function flatten(top: ClipDraft[]): TimelineTrack[] {
   const add = (clip: ClipDraft, host: ClipDraft | null, parent: ClipDraft | null) => {
     entries.push({ clip, host, parent });
     for (const inner of clip.inside) add(inner, host, clip);
-  };
-  for (const clip of top) {
-    add(clip, null, null);
     for (const child of clip.children) add(child, clip, null);
-  }
+  };
+  for (const clip of top) add(clip, null, null);
   const byKind = TRACK_ORDER.map((kind) => ({
     kind,
     entries: entries
@@ -475,12 +473,15 @@ function flatten(top: ClipDraft[]): TimelineTrack[] {
 }
 
 /** The runtime shows a nested clip only inside its parent's window, and its data-start counts from the composition. */
+export const NEVER_VISIBLE = "never visible";
+
 function neverVisibleWarning(clip: ClipDraft, parent: ClipDraft | null): string[] {
-  if (!parent || clip.absEnd <= clip.absStart || parent.absEnd <= parent.absStart) return [];
+  if (!parent || clip.kind === "audio") return [];
+  if (clip.absEnd <= clip.absStart || parent.absEnd <= parent.absStart) return [];
   if (clip.absEnd > parent.absStart && clip.absStart < parent.absEnd) return [];
   const name = parent.elementId ? `#${parent.elementId}` : `its parent <${parent.kind}>`;
   return [
-    `never visible: plays ${clip.absStart}-${clip.absEnd}s, but ${name} only shows ${parent.absStart}-${parent.absEnd}s; a nested data-start counts from the composition, not from ${name}`,
+    `${NEVER_VISIBLE}: plays ${clip.absStart}-${clip.absEnd}s, but ${name} only shows ${parent.absStart}-${parent.absEnd}s; a nested data-start counts from the composition, not from ${name}`,
   ];
 }
 

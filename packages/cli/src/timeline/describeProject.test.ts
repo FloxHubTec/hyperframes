@@ -135,6 +135,24 @@ describe("describeProject", () => {
       "never visible: plays 0-2s, but #shot2 only shows 5-10s; a nested data-start counts from the composition, not from #shot2",
     ]);
     expect(text).toContain("#lost lost 0-2s warning: never visible");
+    expect(text).not.toContain("no stable name");
+  });
+
+  it("lists a sub-composition mounted inside a timed wrapper with every clip it holds", async () => {
+    const { rows } = await rowsOf(
+      `<html><body>
+<div data-composition-id="main" data-width="1920" data-height="1080" data-duration="10">
+  <div id="shot" data-start="0" data-duration="5" data-track-index="0">
+    <div id="scene" data-composition-src="compositions/title.html" data-start="0" data-duration="5"></div>
+  </div>
+</div></body></html>`,
+    );
+    const at = (p: { kind: string; index: number }) =>
+      rows.find((r) => r.trackKind === p.kind && r.index === p.index)?.id;
+    const byId = (id: string) => rows.find((r) => r.id === id)!;
+
+    expect(byId("shot").children.map(at)).toEqual(["scene"]);
+    expect(byId("scene").children.map(at)).toEqual(["t1", "t2"]);
   });
 
   it("reports each half's out-of-sync offset from its source pair, at the project fps", async () => {

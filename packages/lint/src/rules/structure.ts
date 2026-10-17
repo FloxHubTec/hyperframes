@@ -61,6 +61,7 @@ const NODE_ATTRS = [
   "data-track-kind",
   "data-composition-id",
   "data-composition-src",
+  "data-hf-media-start-basis",
 ];
 
 function toNode(open: OpenTag): TagNode {
@@ -198,6 +199,7 @@ function neverVisibleNestedFindings(parent: TagNode, severity: Severity): Hyperf
   const window = readClipTiming({ getAttribute: (name) => parent.attrs[name] ?? null });
   return topLevelElements(parent).flatMap((clip) => {
     const inner = isSubCompositionHost(clip) ? [] : neverVisibleNestedFindings(clip, severity);
+    if (clip.tag === "audio" || clip.attrs["data-hf-media-start-basis"] === "global") return inner;
     const own = readClipTiming({ getAttribute: (name) => clip.attrs[name] ?? null });
     if (window.start === null || window.end === null || own.start === null || own.end === null)
       return inner;

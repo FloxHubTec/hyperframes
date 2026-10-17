@@ -34,6 +34,10 @@ describe("nested_clip_never_visible", () => {
   it("leaves a nested clip that plays inside its parent's window", async () => {
     expect(neverVisible(await codes(shot(6)))).toEqual([]);
   });
+  it("leaves nested audio alone: it plays whether or not its parent shows", async () => {
+    const body = `<div id="shot2" class="clip" data-start="5" data-duration="5"><audio id="a1" class="clip" src="a.mp3" data-start="0" data-duration="2"></audio></div>`;
+    expect(neverVisible(await codes(body))).toEqual([]);
+  });
   it("checks sub-composition files too", async () => {
     expect(neverVisible(await codes(shot(0), { isSubComposition: true }))).toHaveLength(1);
   });
