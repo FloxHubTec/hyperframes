@@ -232,7 +232,7 @@ function readSignalStats(ffmpegPath, mediaPath, seekSeconds, frames) {
         "-i",
         mediaPath,
         "-vf",
-        "format=yuv444p,signalstats,metadata=print:file=-",
+        `trim=end_frame=${frames},format=yuv444p,signalstats,metadata=print:file=-`,
         "-frames:v",
         String(frames),
         "-f",
@@ -243,9 +243,12 @@ function readSignalStats(ffmpegPath, mediaPath, seekSeconds, frames) {
     );
   } catch (error) {
     if (error.code !== "ETIMEDOUT") throw error;
-    const at = seekSeconds === null ? "" : ` at ${seekSeconds.toFixed(1)}s`;
+    const target =
+      seekSeconds === null
+        ? `the first ${frames} frames`
+        : `the frame at ${seekSeconds.toFixed(1)}s`;
     throw new Error(
-      `FFmpeg took longer than ${timeoutMs / 1000}s to decode one frame${at}; set HYPERFRAMES_ANALYZE_TIMEOUT_MS to allow more`,
+      `FFmpeg took longer than ${timeoutMs / 1000}s to measure ${target}; set HYPERFRAMES_ANALYZE_TIMEOUT_MS to allow more`,
     );
   }
 }

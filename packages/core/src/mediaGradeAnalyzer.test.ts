@@ -67,11 +67,20 @@ describe("analyzeMediaGrade", () => {
     vi.stubEnv("HYPERFRAMES_ANALYZE_TIMEOUT_MS", "1");
     try {
       expect(() => analyzeMediaGrade(makeLongHlgClip())).toThrow(
-        /took longer than 0\.001s to decode one frame at 12\.0s; set HYPERFRAMES_ANALYZE_TIMEOUT_MS/,
+        /took longer than 0\.001s to measure the frame at 12\.0s; set HYPERFRAMES_ANALYZE_TIMEOUT_MS/,
       );
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("measures the clip the same way in the media-use copy", async () => {
+    const vendored = await import(
+      new URL("../../../packages/cli/src/media-use/lib/grade-analyzer.mjs", import.meta.url).href
+    );
+    expect(vendored.analyzeMediaGrade(makeLongHlgClip())).toEqual(
+      analyzeMediaGrade(makeLongHlgClip()),
+    );
   });
 
   it("places one sample in the middle of each fifth of the clip", () => {
