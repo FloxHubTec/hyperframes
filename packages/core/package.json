@@ -547,8 +547,7 @@
     }
   },
   "publishConfig": {
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts",
+    "access": "public",
     "exports": {
       ".": {
         "import": "./dist/index.js",
@@ -903,7 +902,8 @@
         "types": "./dist/timelineAssetId.d.ts"
       }
     },
-    "access": "public"
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts"
   },
   "scripts": {
     "build": "bun run build:fonts && bun run build:svg-selector-aliases && bun run build:hyperframes-runtime && bun run build:position-edits-render && bun run build:audio-fx-runtime && tsc && node ../../scripts/rewrite-relative-import-extensions.mjs dist",
