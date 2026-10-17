@@ -15,6 +15,7 @@ import {
 } from "../utils/urlDownloader.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { formatFfmpegError, runFfmpeg, type RunFfmpegResult } from "../utils/runFfmpeg.js";
+import { audioSubprocessEvidence } from "./audioFailureDiagnostic.js";
 import { unwrapTemplate } from "../utils/htmlTemplate.js";
 import { resolveMediaElementSrc, resolveProjectRelativeSrc } from "./videoFrameExtractor.js";
 import { resolveReferencedStart, type RefResolverEl } from "./referenceResolver.js";
@@ -326,16 +327,18 @@ export function buildFadeFilters(
   return stages.length ? `,${stages.join(",")}` : "";
 }
 
-/** One track: trim, volume, afade, delay/pad. asetpts after apad so FFmpeg 5-8 delayed branches do not land at t=0. */
+/** One track: trim, volume, afade, delay. Legacy and group mixes also pad each branch. */
 export function buildTrackInputFilter(
   track: Pick<AudioTrack, "start" | "end" | "fadeIn" | "fadeOut" | "tailSeconds">,
   index: number,
   volumeFilter: string,
   totalDuration: number,
+  padToDuration = true,
 ): string {
   const delayMs = Math.round(track.start * 1000);
   const trimDuration = track.end - track.start + (track.tailSeconds ?? 0);
-  return `[${index}:a]atrim=0:${formatFilterNumber(trimDuration)},${volumeFilter}${buildFadeFilters(track)},adelay=${delayMs}|${delayMs},apad,asetpts=N/SR/TB,atrim=0:${formatFilterNumber(totalDuration)}[a${index}]`;
+  const filters = `[${index}:a]atrim=0:${formatFilterNumber(trimDuration)},${volumeFilter}${buildFadeFilters(track)},adelay=${delayMs}|${delayMs}`;
+  return `${filters}${padToDuration ? `,apad,asetpts=N/SR/TB,atrim=0:${formatFilterNumber(totalDuration)}` : ""}[a${index}]`;
 }
 
 interface ExtractResult {
@@ -464,6 +467,7 @@ function ffmpegFailure(
     owner,
     retryable,
     elementId,
+    subprocess: audioSubprocessEvidence(result),
     detail: boundedDetail(
       result.error?.message
         ? `${formatFfmpegError(result.exitCode, stderr)}: ${result.error.message}`
@@ -777,19 +781,21 @@ async function mixAudioTracks(
   const outputDir = dirname(outputPath);
   if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
 
-  const buildFilterComplex = (ignoreAutomation: boolean): string => {
+  const buildFilterComplex = (ignoreAutomation: boolean, useNormalize: boolean): string => {
     const filterParts: string[] = [];
     tracks.forEach((track, i) => {
       const volumeFilter = buildVolumeExpression(track, ignoreAutomation);
-      filterParts.push(buildTrackInputFilter(track, i, volumeFilter, totalDuration));
+      filterParts.push(buildTrackInputFilter(track, i, volumeFilter, totalDuration, !useNormalize));
     });
 
     const mixInputs = tracks.map((_, i) => `[a${i}]`).join("");
-    const mixFilter = `${mixInputs}amix=inputs=${tracks.length}:duration=longest:dropout_transition=0[mixed]`;
-    // amix divides output by inputs count (default normalize=true). Multiply master
-    // gain by track count so per-track volumes authored in data-volume are preserved.
-    const compensatedGain = masterOutputGain * tracks.length;
-    const postMixGainFilter = `[mixed]volume=${formatFilterNumber(compensatedGain)}[out]`;
+    const mixFilter = `${mixInputs}amix=inputs=${tracks.length}:duration=longest:dropout_transition=0${useNormalize ? ":normalize=0" : ""}[mixed]`;
+    // Older FFmpeg builds lack normalize=0. Their default amix divides by the
+    // active input count, so keep all branches padded and compensate by N.
+    const gain = masterOutputGain * (useNormalize ? 1 : tracks.length);
+    const postMixGainFilter = useNormalize
+      ? `[mixed]volume=${formatFilterNumber(gain)},apad,asetpts=N/SR/TB,atrim=0:${formatFilterNumber(totalDuration)}[out]`
+      : `[mixed]volume=${formatFilterNumber(gain)}[out]`;
     return [...filterParts, mixFilter, postMixGainFilter].join(";");
   };
 
@@ -804,14 +810,14 @@ async function mixAudioTracks(
   // alias from nightly builds; older stable builds do not understand the new
   // spelling. Prefer the legacy spelling for broad compatibility and retry
   // only when FFmpeg explicitly says that option is unavailable.
-  const runMix = async (ignoreAutomation: boolean) => {
+  const runMix = async (ignoreAutomation: boolean, useNormalize: boolean) => {
     const inputs: string[] = [];
     tracks.forEach((track) => inputs.push("-i", track.srcPath));
     const scriptDir = mkdtempSync(join(outputDir, ".filter-complex-"));
     const scriptPath = join(scriptDir, "graph.txt");
     const fd = openSync(scriptPath, "wx", 0o600);
     try {
-      writeFileSync(fd, buildFilterComplex(ignoreAutomation));
+      writeFileSync(fd, buildFilterComplex(ignoreAutomation, useNormalize));
     } finally {
       closeSync(fd);
     }
@@ -840,7 +846,17 @@ async function mixAudioTracks(
     }
   };
 
-  let result = await runMix(false);
+  let useNormalize = true;
+  let result = await runMix(false, useNormalize);
+  if (
+    !result.success &&
+    result.failureReason !== "external_interruption" &&
+    !signal?.aborted &&
+    groupNormalizeOptionUnsupported(result.stderr)
+  ) {
+    useNormalize = false;
+    result = await runMix(false, useNormalize);
+  }
 
   // Defense in depth: volume automation is folded into an FFmpeg `volume`
   // expression whose evaluator limits are build-dependent (see
@@ -855,7 +871,7 @@ async function mixAudioTracks(
     !signal?.aborted &&
     hasAutomation
   ) {
-    const retry = await runMix(true);
+    const retry = await runMix(true, useNormalize);
     if (retry.success) {
       result = retry;
       degradedAutomation = true;
@@ -919,8 +935,8 @@ function groupNormalizeOptionUnsupported(stderr: string): boolean {
 
 /**
  * Sub-mix one group's members into a single PCM WAV at full composition
- * length — the same per-input treatment `mixAudioTracks` gives every track
- * (atrim, volume, adelay, `apad` — RULES 6), writing PCM instead of AAC so the
+ * length. Unlike the main mix, this still pads each member (atrim, volume,
+ * adelay, `apad` — RULES 6), writing PCM instead of AAC so the
  * result can feed straight into `applyAudioFxChain` (which reads raw WAV
  * samples, not a decoded container).
  *
@@ -939,7 +955,10 @@ async function mixGroupMembers(
   totalDuration: number,
   signal?: AbortSignal,
   config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout">>,
-): Promise<{ success: boolean; error?: string; degradedAutomation?: boolean }> {
+): Promise<
+  | { success: true; degradedAutomation?: boolean }
+  | { success: false; error: string; failure: AudioProcessingFailure }
+> {
   const ffmpegProcessTimeout = config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
   const outputDir = dirname(outputPath);
   if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
@@ -1032,9 +1051,10 @@ async function mixGroupMembers(
     }
   }
 
-  if (signal?.aborted) return { success: false, error: "Group sub-mix cancelled" };
-  if (!result.success)
-    return { success: false, error: formatFfmpegError(result.exitCode, result.stderr) };
+  if (signal?.aborted || !result.success) {
+    const failure = ffmpegFailure("mix", result);
+    return { success: false, error: failure.detail, failure };
+  }
   return { success: true, degradedAutomation };
 }
 
@@ -1103,6 +1123,7 @@ export async function processCompositionAudio(
 ): Promise<MixResult> {
   const startMs = Date.now();
   const tracks: AudioTrack[] = [];
+  const preparedTracks = new Array<AudioTrack | undefined>(elements.length);
   const failures: AudioProcessingFailure[] = [];
   // Grouped members are diverted here instead of `tracks` during element
   // processing, then summed into one processed track per group before the
@@ -1134,7 +1155,7 @@ export async function processCompositionAudio(
   }
 
   await Promise.all(
-    elements.map(async (element) => {
+    elements.map(async (element, index) => {
       if (effectiveSignal.aborted) {
         failures.push({
           stage: "cancelled",
@@ -1366,24 +1387,7 @@ export async function processCompositionAudio(
           ...(tailSeconds > 0 ? { tailSeconds } : {}),
         };
 
-        // A grouped member keeps every bit of its OWN processing above
-        // (FX, envelope) exactly like an ungrouped track — it just lands in
-        // the group's bucket instead of the flat list, to be summed into one
-        // processed bus below rather than mixed directly.
-        if (element.groupId) {
-          const bucket = groupTracks.get(element.groupId);
-          if (bucket) bucket.push(track);
-          else groupTracks.set(element.groupId, [track]);
-          if (!groupMeta.has(element.groupId)) {
-            groupMeta.set(element.groupId, {
-              ...(element.groupFxChain ? { fxChain: element.groupFxChain } : {}),
-              ...(element.groupAutomation ? { automation: element.groupAutomation } : {}),
-              volume: element.groupVolume ?? 1,
-            });
-          }
-        } else {
-          tracks.push(track);
-        }
+        preparedTracks[index] = track;
       } catch (err: unknown) {
         // An FX failure is fatal for the whole mix. Every other failure mode
         // degrades gracefully — the track drops and siblings continue — but
@@ -1414,6 +1418,27 @@ export async function processCompositionAudio(
       /* ignore */
     }
     throw err;
+  });
+
+  // FFmpeg's floating-point sum depends on input order. Keep parallel prep,
+  // but assemble flat tracks, group members and groups in authored order.
+  elements.forEach((element, index) => {
+    const track = preparedTracks[index];
+    if (!track) return;
+    if (element.groupId) {
+      const bucket = groupTracks.get(element.groupId);
+      if (bucket) bucket.push(track);
+      else groupTracks.set(element.groupId, [track]);
+      if (!groupMeta.has(element.groupId)) {
+        groupMeta.set(element.groupId, {
+          ...(element.groupFxChain ? { fxChain: element.groupFxChain } : {}),
+          ...(element.groupAutomation ? { automation: element.groupAutomation } : {}),
+          volume: element.groupVolume ?? 1,
+        });
+      }
+    } else {
+      tracks.push(track);
+    }
   });
 
   // Never turn a per-track preparation failure into a successful partial mix.
@@ -1494,10 +1519,7 @@ export async function processCompositionAudio(
       );
       if (!subMix.success) {
         failures.push({
-          stage: "mix",
-          reason: "ffmpeg_failed",
-          owner: "system",
-          retryable: false,
+          ...subMix.failure,
           elementId: groupId,
           detail: boundedDetail(
             `Group sub-mix failed for group ${groupId}: ${subMix.error ?? "unknown"}`,

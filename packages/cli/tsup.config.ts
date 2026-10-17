@@ -101,6 +101,7 @@ var __dirname = __hf_dirname(__filename);`,
         "./chrome-host-ceiling",
         "./shader-transitions",
         "./system-memory",
+        "./wsl-host",
       ]),
     };
     options.loader = { ...options.loader, ".browser.js": "text" };

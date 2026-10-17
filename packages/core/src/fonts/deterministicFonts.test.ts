@@ -213,7 +213,13 @@ describe("var() font-family fallbacks", () => {
 
   it("injects the fallback family of an undefined custom property", async () => {
     const html = styled(`body { font-family: var(--font-body, Inter, system-ui, sans-serif); }`);
-    const result = await injectDeterministicFontFaces(html, { allowSystemFontCapture: false });
+    const fetchImpl = Object.assign(async () => new Response("", { status: 404 }), {
+      preconnect: fetch.preconnect,
+    });
+    const result = await injectDeterministicFontFaces(html, {
+      fetchImpl,
+      allowSystemFontCapture: false,
+    });
     expect(result).toContain(`font-family: "Inter";`);
   });
 

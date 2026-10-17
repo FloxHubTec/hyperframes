@@ -171,6 +171,10 @@ export interface StudioApiAdapter {
      */
     fps: import("@hyperframes/core").Fps;
     quality: string;
+    crf?: number;
+    videoBitrate?: string;
+    videoFrameFormat?: "auto" | "jpg" | "png";
+    hdrMode?: "auto" | "force-hdr" | "force-sdr";
     jobId: string;
     /**
      * The triggering browser profile has telemetry disabled (localStorage

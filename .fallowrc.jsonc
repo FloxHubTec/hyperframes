@@ -453,6 +453,8 @@
     "@hyperframes/core",
     "@hyperframes/studio",
     "@hyperframes/producer",
+    // Inspector's published declarations import it through the core sources they bundle.
+    "@hyperframes/parsers",
     "@fontsource/archivo-black",
     "@fontsource/eb-garamond",
     "@fontsource/ibm-plex-mono",

@@ -1041,6 +1041,29 @@ describe("createColorGradingRuntime", () => {
     expect(document.querySelector("[data-hf-color-grading-canvas]")).not.toBeNull();
   });
 
+  it("grades a clip's first producer frame when the DOM observer runs before it decodes", () => {
+    const video = makeDrawableVideo();
+    video.style.visibility = "hidden";
+    document.body.appendChild(video);
+    runtime = createColorGradingRuntime();
+
+    let decoded = false;
+    const frame = document.createElement("img");
+    frame.id = "__render_frame_hero-video__";
+    frame.className = "__render_frame__";
+    frame.style.visibility = "visible";
+    Object.defineProperty(frame, "complete", { get: () => decoded, configurable: true });
+    Object.defineProperty(frame, "naturalWidth", { get: () => (decoded ? 640 : 0) });
+    Object.defineProperty(frame, "naturalHeight", { get: () => (decoded ? 360 : 0) });
+    video.after(frame);
+    runtime.refresh();
+    decoded = true;
+
+    expect(runtime.redraw()).toBe(1);
+    expect(texImage2DCalls.at(-1)).toContain(frame);
+    expect(frame.nextSibling).toBe(document.querySelector("[data-hf-color-grading-canvas]"));
+  });
+
   it("does not recreate an inactive clip from its hidden producer frame", () => {
     const { video, canvas } = startRuntimeWithVideo();
     const frame = document.createElement("img");

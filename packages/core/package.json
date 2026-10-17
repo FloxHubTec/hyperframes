@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.150",
+  "version": "0.8.167",
   "description": "",
   "repository": {
     "type": "git",
@@ -67,6 +67,12 @@
       "node": "./dist/atomicFile.js",
       "import": "./src/atomicFile.ts",
       "types": "./src/atomicFile.ts"
+    },
+    "./project-folders": {
+      "bun": "./src/projectFolders.ts",
+      "node": "./dist/projectFolders.js",
+      "import": "./src/projectFolders.ts",
+      "types": "./src/projectFolders.ts"
     },
     "./asset-paths": {
       "bun": "./src/compiler/rewriteSubCompPaths.ts",
@@ -259,6 +265,12 @@
       "node": "./dist/audibleVideo.js",
       "import": "./src/audibleVideo.ts",
       "types": "./src/audibleVideo.ts"
+    },
+    "./audio-analysis": {
+      "bun": "./src/audioAnalysis.ts",
+      "node": "./dist/audioAnalysis.js",
+      "import": "./src/audioAnalysis.ts",
+      "types": "./src/audioAnalysis.ts"
     },
     "./audio-gain": {
       "bun": "./src/audioGain.ts",
@@ -564,6 +576,10 @@
         "import": "./dist/atomicFile.js",
         "types": "./dist/atomicFile.d.ts"
       },
+      "./project-folders": {
+        "import": "./dist/projectFolders.js",
+        "types": "./dist/projectFolders.d.ts"
+      },
       "./asset-paths": {
         "import": "./dist/compiler/rewriteSubCompPaths.js",
         "types": "./dist/compiler/rewriteSubCompPaths.d.ts"
@@ -691,6 +707,10 @@
       "./audible-video": {
         "import": "./dist/audibleVideo.js",
         "types": "./dist/audibleVideo.d.ts"
+      },
+      "./audio-analysis": {
+        "import": "./dist/audioAnalysis.js",
+        "types": "./dist/audioAnalysis.d.ts"
       },
       "./audio-gain": {
         "import": "./dist/audioGain.js",
@@ -876,7 +896,7 @@
     "types": "./dist/index.d.ts"
   },
   "scripts": {
-    "build": "bun run build:fonts && bun run build:svg-selector-aliases && bun run build:hyperframes-runtime && bun run build:position-edits-render && bun run build:audio-fx-runtime && tsc && tsx scripts/rewrite-esm-extensions.ts",
+    "build": "bun run build:fonts && bun run build:svg-selector-aliases && bun run build:hyperframes-runtime && bun run build:position-edits-render && bun run build:audio-fx-runtime && tsc && node ../../scripts/rewrite-relative-import-extensions.mjs dist",
     "build:fonts": "node scripts/build-fonts.mjs",
     "test": "bun run check:position-edits-render && bun run check:svg-selector-aliases && bun run build:audio-fx-runtime && vitest run",
     "test:watch": "vitest",
@@ -911,7 +931,6 @@
     "@hyperframes/parsers": "workspace:*",
     "@hyperframes/studio-server": "workspace:*",
     "acorn": "^8.17.0",
-    "bpm-detective": "^2.0.5",
     "linkedom": "^0.18.12",
     "postcss": "^8.5.8",
     "wawoff2": "^2.0.1"

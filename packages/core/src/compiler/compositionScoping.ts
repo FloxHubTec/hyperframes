@@ -415,10 +415,8 @@ export function wrapScopedCompositionScript(
           if (prop !== __hfCompId) {
             return Reflect.get(target, prop, target);
           }
-          var authoredValue = Reflect.get(target, prop, target);
-          return authoredValue === undefined
-            ? Reflect.get(target, __hfTimelineCompId, target)
-            : authoredValue;
+          var runtimeValue = Reflect.get(target, __hfTimelineCompId, target);
+          return runtimeValue === undefined ? Reflect.get(target, prop, target) : runtimeValue;
         },
         set: function(target, prop, value, receiver) {
           if (prop !== __hfCompId) {
@@ -426,11 +424,15 @@ export function wrapScopedCompositionScript(
           }
           // The authored node remains in the compiled DOM when its local id
           // differs from the runtime mount id, so readiness legitimately sees
-          // both compositions. Publish the same timeline under both identities
-          // instead of replacing one with the other.
-          var authoredSet = Reflect.set(target, __hfCompId, value, target);
+          // both compositions. Publish the same timeline under both identities,
+          // unless another mount of the same file already owns the authored one.
+          var authoredValue = Reflect.get(target, __hfCompId, target);
+          var ownsAuthored =
+            authoredValue === undefined ||
+            authoredValue === Reflect.get(target, __hfTimelineCompId, target);
           var runtimeSet = Reflect.set(target, __hfTimelineCompId, value, target);
-          return authoredSet && runtimeSet;
+          if (!ownsAuthored) return runtimeSet;
+          return Reflect.set(target, __hfCompId, value, target) && runtimeSet;
         },
       });
     }
@@ -571,12 +573,16 @@ export function wrapScopedCompositionScript(
   var __hfBaseHyperframes = window.__hyperframes;
   var __hfScopedHyperframes = ${SCOPED_HYPERFRAMES_EXPRESSION};
   var __hfRun = function() {
+    var report = window.__hfScriptState;
+    if (typeof report === "function") report("start", __hfCompositionSrc || "index.html");
     try {
       (function(document, gsap, window, __hyperframes) {
 ${source.replace(/<\/(script)/gi, "<\\/$1")}
       }).call(window, __hfScopedDocument, __hfScopedGsap, __hfScopedWindow, __hfScopedHyperframes);
     } catch (_err) {
       console.error(__hfErrorLabel, __hfCompId, _err);
+    } finally {
+      if (typeof report === "function") report("finish", __hfCompositionSrc || "index.html");
     }
   };
   // What the script started on the global gsap timeline, by any route, for a scene swap to revert.

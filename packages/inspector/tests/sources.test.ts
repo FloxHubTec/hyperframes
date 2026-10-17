@@ -1,14 +1,32 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Sources, mergeSnippets, fingerprint } from "../src/sources";
+import { PREVIEW_IGNORED_DIRS } from "../../core/src/projectFolders";
 import {
   bundleToSingleHtml,
   type BundleScriptProvenance,
 } from "../../core/src/compiler/htmlBundler";
 
 describe("source records", () => {
+  it("ignores the generated folders Studio's preview signature ignores", () => {
+    const dir = mkdtempSync(join(tmpdir(), "inspect-source-"));
+    try {
+      writeFileSync(join(dir, "index.html"), "<div></div>");
+      const before = fingerprint(dir);
+      for (const folder of PREVIEW_IGNORED_DIRS) {
+        mkdirSync(join(dir, folder));
+        writeFileSync(join(dir, folder, "peaks.json"), "[1,2,3]");
+      }
+      expect(fingerprint(dir)).toBe(before);
+      writeFileSync(join(dir, "data.json"), "{}");
+      expect(fingerprint(dir)).not.toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps original multiline blocks and deduplicates targets without reformatting", () => {
     const dir = mkdtempSync(join(tmpdir(), "inspect-source-"));
     try {
@@ -69,6 +87,29 @@ describe("source records", () => {
       });
     } finally {
       dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true }));
+    }
+  });
+  it("finds an element's tag before its served data-hf-id reaches the source", () => {
+    const dir = mkdtempSync(join(tmpdir(), "inspect-source-"));
+    try {
+      writeFileSync(
+        join(dir, "scene.html"),
+        '<div data-composition-id="s"><span id="t" class="w">A</span><i class="dot"></i><i class="dot"></i></div>',
+      );
+      const source = new Sources(dir);
+      const served = {
+        ref: "r",
+        tag: "span",
+        id: "t",
+        hfId: "hf-ab12",
+        classes: ["w"],
+        composition: "s",
+      };
+      expect(source.markup(served, 0)?.code).toContain('<span id="t" class="w">');
+      const twin = { ...served, tag: "i", id: "", classes: ["dot"] };
+      expect(source.markup(twin, 0)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

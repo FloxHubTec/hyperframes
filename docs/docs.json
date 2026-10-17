@@ -960,6 +960,7 @@
               "developers/cli",
               "packages/cli",
               "developers/catalog-search",
+              "developers/harness-tool-context",
               "packages/lint"
             ]
           },

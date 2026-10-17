@@ -6,7 +6,7 @@
       "files": 145
     },
     "faceless-explainer": {
-      "hash": "fe5ac45ac43dee42",
+      "hash": "395653774d035d3a",
       "files": 29
     },
     "figma": {
@@ -14,15 +14,15 @@
       "files": 2
     },
     "general-video": {
-      "hash": "d654955cbceaf3c7",
+      "hash": "f288a7bc7eb1a1cf",
       "files": 6
     },
     "hyperframes": {
-      "hash": "7995559a6ae64821",
+      "hash": "44700184328c21b5",
       "files": 31
     },
     "hyperframes-animation": {
-      "hash": "9370b856259f4586",
+      "hash": "1c91404cdf888540",
       "files": 122
     },
     "hyperframes-audio": {
@@ -30,15 +30,15 @@
       "files": 8
     },
     "hyperframes-cli": {
-      "hash": "5a0f95b33cc1e8ad",
+      "hash": "3c8d1fac9e0a02fe",
       "files": 11
     },
     "hyperframes-core": {
-      "hash": "010a65915fc7b45e",
+      "hash": "66fc3e623a910923",
       "files": 11
     },
     "hyperframes-creative": {
-      "hash": "8d0601ce26adc560",
+      "hash": "043c4bc84b16a96f",
       "files": 79
     },
     "hyperframes-keyframes": {
@@ -50,27 +50,27 @@
       "files": 12
     },
     "hyperframes-studio": {
-      "hash": "f5e0b44d68152c12",
+      "hash": "9c347bc86335c354",
       "files": 1
     },
     "media-use": {
-      "hash": "dd6a1116d3d01906",
+      "hash": "c4c3c723aa04bb7d",
       "files": 112
     },
     "motion-graphics": {
-      "hash": "6db77031ad839f6a",
+      "hash": "7e4af0881390ac2e",
       "files": 23
     },
     "music-to-video": {
-      "hash": "b775f27b16efb1f2",
+      "hash": "ac33d950e9a2e1e9",
       "files": 169
     },
     "pr-to-video": {
-      "hash": "49dfd8081dfb3417",
+      "hash": "5e69368e66a27179",
       "files": 35
     },
     "product-launch-video": {
-      "hash": "39c46bb51002d67c",
+      "hash": "14d03406b4fc6904",
       "files": 37
     },
     "remotion-to-hyperframes": {
@@ -82,7 +82,7 @@
       "files": 2
     },
     "talking-head-recut": {
-      "hash": "9aac076ceddd2499",
+      "hash": "4b2cf6d7b6e336b4",
       "files": 28
     }
   }

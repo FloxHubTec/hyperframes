@@ -56,6 +56,12 @@ import {
   type VideoMetadata,
 } from "../utils/ffprobe.js";
 import { runFfmpeg } from "../utils/runFfmpeg.js";
+
+// Pass-through, so a test can tell whether extraction ran ffmpeg.
+vi.mock("../utils/runFfmpeg.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../utils/runFfmpeg.js")>();
+  return { ...real, runFfmpeg: vi.fn(real.runFfmpeg) };
+});
 import { COMPLETE_SENTINEL, GC_MARKER, SCHEMA_PREFIX } from "./extractionCache.js";
 import { resolveRuntimeMediaClipDuration } from "../../../core/src/runtime/media.js";
 import { compileTimingAttrs, sourceTimeAt } from "@hyperframes/core";
@@ -1382,6 +1388,60 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
     };
   }
 
+  it("keeps the rightmost 8 columns of a 1080-wide (16n + 8) jpg extraction", async () => {
+    const source = join(FIXTURE_DIR, "white-1080.mp4");
+    const synth = await runFfmpeg([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=white:s=1080x16:d=1:r=1",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-crf",
+      "0",
+      "-pix_fmt",
+      "yuv420p",
+      source,
+    ]);
+    expect(synth.success).toBe(true);
+    const outDir = join(FIXTURE_DIR, "out-white-1080");
+    mkdirSync(outDir, { recursive: true });
+    const result = await extractAllVideoFrames(
+      [{ ...fixtureVideo(), id: "white", src: source }],
+      FIXTURE_DIR,
+      { fps: 1, outputDir: outDir },
+    );
+    expect(result.errors).toEqual([]);
+    const frame = result.extracted[0]!.framePaths.get(0)!;
+    expect(frame.endsWith(".jpg")).toBe(true);
+    const lastColumns = (file: string) => [
+      ...spawnSync("ffmpeg", [
+        "-v",
+        "error",
+        "-i",
+        file,
+        "-frames:v",
+        "1",
+        "-vf",
+        "format=gray,crop=8:1:iw-8:8",
+        "-f",
+        "rawvideo",
+        "-",
+      ]).stdout,
+    ];
+    const delivered = lastColumns(frame);
+    const expected = lastColumns(source);
+    expect(delivered).toHaveLength(8);
+    for (const [i, v] of delivered.entries())
+      expect(Math.abs(v - expected[i]!)).toBeLessThanOrEqual(5);
+  }, 60_000);
+
   it("keeps color-sensitive UI reds closer to source when extraction is forced to png", async () => {
     const defaultOut = join(FIXTURE_DIR, "out-default");
     const pngOut = join(FIXTURE_DIR, "out-png");
@@ -2390,6 +2450,59 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
     expect(result.totalFrames).toBe(3);
   }, 60_000);
 
+  // With B-frames, mp4 packet durations are decode-order gaps, so a frame can claim 0.5s while
+  // the next one starts 17ms later. Each slot must still show the frame on screen at its time:
+  // `-fps_mode cfr` on ffmpeg 8 held such a frame for 14 slots and cut the still before a gap short.
+  it("samples a B-frame VFR source by timestamp, not by packet duration", async () => {
+    const source = join(FIXTURE_DIR, "vfr_bframes.mp4");
+    const synth = await runFfmpeg([
+      "-y",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=s=320x180:d=4:rate=60",
+      "-vf",
+      "select='not(between(n\\,30\\,89))*not(between(n\\,150\\,179))'",
+      "-fps_mode",
+      "vfr",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "medium",
+      "-bf",
+      "3",
+      "-g",
+      "600",
+      "-pix_fmt",
+      "yuv420p",
+      source,
+    ]);
+    if (!synth.success) throw new Error(`fixture synthesis failed: ${synth.stderr.slice(-400)}`);
+    const distinctFrames = (paths: Iterable<string>) =>
+      new Set([...paths].map((path) => readFileSync(path).toString("base64"))).size;
+
+    // 2.5s to 3s is a still; every 30fps slot after it lands on its own 60fps source frame.
+    const afterGap = await extractVideoFramesRange(source, "vfr-bframes-after-gap", 2.5, 1.5, {
+      fps: 30,
+      outputDir: join(FIXTURE_DIR, "out-vfr-bframes-after-gap"),
+      format: "png",
+    });
+    expect(afterGap.metadata.isVFR).toBe(true);
+    expect(afterGap.totalFrames).toBe(45);
+    const slots = [...afterGap.framePaths.entries()].sort(([a], [b]) => a - b);
+    expect(distinctFrames(slots.slice(0, 15).map(([, path]) => path))).toBe(1);
+    expect(distinctFrames(slots.slice(15).map(([, path]) => path))).toBe(30);
+
+    const endsOnStill = await extractVideoFramesRange(source, "vfr-bframes-still", 0, 3, {
+      fps: 30,
+      outputDir: join(FIXTURE_DIR, "out-vfr-bframes-still"),
+      format: "png",
+    });
+    expect(endsOnStill.totalFrames).toBe(90);
+  }, 60_000);
+
   it("produces the expected frame count for a mid-file segment", async () => {
     const outputDir = join(FIXTURE_DIR, "out-mid-segment");
     mkdirSync(outputDir, { recursive: true });
@@ -2589,15 +2702,13 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
     expect(miss.errors).toEqual([]);
     expect(miss.phaseBreakdown.cacheHits).toBe(0);
     expect(miss.phaseBreakdown.cacheMisses).toBe(1);
+    const ffmpegRunsBeforeHit = vi.mocked(runFfmpeg).mock.calls.length;
 
     const hit = await extractWithCache(video, "out-cache-hit", CACHE_DIR);
     expect(hit.errors).toEqual([]);
     expect(hit.phaseBreakdown.cacheHits).toBe(1);
     expect(hit.phaseBreakdown.cacheMisses).toBe(0);
-    // extractMs on a hit is only the cache-lookup bookkeeping; asserting <50ms
-    // is loose enough to survive CI jitter but tight enough to catch a
-    // regression that accidentally triggered ffmpeg again.
-    expect(hit.phaseBreakdown.extractMs).toBeLessThan(50);
+    expect(vi.mocked(runFfmpeg).mock.calls.length).toBe(ffmpegRunsBeforeHit);
     expect(hit.extracted).toHaveLength(1);
     expect(hit.extracted[0]!.totalFrames).toBe(miss.extracted[0]!.totalFrames);
 
@@ -3697,7 +3808,7 @@ describe.skipIf(!HAS_ZSCALE)("forced-SDR HDR extraction", () => {
   }, 60_000);
 
   // A second process would read the frames back without the HDR10 light-level metadata the tone map uses.
-  it("tone-maps a VFR HDR10 window in one process, exactly as the unfiltered resample would", async () => {
+  it("tone-maps a VFR HDR10 window in one process, as the reference tone map would", async () => {
     const source = join(fixtureDir, "pq-vfr-4000nit.mp4");
     const synthesized = await runFfmpeg([
       "-y",
@@ -3753,7 +3864,8 @@ describe.skipIf(!HAS_ZSCALE)("forced-SDR HDR extraction", () => {
 
     expect(result.metadata.isVFR).toBe(true);
     const referenceFrames = readdirSync(referenceDir).sort();
-    expect(result.totalFrames).toBe(referenceFrames.length);
+    // One slot per 30fps tick before 0.616666s; x265 packet durations cut the reference's still short.
+    expect(result.totalFrames).toBe(19);
     expect(readFileSync(result.framePaths.get(0)!)).toEqual(
       readFileSync(join(referenceDir, referenceFrames[0]!)),
     );

@@ -90,13 +90,7 @@ export function runCancellableProcess(
     };
     const finishReject = async (error: unknown): Promise<void> => {
       if (settled) return;
-      if (terminationTask) {
-        try {
-          terminationSignal = await terminationTask;
-        } catch (terminationError) {
-          error = terminationError;
-        }
-      }
+      if (terminationTask) terminationSignal = await terminationTask.catch(() => terminationSignal);
       if (settled) return;
       settled = true;
       cleanup();
@@ -130,14 +124,7 @@ export function runCancellableProcess(
     // fallow-ignore-next-line complexity
     child.once("close", async (status, closeSignal) => {
       if (settled) return;
-      if (terminationTask) {
-        try {
-          terminationSignal = await terminationTask;
-        } catch (error) {
-          await finishReject(error);
-          return;
-        }
-      }
+      if (terminationTask) terminationSignal = await terminationTask.catch(() => terminationSignal);
       if (settled) return;
       settled = true;
       cleanup();

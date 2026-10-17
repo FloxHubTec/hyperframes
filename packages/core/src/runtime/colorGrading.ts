@@ -2494,7 +2494,7 @@ function findRenderFrameImage(video: HTMLVideoElement): HTMLImageElement | null 
 
 function hasInjectedRenderFrame(element: ColorGradingMediaElement): boolean {
   if (!isVideoElement(element)) return false;
-  const frame = findRenderFrameImage(element);
+  const frame = findInjectedRenderFrame(element);
   if (!frame) return false;
   const style = window.getComputedStyle(frame);
   return style.display !== "none" && style.visibility !== "hidden";

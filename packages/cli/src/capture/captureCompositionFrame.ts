@@ -1,6 +1,11 @@
-import { launchManagedBrowser, resolveManagedGpuMode } from "../browser/launch.js";
+import {
+  rethrowAfterBrowserCleanup,
+  launchManagedBrowser,
+  resolveManagedGpuMode,
+} from "../browser/launch.js";
 import { spawn } from "node:child_process";
 import type { Browser, Page } from "puppeteer-core";
+import type { InProcessRequest, InProcessResponse } from "../utils/staticProjectServer.js";
 import { c } from "../ui/colors.js";
 import {
   assertWebGpuAdapterAvailable,
@@ -13,6 +18,7 @@ import { windowsChromeCrashRemediation } from "../browser/windowsCrash.js";
 import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { resolveDiagnosticNavigationTimeoutMs } from "../utils/renderArgs.js";
+import { gotoWhenSent } from "./navigateForCapture.js";
 
 const SHADER_TRANSITIONS_TIMEOUT_MS = 90_000;
 const CAPTURE_SETTLE_MS = 1500;
@@ -34,6 +40,7 @@ export const DENSE_GEOMETRY_SEEK_OPTIONS = {
   animationFrameSettle: "none",
   waitForFontsMs: 0,
   settleMs: 0,
+  waitForVideoFrames: false,
 } as const;
 
 export interface SeekCompositionTimelineOptions {
@@ -43,18 +50,22 @@ export interface SeekCompositionTimelineOptions {
   animationFrameSettle?: "race" | "double" | "none";
   waitForFontsMs?: number;
   settleMs?: number;
+  waitForVideoFrames?: boolean;
 }
+
+type SeekBarrierOptions = { videoFrames: boolean };
 
 type CompositionPageFunction =
   | string
   | (() => unknown)
   | ((value: number) => unknown)
+  | ((barrier: SeekBarrierOptions) => unknown)
   | ((value: number, fallbackToBridgeAndTimelines: boolean, exactTime: boolean) => unknown);
 
 export interface CompositionEvaluationPage {
   evaluate(
     pageFunction: CompositionPageFunction,
-    value?: number,
+    value?: number | SeekBarrierOptions,
     fallbackToBridgeAndTimelines?: boolean,
     exactTime?: boolean,
   ): Promise<unknown>;
@@ -79,6 +90,10 @@ export interface OpenSettledCompositionPageOptions {
   renderReadyTimeoutMs: number;
   renderReadyWarningSuffix: string;
   browserGpuMode?: BrowserGpuMode;
+  signal?: AbortSignal;
+  onBrowser?: (browser: Browser) => void;
+  // Connected composition browser, before page creation or authored scripts.
+  onBrowserReady?: () => void;
   // Runs after the page exists but before page.goto, so console/pageerror/
   // request listeners can attach without missing load-time events.
   beforeNavigate?: (page: Page) => void | Promise<void>;
@@ -189,23 +204,33 @@ export async function openSettledCompositionPage(
 ): Promise<SettledCompositionPage> {
   const viewport = resolveCompositionViewportFromHtml(html);
   const { ensureBrowser, findSystemBrowser } = await import("../browser/manager.js");
-  const browser = await ensureBrowser();
+  const browser = await ensureBrowser({ signal: options.signal });
   const puppeteer = await import("puppeteer-core");
   const { buildChromeArgs } = await import("@hyperframes/engine");
   const requestedGpuMode = options.browserGpuMode ?? resolveCliChromeGpuMode();
+  // Nothing may listen (a sandbox refused it): DevTools over a pipe, one process, pages answered in-process.
+  const answer = (await import("../utils/staticProjectServer.js")).inProcessAnswer(url);
   const requiresWebGpu = compositionRequiresWebGpu(html);
   let softwareWebGpu = false;
   const launch = async (executablePath: string): Promise<Browser> => {
-    const resolvedGpuMode = await resolveManagedGpuMode(requestedGpuMode, executablePath);
+    options.signal?.throwIfAborted();
+    const resolvedGpuMode = await resolveManagedGpuMode(requestedGpuMode, executablePath, {
+      signal: options.signal,
+      onBrowser: options.onBrowser,
+      noListen: answer !== undefined,
+    });
+    options.signal?.throwIfAborted();
     const webGpu = resolveLocalWebGpu(resolvedGpuMode, requiresWebGpu);
     softwareWebGpu = webGpu.softwareWebGpu;
+    const args = buildChromeArgs(
+      { ...viewport, captureMode: "screenshot", requiresWebGpu },
+      webGpu.gpuConfig,
+    );
     return launchManagedBrowser(puppeteer.default, {
       headless: true,
+      signal: options.signal,
       executablePath,
-      args: buildChromeArgs(
-        { ...viewport, captureMode: "screenshot", requiresWebGpu },
-        webGpu.gpuConfig,
-      ),
+      ...(answer ? { pipe: true, args: [...args, "--single-process"] } : { args }),
     });
   };
 
@@ -239,20 +264,23 @@ export async function openSettledCompositionPage(
       }
     }
 
+    options.onBrowser?.(chromeBrowser);
+    options.onBrowserReady?.();
     const page = await chromeBrowser.newPage();
     await installPageFunctionGuard(page);
     await page.setViewport(viewport);
+    if (answer) await answerPageInProcess(page, url, answer);
     await options.beforeNavigate?.(page);
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: resolveDiagnosticNavigationTimeoutMs(process.env, options.navigationTimeoutMs),
-    });
+    await gotoWhenSent(
+      page,
+      url,
+      resolveDiagnosticNavigationTimeoutMs(process.env, options.navigationTimeoutMs),
+    );
     await assertWebGpuAdapterAvailable(page, requiresWebGpu, softwareWebGpu);
     const renderReadyTimedOut = !(await waitForCompositionSettle(page, options));
     return { browser: chromeBrowser, page, renderReadyTimedOut };
   } catch (err) {
-    await chromeBrowser?.close().catch(() => {});
-    throw err;
+    return rethrowAfterBrowserCleanup(chromeBrowser, err);
   }
 }
 
@@ -318,12 +346,15 @@ export async function seekCompositionTimeline(
     options.exactTime === true,
   );
 
-  await page.evaluate(async () => {
-    const waitForCompletion = Reflect.get(window, "__hfWaitForSeekCompletion");
-    if (typeof waitForCompletion === "function") {
-      await Reflect.apply(waitForCompletion, window, []);
-    }
-  });
+  await page.evaluate(
+    async (barrier: SeekBarrierOptions) => {
+      const waitForCompletion = Reflect.get(window, "__hfWaitForSeekCompletion");
+      if (typeof waitForCompletion === "function") {
+        await Reflect.apply(waitForCompletion, window, [barrier]);
+      }
+    },
+    { videoFrames: options.waitForVideoFrames !== false },
+  );
 
   const animationFrameSettle = options.animationFrameSettle ?? "race";
   if (animationFrameSettle === "race") {
@@ -581,5 +612,27 @@ export async function runFfmpegOnce(
       clearTimeout(timer);
       resolvePromise({ code: null, stderr: "ffmpeg spawn failed", timedOut });
     });
+  });
+}
+
+/** Requests to the in-process origin are answered here; any other request goes on as usual. */
+async function answerPageInProcess(
+  page: Page,
+  url: string,
+  answer: (request: InProcessRequest) => Promise<InProcessResponse>,
+): Promise<void> {
+  const origin = new URL(url).origin;
+  await page.setRequestInterception(true);
+  page.on("request", (request) => {
+    if (request.isInterceptResolutionHandled()) return;
+    const target = new URL(request.url());
+    if (target.origin !== origin) return void request.continue().catch(() => {});
+    answer({
+      method: request.method(),
+      path: target.pathname + target.search,
+      headers: request.headers(),
+    })
+      .then((response) => request.respond(response))
+      .catch(() => request.abort("failed").catch(() => {}));
   });
 }

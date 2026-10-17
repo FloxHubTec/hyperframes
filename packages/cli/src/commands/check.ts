@@ -1,4 +1,17 @@
+import { captureArtifactRevision } from "../utils/artifactCapture.js";
+import { pngDimensions } from "../utils/pngDimensions.js";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import {
+  recordArtifacts,
+  type ArtifactCapture,
+  type ArtifactInput,
+  type ArtifactRecord,
+} from "@hyperframes/studio-server/history";
 import { formatFindingTimes } from "../utils/checkFindings.js";
+import { withProjectLock } from "../utils/projectLock.js";
+import { reportArtifacts } from "../utils/toolContext.js";
 import { defineCommand, parseArgs } from "citty";
 import type { ArgsDef } from "citty";
 import type { Example } from "./_examples.js";
@@ -14,6 +27,7 @@ import {
   DEFAULT_CHECK_OPTIONS,
   checkExitCode,
   runCheckPipeline,
+  selectFindingCropRequests,
   type CheckFinding,
   type CheckOptions,
   type CheckReport,
@@ -29,17 +43,107 @@ export const examples: Example[] = [
   ["Also fail on warnings", "hyperframes check --strict"],
 ];
 
+type SavedCheck = Pick<ArtifactRecord, "id" | "revision" | "report" | "attribution">;
+type SavedCheckReport = CheckReport & { saved?: SavedCheck };
+
 export interface CheckCommandDependencies {
   resolveProject(dir: string | undefined): ProjectDir;
-  runPipeline(project: ProjectDir, options: CheckOptions): Promise<CheckReport>;
+  runPipeline(project: ProjectDir, options: CheckOptions): Promise<SavedCheckReport>;
   withMeta(value: object): object;
 }
 
 const DEFAULT_COMMAND_DEPENDENCIES: CheckCommandDependencies = {
   resolveProject,
-  runPipeline: runCheckPipeline,
+  async runPipeline(project, options) {
+    const capture = await captureArtifactRevision(project.dir).catch(warnNotRecorded);
+    const report = await runCheckPipeline(project, options);
+    const images = (files: readonly string[]) => files.map((file) => resolve(project.dir, file));
+    reportArtifacts("check", "frame", images(report.snapshots.files));
+    reportArtifacts("check", "finding", images(report.snapshots.findingFiles));
+    if (!capture) return report;
+    try {
+      return { ...report, saved: await saveCheckReport(project, options, report, capture) };
+    } catch (error) {
+      warnNotRecorded(error);
+      return report;
+    }
+  },
   withMeta,
 };
+
+function warnNotRecorded(error: unknown): undefined {
+  console.warn(`${c.warn("⚠")}  Check report was not recorded: ${normalizeErrorMessage(error)}`);
+  return undefined;
+}
+
+async function saveCheckReport(
+  project: ProjectDir,
+  options: CheckOptions,
+  report: CheckReport,
+  capture: ArtifactCapture,
+): Promise<SavedCheck> {
+  const id = randomUUID();
+  const directory = join(project.dir, ".hyperframes", "artifacts", "checks");
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, `${id}.json`);
+  writeFileSync(path, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
+  const reportScope =
+    "scope" in report && typeof report.scope === "object" && report.scope !== null
+      ? report.scope
+      : undefined;
+  const artifacts: ArtifactInput[] = [
+    {
+      kind: "check",
+      id,
+      scope: reportScope ? "scoped" : "project",
+      report: resolve(path),
+      metadata: {
+        ok: report.ok,
+        browserSkipped: report.browserSkipped,
+        scope: reportScope,
+        options,
+      },
+    },
+  ];
+  for (const [index, image] of report.snapshots.files.entries()) {
+    artifacts.push({
+      kind: "snapshot",
+      id: `${id}-${index}`,
+      scope: "full",
+      image: resolve(project.dir, image),
+      time: report.snapshots.times[index],
+      metadata: {
+        checkId: id,
+        ...pngDimensions(resolve(project.dir, image)),
+      },
+    });
+  }
+  const crops = selectFindingCropRequests(report);
+  for (const [index, image] of report.snapshots.findingFiles.entries()) {
+    const crop = crops.find((request) => image.endsWith(request.filename));
+    artifacts.push({
+      kind: "snapshot",
+      id: `${id}-crop-${index}`,
+      scope: "finding",
+      image: resolve(project.dir, image),
+      time: crop?.time,
+      metadata: {
+        checkId: id,
+        finding: crop,
+        ...pngDimensions(resolve(project.dir, image)),
+      },
+    });
+  }
+  const [saved] = await recordArtifacts(project.dir, capture, artifacts);
+  if (!saved) throw new Error("no history record was written");
+  reportArtifacts("check", "check-report", [resolve(path)]);
+  return {
+    id: saved.id,
+    revision: saved.revision,
+    report: saved.report,
+    attribution: saved.attribution,
+  };
+}
 
 const CHECK_COMMAND_ARGS = {
   dir: { type: "positional", description: "Project directory", required: false },
@@ -119,7 +223,7 @@ const CHECK_COMMAND_ARGS = {
   },
   snapshots: {
     type: "boolean",
-    description: "Save the five contrast-pass PNGs under snapshots/",
+    description: "Save contrast-pass PNGs under .hyperframes/artifacts/snapshots/",
     default: false,
   },
   "caption-zone": {
@@ -158,11 +262,19 @@ export function createCheckCommand(
         if (!asJson) {
           console.log(`${c.accent("◆")}  Checking ${c.accent(project.name)}`);
         }
-        const report = await dependencies.runPipeline(project, options);
+        const report = await withProjectLock(project.dir, "check", () =>
+          dependencies.runPipeline(project, options),
+        );
         if (asJson) {
           console.log(JSON.stringify(dependencies.withMeta(report), null, 2));
         } else {
           printHumanReport(report);
+          if (report.saved) {
+            console.log(`Report: ${report.saved.report}`);
+            console.log(
+              `Revision: ${report.saved.revision ?? "none"} (${report.saved.attribution})`,
+            );
+          }
         }
         setCommandExitCode(checkExitCode(report));
       } catch (error) {

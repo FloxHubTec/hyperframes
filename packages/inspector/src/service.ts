@@ -51,7 +51,13 @@ export interface InspectorOptions {
   instrument?: boolean;
 }
 function chromePath() {
-  if (process.env.HF_INSPECT_CHROME) return process.env.HF_INSPECT_CHROME;
+  const configured = process.env.HF_INSPECT_CHROME;
+  if (configured) {
+    if (existsSync(configured)) return configured;
+    throw new Error(
+      "Set HF_INSPECT_CHROME to an installed Chrome executable; inspection does not download a browser.",
+    );
+  }
   const root = join(homedir(), ".cache/hyperframes/chrome/chrome-headless-shell");
   if (existsSync(root))
     for (const version of readdirSync(root).sort().reverse()) {
@@ -326,3 +332,5 @@ export class Inspector {
     });
   }
 }
+
+export type { InspectRequest, TimelineRequest };

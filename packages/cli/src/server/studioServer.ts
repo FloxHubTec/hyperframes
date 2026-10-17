@@ -32,6 +32,7 @@ import {
   resolveCliTelemetryDistinctId,
 } from "./telemetryIdentity.js";
 import { emitStudioRenderComplete, emitStudioRenderError } from "./studioRenderTelemetry.js";
+import { startRenderCpuSampler } from "../telemetry/renderCpu.js";
 import { mountDesktopRoutes } from "./desktopRoutes.js";
 import { isDevMode } from "../utils/env.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
@@ -591,6 +592,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
 
       // Run render asynchronously, mutating the state object
       const startTime = Date.now();
+      const cpu = startRenderCpuSampler(opts.telemetryOptOut !== true);
       const run = (async () => {
         let renderJob: RenderJob | undefined;
         const removeCancelledOutput = () => {
@@ -627,6 +629,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             ...(manualEditsRenderScript ? { renderBodyScripts: [manualEditsRenderScript] } : {}),
             ...(opts.composition ? { entryFile: opts.composition } : {}),
             ...(opts.variables ? { variables: opts.variables } : {}),
+            ...(opts.crf !== undefined ? { crf: opts.crf } : {}),
+            ...(opts.videoBitrate ? { videoBitrate: opts.videoBitrate } : {}),
+            ...(opts.videoFrameFormat ? { videoFrameFormat: opts.videoFrameFormat } : {}),
+            ...(opts.hdrMode ? { hdrMode: opts.hdrMode } : {}),
             ...(opts.useGpu ? { useGpu: true } : {}),
           });
           renderJob = job;
@@ -665,7 +671,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           // /api/telemetry-identity, so this process would otherwise keep its
           // startup-cached posture for the life of the preview server.
           refreshTelemetryPosture();
-          emitStudioRenderComplete(opts, Date.now() - startTime, job.perfSummary);
+          emitStudioRenderComplete(opts, Date.now() - startTime, job.perfSummary, cpu.stop());
         } catch (err) {
           if (abortController.signal.aborted) {
             removeCancelledOutput();
@@ -675,13 +681,22 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           state.error = err instanceof Error ? err.message : String(err);
           // fallow-ignore-next-line code-duplication
           refreshTelemetryPosture();
-          emitStudioRenderError(opts, Date.now() - startTime, state.stage, err, renderJob);
+          emitStudioRenderError(
+            opts,
+            Date.now() - startTime,
+            state.stage,
+            err,
+            renderJob,
+            cpu.stop(),
+          );
           try {
             const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
             writeFileSync(metaPath, JSON.stringify({ status: "failed" }));
           } catch {
             /* ignore */
           }
+        } finally {
+          cpu.stop();
         }
       })();
       inFlightRenders.set(abortController, run);

@@ -91,7 +91,7 @@ describe.skipIf(process.platform === "win32")("extractAllVideoFrames ffmpeg conc
     expect(Math.max(...alive)).toBe(1);
   }, 120_000);
 
-  it("gives a variable-frame-rate clip's two-process pipeline one slot", async () => {
+  it("runs a variable-frame-rate clip's ffmpeg in the one slot", async () => {
     const clips = await Promise.all(
       [0, 1].map((i) =>
         synth(`vfr-${i}`, `color=c=0x${i ? "28C83C" : "C83C28"}:s=32x32:d=2:r=60`, [
@@ -100,8 +100,8 @@ describe.skipIf(process.platform === "win32")("extractAllVideoFrames ffmpeg conc
       ),
     );
     const alive = await aliveCounts("vfr", clips, 1, 30);
-    expect(alive).toHaveLength(4);
-    expect(Math.max(...alive)).toBeLessThanOrEqual(2);
+    expect(alive).toHaveLength(2);
+    expect(Math.max(...alive)).toBe(1);
   }, 60_000);
 
   it("lets a cancelled extraction leave the queue while another holds the slot", async () => {

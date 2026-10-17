@@ -1,3 +1,4 @@
+import { audioFailureDiagnostics } from "@hyperframes/engine";
 // fallow-ignore-file unused-type circular-dependency code-duplication complexity
 /**
  * Render Orchestrator Service
@@ -216,6 +217,7 @@ import {
   resolveCaptureJpegQuality,
 } from "./render/captureImageFormat.js";
 import { assertMotionBlurSupported } from "./render/motionBlurRoute.js";
+import { assertOutputScaleSupported } from "./render/outputScaleRoute.js";
 
 export function sampleDirectoryBytes(dir: string): number {
   let total = 0;
@@ -2121,7 +2123,7 @@ export function shouldPreferSingleWorkerDrawElement(args: {
    * telemetry and keep the probe session alive through the heaviest stage.
    */
   layeredOrEffectRoute: boolean;
-  /** deviceScaleFactor > 1 — the engine's supersampling gate blocks DE. */
+  /** deviceScaleFactor other than 1 — the engine's supersampling gate blocks DE. */
   supersampling: boolean;
   /**
    * The probe session already ran the engine's init-time DE gates and DE did
@@ -2558,7 +2560,7 @@ export function resolveParallelCaptureMode(args: {
   forceScreenshot: boolean;
   deviceScaleFactor?: number;
 }): "screenshot" | "beginframe" {
-  const supersampling = (args.deviceScaleFactor ?? 1) > 1;
+  const supersampling = (args.deviceScaleFactor ?? 1) !== 1;
   return args.headlessShell && args.platform === "linux" && !args.forceScreenshot && !supersampling
     ? "beginframe"
     : "screenshot";
@@ -3387,6 +3389,7 @@ async function executeRenderPipeline(input: {
             message: `Audio mix failed; output would be video-only: ${audioResult.audioError}`,
             details: {
               mediaType: "audio",
+              audioFailures: audioFailureDiagnostics(audioFailures),
               failureReasons: [...new Set(audioFailures.map((failure) => failure.reason))],
               failureStages: [...new Set(audioFailures.map((failure) => failure.stage))],
               failureOwner,
@@ -3641,7 +3644,7 @@ async function executeRenderPipeline(input: {
       minFrames: deSingleMinFrames,
       singleWorkerStreamingOk: shouldUseStreamingEncode(cfg, outputFormat, 1, job.duration),
       layeredOrEffectRoute: hasHdrContent || compiled.hasShaderTransitions,
-      supersampling: deviceScaleFactor > 1,
+      supersampling: deviceScaleFactor !== 1,
       probeDeGated:
         probeSession !== null &&
         probeSession.captureMode !== "drawelement" &&
@@ -3734,7 +3737,7 @@ async function executeRenderPipeline(input: {
       totalFrames,
       minFrames: deParallelMinFrames,
       layeredOrEffectRoute: hasHdrContent || compiled.hasShaderTransitions,
-      supersampling: deviceScaleFactor > 1,
+      supersampling: deviceScaleFactor !== 1,
       probeDeGated:
         probeSession !== null &&
         probeSession.captureMode !== "drawelement" &&
@@ -4274,6 +4277,7 @@ async function executeRenderPipeline(input: {
       // Every route the render can end up on passes through here, including the ones a
       // replan lands on, so this is where motion blur's one supported-route answer belongs.
       assertMotionBlurSupported(job.config.motionBlur, capturePlan.kind);
+      assertOutputScaleSupported(deviceScaleFactor, capturePlan.kind);
       workerCount = capturePlan.workerCount;
       captureForceScreenshot = capturePlan.forceScreenshot;
       useStreamingEncode = capturePlan.kind === "sdr_streaming";
@@ -4490,8 +4494,8 @@ async function executeRenderPipeline(input: {
               outputFormat,
               streamingEncoderOptions: {
                 fps: job.config.fps,
-                width,
-                height,
+                width: captureCompositionWidth ?? width,
+                height: captureCompositionHeight ?? height,
                 codec: preset.codec,
                 preset: preset.preset,
                 quality: effectiveQuality,
@@ -4593,8 +4597,8 @@ async function executeRenderPipeline(input: {
                 outputFormat,
                 streamingEncoderOptions: {
                   fps: job.config.fps,
-                  width,
-                  height,
+                  width: captureCompositionWidth ?? width,
+                  height: captureCompositionHeight ?? height,
                   codec: preset.codec,
                   preset: preset.preset,
                   quality: effectiveQuality,

@@ -1,3 +1,4 @@
+import type { CheckDeadline } from "./checkDeadline.js";
 import type { ProjectLintResult } from "./lintProject.js";
 import type { LayoutIssue, LayoutOverflow, LayoutRect } from "./layoutAudit.js";
 import type { Canvas, MotionFrame } from "./motionAudit.js";
@@ -194,6 +195,7 @@ export interface CheckAuditDriver {
   /** True when the root composition explicitly declares that it is intentionally timeline-free. */
   hasNoTimelineDeclaration(): Promise<boolean>;
   getTransitionBoundaries(): Promise<number[]>;
+  getClipEdges(): Promise<number[]>;
   getCanvas(): Promise<Canvas>;
   findAmbiguousSelectors(selectors: string[]): Promise<AnchoredLayoutIssue[]>;
   seek(time: number): Promise<void>;
@@ -313,6 +315,7 @@ export interface CheckDependencies {
     project: ProjectDir,
     options: CheckOptions,
     motion: MotionSpecResolution,
+    deadline?: CheckDeadline,
   ): Promise<CheckBrowserResult>;
   writeSnapshot(
     projectDir: string,
@@ -324,6 +327,7 @@ export interface CheckDependencies {
     project: ProjectDir,
     options: CheckOptions,
     requests: CheckFindingCropRequest[],
+    deadline?: CheckDeadline,
   ): Promise<string[]>;
   inspectHdrAutoPromotion?(project: ProjectDir): Promise<CheckReport["hdr"]["autoPromotion"]>;
 }

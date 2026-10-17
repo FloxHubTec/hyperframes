@@ -48,6 +48,10 @@ describe("formatSnapshotTimestamp", () => {
   it.each([
     [1.12, "1.12s"],
     [0.30000000000000004, "0.3s"],
+    [0, "0s"],
+    [1.5, "1.5s"],
+    [12.25, "12.25s"],
+    [1.5000001, "1.5s"],
   ])("formats %s without discarding useful precision", (time, expected) => {
     expect(formatSnapshotTimestamp(time)).toBe(expected);
   });
@@ -76,9 +80,7 @@ describe("tailFrameTime", () => {
 describe("transparent snapshot capture", () => {
   it("asks Chrome to retain the alpha channel in review PNGs", () => {
     const source = readFileSync(new URL("./snapshot.ts", import.meta.url), "utf8");
-    expect(source).toContain(
-      'page.screenshot({ path: framePath, type: "png", omitBackground: true })',
-    );
+    expect(source).toContain('page.screenshot({ type: "png", omitBackground: true })');
   });
 
   it("exposes --proxy/--no-proxy and forwards the override to the static server", () => {
@@ -931,10 +933,7 @@ describe("snapshot composite recapture", () => {
     const injection = source.indexOf("await injectVideoFramesBatch(page, updates)");
     const visibility = source.indexOf("await syncVideoFrameVisibility(", injection);
     const recapture = source.indexOf("await recaptureSnapshotComposite(page)", visibility);
-    const finalCapture = source.indexOf(
-      'page.screenshot({ path: framePath, type: "png"',
-      recapture,
-    );
+    const finalCapture = source.indexOf('page.screenshot({ type: "png"', recapture);
     expect(injection).toBeGreaterThan(-1);
     expect(visibility).toBeGreaterThan(injection);
     expect(recapture).toBeGreaterThan(visibility);
