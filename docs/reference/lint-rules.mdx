@@ -98,12 +98,6 @@ Source: `packages/lint/src/rules/composition.ts`.
 
 **Fix:** Keep `data-composition-id` on exactly one element: the composition root. Remove it from metadata or duplicate hosts.
 
-### `html_dir_attribute_breaks_render`
-
-**Error.** `<html dir="rtl">` or `<html dir="auto">` renders correctly in preview and snapshot but produces a fully blank or black video from render — a confirmed, silent failure. `dir="ltr"` is not flagged.
-
-**Fix:** Remove `dir` from `<html>`, keep `lang`, and scope the direction to individual text-containing elements instead — `direction: rtl` in CSS, or `dir="auto"` on the element.
-
 ### `invalid_parent_traversal_in_asset_path`
 
 **Error.** Asset paths use `../` to traverse above the project root; render and preview clamp or misresolve them.

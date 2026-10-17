@@ -1224,38 +1224,6 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
       .filter((tag) => readJsonAttr(tag.raw, "data-composition-variables"))
       .flatMap((tag) => variablesDeclarationFindings(tag, tags)),
 
-  // html_dir_attribute_breaks_render — valid non-LTR dir values on
-  // <html> renders correctly in preview/snapshot but produces a fully
-  // blank/black video from render, with no other lint/validate/inspect
-  // check catching it (output file size, far smaller than expected, is the
-  // only tell). Confirmed independently by two separate reports, both
-  // diagnosing the same exact trigger and the same fix: drop dir from
-  // <html>, keep lang, and scope `direction: rtl` to individual
-  // text-containing elements via CSS instead (text still bidi-shapes
-  // correctly). Advisory-only — this does not attempt to fix the render
-  // pipeline's own root cause (suspected to be a capture step that clips a
-  // fixed top-left-origin screenshot region, which RTL layout can shift the
-  // actual content away from), only surfaces the already-confirmed footgun
-  // before someone hits it blind.
-  ({ tags }) => {
-    const htmlTag = findHtmlTag(tags);
-    if (!htmlTag) return [];
-    const dir = readAttr(htmlTag.raw, "dir");
-    if (!dir) return [];
-    const normalizedDir = dir.toLowerCase();
-    if (normalizedDir !== "rtl" && normalizedDir !== "auto") return [];
-    const scopedDirection = normalizedDir === "auto" ? 'dir="auto"' : `direction: ${normalizedDir}`;
-    return [
-      {
-        code: "html_dir_attribute_breaks_render",
-        severity: "error",
-        message: `<html dir="${dir}"> renders correctly in preview/snapshot but produces a fully blank/black video from render. This is a confirmed, silent failure.`,
-        fixHint: `Remove dir="${dir}" from <html>. Keep lang, and scope ${scopedDirection} to individual text-containing elements instead. Text still shapes correctly via the browser's own bidi algorithm.`,
-        snippet: truncateSnippet(htmlTag.raw),
-      },
-    ];
-  },
-
   // subcomposition_blanks_before_host
   // Warns when a full-bleed sub-composition slot ends before the host composition
   // does, leaving the slot blank for the remainder (issue #1540). Scoped narrowly to
