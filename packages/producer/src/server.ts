@@ -91,6 +91,7 @@ interface RenderInput {
   maxRenderMs?: number;
   crf?: number;
   videoBitrate?: string;
+  chromaSubsampling?: RenderConfig["chromaSubsampling"];
   useGpu: boolean;
   debug: boolean;
   strictness: RenderConfig["strictness"];
@@ -241,7 +242,9 @@ export function parseRenderOptions(body: Record<string, unknown>): Omit<RenderIn
     parseServerOutputDynamicRange(body.outputDynamicRange) ??
     fromRenderHdrMode(parseLegacyServerHdrMode(body.hdrMode));
   const encoder = parseEncoderOptions(body, format ?? "mp4");
-  const { crf, videoBitrate, videoFrameFormat } = encoder.ok ? encoder.options : {};
+  const { crf, videoBitrate, videoFrameFormat, chromaSubsampling } = encoder.ok
+    ? encoder.options
+    : {};
 
   const { variables, outputResolution, outputResolutionAspectAgnostic } =
     parseRenderOverrides(body);
@@ -254,6 +257,7 @@ export function parseRenderOptions(body: Record<string, unknown>): Omit<RenderIn
     maxRenderMs,
     crf,
     videoBitrate,
+    chromaSubsampling,
     useGpu,
     debug,
     strictness,
@@ -316,6 +320,7 @@ function buildRenderJobConfig(input: RenderInput, outputPath: string, log: Produ
       maxRenderMs: input.maxRenderMs,
       crf: input.crf,
       videoBitrate: input.videoBitrate,
+      chromaSubsampling: input.chromaSubsampling,
       useGpu: input.useGpu,
       debug: input.debug,
       strictness: input.strictness,
@@ -385,6 +390,11 @@ function validateRenderOverrides(body: Record<string, unknown>): string | undefi
     outputDynamicRange !== fromRenderHdrMode(legacyHdrMode)
   ) {
     return "outputDynamicRange and legacy hdrMode must describe the same output policy";
+  }
+  // parseEncoderOptions only sees the legacy hdrMode; HDR requested through
+  // outputDynamicRange would otherwise pass and fail later in the render.
+  if (body.chromaSubsampling === "444" && outputDynamicRange === "hdr") {
+    return 'chromaSubsampling "444" is SDR only, not outputDynamicRange "hdr"';
   }
   return validateOutputResolutionOverride(body);
 }
