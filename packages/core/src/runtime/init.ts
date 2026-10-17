@@ -4598,6 +4598,7 @@ export function initSandboxRuntimeModular(): void {
                 totalTime: tl.totalTime.bind(tl),
                 totalDuration: tl.totalDuration?.bind(tl),
                 getChildren: tl.getChildren?.bind(tl),
+                render: tl.render?.bind(tl),
               },
               tlSeekTime,
               structure,

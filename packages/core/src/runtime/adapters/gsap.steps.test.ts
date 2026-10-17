@@ -578,6 +578,63 @@ describe("seekGsapTimeline", () => {
     seekGsapTimeline(film.timeline, 0.1, false);
     expect(film.calls()).toBe(1);
   });
+
+  // A scene that reveals its content with steps at 0, as scenes built from template clones do.
+  function revealedAtZero() {
+    const field = document.body.appendChild(document.createElement("div"));
+    const timeline = gsap.timeline({ paused: true });
+    timeline.set(field, { visibility: "hidden" }, 0);
+    timeline.set(field, { visibility: "visible" }, 0);
+    timeline.to(field, { x: 100, duration: 2 }, 0);
+    timeline.set(field, { visibility: "hidden" }, 1.5);
+    return { field, timeline: timeline as unknown as RuntimeTimelineLike };
+  }
+
+  it("shows a scene's steps at 0 after the playhead comes back to 0 from later", () => {
+    const scene = revealedAtZero();
+    seekGsapTimeline(scene.timeline, 1, false);
+    seekGsapTimeline(scene.timeline, 0, false);
+    expect(scene.field.style.visibility).toBe("visible");
+    seekGsapTimeline(scene.timeline, 0.5, false);
+    expect(scene.field.style.visibility).toBe("visible");
+  });
+
+  it("shows a nested scene's steps at 0 after its parent parks it there from later", () => {
+    const scene = revealedAtZero();
+    const root = gsap
+      .timeline({ paused: true })
+      .add(scene.timeline as unknown as gsap.core.Timeline, 6);
+    root.set({}, {}, 12);
+    // What a runtime seek does: the root, then the scene at its own time, held at 0 before it starts.
+    const seekBoth = (t: number) => {
+      root.totalTime(t, false);
+      seekGsapTimeline(scene.timeline, Math.max(0, t - 6), false);
+    };
+    seekBoth(8);
+    seekBoth(5.9);
+    seekBoth(6.5);
+    expect(scene.field.style.visibility).toBe("visible");
+  });
+
+  it("shows two steps on one later time in authored order after the playhead comes back onto it", () => {
+    const word = document.body.appendChild(document.createElement("span"));
+    const timeline = gsap.timeline({ paused: true });
+    timeline.set(word, { visibility: "hidden" }, 1).set(word, { visibility: "visible" }, 1);
+    timeline.to({}, { duration: 3 }, 0);
+    const scene = timeline as unknown as RuntimeTimelineLike;
+    seekGsapTimeline(scene, 2, false);
+    seekGsapTimeline(scene, 1, false);
+    expect(word.style.visibility).toBe("visible");
+    seekGsapTimeline(scene, 1.2, false);
+    expect(word.style.visibility).toBe("visible");
+  });
+
+  it("keeps a scene's steps at 0 through the root's re-render at 0", () => {
+    const scene = revealedAtZero();
+    seekGsapTimeline(scene.timeline, 1, false);
+    if (!seekGsapTimeline(scene.timeline, 0, false)) rerenderGsapTimelineAt(scene.timeline, 0);
+    expect(scene.field.style.visibility).toBe("visible");
+  });
 });
 
 describe("rerenderGsapTimelineAt with a structure key", () => {

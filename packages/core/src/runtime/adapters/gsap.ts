@@ -5,7 +5,7 @@ type GsapAdapterDeps = {
 };
 
 /**
- * Re-renders a timeline already at `t`, silently, from just below (above at 0) so same-time steps apply in authored
+ * Re-renders a timeline already at `t`, silently, from just below (forced at 0) so same-time steps apply in authored
  * order. That step skips a keyframed tween at its start and undoes from-values of tweens starting within it: redo both.
  */
 export function rerenderGsapTimelineAt(
@@ -13,6 +13,7 @@ export function rerenderGsapTimelineAt(
     totalTime: (time: number, suppressEvents?: boolean) => unknown;
     totalDuration?: () => number;
     getChildren?: RuntimeTimelineLike["getChildren"];
+    render?: RuntimeTimelineLike["render"];
   },
   t: number,
   structure?: GsapStructureKey,
@@ -33,10 +34,7 @@ export function rerenderGsapTimelineAt(
   );
   for (const [child] of skipped) child._ts = 0;
   try {
-    const below = t >= REDRAW_STEP;
-    timeline.totalTime(below ? t - REDRAW_STEP : t + REDRAW_STEP, true);
-    primeTweensStartingAt(children, t, below ? REDRAW_STEP : 0);
-    timeline.totalTime(t, true);
+    renderOntoInAuthoredOrder(timeline, children, t);
   } finally {
     for (const [child, timeScale] of skipped) child._ts = timeScale;
     for (const [parent, dur, tDur, end, dirty] of lengths) {
@@ -48,6 +46,21 @@ export function rerenderGsapTimelineAt(
     child._zTime = zTime;
     child._act = active;
   }
+}
+
+function renderOntoInAuthoredOrder(
+  timeline: Parameters<typeof rerenderGsapTimelineAt>[0],
+  children: unknown[],
+  t: number,
+): void {
+  const below = t >= REDRAW_STEP;
+  if (!below && timeline.render) {
+    timeline.render(t, true, true);
+    return;
+  }
+  timeline.totalTime(below ? t - REDRAW_STEP : t + REDRAW_STEP, true);
+  primeTweensStartingAt(children, t, below ? REDRAW_STEP : 0);
+  timeline.totalTime(t, true);
 }
 
 type GsapRenderState = { _initted?: number };
@@ -73,14 +86,16 @@ export function seekGsapTimeline(
     timeline.seek(t, suppressEvents);
     return false;
   }
-  const gsapSkipsRenderInPlace = Number(timeline.totalTime()) === t;
+  const from = Number(timeline.totalTime());
   timeline.totalTime(t, suppressEvents);
-  if (!gsapSkipsRenderInPlace || !gsapNeverRendered(timeline)) return false;
+  const landedBackwardOnSameTimeSteps = t < from;
+  if (!landedBackwardOnSameTimeSteps && (from !== t || !gsapNeverRendered(timeline))) return false;
   rerenderGsapTimelineAt(
     {
       totalTime: timeline.totalTime.bind(timeline),
       totalDuration: timeline.totalDuration?.bind(timeline),
       getChildren: timeline.getChildren?.bind(timeline),
+      render: timeline.render?.bind(timeline),
     },
     t,
   );
@@ -282,6 +297,7 @@ export function createGsapAdapter(deps: GsapAdapterDeps): RuntimeDeterministicAd
             totalTime: timeline.totalTime.bind(timeline),
             totalDuration: timeline.totalDuration?.bind(timeline),
             getChildren: timeline.getChildren?.bind(timeline),
+            render: timeline.render?.bind(timeline),
           },
           safeTime,
         );
