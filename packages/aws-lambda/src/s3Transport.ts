@@ -148,15 +148,6 @@ export async function uploadContentAddressedFileToS3(
   if (!existsSync(localPath)) {
     throw new Error(`[s3Transport] upload source missing: ${localPath}`);
   }
-  const actualSha256 = await sha256File(localPath);
-  if (actualSha256 !== expectedSha256) {
-    const error = new Error(
-      `[s3Transport] PLAN_ARTIFACT_DIGEST_MISMATCH: local artifact ${localPath} expected ${expectedSha256}, got ${actualSha256}`,
-    );
-    error.name = "PLAN_ARTIFACT_DIGEST_MISMATCH";
-    throw error;
-  }
-
   const { bucket, key } = parseS3Uri(uri);
   const size = statSync(localPath).size;
   const existing = await inspectContentAddressedObject(client, bucket, key, size, expectedSha256);
@@ -173,6 +164,7 @@ export async function uploadContentAddressedFileToS3(
         ContentType: contentType,
         ContentLength: size,
         Metadata: { sha256: expectedSha256 },
+        // S3 rejects the PUT when the streamed bytes do not hash to this.
         ChecksumSHA256: Buffer.from(expectedSha256, "hex").toString("base64"),
         // HEAD followed by an unconditional PUT can overwrite a conflicting
         // object published by a concurrent planner. Conditional create makes

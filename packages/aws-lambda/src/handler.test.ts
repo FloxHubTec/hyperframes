@@ -15,7 +15,7 @@
  * the glue's contract.
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -619,6 +619,10 @@ describe("handler dispatch", () => {
       skipChromeResolution: true,
     };
 
+    const logged: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation((line: string) => {
+      logged.push(line);
+    });
     const planned = await handler(
       {
         Action: "plan",
@@ -627,7 +631,12 @@ describe("handler dispatch", () => {
         Config: { fps: 30, width: 640, height: 360, format: "mp4" },
       },
       deps,
-    );
+    ).finally(() => logSpy.mockRestore());
+    const stageLines = logged
+      .filter((line) => line.includes('"plan_stage"'))
+      .map((line) => JSON.parse(line) as { stage?: string; ms?: unknown });
+    expect(stageLines.map((line) => line.stage)).toEqual(["download", "untar"]);
+    expect(stageLines.every((line) => typeof line.ms === "number")).toBe(true);
     expect(planned).toMatchObject({
       PlanProtocol: "v2",
       PlanV2ManifestS3Uri: "s3://bucket/renders/v2/v2/manifest.json",

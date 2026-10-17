@@ -413,8 +413,12 @@ async function handlePlanV2(
   const projectArchive = join(work, "project.tar.gz");
   const projectDir = join(work, "project");
   try {
+    let stageStarted = Date.now();
     await downloadS3ObjectToFile(s3, event.ProjectS3Uri, projectArchive);
+    logEvent({ event: "plan_stage", stage: "download", ms: Date.now() - stageStarted });
+    stageStarted = Date.now();
     await untarDirectory(projectArchive, projectDir);
+    logEvent({ event: "plan_stage", stage: "untar", ms: Date.now() - stageStarted });
     const publisher = new S3PlanV2ArtifactPublisher({
       s3,
       planOutputS3Prefix: event.PlanOutputS3Prefix,
