@@ -6,7 +6,7 @@ import {
   type SFNClient,
 } from "@aws-sdk/client-sfn";
 import { computeRenderCost } from "./costAccounting.js";
-import { getRenderProgress } from "./getRenderProgress.js";
+import { createProgressSfnClient, getRenderProgress } from "./getRenderProgress.js";
 
 interface DescribeShape {
   status?: string;
@@ -17,19 +17,30 @@ interface DescribeShape {
 interface FakeInput {
   executionArn?: string;
   mapRunArn?: string;
+  statusFilter?: string;
   nextToken?: string;
+}
+
+interface FakeChild {
+  status: string;
+  history: HistoryEvent[];
 }
 
 class FakeSFN {
   describe: DescribeShape = {};
   // Pages of history events; FakeSFN walks them in order, paginating with `nextToken`.
   historyPages: HistoryEvent[][] = [];
-  // Distributed Map child executions: map run ARN -> child ARNs, child ARN -> its history.
-  mapRunChildren: Record<string, string[]> = {};
-  childHistories: Record<string, HistoryEvent[]> = {};
+  // Distributed Map: map run ARN -> item counts and child executions (child ARN -> status + history).
+  mapRunCounts: Record<string, Record<string, number>> = {};
+  mapRunChildren: Record<string, Record<string, FakeChild>> = {};
+  calls: string[] = [];
   async send(command: unknown): Promise<unknown> {
     const { constructor, input } = command as { constructor: { name: string }; input: FakeInput };
+    this.calls.push(constructor.name);
     if (constructor.name === "DescribeExecutionCommand") return this.describeResult();
+    if (constructor.name === "DescribeMapRunCommand") {
+      return { itemCounts: this.mapRunCounts[input.mapRunArn ?? ""] };
+    }
     if (constructor.name === "ListExecutionsCommand") return this.listResult(input);
     if (constructor.name === "GetExecutionHistoryCommand") return this.historyResult(input);
     throw new Error(`FakeSFN: unexpected command ${constructor.name}`);
@@ -41,13 +52,16 @@ class FakeSFN {
       stopDate: this.describe.stopDate,
     };
   }
-  private listResult({ mapRunArn = "" }: FakeInput): unknown {
-    const arns = this.mapRunChildren[mapRunArn] ?? [];
-    return { executions: arns.map((executionArn) => ({ executionArn })) };
+  private listResult({ mapRunArn = "", statusFilter }: FakeInput): unknown {
+    const children = Object.entries(this.mapRunChildren[mapRunArn] ?? {});
+    const matching = children.filter(([, c]) => !statusFilter || c.status === statusFilter);
+    return { executions: matching.map(([executionArn]) => ({ executionArn })) };
   }
   private historyResult({ executionArn = "", nextToken }: FakeInput): unknown {
-    const child = this.childHistories[executionArn];
-    return historyPage(child ? [child] : this.historyPages, Number(nextToken ?? 0));
+    const child = Object.values(this.mapRunChildren)
+      .map((children) => children[executionArn])
+      .find(Boolean);
+    return historyPage(child ? [child.history] : this.historyPages, Number(nextToken ?? 0));
   }
 }
 
@@ -310,14 +324,15 @@ describe("getRenderProgress", () => {
     expect(progress.overallProgress).toBe(1);
   });
 
-  it("reads chunk frames, cost and errors from Distributed Map child executions", async () => {
-    const sfn = new FakeSFN();
+  describe("Distributed Map chunks", () => {
     const mapRunArn = "arn:aws:states:us-east-2:0:mapRun:hf-render/RenderChunksV2:run";
-    sfn.historyPages = [
-      [
+    const CHUNKS = 225;
+
+    function parentUntilMapRun(totalFrames: number): HistoryEvent[] {
+      return [
         stateEntered("PlanV2"),
         taskScheduled(),
-        taskSucceeded({ TotalFrames: 300, DurationMs: 1000 }),
+        taskSucceeded({ TotalFrames: totalFrames, DurationMs: 1000 }),
         {
           type: "MapStateEntered",
           id: 1,
@@ -330,33 +345,132 @@ describe("getRenderProgress", () => {
           timestamp: new Date(),
           mapRunStartedEventDetails: { mapRunArn },
         } as HistoryEvent,
-      ],
-    ];
-    sfn.mapRunChildren[mapRunArn] = ["child-0", "child-1"];
-    sfn.childHistories["child-0"] = [
-      stateEntered("RenderChunkV2"),
-      taskScheduled(),
-      taskSucceeded({ FramesEncoded: 150, DurationMs: 4000 }),
-    ];
-    sfn.childHistories["child-1"] = [
-      stateEntered("RenderChunkV2"),
-      taskScheduled(),
-      taskFailed("PLAN_HASH_MISMATCH", "hash drift"),
-    ];
-    const p = await getRenderProgress({ executionArn: "arn:x", sfn: sfn as unknown as SFNClient });
-    expect(p.framesRendered).toBe(150);
-    expect(p.overallProgress).toBeCloseTo(0.1 + 0.8 * 0.5, 5);
-    expect(p.lambdasInvoked).toBe(3);
-    const billed = [1000, 4000].map((billedDurationMs) => ({
-      billedDurationMs,
-      memorySizeMb: 10240,
-      estimated: false,
-    }));
-    expect(p.costs.breakdown.lambdaUsd).toBe(computeRenderCost(billed, 0).breakdown.lambdaUsd);
-    expect(p.errors).toEqual([
-      { state: "RenderChunkV2", error: "PLAN_HASH_MISMATCH", cause: "hash drift" },
-    ]);
+      ];
+    }
+
+    function chunkChild(status: string, last: HistoryEvent): FakeChild {
+      return { status, history: [stateEntered("RenderChunkV2"), taskScheduled(), last] };
+    }
+
+    // Children with real histories, so a per-child reader would find (and pay for) all of them.
+    function fakeWithChildren(statuses: string[]): FakeSFN {
+      const sfn = new FakeSFN();
+      sfn.historyPages = [parentUntilMapRun(3600)];
+      sfn.mapRunChildren[mapRunArn] = Object.fromEntries(
+        statuses.map((status, i) => [
+          `child-${i}`,
+          status === "FAILED"
+            ? chunkChild(status, taskFailed("PLAN_HASH_MISMATCH", `chunk ${i} hash drift`))
+            : chunkChild(status, taskSucceeded({ FramesEncoded: 16, DurationMs: 4000 })),
+        ]),
+      );
+      return sfn;
+    }
+
+    it("polls 225 running chunks with a constant number of calls", async () => {
+      const statuses = Array.from({ length: CHUNKS }, (_, i) =>
+        i < 125 ? "SUCCEEDED" : "RUNNING",
+      );
+      const sfn = fakeWithChildren(statuses);
+      sfn.mapRunCounts[mapRunArn] = { total: CHUNKS, pending: 0, running: 100, succeeded: 125 };
+      const p = await getRenderProgress({
+        executionArn: "arn:x",
+        sfn: sfn as unknown as SFNClient,
+      });
+      expect(sfn.calls).toEqual([
+        "DescribeExecutionCommand",
+        "GetExecutionHistoryCommand",
+        "DescribeMapRunCommand",
+      ]);
+      expect(p.framesRendered).toBe(Math.floor((3600 * 125) / CHUNKS));
+      expect(p.overallProgress).toBeCloseTo(0.1 + 0.8 * (125 / CHUNKS), 5);
+      expect(p.lambdasInvoked).toBe(1 + CHUNKS);
+      expect(p.errors).toEqual([]);
+    });
+
+    it("reads exact chunk frames and cost from the Map output once it exits", async () => {
+      const sfn = new FakeSFN();
+      const chunks = Array.from({ length: CHUNKS }, (_, i) => ({
+        ChunkIndex: i,
+        FramesEncoded: 16,
+        DurationMs: 4000,
+      }));
+      sfn.historyPages = [
+        [
+          ...parentUntilMapRun(3600),
+          {
+            type: "MapStateExited",
+            id: 1,
+            timestamp: new Date(),
+            stateExitedEventDetails: {
+              name: "RenderChunksV2",
+              output: JSON.stringify({ Chunks: chunks }),
+            },
+          } as HistoryEvent,
+        ],
+      ];
+      const p = await getRenderProgress({
+        executionArn: "arn:x",
+        sfn: sfn as unknown as SFNClient,
+      });
+      expect(sfn.calls).toEqual(["DescribeExecutionCommand", "GetExecutionHistoryCommand"]);
+      expect(p.framesRendered).toBe(3600);
+      expect(p.lambdasInvoked).toBe(1 + CHUNKS);
+      const billed = [1000, ...chunks.map((c) => c.DurationMs)].map((billedDurationMs) => ({
+        billedDurationMs,
+        memorySizeMb: 10240,
+        estimated: false,
+      }));
+      expect(p.costs.breakdown.lambdaUsd).toBe(computeRenderCost(billed, 0).breakdown.lambdaUsd);
+    });
+
+    it("surfaces a failed chunk's own error, reading only failed children", async () => {
+      const statuses = Array.from({ length: CHUNKS }, (_, i) =>
+        i === 7 ? "FAILED" : i < 100 ? "SUCCEEDED" : "ABORTED",
+      );
+      const sfn = fakeWithChildren(statuses);
+      sfn.mapRunCounts[mapRunArn] = { total: CHUNKS, succeeded: 99, failed: 1, aborted: 125 };
+      const p = await getRenderProgress({
+        executionArn: "arn:x",
+        sfn: sfn as unknown as SFNClient,
+      });
+      expect(p.errors).toEqual([
+        { state: "RenderChunkV2", error: "PLAN_HASH_MISMATCH", cause: "chunk 7 hash drift" },
+      ]);
+      expect(sfn.calls).toHaveLength(5);
+    });
   });
+
+  it("backs off on ThrottlingException and still returns progress", async () => {
+    let throttlesLeft = 3;
+    const targets: string[] = [];
+    const json = (statusCode: number, body: unknown) => ({
+      response: {
+        statusCode,
+        headers: { "content-type": "application/x-amz-json-1.0" },
+        body: new TextEncoder().encode(JSON.stringify(body)),
+      },
+    });
+    const sfn = createProgressSfnClient({
+      region: "us-east-2",
+      credentials: { accessKeyId: "a", secretAccessKey: "b" },
+      requestHandler: {
+        async handle(req: { headers: Record<string, string> }) {
+          targets.push(req.headers["x-amz-target"] ?? "");
+          if (throttlesLeft-- > 0) {
+            return json(400, { __type: "ThrottlingException", message: "Rate exceeded" });
+          }
+          if (req.headers["x-amz-target"]?.endsWith("DescribeExecution")) {
+            return json(200, { status: "RUNNING", startDate: 1_760_000_000 });
+          }
+          return json(200, { events: [] });
+        },
+      },
+    });
+    const p = await getRenderProgress({ executionArn: "arn:x", sfn });
+    expect(p.status).toBe("RUNNING");
+    expect(targets).toHaveLength(5);
+  }, 20_000);
 
   it("requires executionArn", async () => {
     await expect(getRenderProgress({ executionArn: "" })).rejects.toThrow(/executionArn/);

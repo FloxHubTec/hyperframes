@@ -345,6 +345,8 @@ export class HyperframesRenderStack extends Construct {
         "ChunkS3Uri.$": "$.Payload.ChunkS3Uri",
         "ChunkIndex.$": "$.Payload.ChunkIndex",
         "Sha256.$": "$.Payload.Sha256",
+        "FramesEncoded.$": "$.Payload.FramesEncoded",
+        "DurationMs.$": "$.Payload.DurationMs",
       },
     });
     renderChunkTask.addRetry({
@@ -362,7 +364,7 @@ export class HyperframesRenderStack extends Construct {
 
     const renderChunks = new sfn.DistributedMap(this, "RenderChunks", {
       label: "RenderChunks",
-      // STANDARD children: EXPRESS ones stop at 5 minutes and a chunk may run the Lambda's full 15.
+      // Standard-type children: express ones stop at 5 minutes and a chunk may run the Lambda's full 15.
       mapExecutionType: sfn.StateMachineType.STANDARD,
       itemsPath: "$.Iterator.ChunkIndexes",
       itemSelector: {
@@ -424,6 +426,8 @@ export class HyperframesRenderStack extends Construct {
         "ChunkS3Uri.$": "$.Payload.ChunkS3Uri",
         "ChunkIndex.$": "$.Payload.ChunkIndex",
         "Sha256.$": "$.Payload.Sha256",
+        "FramesEncoded.$": "$.Payload.FramesEncoded",
+        "DurationMs.$": "$.Payload.DurationMs",
       },
     });
     renderChunkV2Task.addRetry({ errors: NON_RETRYABLE_CHUNK, maxAttempts: 0 });

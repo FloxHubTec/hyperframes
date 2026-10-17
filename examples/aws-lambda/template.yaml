@@ -425,6 +425,8 @@ Resources:
                     ChunkS3Uri.$: "$.Payload.ChunkS3Uri"
                     ChunkIndex.$: "$.Payload.ChunkIndex"
                     Sha256.$: "$.Payload.Sha256"
+                    FramesEncoded.$: "$.Payload.FramesEncoded"
+                    DurationMs.$: "$.Payload.DurationMs"
                   Retry:
                     - ErrorEquals:
                         - FFMPEG_VERSION_MISMATCH
@@ -535,6 +537,8 @@ Resources:
                     ChunkS3Uri.$: "$.Payload.ChunkS3Uri"
                     ChunkIndex.$: "$.Payload.ChunkIndex"
                     Sha256.$: "$.Payload.Sha256"
+                    FramesEncoded.$: "$.Payload.FramesEncoded"
+                    DurationMs.$: "$.Payload.DurationMs"
                   Retry:
                     - ErrorEquals:
                         - FFMPEG_VERSION_MISMATCH
