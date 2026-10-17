@@ -137,3 +137,50 @@ it("keeps a clip's own rate when the transport rate is set while playing", () =>
   expect(rates.filter((rate) => Math.abs(rate - 1.15) > 1e-9)).toEqual([]);
   expect(video.playbackRate).toBeCloseTo(1.15, 9);
 });
+
+describe("pause placement", () => {
+  it("leaves a video leased while paused where its owner put it", () => {
+    const { player, video, step, seeks } = mountPlayer("", 20);
+    player.play();
+    step(3);
+    window.__hf!.leasePausedMedia!(video);
+    video.currentTime = 1;
+    seeks.length = 0;
+    player.pause();
+    step(3);
+    expect(seeks).toEqual([]);
+  });
+
+  it("still places an unleased video at the playhead", () => {
+    const { player, video, step, seeks } = mountPlayer("", 20);
+    player.play();
+    step(3);
+    video.currentTime = 1;
+    seeks.length = 0;
+    player.pause();
+    step(3);
+    expect(seeks).toEqual([0.3]);
+  });
+});
+
+it("does not move media on play while native media sync is disabled", () => {
+  const { player, video, step, seeks } = mountPlayer("", 20);
+  // What the slideshow player sends: its presenter drives the slide media itself.
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      source: window.parent,
+      data: {
+        source: "hf-parent",
+        type: "control",
+        action: "set-native-media-sync-disabled",
+        disabled: true,
+      },
+    }),
+  );
+  player.seek(5);
+  seeks.length = 0;
+  player.play();
+  step(3);
+  expect(seeks).toEqual([]);
+  expect(video.currentTime).toBe(0);
+});

@@ -3456,6 +3456,12 @@ export function initSandboxRuntimeModular(): void {
   };
   window.__hf.leasePausedMedia = leasePausedMedia;
   window.__hf.releasePausedMedia = releasePausedMedia;
+  // The clips the transport may move now; null while the host drives media itself (slideshow).
+  // A leased clip is not the transport's while paused; during playback it owns everything again.
+  const transportMovableClips = (clips: RuntimeMediaClip[]): RuntimeMediaClip[] | null => {
+    if (state.nativeMediaSyncDisabled) return null;
+    return state.isPlaying ? clips : clips.filter((clip) => !pausedMediaLeases.has(clip.el));
+  };
   window.__hf.setLoopStart = (seconds) => {
     loopStartSeconds = seconds != null && Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
   };
@@ -3567,17 +3573,13 @@ export function initSandboxRuntimeModular(): void {
       if (kf) clip.volumeKeyframes = kf;
     }
 
-    // A leased element is not the transport's to touch while the clock is paused;
-    // during playback the transport owns everything again. Filtered here rather
-    // than out of `mediaClips` so the in-window bookkeeping below still records it
-    // and the pass after its release visits it normally.
-    const syncedClips = state.isPlaying
-      ? mediaClips
-      : mediaClips.filter((clip) => !pausedMediaLeases.has(clip.el));
+    // Filtered here rather than out of `mediaClips` so the in-window bookkeeping
+    // below still records a leased clip and the pass after its release visits it.
+    const syncedClips = transportMovableClips(mediaClips);
 
     const forceSync = state.mediaForceSyncNextTick;
     if (forceSync) state.mediaForceSyncNextTick = false;
-    if (!state.nativeMediaSyncDisabled) {
+    if (syncedClips) {
       syncRuntimeMedia({
         clips: syncedClips,
         timeSeconds: state.currentTime,
@@ -5641,7 +5643,7 @@ export function initSandboxRuntimeModular(): void {
   const hardSyncAllMedia = (timeSeconds: number) => {
     // Same clips and source time as the media sync that follows, so it has nothing left to seek.
     const clips = withTimingResolver(() => buildRuntimeMediaCache().mediaClips);
-    for (const clip of clips) {
+    for (const clip of transportMovableClips(clips) ?? []) {
       if (!clip.el.isConnected || !isInClipWindow(timeSeconds, clip.start, clip.end)) continue;
       const target = mediaSourceTimeAt(clip, timeSeconds);
       // A seek flushes the decoder even when it lands where the video already is.
