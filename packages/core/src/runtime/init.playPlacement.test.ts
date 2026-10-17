@@ -27,6 +27,7 @@ function mountPlayer(videoAttrs: string, sourceDuration: number) {
   const video = document.querySelector("video")!;
   // A decoder in step with the mocked clock: its position advances at its rate while unpaused.
   const seeks: number[] = [];
+  const rates: number[] = [];
   let position = 0;
   let anchor = 0;
   let paused = true;
@@ -50,6 +51,7 @@ function mountPlayer(videoAttrs: string, sourceDuration: number) {
     playbackRate: {
       get: () => rate,
       set: (r: number) => {
+        rates.push(r);
         reanchor();
         rate = r;
       },
@@ -70,7 +72,7 @@ function mountPlayer(videoAttrs: string, sourceDuration: number) {
   video.load = vi.fn();
   window.__timelines = { main: createMockTimeline(10) };
   initSandboxRuntimeModular();
-  return { player: window.__player!, video, step, seeks };
+  return { player: window.__player!, video, step, seeks, rates };
 }
 
 afterEach(() => {
@@ -88,6 +90,7 @@ describe.each([
   it("lands at its source time in one seek when play is pressed", () => {
     const { player, video, step, seeks } = mountPlayer(attrs, sourceDuration);
     player.seek(5);
+    video.currentTime = 0;
     seeks.length = 0;
     player.play();
     step(3);
@@ -106,4 +109,31 @@ describe.each([
     expect(seeks).toEqual([atFiveAndAHalf]);
     expect(video.currentTime).toBeCloseTo(atFiveAndAHalf + 0.3 * rate, 5);
   });
+});
+
+it("does not seek a paused video already at its source time when play is pressed", () => {
+  const { player, video, step, seeks } = mountPlayer("", 20);
+  player.seek(5);
+  seeks.length = 0;
+  player.play();
+  step(3);
+  expect(seeks).toEqual([]);
+  expect(video.currentTime).toBeCloseTo(5.3, 5);
+});
+
+it("keeps a clip's own rate when the transport rate is set while playing", () => {
+  const { player, video, step, rates } = mountPlayer('data-playback-rate="1.15"', 20);
+  player.play();
+  step(3);
+  rates.length = 0;
+  // Studio sends the transport rate on every Play.
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      source: window.parent,
+      data: { source: "hf-parent", type: "control", action: "set-playback-rate", playbackRate: 1 },
+    }),
+  );
+  step(3);
+  expect(rates.filter((rate) => Math.abs(rate - 1.15) > 1e-9)).toEqual([]);
+  expect(video.playbackRate).toBeCloseTo(1.15, 9);
 });

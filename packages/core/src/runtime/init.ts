@@ -4540,16 +4540,6 @@ export function initSandboxRuntimeModular(): void {
     if (state.capturedTimeline && typeof state.capturedTimeline.timeScale === "function") {
       state.capturedTimeline.timeScale(state.playbackRate);
     }
-    const mediaEls = document.querySelectorAll("video, audio");
-    for (const el of mediaEls) {
-      if (!isMediaElement(el)) continue;
-      try {
-        el.playbackRate = state.playbackRate;
-      } catch (err) {
-        // ignore unsupported values
-        swallow("runtime.init.site10", err);
-      }
-    }
   };
 
   // A paused seek that would reveal undecoded images holds the previous picture until they decode.
@@ -5653,8 +5643,11 @@ export function initSandboxRuntimeModular(): void {
     const clips = withTimingResolver(() => buildRuntimeMediaCache().mediaClips);
     for (const clip of clips) {
       if (!clip.el.isConnected || !isInClipWindow(timeSeconds, clip.start, clip.end)) continue;
+      const target = mediaSourceTimeAt(clip, timeSeconds);
+      // A seek flushes the decoder even when it lands where the video already is.
+      if (Math.abs(clip.el.currentTime - target) <= 0.001) continue;
       try {
-        clip.el.currentTime = mediaSourceTimeAt(clip, timeSeconds);
+        clip.el.currentTime = target;
       } catch {
         // ignore seek restrictions
       }
