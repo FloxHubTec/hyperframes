@@ -112,7 +112,6 @@ export interface MuxVideoWithAudioOptions extends Partial<
    * source compatibility; it will be removed in a future major.
    */
   preserveAudioPrimingEditList?: boolean;
-  /** Hard cap copied audio to the already-encoded video's exact duration. */
 }
 
 async function shouldCopyAacSidecar(

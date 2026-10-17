@@ -133,10 +133,71 @@ export async function assemble(
 ): Promise<AssembleResult> {
   const start = Date.now();
   const log = options?.logger ?? defaultLogger;
-  const abortSignal = options?.abortSignal;
   const cfr = options?.cfr === true;
-  const { ffmpegProcessTimeout } = resolveConfig();
 
+  const plan = readAssemblePlan(planDir, chunkPaths);
+  if (plan.dimensions.format === "png-sequence") {
+    // ── 2a. png-sequence: merge frame directories with global re-numbering
+    return mergePngFrameDirs(chunkPaths, outputPath, plan.totalFrames, audioPath, start);
+  }
+
+  // ── 2b. mp4 / mov / webm: join + audio mux + faststart in one pass ─────
+  const format = plan.dimensions.format;
+  const cfrEncoder = cfr ? readCfrEncoder(planDir, format) : null;
+  if (!existsSync(dirname(outputPath))) {
+    mkdirSync(dirname(outputPath), { recursive: true });
+  }
+  const workDir = mkdtempSync(`${outputPath}.assemble-work-`);
+  const fps = { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen };
+  const stageMs: Record<string, number> = {};
+  const ctx: JoinContext = {
+    workDir,
+    format,
+    fps,
+    fpsArg: fpsToFfmpegArg(fps),
+    signal: options?.abortSignal,
+    timeout: resolveConfig().ffmpegProcessTimeout,
+    log,
+    timed: async (stage, run) => {
+      const stageStart = Date.now();
+      const result = await run();
+      stageMs[stage] = Date.now() - stageStart;
+      return result;
+    },
+  };
+
+  try {
+    const videoSources = cfrEncoder ? [await reencodeCfr(ctx, chunkPaths, cfrEncoder)] : chunkPaths;
+    const finalPath = join(workDir, `output.${format}`);
+    const audio = audioPath !== null && existsSync(audioPath) ? audioPath : null;
+    await writeJoined(ctx, videoSources, audio, finalPath);
+    renameSync(finalPath, outputPath);
+    log.info("[assemble] stage timings", {
+      ...stageMs,
+      chunks: chunkPaths.length,
+      totalMs: Date.now() - start,
+    });
+  } finally {
+    try {
+      rmSync(workDir, { recursive: true, force: true });
+    } catch (err) {
+      log.warn("[assemble] failed to remove work dir", {
+        workDir,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const fileSize = existsSync(outputPath) ? statSync(outputPath).size : 0;
+  return {
+    outputPath,
+    durationMs: Date.now() - start,
+    framesEncoded: plan.totalFrames,
+    fileSize,
+  };
+}
+
+function readAssemblePlan(planDir: string, chunkPaths: readonly string[]): PlanJsonForAssemble {
   // ── 1. Validate planDir manifest matches chunkPaths shape ──────────────
   const planJsonPath = join(planDir, "plan.json");
   const chunksJsonPath = join(planDir, "meta", "chunks.json");
@@ -163,132 +224,115 @@ export async function assemble(
     }
   }
 
-  if (plan.dimensions.format === "png-sequence") {
-    // ── 2a. png-sequence: merge frame directories with global re-numbering
-    return mergePngFrameDirs(chunkPaths, outputPath, plan.totalFrames, audioPath, start);
+  return plan;
+}
+
+interface JoinContext {
+  workDir: string;
+  format: DistributedFormat;
+  fps: { num: number; den: number };
+  fpsArg: string;
+  signal: AbortSignal | undefined;
+  timeout: number;
+  log: ProducerLogger;
+  timed: <T>(stage: string, run: () => Promise<T>) => Promise<T>;
+}
+
+// A one-entry concat list ignores the input-side `-r` (observed `359/12` in the
+// container), so a single file is read directly; every write also sets output `-r`.
+function videoInputArgs(ctx: JoinContext, videoSources: readonly string[]): string[] {
+  return videoSources.length === 1
+    ? ["-i", videoSources[0]!]
+    : concatDemuxerInput(videoSources, ctx.workDir, ctx.fpsArg);
+}
+
+// ── 2c. Optional exact-CFR re-encode ──────────────────────────────────
+// Lands the stream-level `avg_frame_rate` (PTS-derived under stream copy)
+// on the requested rational, for consumers that strict-check it.
+async function reencodeCfr(
+  ctx: JoinContext,
+  chunkPaths: readonly string[],
+  encoder: CfrRateControlSource,
+): Promise<string> {
+  const cfrOutputPath = join(ctx.workDir, `cfr.${ctx.format}`);
+  const cfrArgs = [
+    ...videoInputArgs(ctx, chunkPaths),
+    "-c:v",
+    "libx264",
+    ...cfrRateControlArgs(encoder),
+    "-pix_fmt",
+    "yuv420p",
+    "-fps_mode",
+    "cfr",
+    "-r",
+    ctx.fpsArg,
+  ];
+  appendRenderProvenanceArgs(cfrArgs, cfrOutputPath);
+  cfrArgs.push("-y", cfrOutputPath);
+  await ctx.timed("cfrMs", () =>
+    runAssembleFfmpeg(cfrArgs, "cfr re-encode", ctx.signal, ctx.timeout),
+  );
+  ctx.log.info("[assemble] cfr re-encode applied", {
+    format: ctx.format,
+    fpsNum: ctx.fps.num,
+    fpsDen: ctx.fps.den,
+  });
+  return cfrOutputPath;
+}
+
+// ── 3. Audio pad-or-trim, then one write of the deliverable ──────────
+async function writeJoined(
+  ctx: JoinContext,
+  videoSources: readonly string[],
+  audioPath: string | null,
+  finalPath: string,
+): Promise<void> {
+  if (audioPath === null) {
+    const joinArgs = [...videoInputArgs(ctx, videoSources), "-c", "copy"];
+    if (ctx.format === "mp4") joinArgs.push("-movflags", "+faststart");
+    appendRenderProvenanceArgs(joinArgs, finalPath);
+    joinArgs.push("-r", ctx.fpsArg, "-y", finalPath);
+    await ctx.timed("joinMs", () =>
+      runAssembleFfmpeg(joinArgs, "concat-copy", ctx.signal, ctx.timeout),
+    );
+    return;
   }
-
-  // ── 2b. mp4 / mov / webm: join + audio mux + faststart in one pass ─────
-  const format = plan.dimensions.format;
-  const fps = { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen };
-  const fpsArg = fpsToFfmpegArg(fps);
-  const cfrEncoder = cfr ? readCfrEncoder(planDir, format) : null;
-  if (!existsSync(dirname(outputPath))) {
-    mkdirSync(dirname(outputPath), { recursive: true });
+  const paddedAudioPath = join(ctx.workDir, "audio-padded.m4a");
+  const padTrimResult = await ctx.timed("audioMs", () =>
+    padOrTrimAudioToVideoFrameCount({
+      videoPath: videoSources[0]!,
+      probeVideoFrameInfo: () => probeJoinedFrameInfo(videoSources, ctx.fps, ctx.signal),
+      audioPath,
+      outputPath: paddedAudioPath,
+      signal: ctx.signal,
+      timeoutMs: ctx.timeout,
+    }),
+  );
+  if (!padTrimResult.success) {
+    throw encoderFailureError("[assemble] audio pad/trim failed", padTrimResult);
   }
-  const workDir = mkdtempSync(`${outputPath}.assemble-work-`);
-  const stageMs: Record<string, number> = {};
-  const timed = async <T>(stage: string, run: () => Promise<T>): Promise<T> => {
-    const stageStart = Date.now();
-    const result = await run();
-    stageMs[stage] = Date.now() - stageStart;
-    return result;
-  };
-
-  try {
-    // A one-entry concat list ignores the input-side `-r` (observed `359/12`
-    // in the container), so a single file is read directly; every write below
-    // also sets `-r` on the output.
-    let videoSources = chunkPaths;
-    const videoInputArgs = () =>
-      videoSources.length === 1
-        ? ["-i", videoSources[0]!]
-        : concatDemuxerInput(videoSources, workDir, fpsArg);
-
-    // ── 2c. Optional exact-CFR re-encode ──────────────────────────────────
-    // Lands the stream-level `avg_frame_rate` (PTS-derived under stream copy)
-    // on the requested rational, for consumers that strict-check it.
-    if (cfrEncoder) {
-      const cfrOutputPath = join(workDir, `cfr.${format}`);
-      const cfrArgs = [
-        ...videoInputArgs(),
-        "-c:v",
-        "libx264",
-        ...cfrRateControlArgs(cfrEncoder),
-        "-pix_fmt",
-        "yuv420p",
-        "-fps_mode",
-        "cfr",
-        "-r",
-        fpsArg,
-      ];
-      appendRenderProvenanceArgs(cfrArgs, cfrOutputPath);
-      cfrArgs.push("-y", cfrOutputPath);
-      await timed("cfrMs", () =>
-        runAssembleFfmpeg(cfrArgs, "cfr re-encode", abortSignal, ffmpegProcessTimeout),
-      );
-      videoSources = [cfrOutputPath];
-      log.info("[assemble] cfr re-encode applied", { format, fpsNum: fps.num, fpsDen: fps.den });
-    }
-
-    // ── 3. Audio pad-or-trim, then one write of the deliverable ──────────
-    const finalPath = join(workDir, `output.${format}`);
-    if (audioPath !== null && existsSync(audioPath)) {
-      const paddedAudioPath = join(workDir, "audio-padded.m4a");
-      const padTrimResult = await timed("audioMs", () =>
-        padOrTrimAudioToVideoFrameCount({
-          videoPath: videoSources[0]!,
-          probeVideoFrameInfo: () => probeJoinedFrameInfo(videoSources, fps, abortSignal),
-          audioPath,
-          outputPath: paddedAudioPath,
-          signal: abortSignal,
-          timeoutMs: ffmpegProcessTimeout,
-        }),
-      );
-      if (!padTrimResult.success) {
-        throw encoderFailureError("[assemble] audio pad/trim failed", padTrimResult);
-      }
-      log.info("[assemble] audio normalized for mux", {
-        operation: padTrimResult.operation,
-        targetDurationSeconds: padTrimResult.targetDurationSeconds,
-        sourceDurationSeconds: padTrimResult.sourceDurationSeconds,
-      });
-      const muxResult = await timed("joinMs", () =>
-        muxVideoWithAudio(
-          videoSources[0]!,
-          paddedAudioPath,
-          finalPath,
-          abortSignal,
-          { audioCodec: "aac", ffmpegProcessTimeout, videoInputArgs: videoInputArgs() },
-          fps,
-        ),
-      );
-      if (!muxResult.success) {
-        throw encoderFailureError("[assemble] audio mux failed", muxResult);
-      }
-    } else {
-      const joinArgs = [...videoInputArgs(), "-c", "copy"];
-      if (format === "mp4") joinArgs.push("-movflags", "+faststart");
-      appendRenderProvenanceArgs(joinArgs, finalPath);
-      joinArgs.push("-r", fpsArg, "-y", finalPath);
-      await timed("joinMs", () =>
-        runAssembleFfmpeg(joinArgs, "concat-copy", abortSignal, ffmpegProcessTimeout),
-      );
-    }
-    renameSync(finalPath, outputPath);
-    log.info("[assemble] stage timings", {
-      ...stageMs,
-      chunks: chunkPaths.length,
-      totalMs: Date.now() - start,
-    });
-  } finally {
-    try {
-      rmSync(workDir, { recursive: true, force: true });
-    } catch (err) {
-      log.warn("[assemble] failed to remove work dir", {
-        workDir,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+  ctx.log.info("[assemble] audio normalized for mux", {
+    operation: padTrimResult.operation,
+    targetDurationSeconds: padTrimResult.targetDurationSeconds,
+    sourceDurationSeconds: padTrimResult.sourceDurationSeconds,
+  });
+  const muxResult = await ctx.timed("joinMs", () =>
+    muxVideoWithAudio(
+      videoSources[0]!,
+      paddedAudioPath,
+      finalPath,
+      ctx.signal,
+      {
+        audioCodec: "aac",
+        ffmpegProcessTimeout: ctx.timeout,
+        videoInputArgs: videoInputArgs(ctx, videoSources),
+      },
+      ctx.fps,
+    ),
+  );
+  if (!muxResult.success) {
+    throw encoderFailureError("[assemble] audio mux failed", muxResult);
   }
-
-  const fileSize = existsSync(outputPath) ? statSync(outputPath).size : 0;
-  return {
-    outputPath,
-    durationMs: Date.now() - start,
-    framesEncoded: plan.totalFrames,
-    fileSize,
-  };
 }
 
 /** Concat-demuxer input args; `-r` keeps the demuxer from PTS-averaging the rate. */
