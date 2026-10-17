@@ -10,14 +10,10 @@
  * decodable). For png-sequence chunks (each chunk is a directory of
  * frames) this is a straight directory merge with global re-numbering.
  *
- * Mux + faststart for mp4 / mov / webm go through the engine's
- * `muxVideoWithAudio` + `applyFaststart` helpers — same path the
- * in-process renderer uses; we just feed concat output rather than
- * streaming-encoder output. (Faststart is a no-op for webm and mov —
- * applyFaststart copies the input verbatim.) Audio length is
- * pad-or-trimmed to `frameCount / fps` via
- * `padOrTrimAudioToVideoFrameCount` so the mux step doesn't introduce
- * sub-millisecond drift at the end of long renders.
+ * Join, audio mux and mp4 faststart run as one ffmpeg pass over the concat
+ * demuxer, so disk holds the chunks plus one output copy. Audio is first
+ * pad-or-trimmed to `frameCount / fps` (frames summed over the chunks) so
+ * the mux adds no drift at the end of long renders.
  *
  * Pure function over local paths. No networking. The caller is responsible
  * for moving `outputPath` to its orchestration-level storage.
@@ -30,6 +26,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -37,7 +34,6 @@ import {
 import { dirname, join } from "node:path";
 import {
   appendRenderProvenanceArgs,
-  applyFaststart,
   describeFfmpegFailure,
   getEncoderPreset,
   MIXED_AUDIO_FILENAME,
@@ -48,7 +44,11 @@ import {
 import { fpsToFfmpegArg } from "@hyperframes/core";
 import { defaultLogger, type ProducerLogger } from "../../logger.js";
 import { formatExportFrameName } from "../../utils/paths.js";
-import { padOrTrimAudioToVideoFrameCount } from "../render/audioPadTrim.js";
+import {
+  defaultProbeVideoFrameInfo,
+  padOrTrimAudioToVideoFrameCount,
+  type ProbeVideoFrameInfo,
+} from "../render/audioPadTrim.js";
 import { encoderFailureError } from "../render/encoderInterruption.js";
 import type { ChunkSliceJson, LockedRenderConfig } from "../render/stages/freezePlan.js";
 import { DISTRIBUTED_RENDER_CAPABILITIES, readPlanProtocolV1 } from "./planProtocol.js";
@@ -168,132 +168,43 @@ export async function assemble(
     return mergePngFrameDirs(chunkPaths, outputPath, plan.totalFrames, audioPath, start);
   }
 
-  // ── 2b. mp4 / mov / webm: concat-copy then mux + faststart ────────────
+  // ── 2b. mp4 / mov / webm: join + audio mux + faststart in one pass ─────
+  const format = plan.dimensions.format;
+  const fps = { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen };
+  const fpsArg = fpsToFfmpegArg(fps);
+  const cfrEncoder = cfr ? readCfrEncoder(planDir, format) : null;
   if (!existsSync(dirname(outputPath))) {
     mkdirSync(dirname(outputPath), { recursive: true });
   }
   const workDir = mkdtempSync(`${outputPath}.assemble-work-`);
+  const stageMs: Record<string, number> = {};
+  const timed = async <T>(stage: string, run: () => Promise<T>): Promise<T> => {
+    const stageStart = Date.now();
+    const result = await run();
+    stageMs[stage] = Date.now() - stageStart;
+    return result;
+  };
 
   try {
-    const concatOutputPath = join(workDir, `concat.${plan.dimensions.format}`);
-    const fpsArg = fpsToFfmpegArg({
-      num: plan.dimensions.fpsNum,
-      den: plan.dimensions.fpsDen,
-    });
-
-    // Single-chunk renders bypass the concat demuxer entirely. ffmpeg's
-    // concat demuxer with a one-entry list re-runs as a straight remux of
-    // the single source, and in that path the input-side `-r` flag does
-    // not consistently override the source's PTS-derived r_frame_rate
-    // (observed: `359/12` carrying through to the output container while
-    // the equivalent multi-chunk path produces `30/1` exact). Running a
-    // direct `-c copy` remux with `-r <fps>` as an output flag gives the
-    // muxer the authoritative rate to stamp into the container without
-    // touching the encoded stream. Multi-chunk renders continue through
-    // the concat demuxer where the existing `-r` input flag works.
-    if (chunkPaths.length === 1) {
-      const remuxArgs = ["-i", chunkPaths[0]!, "-c", "copy", "-r", fpsArg];
-      appendRenderProvenanceArgs(remuxArgs, concatOutputPath);
-      remuxArgs.push("-y", concatOutputPath);
-      const remuxResult = await runFfmpeg(remuxArgs, {
-        signal: abortSignal,
-        timeout: ffmpegProcessTimeout,
-      });
-      if (!remuxResult.success) {
-        throw encoderFailureError("[assemble] ffmpeg single-chunk remux failed", {
-          error: describeFfmpegFailure(remuxResult, ffmpegProcessTimeout),
-          failureReason: remuxResult.failureReason,
-        });
-      }
-    } else {
-      // Concat list file — one `file '<path>'` per chunk, in order. ffmpeg's
-      // concat demuxer escapes single quotes via `'\''`; we replicate that
-      // here so chunk paths containing quotes don't break the parser.
-      const concatListPath = join(workDir, "concat-list.txt");
-      const concatBody = chunkPaths
-        .map((path) => `file '${path.replace(/'/g, "'\\''")}'`)
-        .join("\n");
-      writeFileSync(concatListPath, `${concatBody}\n`, "utf-8");
-
-      // Set the exact input framerate so the concat demuxer doesn't
-      // PTS-average a fractional rational like `360000/12001` instead
-      // of `30/1` into the output container metadata. `-c copy` is
-      // retained; no re-encode.
-      const concatArgs = [
-        "-r",
-        fpsArg,
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        concatListPath,
-        "-c",
-        "copy",
-      ];
-      appendRenderProvenanceArgs(concatArgs, concatOutputPath);
-      concatArgs.push("-y", concatOutputPath);
-      const concatResult = await runFfmpeg(concatArgs, {
-        signal: abortSignal,
-        timeout: ffmpegProcessTimeout,
-      });
-      if (!concatResult.success) {
-        throw encoderFailureError("[assemble] ffmpeg concat-copy failed", {
-          error: describeFfmpegFailure(concatResult, ffmpegProcessTimeout),
-          failureReason: concatResult.failureReason,
-        });
-      }
-    }
+    // A one-entry concat list ignores the input-side `-r` (observed `359/12`
+    // in the container), so a single file is read directly; every write below
+    // also sets `-r` on the output.
+    let videoSources = chunkPaths;
+    const videoInputArgs = () =>
+      videoSources.length === 1
+        ? ["-i", videoSources[0]!]
+        : concatDemuxerInput(videoSources, workDir, fpsArg);
 
     // ── 2c. Optional exact-CFR re-encode ──────────────────────────────────
-    // The concat / single-chunk step produces a stream-copy intermediate
-    // whose container `r_frame_rate` is exact but whose stream-level
-    // `avg_frame_rate` stays PTS-derived (concat-copy carries each chunk's
-    // original PTS unmodified). For consumers that strict-check
-    // `avg_frame_rate` or ms-precision duration (broadcast workflows,
-    // frame-accurate compositors, some third-party transcoders), an
-    // opt-in re-encode with `-fps_mode cfr -r <fps>` lands the stream's
-    // avg-frame-rate on the requested rational exactly. Restricted to
-    // mp4 / libx264 — webm and mov go through their own stream-copy
-    // paths that don't exhibit the same avg-frame-rate drift, and h265
-    // mp4 would silently transcode to h264 under the hardcoded
-    // `-c:v libx264` re-encode (a typed throw is preferable to silent
-    // codec loss).
-    let postConcatPath = concatOutputPath;
-    if (cfr) {
-      if (plan.dimensions.format !== "mp4") {
-        throw new Error(
-          `[assemble] cfr=true is only supported for format="mp4" (got ` +
-            `"${plan.dimensions.format}"). Stream-copy paths for webm and mov ` +
-            `already produce exact avg_frame_rate; cfr re-encode is not needed.`,
-        );
-      }
-      // Read `meta/encoder.json` to detect the chunk encoder. The cfr
-      // re-encode hardcodes `-c:v libx264`; pairing it with h265 chunks
-      // would silently transcode them to h264. Throw a typed error so the
-      // caller surfaces the conflict instead of producing a wrong-codec
-      // deliverable.
-      const encoderJsonPath = join(planDir, "meta", "encoder.json");
-      if (!existsSync(encoderJsonPath)) {
-        throw new Error(`[assemble] planDir missing meta/encoder.json: ${encoderJsonPath}`);
-      }
-      const encoderJson = JSON.parse(
-        readFileSync(encoderJsonPath, "utf-8"),
-      ) as CfrRateControlSource & { encoder?: string };
-      if (encoderJson.encoder === "libx265-software") {
-        throw new Error(
-          `[assemble] cfr=true is not yet supported with codec: "h265". The ` +
-            `cfr re-encode pass uses libx264 and would silently transcode the ` +
-            `h265 chunks. Either disable cfr or render with codec: "h264".`,
-        );
-      }
-      const cfrOutputPath = join(workDir, `cfr.${plan.dimensions.format}`);
+    // Lands the stream-level `avg_frame_rate` (PTS-derived under stream copy)
+    // on the requested rational, for consumers that strict-check it.
+    if (cfrEncoder) {
+      const cfrOutputPath = join(workDir, `cfr.${format}`);
       const cfrArgs = [
-        "-i",
-        concatOutputPath,
+        ...videoInputArgs(),
         "-c:v",
         "libx264",
-        ...cfrRateControlArgs(encoderJson),
+        ...cfrRateControlArgs(cfrEncoder),
         "-pix_fmt",
         "yuv420p",
         "-fps_mode",
@@ -303,83 +214,63 @@ export async function assemble(
       ];
       appendRenderProvenanceArgs(cfrArgs, cfrOutputPath);
       cfrArgs.push("-y", cfrOutputPath);
-      const cfrResult = await runFfmpeg(cfrArgs, {
-        signal: abortSignal,
-        timeout: ffmpegProcessTimeout,
-      });
-      if (!cfrResult.success) {
-        throw encoderFailureError("[assemble] ffmpeg cfr re-encode failed", {
-          error: describeFfmpegFailure(cfrResult, ffmpegProcessTimeout),
-          failureReason: cfrResult.failureReason,
-        });
-      }
-      postConcatPath = cfrOutputPath;
-      log.info("[assemble] cfr re-encode applied", {
-        format: plan.dimensions.format,
-        fpsNum: plan.dimensions.fpsNum,
-        fpsDen: plan.dimensions.fpsDen,
-      });
+      await timed("cfrMs", () =>
+        runAssembleFfmpeg(cfrArgs, "cfr re-encode", abortSignal, ffmpegProcessTimeout),
+      );
+      videoSources = [cfrOutputPath];
+      log.info("[assemble] cfr re-encode applied", { format, fpsNum: fps.num, fpsDen: fps.den });
     }
 
-    // ── 3. Audio: pad-or-trim then mux ────────────────────────────────────
-    let normalizedAudioPath: string | null = null;
+    // ── 3. Audio pad-or-trim, then one write of the deliverable ──────────
+    const finalPath = join(workDir, `output.${format}`);
     if (audioPath !== null && existsSync(audioPath)) {
       const paddedAudioPath = join(workDir, "audio-padded.m4a");
-      const padTrimResult = await padOrTrimAudioToVideoFrameCount({
-        videoPath: postConcatPath,
-        audioPath,
-        outputPath: paddedAudioPath,
-        signal: abortSignal,
-        timeoutMs: ffmpegProcessTimeout,
-      });
+      const padTrimResult = await timed("audioMs", () =>
+        padOrTrimAudioToVideoFrameCount({
+          videoPath: videoSources[0]!,
+          probeVideoFrameInfo: () => probeJoinedFrameInfo(videoSources, fps, abortSignal),
+          audioPath,
+          outputPath: paddedAudioPath,
+          signal: abortSignal,
+          timeoutMs: ffmpegProcessTimeout,
+        }),
+      );
       if (!padTrimResult.success) {
         throw encoderFailureError("[assemble] audio pad/trim failed", padTrimResult);
       }
-      normalizedAudioPath = paddedAudioPath;
       log.info("[assemble] audio normalized for mux", {
         operation: padTrimResult.operation,
         targetDurationSeconds: padTrimResult.targetDurationSeconds,
         sourceDurationSeconds: padTrimResult.sourceDurationSeconds,
       });
-    }
-
-    // mux + faststart paths mirror `runAssembleStage` for in-process renders
-    // (`render/stages/assembleStage.ts`). We can't call that stage directly
-    // because it operates on a `RenderJob` and emits `updateJobStatus`
-    // payloads — the distributed activity has no job to thread through.
-    const muxOutputPath =
-      normalizedAudioPath !== null
-        ? join(workDir, `mux.${plan.dimensions.format}`)
-        : postConcatPath;
-    if (normalizedAudioPath !== null) {
-      const muxResult = await muxVideoWithAudio(
-        postConcatPath,
-        normalizedAudioPath,
-        muxOutputPath,
-        abortSignal,
-        { audioCodec: "aac", ffmpegProcessTimeout },
-        { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen },
+      const muxResult = await timed("joinMs", () =>
+        muxVideoWithAudio(
+          videoSources[0]!,
+          paddedAudioPath,
+          finalPath,
+          abortSignal,
+          { audioCodec: "aac", ffmpegProcessTimeout, videoInputArgs: videoInputArgs() },
+          fps,
+        ),
       );
       if (!muxResult.success) {
         throw encoderFailureError("[assemble] audio mux failed", muxResult);
       }
+    } else {
+      const joinArgs = [...videoInputArgs(), "-c", "copy"];
+      if (format === "mp4") joinArgs.push("-movflags", "+faststart");
+      appendRenderProvenanceArgs(joinArgs, finalPath);
+      joinArgs.push("-r", fpsArg, "-y", finalPath);
+      await timed("joinMs", () =>
+        runAssembleFfmpeg(joinArgs, "concat-copy", abortSignal, ffmpegProcessTimeout),
+      );
     }
-
-    // applyFaststart is a no-op for `.mov` (it copies the input to output);
-    // we still call it so the success path produces `outputPath` regardless.
-    const faststartResult = await applyFaststart(
-      muxOutputPath,
-      outputPath,
-      abortSignal,
-      { ffmpegProcessTimeout },
-      {
-        num: plan.dimensions.fpsNum,
-        den: plan.dimensions.fpsDen,
-      },
-    );
-    if (!faststartResult.success) {
-      throw encoderFailureError("[assemble] faststart failed", faststartResult);
-    }
+    renameSync(finalPath, outputPath);
+    log.info("[assemble] stage timings", {
+      ...stageMs,
+      chunks: chunkPaths.length,
+      totalMs: Date.now() - start,
+    });
   } finally {
     try {
       rmSync(workDir, { recursive: true, force: true });
@@ -398,6 +289,79 @@ export async function assemble(
     framesEncoded: plan.totalFrames,
     fileSize,
   };
+}
+
+/** Concat-demuxer input args; `-r` keeps the demuxer from PTS-averaging the rate. */
+function concatDemuxerInput(
+  chunkPaths: readonly string[],
+  workDir: string,
+  fpsArg: string,
+): string[] {
+  // ffmpeg's concat list escapes a single quote as `'\''`.
+  const listPath = join(workDir, "concat-list.txt");
+  const body = chunkPaths.map((path) => `file '${path.replace(/'/g, "'\\''")}'`).join("\n");
+  writeFileSync(listPath, `${body}\n`, "utf-8");
+  return ["-r", fpsArg, "-f", "concat", "-safe", "0", "-i", listPath];
+}
+
+/** What a probe of the joined file would report: the chunks' frames at the plan's rate. */
+async function probeJoinedFrameInfo(
+  videoPaths: readonly string[],
+  fps: { num: number; den: number },
+  signal: AbortSignal | undefined,
+): Promise<ProbeVideoFrameInfo> {
+  const infos = await Promise.all(
+    videoPaths.map((path) => defaultProbeVideoFrameInfo(path, signal)),
+  );
+  return {
+    frameCount: infos.reduce((sum, info) => sum + info.frameCount, 0),
+    fpsNum: fps.num,
+    fpsDen: fps.den,
+  };
+}
+
+async function runAssembleFfmpeg(
+  args: string[],
+  step: string,
+  signal: AbortSignal | undefined,
+  timeout: number,
+): Promise<void> {
+  const result = await runFfmpeg(args, { signal, timeout });
+  if (!result.success) {
+    throw encoderFailureError(`[assemble] ffmpeg ${step} failed`, {
+      error: describeFfmpegFailure(result, timeout),
+      failureReason: result.failureReason,
+    });
+  }
+}
+
+/**
+ * The cfr re-encode hardcodes `-c:v libx264`: reject non-mp4 formats and h265
+ * chunks (which it would silently transcode) before any ffmpeg runs.
+ */
+function readCfrEncoder(planDir: string, format: DistributedFormat): CfrRateControlSource {
+  if (format !== "mp4") {
+    throw new Error(
+      `[assemble] cfr=true is only supported for format="mp4" (got ` +
+        `"${format}"). Stream-copy paths for webm and mov ` +
+        `already produce exact avg_frame_rate; cfr re-encode is not needed.`,
+    );
+  }
+  const encoderJsonPath = join(planDir, "meta", "encoder.json");
+  if (!existsSync(encoderJsonPath)) {
+    throw new Error(`[assemble] planDir missing meta/encoder.json: ${encoderJsonPath}`);
+  }
+  const encoderJson = JSON.parse(readFileSync(encoderJsonPath, "utf-8")) as CfrRateControlSource & {
+    encoder?: string;
+  };
+  if (encoderJson.encoder === "libx265-software") {
+    throw new Error(
+      `[assemble] cfr=true is not yet supported with codec: "h265". The ` +
+        `cfr re-encode pass uses libx264 and would silently transcode the ` +
+        `h265 chunks. Either disable cfr or render with codec: "h264".`,
+    );
+  }
+  return encoderJson;
 }
 
 /**
