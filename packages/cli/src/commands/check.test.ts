@@ -2324,6 +2324,22 @@ describe("dense motion-overlap re-sampling", () => {
     expect(vi.mocked(driver.seekGeometry).mock.calls.length).toBeLessThanOrEqual(240);
   });
 
+  it("still promotes an overlap held on a long film", async () => {
+    const held = (time: number): boolean => time >= 200 && time <= 260;
+    const driver = fakeDriver({
+      getDuration: vi.fn(async () => 540),
+      collectLayout: vi.fn(async (_time: number) => []),
+      collectOverlap: vi.fn(async (time: number) =>
+        held(time) ? [layoutIssue("warning", { time, code: "content_overlap" })] : [],
+      ),
+    });
+    const { report } = await runScenario(driver);
+    expect(report.layout.findings).toContainEqual(
+      expect.objectContaining({ code: "content_overlap", severity: "error" }),
+    );
+    expect(vi.mocked(driver.seekGeometry).mock.calls.length).toBeLessThanOrEqual(240);
+  });
+
   it("samples a short clip the uniform grid steps over", async () => {
     const inShortClip = (time: number): boolean => time > 100.1 && time < 100.4;
     const driver = fakeDriver({
