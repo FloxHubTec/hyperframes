@@ -3208,7 +3208,8 @@ describe("bundleToSingleHtml sceneParts", () => {
     expect(fonts?.hasAttribute("data-hf-scene")).toBe(false);
     const faces = (css: string) => css.match(/@font-face/g)?.length ?? 0;
     expect(faces(fonts?.textContent ?? "")).toBe(1);
-    expect(faces(doc.toString())).toBe(1);
+    const allCss = [...doc.querySelectorAll("style")].map((el) => el.textContent ?? "").join("\n");
+    expect(faces(allCss)).toBe(1);
   });
 
   it("tags each top-level scene's host, styles and scripts, with nested scenes in their parent's parts", async () => {
