@@ -1670,7 +1670,7 @@ export function scanElementTags(html: string): ElementTagScan {
   // the count this gate reads. Converges: every iteration strictly shortens
   // the string or changes nothing and exits.
   let markup = html;
-  for (let previous = ""; markup !== previous;) {
+  for (let previous = ""; markup !== previous; ) {
     previous = markup;
     markup = markup.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
   }

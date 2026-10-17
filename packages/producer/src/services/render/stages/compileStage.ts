@@ -336,7 +336,6 @@ export async function runCompileStage(input: CompileStageInput): Promise<Compile
     hdrRequested: job.config.hdrMode === "force-hdr",
     alphaRequested: needsAlpha,
   });
-  // Rounded as Chrome sizes the screenshot: 854×480.375 → 854×480.
   const outputWidth = Math.round(width * deviceScaleFactor);
   const outputHeight = Math.round(height * deviceScaleFactor);
   if (deviceScaleFactor !== 1) {
