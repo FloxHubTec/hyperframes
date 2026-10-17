@@ -1648,6 +1648,10 @@ adds it. `check` and `update` both accept `--json`, plus `--dir` and `--source`
 to point removed-detection at a different skills directory or source — those two
 scope the prune, not the install.
 
+Set `HYPERFRAMES_SKIP_SKILLS=1` when something else manages the skills (CI, tests,
+or an install pinned to one commit). `skills update` and bare `skills` then exit 0
+with a one-line notice and leave the installed skills unchanged.
+
 The CLI installs from the current HyperFrames GitHub source and links the global
 bundles into whichever compatible agents it finds. After scaffolding, `init`
 also refreshes the core set plus any HyperFrames skills you already have.
