@@ -4417,7 +4417,10 @@ export function initSandboxRuntimeModular(): void {
     standaloneHosts.set(compositionId, node ?? { missingAt: compositionTimingRevision });
     return node;
   };
-  const seekStandaloneRegisteredTimelines = (timeSeconds: number, options?: RuntimeSeekOptions) => {
+  const seekStandaloneRegisteredTimelines = (
+    timeSeconds: number,
+    options?: RuntimeSeekOptions & { activateChildren?: boolean },
+  ) => {
     const timelines = (window.__timelines ?? {}) as Record<string, RuntimeTimelineLike | undefined>;
     const rootCompositionId =
       resolveRootCompositionElement()?.getAttribute("data-composition-id") ?? null;
@@ -4427,7 +4430,11 @@ export function initSandboxRuntimeModular(): void {
       if (!node) continue;
       const start = resolveStartForElement(node, 0);
       if (!Number.isFinite(start)) continue;
-      const hiddenFrom = start + (resolveDurationForElement(node) ?? Infinity);
+      // Rest only where the visibility pass hides the host and no rearmed root propagation moves it.
+      const hiddenFrom =
+        !options?.activateChildren && node.hasAttribute("data-start")
+          ? start + (resolveDurationForElement(node) ?? Infinity)
+          : Infinity;
       const timelineDuration = getTimelineDurationSeconds(timeline);
       const sourceTime =
         readElementPlaybackStart(node) +
