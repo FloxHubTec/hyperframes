@@ -44,6 +44,12 @@
       "import": "./src/telemetryRedaction.ts",
       "types": "./src/telemetryRedaction.ts"
     },
+    "./distributed-fps": {
+      "bun": "./src/distributedFps.ts",
+      "node": "./dist/distributedFps.js",
+      "import": "./src/distributedFps.ts",
+      "types": "./src/distributedFps.ts"
+    },
     "./beats": {
       "bun": "./src/beats/index.ts",
       "node": "./dist/beats/index.js",
@@ -541,7 +547,8 @@
     }
   },
   "publishConfig": {
-    "access": "public",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
     "exports": {
       ".": {
         "import": "./dist/index.js",
@@ -559,6 +566,10 @@
       "./telemetry-redaction": {
         "import": "./dist/telemetryRedaction.js",
         "types": "./dist/telemetryRedaction.d.ts"
+      },
+      "./distributed-fps": {
+        "import": "./dist/distributedFps.js",
+        "types": "./dist/distributedFps.d.ts"
       },
       "./beats": {
         "import": "./dist/beats/index.js",
@@ -892,8 +903,7 @@
         "types": "./dist/timelineAssetId.d.ts"
       }
     },
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts"
+    "access": "public"
   },
   "scripts": {
     "build": "bun run build:fonts && bun run build:svg-selector-aliases && bun run build:hyperframes-runtime && bun run build:position-edits-render && bun run build:audio-fx-runtime && tsc && node ../../scripts/rewrite-relative-import-extensions.mjs dist",
