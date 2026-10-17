@@ -2217,6 +2217,27 @@ async function decodeAllImages(page: Page): Promise<void> {
   });
 }
 
+/** FFmpeg supplies these videos' frames, so their own players would only hold decoders and buffers in every worker. */
+export async function releaseInjectedVideoMedia(
+  page: Page,
+  videoIds: readonly string[],
+): Promise<void> {
+  if (videoIds.length === 0) return;
+  await page.evaluate(
+    (ids: string[]) => {
+      for (const id of ids) {
+        const video = window.__hfMediaEl?.(id) ?? document.getElementById(id);
+        if (!(video instanceof HTMLVideoElement)) continue;
+        video.pause();
+        for (const source of video.querySelectorAll("source")) source.remove();
+        video.removeAttribute("src");
+        video.load();
+      }
+    },
+    [...videoIds],
+  );
+}
+
 export async function applyVideoMetadataHints(
   page: Page,
   hints: readonly CaptureVideoMetadataHint[] | undefined,
@@ -2505,6 +2526,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     recordSubTimelineWarning(session, pageReadyTimeout);
 
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
+    await releaseInjectedVideoMedia(page, session.options.skipReadinessVideoIds ?? []);
     logInitPhase("applyVideoMetadataHints complete");
 
     // Run independent readiness checks in parallel — videos, images, fonts,
@@ -2661,6 +2683,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     recordSubTimelineWarning(session, pageReadyTimeout);
 
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
+    await releaseInjectedVideoMedia(page, session.options.skipReadinessVideoIds ?? []);
     logInitPhase("applyVideoMetadataHints complete");
 
     // Run independent readiness checks in parallel — videos, images, fonts,
@@ -3455,6 +3478,7 @@ export async function createStaticVerificationPage(session: CaptureSession): Pro
       knownUnregisteredIds: session.subTimelineWaitMemo.unregisteredIds,
     });
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
+    await releaseInjectedVideoMedia(page, session.options.skipReadinessVideoIds ?? []);
 
     const skipVideoIds = session.options.skipReadinessVideoIds ?? [];
     await Promise.all([
