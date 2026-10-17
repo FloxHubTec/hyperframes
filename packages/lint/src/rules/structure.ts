@@ -193,6 +193,30 @@ function clipsPastRootFindings(root: TagNode, rows: TagNode[]): HyperframeLintFi
   });
 }
 
+/** The runtime shows a nested clip only while its parent shows, and both data-starts count from the composition. */
+function neverVisibleNestedFindings(parent: TagNode, severity: Severity): HyperframeLintFinding[] {
+  const window = readClipTiming({ getAttribute: (name) => parent.attrs[name] ?? null });
+  return topLevelElements(parent).flatMap((clip) => {
+    const inner = isSubCompositionHost(clip) ? [] : neverVisibleNestedFindings(clip, severity);
+    const own = readClipTiming({ getAttribute: (name) => clip.attrs[name] ?? null });
+    if (window.start === null || window.end === null || own.start === null || own.end === null)
+      return inner;
+    if (own.end > window.start && own.start < window.end) return inner;
+    const shows = `${hundredths(window.start)}s to ${hundredths(window.end)}s`;
+    return [
+      {
+        code: "nested_clip_never_visible",
+        severity,
+        message: `${describe(clip)} plays from ${hundredths(own.start)}s to ${hundredths(own.end)}s, but it sits inside ${describe(parent)}, which only shows from ${shows}, so it never appears. A nested data-start counts from the composition's start, not from ${describe(parent)}.`,
+        elementId: clip.attrs.id,
+        fixHint: `Give ${describe(clip)} a data-start between ${shows} in composition time, or move it out of ${describe(parent)}.`,
+        snippet: truncateSnippet(clip.open.raw),
+      },
+      ...inner,
+    ];
+  });
+}
+
 export const structureRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
   (ctx) => {
     // The timeline shows the root composition's rows; a sub-composition file is the leaf where layout lives.
@@ -207,5 +231,13 @@ export const structureRules: Array<(ctx: LintContext) => HyperframeLintFinding[]
       ...captionFindings(rows, severity),
       ...clipsPastRootFindings(root, rows),
     ];
+  },
+  (ctx) => {
+    const root = buildTree(ctx);
+    if (!root) return [];
+    const severity = ctx.options.host === "studio" ? "error" : "warning";
+    return topLevelElements(root)
+      .filter((row) => !isSubCompositionHost(row))
+      .flatMap((row) => neverVisibleNestedFindings(row, severity));
   },
 ];

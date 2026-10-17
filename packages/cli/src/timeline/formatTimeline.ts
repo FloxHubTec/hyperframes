@@ -48,6 +48,7 @@ function details(row: TimelineRow): string {
     row.sourceFile && !row.children.length && "children=unread",
     row.laneError && `lanes unreadable: ${row.laneError}`,
     ...lanes,
+    ...row.warnings.map((w) => `warning: ${w}`),
   ]
     .filter(Boolean)
     .join(" ");

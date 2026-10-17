@@ -20,7 +20,7 @@ Severities:
 
 Source: `packages/lint/src/rules/structure.ts`.
 
-The four codes marked **Warning or error** are warnings when the CLI lints a project, and errors when Studio lints the file it is editing.
+The five codes marked **Warning or error** are warnings when the CLI lints a project, and errors when Studio lints the file it is editing.
 
 ### `nested_structure_needs_subcomposition`
 
@@ -51,6 +51,12 @@ The four codes marked **Warning or error** are warnings when the CLI lints a pro
 **Warning.** A clip runs past the root composition's `data-duration`, so it is cut off in previews, posters and renders.
 
 **Fix:** Extend the root `data-duration`, or make the clip end at or before it.
+
+### `nested_clip_never_visible`
+
+**Warning or error.** A timed clip sits inside another timed element, and its time window never overlaps that element's, so it never appears. A nested clip's `data-start` counts from the composition's start, not from the element around it. Runs in sub-composition files too.
+
+**Fix:** Give the clip a `data-start` inside its parent's window, in composition time, or move it out of the parent.
 
 ## Composition contract
 

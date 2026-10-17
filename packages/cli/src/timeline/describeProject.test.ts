@@ -116,6 +116,27 @@ describe("describeProject", () => {
     ]);
   });
 
+  it("lists clips nested in a timed wrapper at their playback time and says when one never shows", async () => {
+    const { rows, text } = await rowsOf(`<html><body>
+<div data-composition-id="main" data-width="1920" data-height="1080" data-duration="10">
+  <div id="shot2" data-start="5" data-duration="5" data-track-index="0">
+    <h1 id="seen" data-start="6" data-duration="2">In</h1>
+    <h1 id="lost" data-start="0" data-duration="2">Out</h1>
+  </div>
+</div></body></html>`);
+    const byId = (id: string) => rows.find((r) => r.id === id)!;
+    const at = (p: { kind: string; index: number }) =>
+      rows.find((r) => r.trackKind === p.kind && r.index === p.index)!.id;
+
+    expect(byId("shot2").children.map(at).sort()).toEqual(["lost", "seen"]);
+    expect(byId("seen")).toMatchObject({ absStart: 6, absEnd: 8, warnings: [], nested: false });
+    expect(at(byId("seen").parentRow!)).toBe("shot2");
+    expect(byId("lost").warnings).toEqual([
+      "never visible: plays 0-2s, but #shot2 only shows 5-10s; a nested data-start counts from the composition, not from #shot2",
+    ]);
+    expect(text).toContain("#lost lost 0-2s warning: never visible");
+  });
+
   it("reports each half's out-of-sync offset from its source pair, at the project fps", async () => {
     const { rows, text } = await rowsOf(`<html><body>
 <div data-composition-id="main" data-duration="10" data-fps="24">
