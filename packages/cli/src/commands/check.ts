@@ -55,7 +55,6 @@ export interface CheckCommandDependencies {
 const DEFAULT_COMMAND_DEPENDENCIES: CheckCommandDependencies = {
   resolveProject,
   async runPipeline(project, options) {
-    // Captured beside the check, so recording its report never delays the check itself.
     const capturing = captureArtifactRevision(project.dir).catch(warnNotRecorded);
     const report = await runCheckPipeline(project, options);
     const images = (files: readonly string[]) => files.map((file) => resolve(project.dir, file));

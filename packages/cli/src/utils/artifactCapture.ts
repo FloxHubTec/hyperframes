@@ -1,7 +1,8 @@
 import { beginArtifactCapture } from "@hyperframes/studio-server/history";
 import { withOwner } from "./historyOwner.js";
 
-/** Never waits for history another process holds: recording an artifact must not hold up the command making it. */
+const SKIP_BUSY_HISTORY = { ownerWaitMs: 0 };
+
 export async function captureArtifactRevision(projectDir: string) {
   return withOwner(
     projectDir,
@@ -9,6 +10,6 @@ export async function captureArtifactRevision(projectDir: string) {
       await owner.checkpoint();
       return beginArtifactCapture(projectDir);
     },
-    { ownerWaitMs: 0 },
+    SKIP_BUSY_HISTORY,
   );
 }
