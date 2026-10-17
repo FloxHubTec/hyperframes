@@ -219,7 +219,14 @@ function fontFaceKey(atRule: AtRule): string {
 
 /** Drops repeats of an identical `@font-face` across the given style texts, keeping the last copy:
  * the last matching rule is the one the browser uses, so a rule in between never gains precedence. */
-export function dedupeFontFaceRules(styleTexts: string[]): string[] {
+export const dedupeFontFaceRules = (styleTexts: string[]): string[] => dropFontFaces(styleTexts);
+
+export function hoistFontFaceRules(styleTexts: string[]): { styles: string[]; faces: string[] } {
+  const faces: string[] = [];
+  return { styles: dropFontFaces(styleTexts, faces), faces };
+}
+
+function dropFontFaces(styleTexts: string[], hoisted?: string[]): string[] {
   const seen = new Set<string>();
   return [...styleTexts]
     .reverse()
@@ -235,12 +242,13 @@ export function dedupeFontFaceRules(styleTexts: string[]): string[] {
       for (const node of [...(root.nodes ?? [])].reverse()) {
         if (!isFontFaceAtRule(node)) continue;
         const key = fontFaceKey(node);
-        if (seen.has(key)) {
-          node.remove();
-          changed = true;
-        } else {
+        if (!seen.has(key)) {
           seen.add(key);
+          if (!hoisted) continue;
+          hoisted.unshift(node.toString());
         }
+        node.remove();
+        changed = true;
       }
       return changed ? root.toResult({ map: false }).css : css;
     })
