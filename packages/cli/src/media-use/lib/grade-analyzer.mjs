@@ -212,6 +212,45 @@ export function summarizeMediaTreatmentAnalysis(probe, frames) {
   };
 }
 
+export function gradeSampleTimes(duration) {
+  return Array.from({ length: SAMPLE_FRAMES }, (_, i) => (duration * (i + 0.5)) / SAMPLE_FRAMES);
+}
+
+function readSignalStats(ffmpegPath, mediaPath, seekSeconds, frames) {
+  const timeoutMs = Number(process.env.HYPERFRAMES_ANALYZE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+  // -noaccurate_seek decodes from the keyframe at or before the target only, so a sample costs
+  // one frame however long the clip is.
+  const seek = seekSeconds === null ? [] : ["-noaccurate_seek", "-ss", seekSeconds.toFixed(3)];
+  try {
+    return execFileSync(
+      ffmpegPath,
+      [
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        ...seek,
+        "-i",
+        mediaPath,
+        "-vf",
+        "format=yuv444p,signalstats,metadata=print:file=-",
+        "-frames:v",
+        String(frames),
+        "-f",
+        "null",
+        "-",
+      ],
+      { encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    if (error.code !== "ETIMEDOUT") throw error;
+    const at = seekSeconds === null ? "" : ` at ${seekSeconds.toFixed(1)}s`;
+    throw new Error(
+      `FFmpeg took longer than ${timeoutMs / 1000}s to decode one frame${at}; set HYPERFRAMES_ANALYZE_TIMEOUT_MS to allow more`,
+    );
+  }
+}
+
 export function analyzeMediaGrade(
   mediaPath,
   { ffmpegPath = "ffmpeg", ffprobePath = "ffprobe" } = {},
@@ -219,41 +258,12 @@ export function analyzeMediaGrade(
   try {
     const probe = probeMedia(mediaPath, ffprobePath);
     const isImage = IMAGE_EXT.has(extname(mediaPath).toLowerCase());
-    const fps =
+    const raw =
       !isImage && probe.duration
-        ? Math.max(0.1, Math.min(2, SAMPLE_FRAMES / probe.duration))
-        : null;
-    const filters = [
-      fps ? `fps=${fps.toFixed(4)}` : null,
-      "format=yuv444p",
-      "signalstats",
-      "metadata=print:file=-",
-    ]
-      .filter(Boolean)
-      .join(",");
-    const raw = execFileSync(
-      ffmpegPath,
-      [
-        "-hide_banner",
-        "-nostdin",
-        "-v",
-        "error",
-        "-i",
-        mediaPath,
-        "-vf",
-        filters,
-        "-frames:v",
-        String(SAMPLE_FRAMES),
-        "-f",
-        "null",
-        "-",
-      ],
-      {
-        encoding: "utf8",
-        timeout: Number(process.env.HYPERFRAMES_ANALYZE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+        ? gradeSampleTimes(probe.duration)
+            .map((time) => readSignalStats(ffmpegPath, mediaPath, time, 1))
+            .join("\n")
+        : readSignalStats(ffmpegPath, mediaPath, null, SAMPLE_FRAMES);
     return summarizeMediaTreatmentAnalysis(probe, parseMediaTreatmentSignalStats(raw));
   } catch (error) {
     throw new Error(`grade analysis failed for ${mediaPath}: ${error.message}`);
