@@ -26,6 +26,7 @@ import {
   type Turn,
   type UndoMode,
 } from "../utils/historyOwner.js";
+import { ago } from "../utils/historyAgo.js";
 import { AmbiguousPreviewServerError } from "../utils/studioSelectionClient.js";
 import { withMeta } from "../utils/updateCheck.js";
 
@@ -103,20 +104,12 @@ function since(entries: HistoryListItem[], ref: string, who: HistoryWho): Histor
   return entries.slice(entries.indexOf(entryOf(entries, ref)) + 1);
 }
 
-function ago(at: number): string {
-  const seconds = Math.max(0, Math.round((historyDeps.now() - at) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
-  if (seconds < 86_400) return `${Math.round(seconds / 3600)}h ago`;
-  return `${Math.round(seconds / 86_400)}d ago`;
-}
-
 function line(entry: HistoryListItem | HistoryEntry): string {
   const paths = entry.files.map((file) => file.path);
   const files = paths.slice(0, 2).join(", ") + (paths.length > 2 ? ` +${paths.length - 2}` : "");
   const flags =
     "undone" in entry ? `${entry.undone ? " [undone]" : ""}${entry.pinned ? " [pinned]" : ""}` : "";
-  return `${short(entry.id)}  ${ago(entry.endedAt)}  ${entry.who.name}  ${entry.label}  (${files})${flags}`;
+  return `${short(entry.id)}  ${ago(entry.endedAt, historyDeps.now())}  ${entry.who.name}  ${entry.label}  (${files})${flags}`;
 }
 
 /** The public entry shape: files as paths, no hashes. */
