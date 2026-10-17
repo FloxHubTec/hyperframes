@@ -79,6 +79,7 @@ import { createWaapiAdapter } from "./adapters/waapi";
 import {
   MEDIA_SYNC_TOLERANCE_SECONDS,
   isUnplayable,
+  mediaSourceTimeAt,
   readElementPlaybackRate,
   readElementPlaybackStart,
   readElementRateSpec,
@@ -5648,23 +5649,14 @@ export function initSandboxRuntimeModular(): void {
   };
 
   const hardSyncAllMedia = (timeSeconds: number) => {
-    const mediaEls = document.querySelectorAll("video, audio");
-    for (const el of mediaEls) {
-      if (!isMediaElement(el)) continue;
-      if (!el.isConnected) continue;
-      if (!el.hasAttribute("data-start")) continue;
-      const start = resolveAbsoluteMediaStartSeconds(el);
-      if (!Number.isFinite(start)) continue;
-      const kept = playedMediaWindow(el, start);
-      if (!isInClipWindow(timeSeconds, kept.start, kept.end)) continue;
-      const mediaStart = readElementPlaybackStart(el);
-      const relTime = timeSeconds - start + mediaStart;
-      if (relTime >= 0) {
-        try {
-          el.currentTime = relTime;
-        } catch {
-          // ignore seek restrictions
-        }
+    // Same clips and source time as the media sync that follows, so it has nothing left to seek.
+    const clips = withTimingResolver(() => buildRuntimeMediaCache().mediaClips);
+    for (const clip of clips) {
+      if (!clip.el.isConnected || !isInClipWindow(timeSeconds, clip.start, clip.end)) continue;
+      try {
+        clip.el.currentTime = mediaSourceTimeAt(clip, timeSeconds);
+      } catch {
+        // ignore seek restrictions
       }
     }
   };
