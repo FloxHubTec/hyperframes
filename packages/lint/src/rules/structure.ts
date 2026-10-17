@@ -194,15 +194,24 @@ function clipsPastRootFindings(root: TagNode, rows: TagNode[]): HyperframeLintFi
   });
 }
 
+function followsParentVisibility(clip: TagNode): boolean {
+  return clip.tag !== "audio" && clip.attrs["data-hf-media-start-basis"] !== "global";
+}
+
+function isTimed(timing: {
+  start: number | null;
+  end: number | null;
+}): timing is { start: number; end: number } {
+  return timing.start !== null && timing.end !== null;
+}
+
 /** The runtime shows a nested clip only while its parent shows, and both data-starts count from the composition. */
 function neverVisibleNestedFindings(parent: TagNode, severity: Severity): HyperframeLintFinding[] {
   const window = readClipTiming({ getAttribute: (name) => parent.attrs[name] ?? null });
   return topLevelElements(parent).flatMap((clip) => {
     const inner = isSubCompositionHost(clip) ? [] : neverVisibleNestedFindings(clip, severity);
-    if (clip.tag === "audio" || clip.attrs["data-hf-media-start-basis"] === "global") return inner;
     const own = readClipTiming({ getAttribute: (name) => clip.attrs[name] ?? null });
-    if (window.start === null || window.end === null || own.start === null || own.end === null)
-      return inner;
+    if (!followsParentVisibility(clip) || !isTimed(window) || !isTimed(own)) return inner;
     if (own.end > window.start && own.start < window.end) return inner;
     const shows = `${hundredths(window.start)}s to ${hundredths(window.end)}s`;
     return [
