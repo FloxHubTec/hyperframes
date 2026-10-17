@@ -396,7 +396,8 @@ function cutRow(row: ClipDraft, slots: readonly HostSlot[]): ClipDraft[] {
   if (kept.end === kept.start && row.absEnd > row.absStart) return [];
   const skipped = (kept.start - row.absStart) * (row.playbackRate ?? 1);
   const mediaStart = row.mediaStart === null ? null : roundMs(row.mediaStart + skipped);
-  return [{ ...row, absStart: roundMs(kept.start), absEnd: roundMs(kept.end), mediaStart }];
+  const inside = row.inside.flatMap((inner) => cutRow(inner, slots));
+  return [{ ...row, absStart: roundMs(kept.start), absEnd: roundMs(kept.end), mediaStart, inside }];
 }
 
 /** The file's real path when it is a regular file inside the project (symlinks resolved), else null. */
