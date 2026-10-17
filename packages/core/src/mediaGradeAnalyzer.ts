@@ -299,7 +299,6 @@ export function summarizeMediaTreatmentAnalysis(
   };
 }
 
-/** Seek targets for a video's samples: the middle of each of SAMPLE_FRAMES equal slices. */
 export function gradeSampleTimes(duration: number): number[] {
   return Array.from({ length: SAMPLE_FRAMES }, (_, i) => (duration * (i + 0.5)) / SAMPLE_FRAMES);
 }
@@ -311,9 +310,8 @@ function readSignalStats(
   frames: number,
 ): string {
   const timeoutMs = Number(process.env.HYPERFRAMES_ANALYZE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
-  // -noaccurate_seek decodes from the keyframe at or before the target only, so a sample costs
-  // one frame however long the clip is.
-  const seek = seekSeconds === null ? [] : ["-noaccurate_seek", "-ss", seekSeconds.toFixed(3)];
+  const keyframeSeek =
+    seekSeconds === null ? [] : ["-noaccurate_seek", "-ss", seekSeconds.toFixed(3)];
   try {
     return execFileSync(
       ffmpegPath,
@@ -322,7 +320,7 @@ function readSignalStats(
         "-nostdin",
         "-v",
         "error",
-        ...seek,
+        ...keyframeSeek,
         "-i",
         mediaPath,
         "-vf",

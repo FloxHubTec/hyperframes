@@ -218,9 +218,8 @@ export function gradeSampleTimes(duration) {
 
 function readSignalStats(ffmpegPath, mediaPath, seekSeconds, frames) {
   const timeoutMs = Number(process.env.HYPERFRAMES_ANALYZE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
-  // -noaccurate_seek decodes from the keyframe at or before the target only, so a sample costs
-  // one frame however long the clip is.
-  const seek = seekSeconds === null ? [] : ["-noaccurate_seek", "-ss", seekSeconds.toFixed(3)];
+  const keyframeSeek =
+    seekSeconds === null ? [] : ["-noaccurate_seek", "-ss", seekSeconds.toFixed(3)];
   try {
     return execFileSync(
       ffmpegPath,
@@ -229,7 +228,7 @@ function readSignalStats(ffmpegPath, mediaPath, seekSeconds, frames) {
         "-nostdin",
         "-v",
         "error",
-        ...seek,
+        ...keyframeSeek,
         "-i",
         mediaPath,
         "-vf",
