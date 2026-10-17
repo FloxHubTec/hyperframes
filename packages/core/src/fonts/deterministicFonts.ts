@@ -246,7 +246,6 @@ export type FontFamilyDeclaration = {
 };
 
 function collectCssCustomProperties(css: string, customProperties: Map<string, string>): void {
-  // A full parse of a large stylesheet costs seconds on a busy machine; skip one that can't hold a match.
   if (!css.includes("--")) return;
   const root = parseCssRoot(css);
   if (!root) return;
