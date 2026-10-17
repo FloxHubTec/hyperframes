@@ -10,15 +10,7 @@
  * has in memory.
  */
 
-import { createHash } from "node:crypto";
-import {
-  createReadStream,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 import type { Fps } from "@hyperframes/core";
@@ -29,6 +21,7 @@ import {
   type PlanAssetHash,
   type PlanDimensions,
   sha256File,
+  sha256FileAsync,
 } from "./planHash.js";
 
 /**
@@ -182,17 +175,15 @@ export function planFileSha256(absolutePath: string, digests?: PlanFileDigests):
 
 /** Hash every file under `dir` into `digests` without blocking the event loop. */
 export async function prehashPlanFiles(dir: string, digests: PlanFileDigests): Promise<void> {
+  if (!existsSync(dir)) return;
   for (const { absolutePath } of listPlanFiles(dir)) {
-    if (digests.has(absolutePath)) continue;
-    const hash = createHash("sha256");
-    for await (const chunk of createReadStream(absolutePath)) hash.update(chunk as Buffer);
-    digests.set(absolutePath, hash.digest("hex"));
+    if (!digests.has(absolutePath)) digests.set(absolutePath, await sha256FileAsync(absolutePath));
   }
 }
 
 /**
  * Recursively drop keys whose value is `undefined`. Preserves arrays and
- * primitive leaves. Used to sanitize the `LockedRenderConfig` before
+ * primitive leaves. Sanitizes the `LockedRenderConfig` before
  * canonical-JSON serialization so optional fields collapse to "absent"
  * rather than tripping `canonicalJsonStringify`'s undefined-rejection.
  */

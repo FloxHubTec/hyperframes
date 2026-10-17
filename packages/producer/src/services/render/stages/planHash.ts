@@ -32,7 +32,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, createReadStream, openSync, readSync } from "node:fs";
 import type { DistributedFormat } from "../../distributed/shared.js";
 
 /**
@@ -189,6 +189,14 @@ export function sha256File(path: string): string {
     } while (bytesRead > 0);
   } finally {
     closeSync(fd);
+  }
+  return hash.digest("hex");
+}
+
+export async function sha256FileAsync(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path, { highWaterMark: 1024 * 1024 })) {
+    hash.update(chunk as Buffer);
   }
   return hash.digest("hex");
 }

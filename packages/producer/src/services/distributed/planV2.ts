@@ -641,21 +641,14 @@ export async function publishPlanV2FromExecutionPlan(
 async function publishExecutionPlan(
   executionPlanDir: string,
   publisher: PlanV2ArtifactPublisher,
-  {
-    digests,
-    published,
-    log = defaultLogger,
-  }: { digests?: PlanFileDigests; published?: ReadonlySet<string>; log?: ProducerLogger },
+  { digests, log = defaultLogger }: { digests?: PlanFileDigests; log?: ProducerLogger },
 ): Promise<PlanV2Manifest> {
   try {
     let stageStarted = Date.now();
     const publication = buildPlanV2Publication(executionPlanDir, digests);
     logPlanStage(log, "publication", stageStarted);
     stageStarted = Date.now();
-    await putBlobs(
-      publisher,
-      publication.blobs.filter((blob) => !published?.has(blob.sha256)),
-    );
+    await putBlobs(publisher, publication.blobs);
     logPlanStage(log, "upload", stageStarted);
     stageStarted = Date.now();
     await publisher.commitManifest(canonicalJsonStringify(publication.manifest));
@@ -697,27 +690,21 @@ export async function planV2WithPublisher(
 ): Promise<PlanV2Manifest> {
   const stagingRoot = mkdtempSync(join(options.stagingParentDir ?? tmpdir(), ".execution-plan-"));
   const digests: PlanFileDigests = new Map();
-  const published = new Set<string>();
   try {
     await buildLocalExecutionPlan(projectDir, config, stagingRoot, {
       executionPlanSizeLimitBytes: Number.MAX_SAFE_INTEGER,
       deferVideoExtraction: true,
-      fileDigests: digests,
-      // artifactTargets ships every compiled/ file to all chunks, so each is in the manifest.
-      whileAudioMixes: async (executionPlanDir) => {
-        const blobs = listFiles(join(executionPlanDir, "compiled")).map((file) =>
-          publishBlobFor(file.absolutePath, digests),
-        );
-        const unique = [...new Map(blobs.map((blob) => [blob.sha256, blob])).values()];
-        await putBlobs(publisher, unique);
-        for (const blob of unique) published.add(blob.sha256);
-      },
-    });
-    return await publishExecutionPlan(stagingRoot, publisher, {
       digests,
-      published,
-      log: config.logger,
+      // artifactTargets ships every compiled/ file to all chunks, so each is in the manifest.
+      whileAudioMixes: () =>
+        putBlobs(
+          publisher,
+          listFiles(join(stagingRoot, "compiled")).map((file) =>
+            publishBlobFor(file.absolutePath, digests),
+          ),
+        ),
     });
+    return await publishExecutionPlan(stagingRoot, publisher, { digests, log: config.logger });
   } catch (error) {
     try {
       await publisher.abort();

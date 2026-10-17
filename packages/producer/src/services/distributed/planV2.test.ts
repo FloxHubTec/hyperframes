@@ -1021,7 +1021,7 @@ describe("Plan v2 planning", () => {
   });
 
   it.skipIf(!HAS_FFMPEG)(
-    "publishes the compiled tree while the audio mixes, once per blob, with the serial manifest",
+    "publishes the compiled tree while the audio mixes, with the serial manifest",
     async () => {
       const root = tempPath("hf-plan-v2-overlap-");
       const projectDir = join(root, "project");
@@ -1066,7 +1066,9 @@ describe("Plan v2 planning", () => {
               name.startsWith(".execution-plan-"),
             );
             const workDir = join(stagingParentDir, String(staging), ".plan-work");
-            puts.push({ sha256: blob.sha256, duringAudio: existsSync(workDir) });
+            if (!puts.some((put) => put.sha256 === blob.sha256)) {
+              puts.push({ sha256: blob.sha256, duringAudio: existsSync(workDir) });
+            }
             await local.putBlob(blob);
           },
           commitManifest: (bytes) => local.commitManifest(bytes),
@@ -1099,7 +1101,8 @@ describe("Plan v2 planning", () => {
       expect(compiled.size).toBeGreaterThan(1);
       expect(compiledPuts).toHaveLength(compiled.size);
       expect(compiledPuts.every((put) => put.duringAudio)).toBe(true);
-      expect(new Set(puts.map((put) => put.sha256)).size).toBe(puts.length);
+      const referenced = new Set(manifest.artifacts.map((artifact) => artifact.sha256));
+      expect(puts.every((put) => referenced.has(put.sha256))).toBe(true);
       expect(stages).toEqual(
         expect.arrayContaining([
           ...["copy", "compile", "probe", "extract", "audio", "prehash", "prepublish"],

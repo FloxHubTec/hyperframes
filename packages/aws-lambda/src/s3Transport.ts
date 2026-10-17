@@ -131,11 +131,9 @@ export async function uploadFileToS3(
 }
 
 /**
- * Upload one content-addressed plan-v2 artifact exactly once.
- *
- * Existing objects are reused only when their immutable digest metadata and
- * byte length agree. A conflicting object is never overwritten: doing so
- * could change a plan already being consumed by another chunk invocation.
+ * Upload one content-addressed plan-v2 artifact exactly once; S3 verifies the bytes against
+ * `ChecksumSHA256`. An existing object is reused only when its digest metadata and length agree,
+ * and a conflicting one is never overwritten, since a chunk may already be reading that plan.
  */
 export async function uploadContentAddressedFileToS3(
   client: S3Client,
@@ -164,7 +162,6 @@ export async function uploadContentAddressedFileToS3(
         ContentType: contentType,
         ContentLength: size,
         Metadata: { sha256: expectedSha256 },
-        // S3 rejects the PUT when the streamed bytes do not hash to this.
         ChecksumSHA256: Buffer.from(expectedSha256, "hex").toString("base64"),
         // HEAD followed by an unconditional PUT can overwrite a conflicting
         // object published by a concurrent planner. Conditional create makes

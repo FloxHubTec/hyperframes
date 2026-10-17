@@ -295,9 +295,9 @@ export interface BuildLocalExecutionPlanOptions {
    */
   readonly deferVideoExtraction?: boolean;
   /** Shared with the publisher so each plan file is hashed once. */
-  readonly fileDigests?: PlanFileDigests;
+  readonly digests?: PlanFileDigests;
   /** Runs while the audio mixes, once `compiled/` and the video trees are final. */
-  readonly whileAudioMixes?: (executionPlanDir: string) => Promise<void>;
+  readonly whileAudioMixes?: () => Promise<void>;
 }
 
 export function logPlanStage(log: ProducerLogger, stage: string, startedAt: number): void {
@@ -1150,7 +1150,8 @@ export async function buildLocalExecutionPlan(
   const stagedVideoFrames = join(compiledDir, "__hyperframes_video_frames");
   const videoFramesDst = join(planDir, "video-frames");
   if (existsSync(videoFramesDst)) rmSync(videoFramesDst, { recursive: true, force: true });
-  rmSync(join(planDir, "video-sources"), { recursive: true, force: true });
+  const videoSourcesDir = join(planDir, "video-sources");
+  rmSync(videoSourcesDir, { recursive: true, force: true });
   if (existsSync(stagedVideoFrames)) {
     renameSync(stagedVideoFrames, videoFramesDst);
   } else {
@@ -1197,7 +1198,7 @@ export async function buildLocalExecutionPlan(
   // ── Audio ──
   // Only the assembler reads the mix, so hashing and publishing the final
   // compiled and video trees run beside it instead of after it.
-  const digests = options.fileDigests ?? new Map<string, string>();
+  const digests: PlanFileDigests = options.digests ?? new Map();
   stageStarted = Date.now();
   const [audioOutcome, overlapOutcome] = await Promise.allSettled([
     runAudioStage({
@@ -1213,13 +1214,13 @@ export async function buildLocalExecutionPlan(
       assertNotAborted,
     }).finally(() => logPlanStage(log, "audio", stageStarted)),
     (async () => {
-      for (const dir of [finalCompiledDir, videoFramesDst, join(planDir, "video-sources")]) {
-        if (existsSync(dir)) await prehashPlanFiles(dir, digests);
+      for (const dir of [finalCompiledDir, videoFramesDst, videoSourcesDir]) {
+        await prehashPlanFiles(dir, digests);
       }
       logPlanStage(log, "prehash", stageStarted);
       if (options.whileAudioMixes) {
         const prepublishStarted = Date.now();
-        await options.whileAudioMixes(planDir);
+        await options.whileAudioMixes();
         logPlanStage(log, "prepublish", prepublishStarted);
       }
     })(),
