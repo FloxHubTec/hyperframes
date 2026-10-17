@@ -4427,12 +4427,14 @@ export function initSandboxRuntimeModular(): void {
       if (!node) continue;
       const start = resolveStartForElement(node, 0);
       if (!Number.isFinite(start)) continue;
-      // A scene is hidden after its clip, so a longer animation rests at the clip's end.
-      const hostTime = Math.min(timeSeconds, start + (resolveDurationForElement(node) ?? Infinity));
+      const hiddenFrom = start + (resolveDurationForElement(node) ?? Infinity);
       const timelineDuration = getTimelineDurationSeconds(timeline);
       const sourceTime =
         readElementPlaybackStart(node) +
-        sourceTimeAt(readElementRateSpec(node), Math.max(0, hostTime - start));
+        sourceTimeAt(
+          readElementRateSpec(node),
+          Math.max(0, Math.min(timeSeconds, hiddenFrom) - start),
+        );
       const localTime = Math.max(
         0,
         timelineDuration != null && timelineDuration > 0
