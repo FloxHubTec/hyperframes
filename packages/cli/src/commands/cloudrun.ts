@@ -31,6 +31,7 @@ import {
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { defaultCloudFps } from "../utils/compositionFps.js";
 import { DISTRIBUTED_FPS, type DistributedFps, isDistributedFps } from "@hyperframes/core";
+import { isMissingPackageError, missingPackageMessage } from "../utils/missingPackage.js";
 
 export const examples: Example[] = [
   ["Deploy the Cloud Run render stack", "hyperframes cloudrun deploy --project my-gcp-project"],
@@ -101,20 +102,11 @@ function loadCloudRunAdapter(): Promise<CloudRunAdapter> {
 }
 
 export function isMissingCloudRunAdapterError(error: unknown): boolean {
-  return (
-    (error as NodeJS.ErrnoException)?.code === "ERR_MODULE_NOT_FOUND" &&
-    normalizeErrorMessage(error).includes("@hyperframes/gcp-cloud-run")
-  );
+  return isMissingPackageError(error, "@hyperframes/gcp-cloud-run");
 }
 
 export function missingCloudRunAdapterMessage(subcommand: string): string {
-  return (
-    `${c.error("@hyperframes/gcp-cloud-run is not installed.")} The ${c.accent(`hyperframes cloudrun ${subcommand}`)} command needs it at runtime.\n` +
-    `Install it alongside the CLI:\n` +
-    `  ${c.accent("npm install -g @hyperframes/gcp-cloud-run")}\n` +
-    `Or, for an opt-in project setup:\n` +
-    `  ${c.accent("npm install @hyperframes/gcp-cloud-run")}`
-  );
+  return missingPackageMessage("@hyperframes/gcp-cloud-run", `hyperframes cloudrun ${subcommand}`);
 }
 
 export default defineCommand({
