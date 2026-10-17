@@ -239,6 +239,31 @@ describe("runtime sub-composition placement", () => {
     expect(shownX()).toBe(75);
   });
 
+  it("keeps a slow scene Studio stamped animating past its stamp, once the root has grown", () => {
+    const parent = window.parent;
+    Object.defineProperty(window, "parent", { configurable: true, value: {} });
+    try {
+      // What Studio leaves after a root extension: the host's discovery stamp still ends at 10 s.
+      document.body.innerHTML =
+        `<div data-composition-id="main" data-root="true" data-duration="20">` +
+        `<div id="host" style="position: absolute" data-composition-id="scene" data-playback-rate="0.5"` +
+        ` data-start="0" data-duration="10" data-hf-autostamped="1"><div id="s"></div></div></div>`;
+      const scene = gsap
+        .timeline({ paused: true })
+        .to("#s", { x: 100, duration: 8, ease: "none" }, 0);
+      const root = gsap.timeline({ paused: true }).to({}, { duration: 20 }, 0);
+      window.__timelines = { main: root, scene } as unknown as Record<string, RuntimeTimelineLike>;
+      initSandboxRuntimeModular();
+
+      window.__player?.seek(6);
+      window.__player?.seek(12);
+      expect(shownX()).toBe(75);
+      expect(getComputedStyle(document.getElementById("host")!).visibility).not.toBe("hidden");
+    } finally {
+      Object.defineProperty(window, "parent", { configurable: true, value: parent });
+    }
+  });
+
   it("renders a scene past its clip's end where root propagation leaves it, replaying no callbacks", () => {
     document.body.innerHTML =
       `<div data-composition-id="main" data-root="true" data-duration="10">` +

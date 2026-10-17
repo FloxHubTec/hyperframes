@@ -433,6 +433,9 @@ function loadPreviewImagesIn(root: Element): void {
 export function initSandboxRuntimeModular(): void {
   const state = createRuntimeState();
   const stampsForStudio = window.parent !== window;
+  // Studio's discovery stamps time a clip for the timeline only; nothing hides it at their end.
+  const isDiscoveryStamped = (el: Element) =>
+    stampsForStudio && el.hasAttribute(RUNTIME_STAMPED_ATTR);
   authoredMediaObserver?.disconnect();
   authoredMediaObserver = null;
   if (readSceneParts(document)) recordAuthoredMedia(document.documentElement);
@@ -2959,7 +2962,7 @@ export function initSandboxRuntimeModular(): void {
         visibleAt(rawNode, currentTime) &&
         clipChainVisibleAt(rawNode.parentElement, currentTime, visibleAt, rootComp);
       visibilityDecided.set(rawNode, isVisibleNow);
-      const isRuntimeStamped = stampsForStudio && rawNode.hasAttribute(RUNTIME_STAMPED_ATTR);
+      const isRuntimeStamped = isDiscoveryStamped(rawNode);
       if (!isRuntimeStamped) rawNode.style.visibility = isVisibleNow ? "visible" : "hidden";
       rawNode.toggleAttribute(CLIP_HIDDEN_ATTR, !isRuntimeStamped && !isVisibleNow);
       const upcoming =
@@ -4432,7 +4435,7 @@ export function initSandboxRuntimeModular(): void {
       if (!Number.isFinite(start)) continue;
       // Rest only where the visibility pass hides the host and no rearmed root propagation moves it.
       const hiddenFrom =
-        !options?.activateChildren && node.hasAttribute("data-start")
+        !options?.activateChildren && node.hasAttribute("data-start") && !isDiscoveryStamped(node)
           ? start + (resolveDurationForElement(node) ?? Infinity)
           : Infinity;
       const timelineDuration = getTimelineDurationSeconds(timeline);
