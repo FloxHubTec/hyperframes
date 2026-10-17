@@ -16,7 +16,7 @@ import {
   isJavaScriptType,
   planCompositionAssembly,
 } from "./compositionAssembly";
-import { SCENE_PART_ATTR } from "../sceneParts";
+import { SCENE_FONTS_ATTR, SCENE_PART_ATTR } from "../sceneParts";
 import {
   ensureExternalScriptTag,
   readExternalScriptAttributes,
@@ -54,6 +54,7 @@ import {
 import {
   buildVariablesByCompScript,
   dedupeFontFaceRules,
+  hoistFontFaceRules,
   scopeCssToComposition,
   wrapInlineScriptWithErrorBoundary,
   scopedModulePrelude,
@@ -1406,13 +1407,20 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
     if (srcset)
       el.setAttribute("srcset", rewriteSrcsetWithInlinedAssets(srcset, projectDir, inlineAssets));
   }
-  // Before inlining, so postcss reads paths not font bytes; scene parts keep copies to swap alone.
-  if (!options?.sceneParts) {
-    const liveStyles = [...document.querySelectorAll("style")].filter(isAlwaysAppliedStyle);
-    const dedupedStyles = dedupeFontFaceRules(liveStyles.map((el) => el.textContent || ""));
-    liveStyles.forEach((el, i) => {
-      el.textContent = dedupedStyles[i] ?? "";
-    });
+  // Before inlining, so postcss reads paths not font bytes.
+  const liveStyles = [...document.querySelectorAll("style")].filter(isAlwaysAppliedStyle);
+  const liveCss = liveStyles.map((el) => el.textContent || "");
+  const { styles, faces } = options?.sceneParts
+    ? hoistFontFaceRules(liveCss)
+    : { styles: dedupeFontFaceRules(liveCss), faces: [] };
+  liveStyles.forEach((el, i) => {
+    el.textContent = styles[i] ?? "";
+  });
+  if (faces.length > 0) {
+    const holder = document.createElement("style");
+    holder.setAttribute(SCENE_FONTS_ATTR, "");
+    holder.textContent = faces.join("\n");
+    document.head.prepend(holder);
   }
   for (const styleEl of document.querySelectorAll("style")) {
     styleEl.textContent = rewriteCssUrlsWithInlinedAssets(

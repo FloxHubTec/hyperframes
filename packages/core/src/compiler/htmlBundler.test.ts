@@ -3182,7 +3182,7 @@ describe("bundleToSingleHtml sceneParts", () => {
   const partsOf = (doc: Document, scene: string) =>
     [...doc.querySelectorAll(`[data-hf-scene="${scene}"]`)].map((el) => el.tagName.toLowerCase());
 
-  it("keeps each scene's own copy of a shared @font-face, so one scene still swaps alone", async () => {
+  it("puts a @font-face two scenes share in one style outside the scenes, once", async () => {
     const face = `@font-face { font-family: "Brand"; src: url('assets/fonts/brand.woff2'); }`;
     const dir = makeTempProject({
       "index.html": `<!doctype html>
@@ -3202,8 +3202,14 @@ describe("bundleToSingleHtml sceneParts", () => {
       const css = [...doc.querySelectorAll(`style[data-hf-scene="${scene}"]`)]
         .map((el) => el.textContent ?? "")
         .join("\n");
-      expect(css).toContain("@font-face");
+      expect(css).not.toContain("@font-face");
     }
+    const fonts = doc.querySelector("style[data-hf-scene-fonts]");
+    expect(fonts?.hasAttribute("data-hf-scene")).toBe(false);
+    const faces = (css: string) => css.match(/@font-face/g)?.length ?? 0;
+    expect(faces(fonts?.textContent ?? "")).toBe(1);
+    const allCss = [...doc.querySelectorAll("style")].map((el) => el.textContent ?? "").join("\n");
+    expect(faces(allCss)).toBe(1);
   });
 
   it("tags each top-level scene's host, styles and scripts, with nested scenes in their parent's parts", async () => {

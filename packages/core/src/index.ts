@@ -14,7 +14,6 @@ export type {
   CanvasResolution,
   Fps,
   FpsInput,
-  DistributedFps,
   FpsParseResult,
   MediaFile,
   CompositionAPI,
@@ -73,8 +72,6 @@ export {
   toFps,
   fpsToNumber,
   fpsToFfmpegArg,
-  DISTRIBUTED_FPS,
-  isDistributedFps,
   TIMELINE_COLORS,
   DEFAULT_DURATIONS,
   COMPOSITION_VARIABLE_TYPES,
@@ -83,6 +80,8 @@ export {
   isCompositionElement,
   getDefaultStageZoom,
 } from "./core.types";
+
+export { DISTRIBUTED_FPS, type DistributedFps, isDistributedFps } from "./distributedFps";
 
 // Templates
 export { generateBaseHtml, getStageStyles } from "./templates/base";

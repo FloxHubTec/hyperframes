@@ -3,6 +3,7 @@ import {
   launchManagedBrowser,
   resolveManagedGpuMode,
 } from "../browser/launch.js";
+import { oneProcessOverPipe } from "../browser/sandboxDenied.js";
 import { spawn } from "node:child_process";
 import type { Browser, Page } from "puppeteer-core";
 import type { InProcessRequest, InProcessResponse } from "../utils/staticProjectServer.js";
@@ -230,7 +231,7 @@ export async function openSettledCompositionPage(
       headless: true,
       signal: options.signal,
       executablePath,
-      ...(answer ? { pipe: true, args: [...args, "--single-process"] } : { args }),
+      ...(answer ? oneProcessOverPipe({ args }) : { args }),
     });
   };
 

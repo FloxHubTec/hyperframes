@@ -888,6 +888,70 @@ describe("plan() — golden planDir + planHash determinism", () => {
   );
 });
 
+describe.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0)("stitched mp4 plans", () => {
+  function audioProject(name: string): string {
+    const dir = join(runRoot, name);
+    mkdirSync(dir, { recursive: true });
+    const tone = spawnSync("ffmpeg", [
+      "-nostdin",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "aevalsrc=0.99*sin(2*PI*440*t):s=48000:d=0.6",
+      "-c:a",
+      "pcm_s16le",
+      join(dir, "tone.wav"),
+    ]);
+    if (tone.status !== 0) throw new Error(`ffmpeg tone failed: ${tone.stderr}`);
+    writeFileSync(
+      join(dir, "index.html"),
+      `<!doctype html><html><head><meta charset="utf-8"></head><body>
+  <div data-composition-id="root" data-width="320" data-height="240" data-duration="1">
+    <audio data-composition-audio src="tone.wav"></audio>
+  </div></body></html>`,
+    );
+    return dir;
+  }
+
+  it("fits the audio length and peak and records the layout only for mp4 without cfr", async () => {
+    const project = audioProject("project-stitch");
+    const config = { fps: 30, width: 320, height: 240, format: "mp4" } as const;
+    const stitched = join(runRoot, "plan-stitch");
+    await buildLocalExecutionPlan(project, config, stitched, { chunksCarryAudio: true });
+    const encoder = JSON.parse(readFileSync(join(stitched, "meta", "encoder.json"), "utf-8"));
+    expect(encoder.chunksCarryAudio).toBe(true);
+    const probe = spawnSync(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "csv=p=0",
+        join(stitched, "audio.m4a"),
+      ],
+      { encoding: "utf-8" },
+    );
+    expect(Math.abs(Number(probe.stdout) - 1)).toBeLessThan(0.001);
+    const volume = spawnSync(
+      "ffmpeg",
+      ["-nostdin", "-i", join(stitched, "audio.m4a"), "-af", "volumedetect", "-f", "null", "-"],
+      { encoding: "utf-8" },
+    );
+    expect(Number(/max_volume: (-?[\d.]+) dB/.exec(volume.stderr)?.[1])).toBeLessThan(-1);
+
+    const withCfr = join(runRoot, "plan-stitch-cfr");
+    await buildLocalExecutionPlan(project, { ...config, cfr: true }, withCfr, {
+      chunksCarryAudio: true,
+    });
+    const cfrEncoder = JSON.parse(readFileSync(join(withCfr, "meta", "encoder.json"), "utf-8"));
+    expect(cfrEncoder.chunksCarryAudio).toBeUndefined();
+  }, 60_000);
+});
+
 describe("plan() — codec knob", () => {
   const TIMEOUT_MS = 30_000;
 

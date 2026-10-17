@@ -155,6 +155,9 @@ export async function assemble(
     format,
     fps,
     fpsArg: fpsToFfmpegArg(fps),
+    chunkSeconds: chunksCarryAudio(planDir)
+      ? plan.chunks.map((chunk) => ((chunk.endFrame - chunk.startFrame) * fps.den) / fps.num)
+      : null,
     signal: options?.abortSignal,
     timeout: resolveConfig().ffmpegProcessTimeout,
     log,
@@ -197,7 +200,10 @@ export async function assemble(
   };
 }
 
-function readAssemblePlan(planDir: string, chunkPaths: readonly string[]): PlanJsonForAssemble {
+function readAssemblePlan(
+  planDir: string,
+  chunkPaths: readonly string[],
+): PlanJsonForAssemble & { chunks: ChunkSliceJson[] } {
   // ── 1. Validate planDir manifest matches chunkPaths shape ──────────────
   const planJsonPath = join(planDir, "plan.json");
   const chunksJsonPath = join(planDir, "meta", "chunks.json");
@@ -224,7 +230,7 @@ function readAssemblePlan(planDir: string, chunkPaths: readonly string[]): PlanJ
     }
   }
 
-  return plan;
+  return { ...plan, chunks };
 }
 
 interface JoinContext {
@@ -236,6 +242,7 @@ interface JoinContext {
   timeout: number;
   log: ProducerLogger;
   timed: <T>(stage: string, run: () => Promise<T>) => Promise<T>;
+  chunkSeconds: number[] | null;
 }
 
 // A one-entry concat list ignores the input-side `-r` (observed `359/12` in the
@@ -243,7 +250,7 @@ interface JoinContext {
 function videoInputArgs(ctx: JoinContext, videoSources: readonly string[]): string[] {
   return videoSources.length === 1
     ? ["-i", videoSources[0]!]
-    : concatDemuxerInput(videoSources, ctx.workDir, ctx.fpsArg);
+    : concatDemuxerInput(videoSources, ctx.workDir, ctx.fpsArg, ctx.chunkSeconds);
 }
 
 // ── 2c. Optional exact-CFR re-encode ──────────────────────────────────
@@ -340,11 +347,18 @@ function concatDemuxerInput(
   chunkPaths: readonly string[],
   workDir: string,
   fpsArg: string,
+  chunkSeconds: readonly number[] | null,
 ): string[] {
   // ffmpeg's concat list escapes a single quote as `'\''`.
   const listPath = join(workDir, "concat-list.txt");
-  const body = chunkPaths.map((path) => `file '${path.replace(/'/g, "'\\''")}'`).join("\n");
-  writeFileSync(listPath, `${body}\n`, "utf-8");
+  // Chunks that carry audio: read only their video (track 1), and end each chunk at its last frame
+  // rather than after its audio, which starts with the AAC priming and can run one packet longer.
+  const head = chunkSeconds ? ["stream", "exact_stream_id 1"] : [];
+  const body = chunkPaths.map((path, i) => {
+    const line = `file '${path.replace(/'/g, "'\\''")}'`;
+    return chunkSeconds ? `${line}\nduration ${chunkSeconds[i]!.toFixed(6)}` : line;
+  });
+  writeFileSync(listPath, `${[...head, ...body].join("\n")}\n`, "utf-8");
   return ["-r", fpsArg, "-f", "concat", "-safe", "0", "-i", listPath];
 }
 
@@ -377,6 +391,15 @@ async function runAssembleFfmpeg(
       failureReason: result.failureReason,
     });
   }
+}
+
+function chunksCarryAudio(planDir: string): boolean {
+  const encoderJsonPath = join(planDir, "meta", "encoder.json");
+  if (!existsSync(encoderJsonPath)) return false;
+  return (
+    (JSON.parse(readFileSync(encoderJsonPath, "utf-8")) as LockedRenderConfig).chunksCarryAudio ===
+    true
+  );
 }
 
 /**

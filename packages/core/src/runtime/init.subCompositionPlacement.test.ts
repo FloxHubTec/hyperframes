@@ -199,6 +199,100 @@ describe("runtime sub-composition placement", () => {
     expect(window.__player?.getDuration()).toBe(9);
   });
 
+  it("rests a scene's longer animation at its clip's end, where the clip hides", () => {
+    document.body.innerHTML =
+      `<div data-composition-id="main" data-root="true" data-duration="10">` +
+      `<div id="host" class="clip" data-composition-id="scene" data-start="1" data-duration="2">` +
+      `<div id="s"></div></div></div>`;
+    let renders = 0;
+    const scene = gsap
+      .timeline({ paused: true })
+      .to("#s", { x: 100, duration: 8, ease: "none", onUpdate: () => renders++ }, 0);
+    const root = gsap.timeline({ paused: true }).to({}, { duration: 10 }, 0);
+    window.__timelines = { main: root, scene } as unknown as Record<string, RuntimeTimelineLike>;
+    initSandboxRuntimeModular();
+
+    window.__player?.seek(2);
+    expect(shownX()).toBe(12.5);
+    window.__player?.seek(5);
+    expect(shownX()).toBe(25);
+    expect(getComputedStyle(document.getElementById("host")!).visibility).toBe("hidden");
+    renders = 0;
+    window.__player?.seek(6);
+    expect(renders).toBe(0);
+  });
+
+  it("keeps a slow scene with no clip window animating while it shows", () => {
+    document.body.innerHTML =
+      `<div data-composition-id="main" data-root="true" data-duration="20">` +
+      `<div id="host" data-composition-id="scene" data-playback-rate="0.5">` +
+      `<div id="s"></div></div></div>`;
+    const scene = gsap
+      .timeline({ paused: true })
+      .to("#s", { x: 100, duration: 8, ease: "none" }, 0);
+    const root = gsap.timeline({ paused: true }).to({}, { duration: 20 }, 0);
+    window.__timelines = { main: root, scene } as unknown as Record<string, RuntimeTimelineLike>;
+    initSandboxRuntimeModular();
+
+    window.__player?.seek(6);
+    window.__player?.seek(12);
+    expect(shownX()).toBe(75);
+  });
+
+  it("keeps a slow scene Studio stamped animating past its stamp, once the root has grown", () => {
+    const parent = window.parent;
+    Object.defineProperty(window, "parent", { configurable: true, value: {} });
+    try {
+      // What Studio leaves after a root extension: the host's discovery stamp still ends at 10 s.
+      document.body.innerHTML =
+        `<div data-composition-id="main" data-root="true" data-duration="20">` +
+        `<div id="host" style="position: absolute" data-composition-id="scene" data-playback-rate="0.5"` +
+        ` data-start="0" data-duration="10" data-hf-autostamped="1"><div id="s"></div></div></div>`;
+      const scene = gsap
+        .timeline({ paused: true })
+        .to("#s", { x: 100, duration: 8, ease: "none" }, 0);
+      const root = gsap.timeline({ paused: true }).to({}, { duration: 20 }, 0);
+      window.__timelines = { main: root, scene } as unknown as Record<string, RuntimeTimelineLike>;
+      initSandboxRuntimeModular();
+
+      window.__player?.seek(6);
+      window.__player?.seek(12);
+      expect(shownX()).toBe(75);
+      expect(getComputedStyle(document.getElementById("host")!).visibility).not.toBe("hidden");
+    } finally {
+      Object.defineProperty(window, "parent", { configurable: true, value: parent });
+    }
+  });
+
+  it("renders a scene past its clip's end where root propagation leaves it, replaying no callbacks", () => {
+    document.body.innerHTML =
+      `<div data-composition-id="main" data-root="true" data-duration="10">` +
+      `<div id="host" class="clip" data-composition-id="scene" data-start="1" data-duration="2">` +
+      `<div id="s"></div></div></div>`;
+    let callbacks = 0;
+    const scene = gsap.timeline({ paused: true }).to(
+      "#s",
+      {
+        x: 100,
+        duration: 8,
+        ease: "none",
+        onUpdate: () => callbacks++,
+        onComplete: () => callbacks++,
+      },
+      0,
+    );
+    const root = gsap.timeline({ paused: true }).to({}, { duration: 10 }, 0);
+    window.__timelines = { main: root, scene } as unknown as Record<string, RuntimeTimelineLike>;
+    initSandboxRuntimeModular();
+
+    window.__player?.renderSeek(9.1);
+    expect(shownX()).toBe(100);
+    callbacks = 0;
+    window.__player?.renderSeek(9.2);
+    window.__player?.renderSeek(9.3, { suppressEvents: true });
+    expect(callbacks).toBe(0);
+  });
+
   it("keeps the scene in one root after a tween first renders, when the root's own timeline is empty", async () => {
     const runFrames = stubFrames();
     document.body.innerHTML =

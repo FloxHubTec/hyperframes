@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  DISTRIBUTED_FPS,
-  fpsToFfmpegArg,
-  fpsToNumber,
-  isDistributedFps,
-  parseFps,
-} from "./core.types";
+import { fpsToFfmpegArg, fpsToNumber, parseFps } from "./core.types";
+import { DISTRIBUTED_FPS, isDistributedFps } from "./distributedFps";
 
 describe("parseFps — integer forms", () => {
   it("parses integer string '30' as { num: 30, den: 1 }", () => {

@@ -140,6 +140,7 @@ export interface PlanV2WithPublisherOptions {
    * can avoid a second set of data blocks.
    */
   readonly stagingParentDir?: string;
+  readonly chunksCarryAudio?: boolean;
 }
 
 export interface PlanV2MaterializationResult {
@@ -267,8 +268,11 @@ function resolveExtractedVideoOutputDir(planDir: string, videoId: string): strin
 function artifactTargets(
   path: string,
   videoDependencies: ReadonlyMap<string, readonly number[]> | null,
+  chunksCarryAudio: boolean,
 ): Pick<PlanV2Artifact, "chunks" | "assembler"> {
-  if (isPlanAudioArtifactPath(path)) return { chunks: [], assembler: true };
+  if (isPlanAudioArtifactPath(path)) {
+    return { chunks: chunksCarryAudio ? "all" : [], assembler: true };
+  }
   if (path === "plan.json" || path === "meta/chunks.json" || path === "meta/encoder.json") {
     return { chunks: "all", assembler: true };
   }
@@ -548,9 +552,11 @@ function buildPlanV2Publication(
   }
   validateExtractionCacheCompleteSentinels(executionPlanDir);
   const videoDependencyPlan = buildVideoChunkDependencies(executionPlanDir, dimensions);
+  const encoder = readJsonFile(join(executionPlanDir, "meta", "encoder.json"), "meta/encoder.json");
+  const chunksCarryAudio = isRecord(encoder) && encoder.chunksCarryAudio === true;
   for (const file of listFiles(executionPlanDir)) {
     if (isExtractionCacheCompleteSentinelPath(file.path)) continue;
-    const targets = artifactTargets(file.path, videoDependencyPlan.dependencies);
+    const targets = artifactTargets(file.path, videoDependencyPlan.dependencies, chunksCarryAudio);
     if (
       (file.path.startsWith("video-frames/") || file.path.startsWith("video-sources/")) &&
       targets.chunks !== "all" &&
@@ -704,6 +710,7 @@ export async function planV2WithPublisher(
             publishBlobFor(file.absolutePath, digests),
           ),
         ),
+      chunksCarryAudio: options.chunksCarryAudio,
     });
     return await publishExecutionPlan(stagingRoot, publisher, { digests, log: config.logger });
   } catch (error) {

@@ -7,7 +7,7 @@
  */
 
 import { tmpdir } from "node:os";
-import { DISTRIBUTED_FPS, type DistributedFps } from "@hyperframes/core";
+import { DISTRIBUTED_FPS, type DistributedFps } from "@hyperframes/core/distributed-fps";
 import { chromeMajorCeiling } from "./services/chromeHostCeiling.js";
 import { join } from "node:path";
 import {
