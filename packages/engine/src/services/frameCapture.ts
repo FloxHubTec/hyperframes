@@ -2242,12 +2242,10 @@ export async function applyVideoMetadataHints(
           document.getElementById(hint.id)) as HTMLVideoElement | null;
         if (!video || video.hasAttribute("poster")) continue;
 
-        // Chrome sizes a video without metadata from its poster, exactly as it would from the
-        // video's own size; width/height attributes would instead become CSS sizes.
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${hint.width}" height="${hint.height}"/>`;
-        const poster = `data:image/svg+xml,${encodeURIComponent(svg)}`;
-        video.poster = poster;
-        posters.add(poster);
+        const intrinsicSizePoster = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+        video.poster = intrinsicSizePoster;
+        posters.add(intrinsicSizePoster);
       }
       await Promise.all(
         [...posters].map((src) => {
