@@ -144,6 +144,10 @@ function childrenStartingAfter(
 
 type GsapLandingMarks = { ratio: number; _zTime?: number; _act?: number };
 
+type GsapStep = GsapLandingMarks & {
+  render: (totalTime: number, suppressEvents: boolean, force: boolean) => unknown;
+};
+
 function childrenWithLandingMarksIn(timeline: {
   getChildren?: RuntimeTimelineLike["getChildren"];
 }): GsapLandingMarks[] {
@@ -225,14 +229,12 @@ function stepsAt(
   timeline: { getChildren?: RuntimeTimelineLike["getChildren"] },
   structure: GsapStructureKey,
   t: number,
-): (GsapLandingMarks & {
-  render: (totalTime: number, suppressEvents: boolean, force: boolean) => unknown;
-})[] {
+): GsapStep[] {
   const { points } = placedLandingMarks(timeline, structure);
-  const steps = [];
+  const steps: GsapStep[] = [];
   for (let i = firstPointFrom(points, t - PLAYHEAD_FLOAT_NOISE); i < points.length; i++) {
     if (points[i]!.at > t + PLAYHEAD_FLOAT_NOISE) break;
-    steps.push(points[i]!.mark as unknown as (typeof steps)[number]);
+    steps.push(points[i]!.mark as GsapStep);
   }
   return steps;
 }
