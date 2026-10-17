@@ -2217,6 +2217,12 @@ async function decodeAllImages(page: Page): Promise<void> {
   });
 }
 
+/** Out-of-band videos a poster now sizes, so dropping their media cannot move layout. */
+export function releasableVideoIds(options: CaptureOptions): string[] {
+  const hinted = new Set((options.videoMetadataHints ?? []).map((hint) => hint.id));
+  return (options.skipReadinessVideoIds ?? []).filter((id) => hinted.has(id));
+}
+
 /** FFmpeg supplies these videos' frames, so their own players would only hold decoders and buffers in every worker. */
 export async function releaseInjectedVideoMedia(
   page: Page,
@@ -2526,7 +2532,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     recordSubTimelineWarning(session, pageReadyTimeout);
 
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
-    await releaseInjectedVideoMedia(page, session.options.skipReadinessVideoIds ?? []);
+    await releaseInjectedVideoMedia(page, releasableVideoIds(session.options));
     logInitPhase("applyVideoMetadataHints complete");
 
     // Run independent readiness checks in parallel — videos, images, fonts,
@@ -2683,7 +2689,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     recordSubTimelineWarning(session, pageReadyTimeout);
 
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
-    await releaseInjectedVideoMedia(page, session.options.skipReadinessVideoIds ?? []);
+    await releaseInjectedVideoMedia(page, releasableVideoIds(session.options));
     logInitPhase("applyVideoMetadataHints complete");
 
     // Run independent readiness checks in parallel — videos, images, fonts,
@@ -3478,7 +3484,7 @@ export async function createStaticVerificationPage(session: CaptureSession): Pro
       knownUnregisteredIds: session.subTimelineWaitMemo.unregisteredIds,
     });
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
-    await releaseInjectedVideoMedia(page, session.options.skipReadinessVideoIds ?? []);
+    await releaseInjectedVideoMedia(page, releasableVideoIds(session.options));
 
     const skipVideoIds = session.options.skipReadinessVideoIds ?? [];
     await Promise.all([

@@ -3,11 +3,26 @@ import { createServer, type ServerResponse } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Browser } from "puppeteer-core";
 import { resolveHeadlessShellPath } from "./browserManager.js";
-import { applyVideoMetadataHints, releaseInjectedVideoMedia } from "./frameCapture.js";
+import {
+  applyVideoMetadataHints,
+  releasableVideoIds,
+  releaseInjectedVideoMedia,
+} from "./frameCapture.js";
 import { listenOnLoopback, launchTestChrome } from "./__fixtures__/loopback.js";
 
 const chromePath = resolveHeadlessShellPath();
 const hasBrowser = chromePath !== undefined && spawnSync(chromePath, ["--version"]).status === 0;
+
+describe("releasableVideoIds", () => {
+  it("keeps the media of a skipped video no poster sizes, such as a native HDR one", () => {
+    expect(
+      releasableVideoIds({
+        skipReadinessVideoIds: ["hdr", "sdr"],
+        videoMetadataHints: [{ id: "sdr", width: 640, height: 360 }],
+      } as Parameters<typeof releasableVideoIds>[0]),
+    ).toEqual(["sdr"]);
+  });
+});
 
 describe.skipIf(!hasBrowser)("releaseInjectedVideoMedia in Chrome", () => {
   const openMedia = new Set<ServerResponse>();
