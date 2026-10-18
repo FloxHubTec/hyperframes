@@ -270,17 +270,20 @@ describe("resolveMaxParallelChunks", () => {
     expect(resolveMaxParallelChunks(worker, 3600, MP_1080P, log)).toBeLessThan(64);
   });
 
-  it("explicit chunking flags win and no worker inputs keeps the old default", () => {
+  it("explicit maxParallelChunks wins and no worker inputs keeps the old default", () => {
     const worker = { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 200 };
     const args = [THIRTY_MIN_30FPS, MP_1080P] as const;
     expect(resolveMaxParallelChunks({ ...worker, maxParallelChunks: 4 }, ...args)).toBe(4);
-    expect(resolveMaxParallelChunks({ ...worker, chunkSize: 240 }, ...args)).toBe(
-      DEFAULT_MAX_PARALLEL_CHUNKS,
-    );
-    expect(resolveMaxParallelChunks({ ...worker, targetChunkFrames: 300 }, ...args)).toBe(
-      DEFAULT_MAX_PARALLEL_CHUNKS,
-    );
     expect(resolveMaxParallelChunks({}, ...args)).toBe(DEFAULT_MAX_PARALLEL_CHUNKS);
+    expect(resolveMaxParallelChunks({ chunkSize: 240 }, ...args)).toBe(DEFAULT_MAX_PARALLEL_CHUNKS);
+  });
+
+  it("caps pinned chunking at one wave across the worker concurrency", () => {
+    const worker = { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 900 };
+    const maxParallel = resolveMaxParallelChunks({ ...worker, chunkSize: 30 }, 1800, MP_1080P);
+    expect(resolveChunkPlan(1800, 30, maxParallel).chunkCount).toBe(60);
+    const args = [THIRTY_MIN_30FPS, MP_1080P] as const;
+    expect(resolveMaxParallelChunks({ ...worker, targetChunkFrames: 300 }, ...args)).toBe(256);
   });
 
   it("fails fast with a typed error when even 256 chunks cannot fit the limit", () => {

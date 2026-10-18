@@ -444,8 +444,8 @@ export class ChunkExceedsWorkerTimeoutError extends Error {
 }
 
 /**
- * The `maxParallelChunks` a plan uses: explicit chunking flags win; otherwise one wave across
- * `workerConcurrency`, widened so each chunk fits `workerTimeoutSeconds`; with neither, 16.
+ * The `maxParallelChunks` a plan uses: an explicit value, else one wave across `workerConcurrency`
+ * (16 if unknown), widened to fit `workerTimeoutSeconds` unless chunkSize/targetChunkFrames pin it.
  */
 export function resolveMaxParallelChunks(
   config: Pick<
@@ -463,15 +463,15 @@ export function resolveMaxParallelChunks(
 ): number {
   if (config.maxParallelChunks !== undefined) return config.maxParallelChunks;
   const { workerTimeoutSeconds, workerConcurrency } = config;
-  const pinsChunking = config.chunkSize !== undefined || config.targetChunkFrames !== undefined;
-  if (pinsChunking || (workerTimeoutSeconds === undefined && workerConcurrency === undefined)) {
-    return DEFAULT_MAX_PARALLEL_CHUNKS;
-  }
-  const secondsPerFrame = ESTIMATED_SECONDS_PER_MEGAPIXEL_FRAME * megapixels;
   const wave = Math.min(
     workerConcurrency ?? DEFAULT_MAX_PARALLEL_CHUNKS,
     MAX_PARALLEL_CHUNKS_CEILING,
   );
+  const pinsChunking = config.chunkSize !== undefined || config.targetChunkFrames !== undefined;
+  if (pinsChunking || (workerTimeoutSeconds === undefined && workerConcurrency === undefined)) {
+    return wave;
+  }
+  const secondsPerFrame = ESTIMATED_SECONDS_PER_MEGAPIXEL_FRAME * megapixels;
   const minFramesPerChunk = Math.ceil(ESTIMATED_CHUNK_OVERHEAD_SECONDS / secondsPerFrame);
   const wide = Math.max(1, Math.min(wave, Math.floor(totalFrames / minFramesPerChunk)));
   if (workerTimeoutSeconds === undefined) return wide;
