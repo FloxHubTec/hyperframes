@@ -42,6 +42,7 @@ let captureSessionMode: "drawelement" | "screenshot" = "drawelement";
 let deVerifyFramesMap: Map<number, Buffer> | undefined;
 let psnrDbValue = Infinity;
 let regionShiftValue = 0;
+let regionShiftError: Error | null = null;
 let failPrepareCaptureSessionForReuse = false;
 let initializeSessionErrorMessage = "initialize failed";
 const browserConsoleBuffer = ["[FrameCapture:ERROR] page.goto failed"];
@@ -195,7 +196,10 @@ mock.module("@hyperframes/engine", () => ({
     }
   },
   psnrDb: async () => psnrDbValue,
-  regionShift: async () => regionShiftValue,
+  regionShift: async () => {
+    if (regionShiftError) throw regionShiftError;
+    return regionShiftValue;
+  },
   recaptureDrawElementFrameForVerify: async () => Buffer.from("frame"),
   spawnStreamingEncoder,
   writeCapturedFrame: async () => {},
@@ -771,6 +775,75 @@ describe("runCaptureStreamingStage", () => {
 
     expect(caught).toBeUndefined();
     expect(result?.success).toBe(true);
+  });
+
+  it("keeps the enforced PSNR check when the region-shift sample fails", async () => {
+    // The shift metric's ffmpeg chain uses `blend`, which the bootstrap
+    // preflight doesn't cover — a shift failure must not forfeit the PSNR
+    // result (the sample used to be skipped wholesale, letting the render
+    // pass below the dB floor unverified).
+    sessionWorkerEncodeEnabled = true;
+    deVerifyFramesMap = new Map([[0, Buffer.from("truth")]]);
+    psnrDbValue = 20;
+    regionShiftError = new Error("No such filter: 'blend'");
+    const prevBatch = process.env.HF_DE_BATCH;
+    process.env.HF_DE_BATCH = "1";
+    const { runCaptureStreamingStage } = await import("./captureStreamingStage.js");
+    const cfg = { forceScreenshot: false, ffmpegStreamingTimeout: 3_600_000 };
+    const input = { ...createInput(cfg), totalFrames: 1, workerCount: 1 };
+
+    let caught: unknown;
+    try {
+      await runCaptureStreamingStage(input);
+    } catch (error) {
+      caught = error;
+    } finally {
+      sessionWorkerEncodeEnabled = false;
+      deVerifyFramesMap = undefined;
+      psnrDbValue = Infinity;
+      regionShiftError = null;
+      if (prevBatch === undefined) delete process.env.HF_DE_BATCH;
+      else process.env.HF_DE_BATCH = prevBatch;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("drawElement self-verify failed at frame 0");
+    expect((caught as Error).message).toContain("20.0dB < 32dB");
+  });
+
+  it("accepts a verified frame when only the region-shift sample fails", async () => {
+    // Same isolation: a passing PSNR with a failed shift metric completes
+    // the render and records no observed max shift.
+    sessionWorkerEncodeEnabled = true;
+    deVerifyFramesMap = new Map([[0, Buffer.from("truth")]]);
+    psnrDbValue = 48;
+    regionShiftError = new Error("No such filter: 'blend'");
+    const prevBatch = process.env.HF_DE_BATCH;
+    process.env.HF_DE_BATCH = "1";
+    const { runCaptureStreamingStage } = await import("./captureStreamingStage.js");
+    const cfg = { forceScreenshot: false, ffmpegStreamingTimeout: 3_600_000 };
+    const input = { ...createInput(cfg), totalFrames: 1, workerCount: 1 };
+
+    let result:
+      | { success?: boolean; deDrainStats?: { verifyMaxShiftObserved?: number } }
+      | undefined;
+    let caught: unknown;
+    try {
+      result = await runCaptureStreamingStage(input);
+    } catch (error) {
+      caught = error;
+    } finally {
+      sessionWorkerEncodeEnabled = false;
+      deVerifyFramesMap = undefined;
+      psnrDbValue = Infinity;
+      regionShiftError = null;
+      if (prevBatch === undefined) delete process.env.HF_DE_BATCH;
+      else process.env.HF_DE_BATCH = prevBatch;
+    }
+
+    expect(caught).toBeUndefined();
+    expect(result?.success).toBe(true);
+    expect(result?.deDrainStats?.verifyMaxShiftObserved).toBeUndefined();
   });
 });
 

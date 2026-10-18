@@ -721,10 +721,13 @@ function logParDebug(message: () => string): void {
  * (low-contrast content missing, issue #3345); log the pass otherwise. Split
  * from the sampling loop for the complexity gate.
  *
+ * `metrics.shift` is undefined when the observe-only shift sample failed —
+ * the enforced PSNR gate still runs, the shift gate is skipped for it.
+ *
  * Exported for testing; the gate decision is a pure metrics read.
  */
 export function assertDiskSampleVerified(
-  metrics: { db: number; shift: number },
+  metrics: { db: number; shift: number | undefined },
   verifyMinDb: number,
   verifyMaxShift: number | undefined,
   idx: number,
@@ -744,7 +747,11 @@ export function assertDiskSampleVerified(
       },
     );
   }
-  if (verifyMaxShift !== undefined && metrics.shift > verifyMaxShift) {
+  if (
+    verifyMaxShift !== undefined &&
+    metrics.shift !== undefined &&
+    metrics.shift > verifyMaxShift
+  ) {
     throw new DrawElementVerificationError(
       `drawElement self-verify failed at frame ${idx} (disk path, worker ${workerId}): ` +
         `region shift ${metrics.shift}/255 > ${verifyMaxShift}/255 vs pre-injection screenshot; ` +
@@ -757,10 +764,12 @@ export function assertDiskSampleVerified(
       },
     );
   }
+  // The observed max only feeds telemetry on the streaming drain
+  // (verifyMaxShiftObserved); the disk path logs each sample's shift here.
   console.log(
     `[Parallel] drawElement disk self-verify passed (worker ${workerId}, frame ${idx}, ` +
       `${metrics.db === Infinity ? "inf" : metrics.db.toFixed(1)}dB, ` +
-      `shift ${metrics.shift}/255)`,
+      `shift ${metrics.shift === undefined ? "skipped" : `${metrics.shift}/255`})`,
   );
 }
 
@@ -788,24 +797,40 @@ export function isFfmpegInfrastructureFailure(err: unknown): boolean {
 
 /**
  * Compare one captured frame file against its ground truth. Returns the
- * PSNR + worst-region shift, or null on per-sample noise (readFile races,
- * transient EPERM, unparseable ffmpeg output on a single sample) — a skipped
- * sample is not damage evidence and must not fail the capture. Re-throws when
- * the error shape indicates the ffmpeg install itself is broken (missing
- * binary or a missing filter): the drawElement self-verify safety net cannot
- * possibly run in that state, and continuing would silently ship every
- * remaining frame unverified.
+ * PSNR + worst-region shift — `shift` is undefined when the shift sample
+ * itself failed — or null on per-sample noise (readFile races, transient
+ * EPERM, unparseable ffmpeg output on a single sample): a skipped sample is
+ * not damage evidence and must not fail the capture. Re-throws when the PSNR
+ * side's error shape indicates the ffmpeg install itself is broken (missing
+ * binary or a missing `psnr` filter): the drawElement self-verify safety net
+ * cannot possibly run in that state, and continuing would silently ship
+ * every remaining frame unverified.
+ *
+ * The shift metric is observe-only and its ffmpeg chain uses `blend`, which
+ * the bootstrap preflight doesn't cover — it runs under its own catch (log
+ * and move on) so a shift failure can neither forfeit the enforced PSNR
+ * result nor hit the infrastructure abort. The PSNR gate stays exactly as
+ * strong as on main.
+ *
+ * Exported for testing.
  */
-async function metricsForDiskSample(
+export async function metricsForDiskSample(
   framePath: string,
   truth: Buffer,
   workerId: number,
   idx: number,
-): Promise<{ db: number; shift: number } | null> {
+): Promise<{ db: number; shift: number | undefined } | null> {
   try {
     const buf = await readFile(framePath);
-    const [db, shift] = await Promise.all([psnrDb(buf, truth), regionShift(buf, truth)]);
-    return { db, shift };
+    const shiftP = regionShift(buf, truth).catch((err: unknown) => {
+      console.warn(
+        `[Parallel] drawElement disk region-shift sample failed (worker ${workerId}, ` +
+          `frame ${idx}); metric skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return undefined;
+    });
+    const db = await psnrDb(buf, truth);
+    return { db, shift: await shiftP };
   } catch (err) {
     if (isFfmpegInfrastructureFailure(err)) {
       const detail = err instanceof Error ? err.message : String(err);

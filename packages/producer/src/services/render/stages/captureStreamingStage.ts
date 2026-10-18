@@ -427,10 +427,20 @@ function createDrainFrameGuard(args: {
     }
     const truth = session.deVerifyFrames?.get(idx);
     if (truth) {
+      // The shift metric is observe-only and its ffmpeg chain uses `blend`,
+      // which the bootstrap preflight doesn't cover — run it under its own
+      // catch so a shift failure can't forfeit the enforced PSNR result too.
+      // Log and move on: the PSNR gate stays exactly as strong as on main.
+      const shiftP = regionShift(buf, truth).catch((err: unknown) => {
+        log.warn("[Render] drawElement region-shift sample failed; metric skipped", {
+          frame: idx,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return undefined;
+      });
       let db: number;
-      let shift: number;
       try {
-        [db, shift] = await Promise.all([psnrDb(buf, truth), regionShift(buf, truth)]);
+        db = await psnrDb(buf, truth);
       } catch (err) {
         // Infrastructure failure (ffmpeg spawn/parse/tmpdir), not evidence of
         // damage — skip this sample rather than failing or falling back.
@@ -440,7 +450,11 @@ function createDrainFrameGuard(args: {
         });
         return buf;
       }
-      if (db < verifyMinDb || (verifyMaxShift !== undefined && shift > verifyMaxShift)) {
+      const shift = await shiftP;
+      if (
+        db < verifyMinDb ||
+        (shift !== undefined && verifyMaxShift !== undefined && shift > verifyMaxShift)
+      ) {
         // Keep the mismatched pair for diagnosis (tmpdir; OS-reaped).
         const dumpDir = await mkdtemp(join(tmpdir(), "hf-de-verify-fail-")).catch(() => null);
         if (dumpDir) {
@@ -455,21 +469,25 @@ function createDrainFrameGuard(args: {
             { kind: "psnr", frameIndex: idx, failedDb: db, verifyThresholdDb: verifyMinDb },
           );
         }
-        throw new DrawElementVerificationError(
-          `drawElement self-verify failed at frame ${idx}: region shift ${shift}/255 > ${verifyMaxShift}/255 vs pre-injection screenshot; a low-contrast region is absent from the drawElement frame${dumpDir ? ` (pair: ${dumpDir})` : ""}`,
-          { kind: "shift", frameIndex: idx, failedShift: shift, verifyMaxShift },
-        );
+        if (shift !== undefined && verifyMaxShift !== undefined) {
+          throw new DrawElementVerificationError(
+            `drawElement self-verify failed at frame ${idx}: region shift ${shift}/255 > ${verifyMaxShift}/255 vs pre-injection screenshot; a low-contrast region is absent from the drawElement frame${dumpDir ? ` (pair: ${dumpDir})` : ""}`,
+            { kind: "shift", frameIndex: idx, failedShift: shift, verifyMaxShift },
+          );
+        }
       }
       stats.verifyChecked += 1;
       stats.verifyMinDb = stats.verifyMinDb === undefined ? db : Math.min(stats.verifyMinDb, db);
-      stats.verifyMaxShiftObserved =
-        stats.verifyMaxShiftObserved === undefined
-          ? shift
-          : Math.max(stats.verifyMaxShiftObserved, shift);
+      if (shift !== undefined) {
+        stats.verifyMaxShiftObserved =
+          stats.verifyMaxShiftObserved === undefined
+            ? shift
+            : Math.max(stats.verifyMaxShiftObserved, shift);
+      }
       log.info("[Render] drawElement self-verify passed", {
         frame: idx,
         psnrDb: db === Infinity ? "inf" : Number(db.toFixed(1)),
-        regionShift: shift,
+        regionShift: shift === undefined ? "skipped" : shift,
       });
     }
     return buf;

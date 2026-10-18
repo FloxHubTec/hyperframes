@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import {
   assertDiskSampleVerified,
   calculateOptimalWorkers,
@@ -10,6 +13,7 @@ import {
   formatWorkerFailure,
   isFfmpegInfrastructureFailure,
   isPoolFatalWorkerFailure,
+  metricsForDiskSample,
   selectVerifySampleIndicesForTask,
   selectWorkerDiagnostics,
   shouldDisableBrowserPoolForParallelWorker,
@@ -22,6 +26,14 @@ import {
 import { getDrawElementVerificationDetails } from "./frameCapture.js";
 import type { EngineConfig } from "../config.js";
 import { CaptureFailure } from "./captureFailure.js";
+import { psnrDb, regionShift } from "../utils/psnr.js";
+
+vi.mock("../utils/psnr.js", () => ({
+  psnrDb: vi.fn(async () => 44),
+  regionShift: vi.fn(async () => 0),
+  resolveDeVerifyMinDb: vi.fn(() => 32),
+  resolveDeVerifyMaxShift: vi.fn(() => undefined),
+}));
 
 describe("parallel worker phase deadline", () => {
   it("fails a wedged operation with phase and browser diagnostics before the aggregate watchdog", async () => {
@@ -645,7 +657,58 @@ describe("assertDiskSampleVerified", () => {
     );
   });
 
+  it("does not trip an armed shift gate when the shift metric was skipped", () => {
+    expect(() => assertDiskSampleVerified({ db: 44, shift: undefined }, 32, 3, 7, 1)).not.toThrow();
+  });
+
+  it("still enforces the dB floor when the shift metric was skipped", () => {
+    expect(() => assertDiskSampleVerified({ db: 20, shift: undefined }, 32, 3, 7, 1)).toThrow(
+      /20\.0dB < 32dB/,
+    );
+  });
+
   it("passes a sample that clears both gates", () => {
     expect(() => assertDiskSampleVerified({ db: 48, shift: 2 }, 32, 3, 7, 1)).not.toThrow();
+  });
+});
+
+describe("metricsForDiskSample", () => {
+  const writeSample = async (): Promise<{ dir: string; framePath: string }> => {
+    const dir = await mkdtemp(join(tmpdir(), "hf-de-verify-test-"));
+    const framePath = join(dir, "frame.jpg");
+    await writeFile(framePath, Buffer.from("captured"));
+    return { dir, framePath };
+  };
+
+  it("keeps the PSNR result when the region-shift sample fails", async () => {
+    // The shift metric's ffmpeg chain uses `blend`, which the bootstrap
+    // preflight doesn't check — a shift-side failure must not forfeit the
+    // enforced PSNR result or hit the infrastructure abort below.
+    vi.mocked(regionShift).mockRejectedValueOnce(new Error("No such filter: 'blend'"));
+    const { dir, framePath } = await writeSample();
+    try {
+      expect(await metricsForDiskSample(framePath, Buffer.from("truth"), 1, 7)).toEqual({
+        db: 44,
+        shift: undefined,
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still aborts on a PSNR-side infrastructure failure", async () => {
+    // The abort moves wholesale → per-side: only the enforced check's own
+    // ffmpeg failure means the safety net can't run.
+    vi.mocked(psnrDb).mockRejectedValueOnce(
+      Object.assign(new Error("spawn ffmpeg ENOENT"), { code: "ENOENT" }),
+    );
+    const { dir, framePath } = await writeSample();
+    try {
+      await expect(metricsForDiskSample(framePath, Buffer.from("truth"), 1, 7)).rejects.toThrow(
+        /self-verify aborted/,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
