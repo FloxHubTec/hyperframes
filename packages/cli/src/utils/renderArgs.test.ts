@@ -123,6 +123,21 @@ describe("pageNavigationTimeoutMs", () => {
     expect(pageNavigationTimeoutMs()).toBe(DEFAULT_CONFIG.pageNavigationTimeout);
   });
 
+  it("prints no render-only warning where render would disable streaming encode", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    vi.stubEnv("PRODUCER_BROWSER_GPU_MODE", "software");
+    vi.stubEnv("PRODUCER_MAX_WORKERS", "1");
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      expect(pageNavigationTimeoutMs()).toBe(DEFAULT_CONFIG.pageNavigationTimeout);
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      stderr.mockRestore();
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
   it("lets a command's longer --timeout raise it, never lower it", () => {
     expect(pageNavigationTimeoutMs(DEFAULT_CONFIG.pageNavigationTimeout * 2)).toBe(
       DEFAULT_CONFIG.pageNavigationTimeout * 2,

@@ -51,17 +51,16 @@ const SEEK_SETTLE_MS = 150;
 const PREFERRED_SEEK_TARGET_WAIT_MS = 500;
 const MEDIA_EXTENSIONS = /\.(aac|flac|m4a|mov|mp3|mp4|oga|ogg|wav|webm)$/i;
 // Turn Puppeteer's opaque "Navigation timeout of Nms exceeded" into an
-// actionable message: the usual cause is a blocking CDN <script> that render
-// tolerates but validate's tighter budget does not. Returns a replacement Error
-// for a navigation timeout, or null for any other error (caller rethrows as-is).
+// actionable message: the usual cause is a slow blocking CDN <script>. Returns a
+// replacement Error for a navigation timeout, or null for any other error.
 export function navigationTimeoutHint(err: unknown, navTimeoutMs: number): Error | null {
   const msg = err instanceof Error ? err.message : String(err);
   if (!/navigation timeout/i.test(msg)) return null;
   return new Error(
     `Page navigation timed out after ${navTimeoutMs}ms. A blocking external <script> ` +
-      `(e.g. GSAP loaded from a CDN) can delay page load past this budget even when the ` +
-      `full render succeeds. Vendor the script locally (recommended for deterministic ` +
-      `renders), or re-run with a longer --timeout.`,
+      `(e.g. GSAP loaded from a CDN) can delay page load past this budget, which render ` +
+      `shares. Vendor the script locally (recommended for deterministic renders), or ` +
+      `re-run with a longer --timeout or PRODUCER_PAGE_NAVIGATION_TIMEOUT_MS.`,
   );
 }
 

@@ -31,6 +31,7 @@ vi.mock("@hyperframes/engine", () => ({
   resolveConfig: mocks.resolveConfig,
   usesSoftwareWebGpu: mocks.usesSoftwareWebGpu,
   DEFAULT_CONFIG: { pageNavigationTimeout: 60_000 },
+  resolvePageNavigationTimeout: () => 60_000,
 }));
 
 import { openSettledCompositionPage } from "./captureCompositionFrame.js";
