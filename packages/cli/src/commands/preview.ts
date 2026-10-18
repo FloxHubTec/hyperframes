@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import * as clack from "@clack/prompts";
 import { c } from "../ui/colors.js";
-import { desktopHint } from "../utils/desktopApp.js";
+import { desktopHint, insideHostApp } from "../utils/desktopApp.js";
 import { isDevMode } from "../utils/env.js";
 import { normalizeErrorMessage as errorMessage } from "../utils/errorMessage.js";
 import { buildNpxCommand } from "../utils/npxCommand.js";
@@ -488,9 +488,6 @@ export default defineCommand({
       );
     }
 
-    // Runs in the CLI worker while Studio starts, so it never delays the opening; --json skips it.
-    const startupLint = args.json ? null : printStartupLint(dir, Boolean(args["lint-verbose"]));
-
     const launchMode = previewLaunchMode({
       background: Boolean(args.background),
       foreground: Boolean(args.foreground),
@@ -498,6 +495,15 @@ export default defineCommand({
       devMode: isDevMode(),
       localStudio: hasLocalStudio(dir),
     });
+
+    const hostAppError = previewHostAppError(launchMode);
+    if (hostAppError) {
+      reportPreviewFailure(Boolean(args.json), "start", "host-app-owns-preview", hostAppError);
+      return;
+    }
+
+    // Runs in the CLI worker while Studio starts, so it never delays the opening; --json skips it.
+    const startupLint = args.json ? null : printStartupLint(dir, Boolean(args["lint-verbose"]));
 
     if (launchMode === "background") {
       let background;
@@ -641,6 +647,18 @@ export function previewLaunchMode(options: {
   if (!options.foreground && !options.interactive) return "background";
   if (options.devMode) return "dev";
   return options.localStudio ? "local" : "embedded";
+}
+
+export function previewHostAppError(
+  mode: PreviewLaunchMode,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (mode !== "background" || !insideHostApp(env)) return null;
+  return (
+    "A host app is running this project and owns its preview, so a background preview " +
+    "here would outlive this run and keep the project's history locked. Use the host " +
+    "app's preview, or run with --foreground to keep a preview attached to this run."
+  );
 }
 
 export function previewLaunchModeError(options: {

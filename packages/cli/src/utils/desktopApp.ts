@@ -200,6 +200,10 @@ export function desktopInstalled({
   return DESKTOP_BUNDLE_IDS.some(spotlight);
 }
 
+export function insideHostApp(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.HYPERFRAMES_DESKTOP_PROJECT);
+}
+
 /** The app line render and preview print; null inside the app, or with nothing here to open or download. */
 export function desktopHint(
   dir: string,
@@ -215,7 +219,7 @@ export function desktopHint(
     platform?: NodeJS.Platform;
   } = {},
 ): string | null {
-  if (env.HYPERFRAMES_DESKTOP_PROJECT) return null;
+  if (insideHostApp(env)) return null;
   if (ready && (installed ?? desktopInstalled({ platform, env })))
     return `Keep editing by chatting with Framey in the desktop app: ${openCommandFor(dir)}`;
   const url = desktopDownloadUrl(platform);
