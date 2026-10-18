@@ -39,6 +39,7 @@ import { useProjectHasAudio } from "../utils/audioMeterMath";
 import { canAddBeatAt, addBeatAtCompositionTime } from "../utils/beatEditActions";
 import { isTypingTarget } from "../utils/typingTarget";
 import { SPLIT_SHORTCUT_HINT } from "../player/components/studioShortcuts";
+import { useTimelineTrackDensity } from "../player/components/useTimelineTrackHeight";
 import type { TimelineProps } from "../player/components/TimelineTypes";
 
 interface DomEditSessionSlice extends EnableKeyframesSession {
@@ -167,8 +168,8 @@ export const TimelineToolbar = memo(function TimelineToolbar({
   const thumbnailMode = usePlayerStore((s) => s.thumbnailMode);
   const setThumbnailMode = usePlayerStore((s) => s.setThumbnailMode);
   const thumbnailsVisible = thumbnailMode === "adaptive";
-  const trackDensity = usePlayerStore((s) => s.timelineTrackDensity);
-  const setTrackDensity = usePlayerStore((s) => s.setTimelineTrackDensity);
+  const trackDensity = useTimelineTrackDensity((s) => s.density);
+  const setTrackDensity = useTimelineTrackDensity((s) => s.setDensity);
   const compactTracks = trackDensity === "compact";
   const audioMetersVisible = useAudioMetersVisible((s) => s.visible);
   const setAudioMetersVisible = useAudioMetersVisible((s) => s.setVisible);
@@ -491,7 +492,7 @@ export const TimelineToolbar = memo(function TimelineToolbar({
               <Image size={16} aria-hidden="true" />
             </button>
           </Tooltip>
-          <Tooltip label={compactTracks ? "Comfortable track height" : "Compact track height"}>
+          <Tooltip label="Compact track height">
             <button
               type="button"
               aria-label="Compact track height"
