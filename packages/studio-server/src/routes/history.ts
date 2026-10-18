@@ -91,16 +91,17 @@ function nextStep(history: ProjectHistory, direction: "back" | "forward") {
   return { id: target.id, label: target.label, endedAt: target.endedAt, paths };
 }
 
-/** Runs `task` on the project's history; no history is a 404, an engine refusal ("no longer kept") a 409. */
+/** Runs `task` on the project's history; no history is a 404, a refusal to open or to act ("no longer kept") a 409. */
 async function withHistory(
   adapter: StudioApiAdapter,
   c: Context,
   task: (history: ProjectHistory, body: Record<string, unknown>) => Promise<unknown> | unknown,
 ) {
-  const history = await historyOf(adapter, c);
-  if (!history) return c.json({ error: "This project has no history here." }, 404);
   try {
-    return c.json((await task(history, await bodyOf(c))) ?? null);
+    const history = await historyOf(adapter, c);
+    if (!history) return c.json({ error: "This project has no history here." }, 404);
+    const result = await task(history, await bodyOf(c));
+    return result instanceof Response ? result : c.json(result ?? null);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
   }
@@ -149,15 +150,17 @@ export function registerHistoryRoutes(api: Hono, adapter: StudioApiAdapter): voi
       return { ok: true };
     }),
   );
-  api.get(`${base}/blob/:hash`, async (c) => {
-    const history = await historyOf(adapter, c);
-    const hash = c.req.param("hash") ?? "";
-    const missing = () =>
-      c.json({ error: "That file is not kept in this project's history." }, 404);
-    if (!history || !/^[0-9a-f]{64}$/.test(hash)) return missing();
-    const bytes = await history.readBlob(hash).catch(() => null);
-    return bytes ? c.body(new Uint8Array(bytes)) : missing();
-  });
+  api.get(`${base}/blob/:hash`, (c) =>
+    withHistory(adapter, c, async (history) => {
+      const hash = c.req.param("hash") ?? "";
+      const bytes = /^[0-9a-f]{64}$/.test(hash)
+        ? await history.readBlob(hash).catch(() => null)
+        : null;
+      return bytes
+        ? c.body(new Uint8Array(bytes))
+        : c.json({ error: "That file is not kept in this project's history." }, 404);
+    }),
+  );
   // Studio records after it writes, under the edit's label; a gesture with no idleMs holds until another key.
   api.post(`${base}/claim`, (c) =>
     withHistory(adapter, c, async (history, body) => {

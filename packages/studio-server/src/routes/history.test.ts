@@ -521,6 +521,30 @@ describe("history routes", () => {
     const call = apiFor(tempDir("hf-history-routes-none-"));
     expect((await call("")).status).toBe(404);
   });
+
+  it("say why when the project's history cannot open, on every route", async () => {
+    const projectDir = tempDir("hf-history-routes-busy-");
+    writeFileSync(join(projectDir, "index.html"), "A");
+    const historyRoot = tempDir("hf-history-routes-busy-root-");
+    const owner = await openProjectHistory({ projectDir, historyRoot });
+    cleanup.push(() => owner.close());
+    const api = createStudioApi({
+      listProjects: () => [],
+      resolveProject: (id: string) => (id === "demo" ? { id, dir: projectDir } : null),
+      history: () => openProjectHistory({ projectDir, historyRoot, ownerWaitMs: 0 }),
+    } as unknown as StudioApiAdapter);
+    const busy = {
+      error: `This project's history is open in another process (pid ${process.pid}).`,
+    };
+
+    const claim = await api.request("/projects/demo/history/claim", {
+      method: "POST",
+      body: JSON.stringify({ label: "Color", paths: ["index.html"] }),
+    });
+    expect([claim.status, await claim.json()]).toEqual([409, busy]);
+    const blob = await api.request(`/projects/demo/history/blob/${"0".repeat(64)}`);
+    expect([blob.status, await blob.json()]).toEqual([409, busy]);
+  });
 });
 
 it("checkpoints pending writes without closing an agent window", async () => {
