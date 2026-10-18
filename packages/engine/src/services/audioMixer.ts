@@ -15,6 +15,7 @@ import {
 } from "../utils/urlDownloader.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { formatFfmpegError, runFfmpeg, type RunFfmpegResult } from "../utils/runFfmpeg.js";
+import { AAC_ARGS, aacSegmentCount, encodeAac } from "./aacEncode.js";
 import { audioSubprocessEvidence } from "./audioFailureDiagnostic.js";
 import { unwrapTemplate } from "../utils/htmlTemplate.js";
 import { resolveMediaElementSrc, resolveProjectRelativeSrc } from "./videoFrameExtractor.js";
@@ -827,7 +828,7 @@ async function mixAudioTracks(
       scriptPath,
       "-map",
       "[out]",
-      ...(floatWav ? ["-acodec", "pcm_f32le", "-ar", "48000"] : ["-acodec", "aac", "-b:a", "192k"]),
+      ...(floatWav ? ["-acodec", "pcm_f32le", "-ar", "48000"] : AAC_ARGS),
       "-t",
       String(totalDuration),
       "-y",
@@ -1059,12 +1060,12 @@ async function mixGroupMembers(
 }
 
 /**
- * Sum the tracks to a float WAV, run the master chain over the sum, then AAC-encode.
+ * Sum the tracks to a float WAV, run the master chain (if any) over the sum, then AAC-encode.
  * Groups are already folded into `tracks`, and the sum stays float until the encoder.
  */
-async function mixThroughMasterBus(
+async function mixThroughFloatSum(
   tracks: AudioTrack[],
-  masterChain: HfAudioFxChain,
+  masterChain: HfAudioFxChain | undefined,
   outputPath: string,
   workDir: string,
   totalDuration: number,
@@ -1075,25 +1076,18 @@ async function mixThroughMasterBus(
   const sum = await mixAudioTracks(tracks, sumPath, totalDuration, signal, config, true);
   if (!sum.success) return { ...sum, outputPath };
 
-  const fx = await applyAudioFxChain(sumPath, masterChain, join(workDir, "master-fx.wav"), {
-    trackId: "master",
+  const encoderInput = masterChain
+    ? (
+        await applyAudioFxChain(sumPath, masterChain, join(workDir, "master-fx.wav"), {
+          trackId: "master",
+          signal,
+        })
+      ).path
+    : sumPath;
+  const encoded = await encodeAac(encoderInput, outputPath, totalDuration, {
     signal,
+    timeout: config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout,
   });
-  const encoded = await runFfmpeg(
-    [
-      "-i",
-      fx.path,
-      "-t",
-      String(totalDuration),
-      "-acodec",
-      "aac",
-      "-b:a",
-      "192k",
-      "-y",
-      outputPath,
-    ],
-    { signal, timeout: config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout },
-  );
   if (!encoded.success) {
     const failure = ffmpegFailure("mix", encoded);
     return {
@@ -1123,6 +1117,7 @@ export async function processCompositionAudio(
 ): Promise<MixResult> {
   const startMs = Date.now();
   const tracks: AudioTrack[] = [];
+  const preparedTracks = new Array<AudioTrack | undefined>(elements.length);
   const failures: AudioProcessingFailure[] = [];
   // Grouped members are diverted here instead of `tracks` during element
   // processing, then summed into one processed track per group before the
@@ -1154,7 +1149,7 @@ export async function processCompositionAudio(
   }
 
   await Promise.all(
-    elements.map(async (element) => {
+    elements.map(async (element, index) => {
       if (effectiveSignal.aborted) {
         failures.push({
           stage: "cancelled",
@@ -1386,24 +1381,7 @@ export async function processCompositionAudio(
           ...(tailSeconds > 0 ? { tailSeconds } : {}),
         };
 
-        // A grouped member keeps every bit of its OWN processing above
-        // (FX, envelope) exactly like an ungrouped track — it just lands in
-        // the group's bucket instead of the flat list, to be summed into one
-        // processed bus below rather than mixed directly.
-        if (element.groupId) {
-          const bucket = groupTracks.get(element.groupId);
-          if (bucket) bucket.push(track);
-          else groupTracks.set(element.groupId, [track]);
-          if (!groupMeta.has(element.groupId)) {
-            groupMeta.set(element.groupId, {
-              ...(element.groupFxChain ? { fxChain: element.groupFxChain } : {}),
-              ...(element.groupAutomation ? { automation: element.groupAutomation } : {}),
-              volume: element.groupVolume ?? 1,
-            });
-          }
-        } else {
-          tracks.push(track);
-        }
+        preparedTracks[index] = track;
       } catch (err: unknown) {
         // An FX failure is fatal for the whole mix. Every other failure mode
         // degrades gracefully — the track drops and siblings continue — but
@@ -1434,6 +1412,27 @@ export async function processCompositionAudio(
       /* ignore */
     }
     throw err;
+  });
+
+  // FFmpeg's floating-point sum depends on input order. Keep parallel prep,
+  // but assemble flat tracks, group members and groups in authored order.
+  elements.forEach((element, index) => {
+    const track = preparedTracks[index];
+    if (!track) return;
+    if (element.groupId) {
+      const bucket = groupTracks.get(element.groupId);
+      if (bucket) bucket.push(track);
+      else groupTracks.set(element.groupId, [track]);
+      if (!groupMeta.has(element.groupId)) {
+        groupMeta.set(element.groupId, {
+          ...(element.groupFxChain ? { fxChain: element.groupFxChain } : {}),
+          ...(element.groupAutomation ? { automation: element.groupAutomation } : {}),
+          volume: element.groupVolume ?? 1,
+        });
+      }
+    } else {
+      tracks.push(track);
+    }
   });
 
   // Never turn a per-track preparation failure into a successful partial mix.
@@ -1608,8 +1607,8 @@ export async function processCompositionAudio(
   let mixResult: MixResult;
   try {
     mixResult =
-      masterChain && tracks.length > 0
-        ? await mixThroughMasterBus(
+      (masterChain || aacSegmentCount(totalDuration) > 1) && tracks.length > 0
+        ? await mixThroughFloatSum(
             tracks,
             masterChain,
             outputPath,
