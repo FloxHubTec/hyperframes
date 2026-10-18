@@ -93,6 +93,7 @@ function nextStep(history: ProjectHistory, direction: "back" | "forward") {
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const FORWARD_DEADLINE_MS = 5_000;
 
 function ownerRoute(c: Context, error: unknown): string | null {
   if (!(error instanceof HistoryBusyError) || !error.url || !URL.canParse(error.url)) return null;
@@ -112,6 +113,7 @@ async function forward(c: Context, target: string): Promise<Response> {
       ...(token && { "X-Hyperframes-Write-Token": token }),
     },
     ...(!reads && { body: await c.req.arrayBuffer() }),
+    signal: AbortSignal.timeout(FORWARD_DEADLINE_MS),
   });
   const type = reply.headers.get("content-type") ?? "application/json";
   return new Response(await reply.arrayBuffer(), {

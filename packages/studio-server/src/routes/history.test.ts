@@ -574,10 +574,26 @@ describe("history routes", () => {
       expect((await desktop("/claim", { label: "Color", paths: ["index.html"] })).status).toBe(409);
     }
   });
+
+  it("answer the 409 with the reason when the owner takes the request and never replies", async () => {
+    const silent = createServer(() => {});
+    await new Promise<void>((listening) => silent.listen(0, "127.0.0.1", listening));
+    cleanup.push(() => {
+      silent.closeAllConnections();
+      return new Promise((closed) => silent.close(closed));
+    });
+    const port = (silent.address() as AddressInfo).port;
+    const { desktop } = await ownedElsewhere(`http://127.0.0.1:${port}/projects/demo/history`);
+    const started = Date.now();
+
+    const claim = await desktop("/claim", { label: "Color", paths: ["index.html"] });
+    expect(claim.status).toBe(409);
+    expect(Date.now() - started).toBeLessThan(9_000);
+  }, 15_000);
 });
 
 /** A project whose history a served Studio API owns, and a second host (as Desktop) that finds it busy. */
-async function ownedElsewhere() {
+async function ownedElsewhere(advertised?: string) {
   const projectDir = tempDir("hf-history-owned-");
   writeFileSync(join(projectDir, "index.html"), "A");
   const historyRoot = tempDir("hf-history-owned-root-");
@@ -600,7 +616,7 @@ async function ownedElsewhere() {
   await new Promise<void>((listening) => server.listen(0, "127.0.0.1", listening));
   cleanup.push(() => new Promise((closed) => server.close(closed)));
   const ownerUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/projects/demo/history`;
-  owner = await openProjectHistory({ projectDir, historyRoot, ownerUrl });
+  owner = await openProjectHistory({ projectDir, historyRoot, ownerUrl: advertised ?? ownerUrl });
   cleanup.push(() => owner?.close());
   const api = createStudioApi({
     listProjects: () => [],
