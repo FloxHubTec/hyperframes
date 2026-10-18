@@ -7,12 +7,20 @@ import {
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { requestCliExit } from "../utils/commandResult.js";
 import { processIsAlive } from "../utils/processTree.js";
+import {
+  inAgentSandbox,
+  isOneProcessOverPipe,
+  machServiceDenied,
+  oneProcessOverPipe,
+  sandboxDeniedRemediation,
+} from "./sandboxDenied.js";
 
 export class BrowserCleanupError extends AggregateError {}
 
 const browsers = new Set<Browser>();
 const closing = new WeakMap<Browser, Promise<void>>();
 const pending = new Map<Promise<Browser>, AbortController>();
+const sessionCleanups = new Set<() => Promise<void>>();
 const CLOSE_GRACE_MS = 1_000;
 const EXIT_POLL_MS = 50;
 let listening = false;
@@ -54,9 +62,7 @@ export async function resolveManagedGpuMode(
       context.signal?.throwIfAborted();
       const browser = await launchManagedBrowser(puppeteer, {
         ...options,
-        ...(context.noListen
-          ? { pipe: true, args: [...(options.args ?? []), "--single-process"] }
-          : {}),
+        ...(context.noListen ? oneProcessOverPipe(options) : {}),
         signal: context.signal,
       });
       try {
@@ -72,6 +78,29 @@ export async function resolveManagedGpuMode(
 
 /** One owner for every CLI browser, including a launch cancelled before its connection is ready. */
 export async function launchManagedBrowser(
+  puppeteer: PuppeteerNode,
+  options: LaunchOptions,
+): Promise<Browser> {
+  const sandboxed = isOneProcessOverPipe(options) || inAgentSandbox();
+  try {
+    return await launchOwnedBrowser(puppeteer, sandboxed ? oneProcessOverPipe(options) : options);
+  } catch (error) {
+    const unnamedSeatbelt = !sandboxed && machServiceDenied(normalizeErrorMessage(error));
+    if (!unnamedSeatbelt) throw withRemediation(error);
+    return launchOwnedBrowser(puppeteer, oneProcessOverPipe(options)).catch(
+      (retryError: unknown) => {
+        throw withRemediation(retryError);
+      },
+    );
+  }
+}
+
+function withRemediation(error: unknown): unknown {
+  const remediation = sandboxDeniedRemediation(normalizeErrorMessage(error));
+  return remediation ? new Error(remediation, { cause: error }) : error;
+}
+
+async function launchOwnedBrowser(
   puppeteer: PuppeteerNode,
   options: LaunchOptions,
 ): Promise<Browser> {
@@ -102,7 +131,17 @@ export async function launchManagedBrowser(
 async function closeManagedBrowsers(): Promise<void> {
   for (const abort of pending.values()) abort.abort();
   await Promise.allSettled(pending.keys());
-  await Promise.all([...browsers].map(closeManagedBrowser));
+  const results = await Promise.allSettled([...browsers].map(closeManagedBrowser));
+  results.push(...(await Promise.allSettled([...sessionCleanups].map((cleanup) => cleanup()))));
+  const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+  if (errors.length) throw new AggregateError(errors, "Browser session shutdown failed.");
+}
+
+export function registerBrowserSessionCleanup(cleanup: () => Promise<void>): () => void {
+  if (shutdown) throw new Error("The CLI is stopping; no browser session can start.");
+  ownSignals();
+  sessionCleanups.add(cleanup);
+  return () => sessionCleanups.delete(cleanup);
 }
 
 /** Manual teardown and signal teardown share the same bounded close, exactly once. */
