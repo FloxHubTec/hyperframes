@@ -15,7 +15,16 @@ const OPENING_MS = 1600;
 
 type OpenResult = { opened: true } | { opened: false; reason: string; downloadUrl: string };
 
-type DesktopRoute = { handoff: boolean; downloadUrl: string | null };
+type DesktopRoute = {
+  handoff: boolean;
+  downloadUrl: string | null;
+  context: { os: string; app_installed: boolean; download_available: boolean };
+};
+
+type Eligibility = "open_in_app" | "download" | "no_app_for_platform";
+
+const eligibilityOf = (route: DesktopRoute): Eligibility =>
+  route.handoff ? "open_in_app" : route.downloadUrl ? "download" : "no_app_for_platform";
 
 /** Null hides the button: no route (the app's own Studio), or nothing here to open or download. */
 function useDesktopRoute(): DesktopRoute | null {
@@ -24,18 +33,60 @@ function useDesktopRoute(): DesktopRoute | null {
     let live = true;
     studioApiFetch(ROUTE)
       .then((res) => (res.ok ? res.json() : null))
-      .then((body: { available?: unknown; handoff?: unknown; downloadUrl?: unknown } | null) => {
-        if (!live || body?.available !== true) return;
-        const handoff = body.handoff === true;
-        const downloadUrl = typeof body.downloadUrl === "string" ? body.downloadUrl : null;
-        if (handoff || downloadUrl) setRoute({ handoff, downloadUrl });
-      })
+      .then(
+        (
+          body: {
+            available?: unknown;
+            handoff?: unknown;
+            downloadUrl?: unknown;
+            os?: unknown;
+            installed?: unknown;
+          } | null,
+        ) => {
+          if (!live || !body) return;
+          const downloadUrl = typeof body.downloadUrl === "string" ? body.downloadUrl : null;
+          const answered: DesktopRoute = {
+            handoff: body.available === true && body.handoff === true,
+            downloadUrl: body.available === true ? downloadUrl : null,
+            context: {
+              os: typeof body.os === "string" ? body.os : "unknown",
+              app_installed: body.installed === true,
+              download_available: downloadUrl !== null,
+            },
+          };
+          trackStudioEvent("desktop_cta_eligibility", {
+            eligibility: eligibilityOf(answered),
+            ...answered.context,
+          });
+          if (answered.handoff || answered.downloadUrl) setRoute(answered);
+        },
+      )
       .catch(() => {});
     return () => {
       live = false;
     };
   }, []);
   return route;
+}
+
+/** One impression per page, once the button is on screen. */
+function useImpression(anchor: React.RefObject<HTMLElement | null>, route: DesktopRoute | null) {
+  useEffect(() => {
+    const el = anchor.current;
+    if (!route || !el) return;
+    const props = { eligibility: eligibilityOf(route), ...route.context };
+    if (typeof IntersectionObserver === "undefined") {
+      trackStudioEvent("desktop_cta_impression", props);
+      return;
+    }
+    const seen = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      seen.disconnect();
+      trackStudioEvent("desktop_cta_impression", props);
+    });
+    seen.observe(el);
+    return () => seen.disconnect();
+  }, [anchor, route]);
 }
 
 /** Framey looks at the pointer: one listener, one write per frame, no re-render. */
@@ -75,7 +126,14 @@ export function OpenInDesktopButton() {
   const trigger = useRef<HTMLElement>(null);
   const eye = useRef<SVGGElement>(null);
   useGaze(trigger, eye);
+  useImpression(trigger, route);
   if (!route) return null;
+  const outcome = (result: "opened" | "sent_to_download" | "failed", reason?: string) =>
+    trackStudioEvent("desktop_cta_outcome", {
+      outcome: result,
+      ...(reason ? { reason } : {}),
+      ...route.context,
+    });
   const icon = <FrameyGlyph size={24} className="hf-framey" eyeRef={eye} />;
 
   if (!route.handoff) {
@@ -89,7 +147,10 @@ export function OpenInDesktopButton() {
         data-testid="header-open-in-desktop"
         title="Download the free HyperFrames desktop app from hyperframes.dev"
         className={cn(buttonBase, buttonVariants.ghost, buttonSizes.md, LOOK)}
-        onClick={() => trackStudioEvent("toolbar_action", { action: "get_desktop_app" })}
+        onClick={() => {
+          trackStudioEvent("toolbar_action", { action: "get_desktop_app", ...route.context });
+          outcome("sent_to_download");
+        }}
       >
         {icon}
         {LABEL}
@@ -97,24 +158,31 @@ export function OpenInDesktopButton() {
     );
   }
 
-  const download = (url: string) => {
+  const download = (url: string, reason: string) => {
     const tab = window.open(url, "_blank");
-    if (tab) tab.opener = null;
-    else showToast(`Get the HyperFrames desktop app at ${url}`, "info");
+    if (tab) {
+      tab.opener = null;
+      outcome("sent_to_download", reason);
+    } else {
+      showToast(`Get the HyperFrames desktop app at ${url}`, "info");
+      outcome("failed", "download_tab_blocked");
+    }
   };
 
   const open = async () => {
     if (opening) return;
     setOpening(true);
-    trackStudioEvent("toolbar_action", { action: "open_in_desktop" });
+    trackStudioEvent("toolbar_action", { action: "open_in_desktop", ...route.context });
     try {
       const res = await studioApiFetch(ROUTE, { method: "POST" });
       const result = (await res.json()) as OpenResult;
       if (result.opened) {
+        outcome("opened");
         showToast("Opening this project in the HyperFrames desktop app", "info");
         await new Promise((done) => setTimeout(done, OPENING_MS));
-      } else download(result.downloadUrl);
+      } else download(result.downloadUrl, result.reason);
     } catch {
+      outcome("failed", "preview_server_unreachable");
       showToast("Couldn't reach the preview server to open the app", "error");
     } finally {
       setOpening(false);

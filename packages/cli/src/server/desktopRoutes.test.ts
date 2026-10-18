@@ -32,7 +32,13 @@ describe("open-in-desktop routes", () => {
       await server(false, { installed: () => false }).app.request("/api/open-in-desktop")
     ).json();
     const downloadUrl = desktopDownloadUrl();
-    expect(body).toEqual({ available: downloadUrl !== null, handoff: false, downloadUrl });
+    expect(body).toEqual({
+      available: downloadUrl !== null,
+      handoff: false,
+      downloadUrl,
+      os: process.platform,
+      installed: false,
+    });
   });
 
   it("shows the button where the app is installed even without a download (Windows)", async () => {
@@ -42,7 +48,13 @@ describe("open-in-desktop routes", () => {
           "/api/open-in-desktop",
         )
       ).json();
-    expect(await get(true)).toEqual({ available: true, handoff: true, downloadUrl: null });
+    expect(await get(true)).toEqual({
+      available: true,
+      handoff: true,
+      downloadUrl: null,
+      os: "win32",
+      installed: true,
+    });
     expect(await get(false)).toMatchObject({ available: false });
   });
 
@@ -58,6 +70,8 @@ describe("open-in-desktop routes", () => {
       available: true,
       handoff: false,
       downloadUrl: desktopDownloadUrl("darwin"),
+      os: "darwin",
+      installed: false,
     });
   });
 
