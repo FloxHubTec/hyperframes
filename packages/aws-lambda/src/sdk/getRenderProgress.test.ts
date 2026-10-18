@@ -34,9 +34,14 @@ class FakeSFN {
   mapRunCounts: Record<string, Record<string, number>> = {};
   mapRunChildren: Record<string, Record<string, FakeChild>> = {};
   calls: string[] = [];
+  // Command name -> error name the command throws, as the SDK names service errors.
+  failures: Record<string, string> = {};
   async send(command: unknown): Promise<unknown> {
     const { constructor, input } = command as { constructor: { name: string }; input: FakeInput };
     this.calls.push(constructor.name);
+    const failure = this.failures[constructor.name];
+    if (failure)
+      throw Object.assign(new Error(`${failure} from ${constructor.name}`), { name: failure });
     if (constructor.name === "DescribeExecutionCommand") return this.describeResult();
     if (constructor.name === "DescribeMapRunCommand") {
       return { itemCounts: this.mapRunCounts[input.mapRunArn ?? ""] };
@@ -386,6 +391,28 @@ describe("getRenderProgress", () => {
       expect(p.overallProgress).toBeCloseTo(0.1 + 0.8 * (125 / CHUNKS), 5);
       expect(p.lambdasInvoked).toBe(1 + CHUNKS);
       expect(p.errors).toEqual([]);
+    });
+
+    // Callers on the policy from before the Distributed Map lack states:DescribeMapRun.
+    it("falls back to the parent snapshot with a hint when DescribeMapRun is denied", async () => {
+      const sfn = fakeWithChildren(["SUCCEEDED", "RUNNING"]);
+      sfn.failures.DescribeMapRunCommand = "AccessDeniedException";
+      const p = await getRenderProgress({
+        executionArn: "arn:x",
+        sfn: sfn as unknown as SFNClient,
+      });
+      expect(p.status).toBe("RUNNING");
+      expect(p.totalFrames).toBe(3600);
+      expect(p.overallProgress).toBeCloseTo(0.1, 5);
+      expect(p.warnings).toEqual([expect.stringContaining("hyperframes lambda policies user")]);
+    });
+
+    it("still throws other map-run read errors", async () => {
+      const sfn = fakeWithChildren(["RUNNING"]);
+      sfn.failures.DescribeMapRunCommand = "InternalServerError";
+      await expect(
+        getRenderProgress({ executionArn: "arn:x", sfn: sfn as unknown as SFNClient }),
+      ).rejects.toThrow("InternalServerError");
     });
 
     it("reads exact chunk frames and cost from the Map output once it exits", async () => {

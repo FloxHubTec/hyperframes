@@ -84,6 +84,8 @@ export interface RenderProgress {
   errors: RenderError[];
   /** `true` once the execution has terminated in a non-`SUCCEEDED` state. */
   fatalErrorEncountered: boolean;
+  /** Problems reading progress that leave the render itself untouched, such as a missing IAM permission. */
+  warnings: string[];
   startedAt: string;
   endedAt: string | null;
 }
@@ -113,8 +115,14 @@ export async function getRenderProgress(opts: GetRenderProgressOptions): Promise
   const history = await loadFullHistory(sfn, opts.executionArn);
   const summary = summarizeHistory(history, memoryMb);
   const mapRun = findChunkMapRun(history);
+  const warnings: string[] = [];
   if (mapRun?.exited) addChunkResults(summary, mapRun.output, memoryMb);
-  else if (mapRun) await addRunningMapRun(sfn, mapRun.arn, summary, memoryMb);
+  else if (mapRun) {
+    await addRunningMapRun(sfn, mapRun.arn, summary, memoryMb).catch((err: unknown) => {
+      if ((err as { name?: unknown } | null)?.name !== "AccessDeniedException") throw err;
+      warnings.push(MAP_RUN_ACCESS_DENIED);
+    });
+  }
 
   const costs = computeRenderCost(summary.lambdaInvocations, summary.stateTransitions);
   const overallProgress = computeOverallProgress({
@@ -134,6 +142,7 @@ export async function getRenderProgress(opts: GetRenderProgressOptions): Promise
     outputFile: summary.outputFile,
     errors: summary.errors,
     fatalErrorEncountered: isTerminalFailure(status),
+    warnings,
     startedAt,
     endedAt,
   };
@@ -159,6 +168,10 @@ async function loadFullHistory(sfn: SFNClient, executionArn: string): Promise<Hi
 }
 
 const FAILED_CHUNK_HISTORIES_READ = 5;
+
+const MAP_RUN_ACCESS_DENIED =
+  "Chunk progress is hidden until the chunks finish: this caller lacks states:DescribeMapRun. " +
+  "Re-apply the policy from `hyperframes lambda policies user`.";
 
 interface ChunkMapRun {
   arn: string;
