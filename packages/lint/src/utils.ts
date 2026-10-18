@@ -16,6 +16,7 @@ export type OpenTag = {
 export type ExtractedBlock = {
   contentStart?: number;
   file?: string;
+  rootRelativePath?: string;
   attrs: string;
   content: string;
   raw: string;
@@ -147,18 +148,18 @@ export function findHtmlTag(tags: readonly OpenTag[]): OpenTag | null {
   return tags.find((tag) => tag.name === "html") ?? null;
 }
 
+const hasCompositionMarker = (tag: OpenTag): boolean =>
+  Boolean(
+    readDecodedAttr(tag.raw, "data-composition-id") ||
+    readAttr(tag.raw, "data-width") ||
+    readAttr(tag.raw, "data-height"),
+  );
+
 // fallow-ignore-next-line complexity
 export function findRootTag(source: string, parsedTags?: readonly OpenTag[]): OpenTag | null {
   const tags = parsedTags ?? parseHtmlStructure(source).tags;
   const bodyTag = tags.find((tag) => tag.name === "body");
-  if (
-    bodyTag &&
-    (readDecodedAttr(bodyTag.raw, "data-composition-id") ||
-      readAttr(bodyTag.raw, "data-width") ||
-      readAttr(bodyTag.raw, "data-height"))
-  ) {
-    return bodyTag;
-  }
+  if (bodyTag && hasCompositionMarker(bodyTag)) return bodyTag;
   const bodyStart = bodyTag ? bodyTag.index + bodyTag.raw.length : 0;
   const bodyEnd = bodyTag?.closeIndex ?? source.length;
   const bodyTags = tags.filter((tag) => tag.index >= bodyStart && tag.index < bodyEnd);
@@ -170,6 +171,7 @@ export function findRootTag(source: string, parsedTags?: readonly OpenTag[]): Op
   for (const tag of bodyTags) {
     if (tag.index < skipBefore) continue;
     if (["script", "style", "meta", "link", "title"].includes(tag.name)) continue;
+    if ((tag.name === "html" || tag.name === "head") && !hasCompositionMarker(tag)) continue;
     // A leading <svg> block (icon/gradient/filter <defs>, referenced by url(#id)
     // from elsewhere in the document) is shared visual plumbing, not the
     // composition root — two independent reports of this being mistaken for
@@ -178,12 +180,7 @@ export function findRootTag(source: string, parsedTags?: readonly OpenTag[]): Op
     // the composition markers itself, so an intentionally SVG-rooted composition
     // (data-composition-id/data-width/data-height directly on the <svg>) is
     // still eligible as the root.
-    if (
-      tag.name === "svg" &&
-      !readDecodedAttr(tag.raw, "data-composition-id") &&
-      !readAttr(tag.raw, "data-width") &&
-      !readAttr(tag.raw, "data-height")
-    ) {
+    if (tag.name === "svg" && !hasCompositionMarker(tag)) {
       // No closing tag found (malformed HTML) — skip everything rather than
       // risk returning one of the svg's own children as the root.
       skipBefore = tag.endIndex ?? Infinity;
@@ -861,14 +858,13 @@ export function truncateSnippet(value: string, maxLength = 220): string | undefi
 
 /**
  * Matches a media tag carrying a real `src` attribute, capturing the tag name in
- * group 1 and the src value in group 2.
- *
- * The leading whitespace before `src` is load-bearing: `\bsrc\s*=` also matches
- * the tail of `data-var-src="bg"` (a hyphen/`s` boundary is a word boundary), and
- * since `[^>]*` is greedy it wins over a real `src` earlier in the same tag. Every
- * element using a variable binding was therefore reported as referencing a missing
- * file named after the variable id.
+ * group 1 and the quoted src in group 2; {@link mediaSrcOf} reads its value.
+ * `src` must follow whitespace so the tail of `data-var-src="bg"` is not read as one.
  */
 export function mediaSrcTagRe(tagAlternation: string): RegExp {
-  return new RegExp(`<(${tagAlternation})\\b[^>]*\\ssrc\\s*=\\s*["']([^"']+)["'][^>]*>`, "gi");
+  return new RegExp(`<(${tagAlternation})\\b[^>]*\\ssrc\\s*=\\s*("[^"]*"|'[^']*')[^>]*>`, "gi");
+}
+
+export function mediaSrcOf(match: RegExpExecArray): string {
+  return readDecodedAttr(match[0], "src") ?? "";
 }

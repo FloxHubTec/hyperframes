@@ -4,6 +4,7 @@
  * The engine's page contract. Any web page that wants to be rendered
  * as video must expose `window.__hf` implementing the HfProtocol interface.
  */
+import type { AudioFailureDiagnostic } from "./services/audioMixer.types.js";
 import type { Fps } from "@hyperframes/core";
 import type { ChromeMemoryStats } from "./services/chromeMemorySampler.js";
 import type { MotionBlurOptions } from "./services/motionBlur.js";
@@ -14,6 +15,14 @@ import type { MotionBlurOptions } from "./services/motionBlur.js";
  * telemetry so a single alias keeps the values in sync end-to-end.
  */
 export type SubTimelineWaitOutcome = "ready" | "timeout" | "script_failure";
+
+/**
+ * Shared by every capture session of one render: composition ids whose timeline
+ * wait already timed out, so later sessions report the timeout without waiting again.
+ */
+export interface SubTimelineWaitMemo {
+  unregisteredIds?: readonly string[];
+}
 
 export type CaptureWarningCode =
   | "media_readiness_timeout"
@@ -33,6 +42,7 @@ export interface CaptureWarning {
     sources?: string[];
     pendingCompositionIds?: string[];
     timeoutMs?: number;
+    audioFailures?: AudioFailureDiagnostic[];
     failureReasons?: string[];
     failureStages?: string[];
     failureOwner?: "user" | "system";
@@ -187,6 +197,8 @@ export interface CaptureOptions {
    * intrinsic media dimensions.
    */
   skipReadinessVideoIds?: readonly string[];
+  /** Pass one object to every session of a render; see `SubTimelineWaitMemo`. */
+  subTimelineWaitMemo?: SubTimelineWaitMemo;
   /**
    * Render-time variable overrides for the composition. The engine injects
    * these as `window.__hfVariables` via `evaluateOnNewDocument` before any

@@ -1,15 +1,9 @@
 // fallow-ignore-file complexity code-duplication
-/**
- * Audio Mixer Service
- *
- * Processes and mixes audio tracks using FFmpeg.
- */
-
 import { isSelfOrAncestorHidden, memberGroupKey, isMemberGroupHidden } from "./mediaHidden.js";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "fs";
 import { join, dirname, isAbsolute, relative } from "path";
 import { parseHTML } from "linkedom";
-import { extractAudioMetadata } from "../utils/ffprobe.js";
+import { extractAudioMetadata, type AudioMetadata } from "../utils/ffprobe.js";
 import { isNotMediaPayload } from "../utils/notMediaPayload.js";
 import { clampAudioGain } from "@hyperframes/core/audio-gain";
 import { clampFadesToDuration, readElementFades } from "@hyperframes/core/audio-fade";
@@ -21,6 +15,8 @@ import {
 } from "../utils/urlDownloader.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { formatFfmpegError, runFfmpeg, type RunFfmpegResult } from "../utils/runFfmpeg.js";
+import { AAC_ARGS, aacSegmentCount, encodeAac } from "./aacEncode.js";
+import { audioSubprocessEvidence } from "./audioFailureDiagnostic.js";
 import { unwrapTemplate } from "../utils/htmlTemplate.js";
 import { resolveMediaElementSrc, resolveProjectRelativeSrc } from "./videoFrameExtractor.js";
 import { resolveReferencedStart, type RefResolverEl } from "./referenceResolver.js";
@@ -33,7 +29,11 @@ import type {
   MixResult,
 } from "./audioMixer.types.js";
 import { applyVolumeEnvelopeToWav } from "./audioVolumeEnvelope.js";
-import { HF_AUDIO_FX_ATTR, parseAudioFxChain } from "@hyperframes/core/audio-fx";
+import {
+  HF_AUDIO_FX_ATTR,
+  parseAudioFxChain,
+  type HfAudioFxChain,
+} from "@hyperframes/core/audio-fx";
 import {
   HF_AUDIO_AUTOMATION_ATTR,
   parseAutomation,
@@ -55,25 +55,14 @@ import {
   timeAtSourceTime,
   type RateSpec,
 } from "@hyperframes/core";
-import { resolveAudioGroups } from "@hyperframes/core/audio-groups";
+import { readMasterFxChain, resolveAudioGroups } from "@hyperframes/core/audio-groups";
 import { applyAudioFxChain, AudioFxRenderError } from "./audioFxRender.js";
 import type { AudioVolumeKeyframe } from "./audioMixer.types.js";
 
 export type { AudioElement, MixResult } from "./audioMixer.types.js";
 
-/**
- * Filename every caller must use for the mixed-audio artifact.
- *
- * The extension is load-bearing, not cosmetic: FFmpeg picks the muxer from it,
- * and the mix is AAC-encoded. A raw ADTS `.aac` stream has nowhere to record
- * the encoder's priming delay, so those leading samples decode as real silence
- * and shift the whole track ~1024 samples (21.33 ms at 48 kHz) late against a
- * frame-accurate video track. An MP4-family container carries the delay as an
- * edit list, which every decoder then strips, so the mix lands on its authored
- * start. Keep the choice here rather than at each call site: the same file is
- * muxed into the video, shipped in a distributed plan, and handed to users as
- * the PNG-sequence sidecar, and all three have to agree.
- */
+/** An MP4-family container records AAC priming as an edit list; a raw .aac plays ~21 ms late.
+ * The video mux, the distributed plan and the PNG-sequence sidecar all read this one name. */
 export const MIXED_AUDIO_FILENAME = "audio.m4a";
 
 function clampVolume(volume: number): number {
@@ -129,12 +118,13 @@ const MAX_RAMP_SLICES = 240;
 function buildRampFilterComplex(
   lane: RateSpec & object,
   duration: number,
+  headFilter: string | null,
   tailFilter: string | null,
 ): string {
   const slices = Math.min(MAX_RAMP_SLICES, Math.max(1, Math.ceil(duration / RAMP_SLICE_SECONDS)));
   const step = duration / slices;
   const split = Array.from({ length: slices }, (_, i) => `[s${i}]`).join("");
-  const parts = [`[0:a]asplit=${slices}${split}`];
+  const parts = [`[0:a]${headFilter ? `${headFilter},` : ""}asplit=${slices}${split}`];
   for (let i = 0; i < slices; i += 1) {
     const from = sourceTimeAt(lane, i * step);
     const to = sourceTimeAt(lane, (i + 1) * step);
@@ -156,27 +146,20 @@ function buildRampFilterComplex(
 }
 
 function preparedAudioOutputArgs(
-  srcPath: string,
+  metadata: AudioMetadata | null,
   playbackRate: RateSpec,
-  duration = 0,
-): Promise<string[]> {
-  return stereoOutputArgs(srcPath).then((channelArgs) => {
-    const filters: string[] = [];
-    const outputArgs: string[] = [];
-    if (channelArgs[0] === "-af" && channelArgs[1]) {
-      filters.push(channelArgs[1]);
-    } else {
-      outputArgs.push(...channelArgs);
-    }
-    if (typeof playbackRate === "object") {
-      const graph = buildRampFilterComplex(playbackRate, duration, filters.join(",") || null);
-      return ["-filter_complex", graph, "-map", "[out]", ...outputArgs];
-    }
-    const atempo = buildAtempoFilter(playbackRate);
-    if (atempo) filters.push(atempo);
-    if (filters.length > 0) outputArgs.push("-af", filters.join(","));
-    return outputArgs;
-  });
+  duration: number,
+  headFilter: string | null,
+): string[] {
+  const channelFilter = metadata?.channels === 1 ? STEREO_CHANNEL_FILTER : null;
+  const outputArgs = channelFilter ? [] : ["-ac", "2"];
+  if (typeof playbackRate === "object") {
+    const graph = buildRampFilterComplex(playbackRate, duration, headFilter, channelFilter);
+    return ["-filter_complex", graph, "-map", "[out]", ...outputArgs];
+  }
+  const filters = [headFilter, channelFilter, buildAtempoFilter(playbackRate)].filter(Boolean);
+  if (filters.length > 0) outputArgs.push("-af", filters.join(","));
+  return outputArgs;
 }
 
 function escapeExpressionCommas(expression: string): string {
@@ -216,16 +199,6 @@ const VOLUME_SIMPLIFY_EPSILON = 0.005;
 // mono source by 3 dB. Explicitly map front-center into both stereo channels;
 // native stereo sources have FL/FR and pass through unchanged.
 const STEREO_CHANNEL_FILTER = "pan=stereo|FL=FL+FC|FR=FR+FC";
-
-async function stereoOutputArgs(srcPath: string): Promise<string[]> {
-  try {
-    const { channels } = await extractAudioMetadata(srcPath);
-    if (channels === 1) return ["-af", STEREO_CHANNEL_FILTER];
-  } catch {
-    // Preserve the previous FFmpeg conversion path when metadata probing fails.
-  }
-  return ["-ac", "2"];
-}
 
 /**
  * Reduce a sorted keyframe list to a perceptually-equivalent piecewise-linear
@@ -355,16 +328,18 @@ export function buildFadeFilters(
   return stages.length ? `,${stages.join(",")}` : "";
 }
 
-/** One track: trim, volume, afade, delay/pad. asetpts after apad so FFmpeg 5-8 delayed branches do not land at t=0. */
+/** One track: trim, volume, afade, delay. Legacy and group mixes also pad each branch. */
 export function buildTrackInputFilter(
   track: Pick<AudioTrack, "start" | "end" | "fadeIn" | "fadeOut" | "tailSeconds">,
   index: number,
   volumeFilter: string,
   totalDuration: number,
+  padToDuration = true,
 ): string {
   const delayMs = Math.round(track.start * 1000);
   const trimDuration = track.end - track.start + (track.tailSeconds ?? 0);
-  return `[${index}:a]atrim=0:${formatFilterNumber(trimDuration)},${volumeFilter}${buildFadeFilters(track)},adelay=${delayMs}|${delayMs},apad,asetpts=N/SR/TB,atrim=0:${formatFilterNumber(totalDuration)}[a${index}]`;
+  const filters = `[${index}:a]atrim=0:${formatFilterNumber(trimDuration)},${volumeFilter}${buildFadeFilters(track)},adelay=${delayMs}|${delayMs}`;
+  return `${filters}${padToDuration ? `,apad,asetpts=N/SR/TB,atrim=0:${formatFilterNumber(totalDuration)}` : ""}[a${index}]`;
 }
 
 interface ExtractResult {
@@ -493,6 +468,7 @@ function ffmpegFailure(
     owner,
     retryable,
     elementId,
+    subprocess: audioSubprocessEvidence(result),
     detail: boundedDetail(
       result.error?.message
         ? `${formatFfmpegError(result.exitCode, stderr)}: ${result.error.message}`
@@ -549,6 +525,15 @@ export function volumeLaneKeyframes(
   const last = lane.points[lane.points.length - 1]!;
   if (duration > last.t) push(duration, last.v);
   return out;
+}
+
+/**
+ * The top-level root's `data-fx-chain`. It belongs to the composition, not to a clip,
+ * so `processCompositionAudio` takes it beside the tracks: a track the render adds
+ * itself has no parsed element to carry it.
+ */
+export function parseMasterFxChain(html: string): string | undefined {
+  return readMasterFxChain(parseHTML(unwrapTemplate(html)).document);
 }
 
 export function parseAudioElements(html: string): AudioElement[] {
@@ -654,65 +639,12 @@ export function parseAudioElements(html: string): AudioElement[] {
   return elements;
 }
 
-async function extractAudioFromVideo(
-  videoPath: string,
-  outputPath: string,
-  options?: { startTime?: number; duration?: number; playbackRate?: RateSpec },
-  signal?: AbortSignal,
-  config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout">>,
-): Promise<ExtractResult> {
-  const ffmpegProcessTimeout = config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
-  const outputDir = dirname(outputPath);
-  if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
-
-  const playbackRate = normalizeRateSpec(options?.playbackRate);
-  const args: string[] = [];
-  if (options?.startTime !== undefined) args.push("-ss", String(options.startTime));
-  if (options?.duration !== undefined) {
-    args.push("-t", String(sourceTimeAt(playbackRate, options.duration)));
-  }
-  args.push("-i", videoPath);
-  const outputArgs = await preparedAudioOutputArgs(videoPath, playbackRate, options?.duration);
-  args.push("-vn", "-acodec", "pcm_s16le", "-ar", "48000", ...outputArgs);
-  if (playbackRate !== 1 && options?.duration !== undefined) {
-    args.push("-t", String(options.duration));
-  }
-  args.push("-y", outputPath);
-
-  const result = await runFfmpeg(args, { signal, timeout: ffmpegProcessTimeout });
-
-  if (signal?.aborted) {
-    const failure: AudioProcessingFailure = {
-      stage: "cancelled",
-      reason: "cancelled",
-      owner: "user",
-      retryable: false,
-      detail: "Audio extract cancelled",
-    };
-    return {
-      success: false,
-      outputPath,
-      durationMs: result.durationMs,
-      error: failure.detail,
-      failure,
-    };
-  }
-  if (!result.success) {
-    const failure = ffmpegFailure("extract", result);
-    return {
-      success: false,
-      outputPath,
-      durationMs: result.durationMs,
-      error: failure.detail,
-      failure,
-    };
-  }
-  return { success: true, outputPath, durationMs: result.durationMs };
-}
-
-async function prepareAudioTrack(
+/** Decode `duration` s of audio from `mediaStart` in Chrome's media time. Until every stream has
+ * started, an input seek snaps audio to the video's first keyframe, so read by timestamp instead. */
+async function extractAudioSegment(
   srcPath: string,
   outputPath: string,
+  stage: "extract" | "prepare",
   mediaStart: number,
   duration: number,
   playbackRate: RateSpec = 1,
@@ -723,21 +655,25 @@ async function prepareAudioTrack(
   const outputDir = dirname(outputPath);
   if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
   const normalizedPlaybackRate = normalizeRateSpec(playbackRate);
-  const outputArgs = await preparedAudioOutputArgs(srcPath, normalizedPlaybackRate, duration);
+  const sourceDuration = sourceTimeAt(normalizedPlaybackRate, duration);
+  // A failed probe keeps FFmpeg's default channel conversion and the input seek.
+  const metadata = await extractAudioMetadata(srcPath).catch(() => null);
+  const inputSeek = mediaStart >= (metadata?.latestStreamLeadSeconds ?? 0);
+  const start = formatFilterNumber(mediaStart);
+  const timestampTrim = inputSeek
+    ? null
+    : `atrim=start=${start}:end=${formatFilterNumber(mediaStart + sourceDuration)},asetpts=PTS-${start}/TB,aresample=async=1:first_pts=0`;
+  const outputArgs = preparedAudioOutputArgs(
+    metadata,
+    normalizedPlaybackRate,
+    duration,
+    timestampTrim,
+  );
 
-  const args = [
-    "-ss",
-    String(mediaStart),
-    "-t",
-    String(sourceTimeAt(normalizedPlaybackRate, duration)),
-    "-i",
-    srcPath,
-    "-acodec",
-    "pcm_s16le",
-    "-ar",
-    "48000",
-    ...outputArgs,
-  ];
+  const args = inputSeek
+    ? ["-ss", String(mediaStart), "-t", String(sourceDuration), "-i", srcPath]
+    : ["-i", srcPath];
+  args.push("-vn", "-acodec", "pcm_s16le", "-ar", "48000", ...outputArgs);
   if (normalizedPlaybackRate !== 1) args.push("-t", String(duration));
   args.push("-y", outputPath);
 
@@ -749,7 +685,7 @@ async function prepareAudioTrack(
       reason: "cancelled",
       owner: "user",
       retryable: false,
-      detail: "Audio prepare cancelled",
+      detail: `Audio ${stage} cancelled`,
     };
     return {
       success: false,
@@ -759,7 +695,7 @@ async function prepareAudioTrack(
       failure,
     };
   }
-  const failure = !result.success ? ffmpegFailure("prepare", result) : undefined;
+  const failure = !result.success ? ffmpegFailure(stage, result) : undefined;
   return {
     success: result.success,
     outputPath,
@@ -826,6 +762,7 @@ async function mixAudioTracks(
   totalDuration: number,
   signal?: AbortSignal,
   config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout" | "audioGain">>,
+  floatWav = false,
 ): Promise<MixResult> {
   const ffmpegProcessTimeout = config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
   const masterOutputGain = config?.audioGain ?? DEFAULT_CONFIG.audioGain;
@@ -845,19 +782,21 @@ async function mixAudioTracks(
   const outputDir = dirname(outputPath);
   if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
 
-  const buildFilterComplex = (ignoreAutomation: boolean): string => {
+  const buildFilterComplex = (ignoreAutomation: boolean, useNormalize: boolean): string => {
     const filterParts: string[] = [];
     tracks.forEach((track, i) => {
       const volumeFilter = buildVolumeExpression(track, ignoreAutomation);
-      filterParts.push(buildTrackInputFilter(track, i, volumeFilter, totalDuration));
+      filterParts.push(buildTrackInputFilter(track, i, volumeFilter, totalDuration, !useNormalize));
     });
 
     const mixInputs = tracks.map((_, i) => `[a${i}]`).join("");
-    const mixFilter = `${mixInputs}amix=inputs=${tracks.length}:duration=longest:dropout_transition=0[mixed]`;
-    // amix divides output by inputs count (default normalize=true). Multiply master
-    // gain by track count so per-track volumes authored in data-volume are preserved.
-    const compensatedGain = masterOutputGain * tracks.length;
-    const postMixGainFilter = `[mixed]volume=${formatFilterNumber(compensatedGain)}[out]`;
+    const mixFilter = `${mixInputs}amix=inputs=${tracks.length}:duration=longest:dropout_transition=0${useNormalize ? ":normalize=0" : ""}[mixed]`;
+    // Older FFmpeg builds lack normalize=0. Their default amix divides by the
+    // active input count, so keep all branches padded and compensate by N.
+    const gain = masterOutputGain * (useNormalize ? 1 : tracks.length);
+    const postMixGainFilter = useNormalize
+      ? `[mixed]volume=${formatFilterNumber(gain)},apad,asetpts=N/SR/TB,atrim=0:${formatFilterNumber(totalDuration)}[out]`
+      : `[mixed]volume=${formatFilterNumber(gain)}[out]`;
     return [...filterParts, mixFilter, postMixGainFilter].join(";");
   };
 
@@ -872,14 +811,14 @@ async function mixAudioTracks(
   // alias from nightly builds; older stable builds do not understand the new
   // spelling. Prefer the legacy spelling for broad compatibility and retry
   // only when FFmpeg explicitly says that option is unavailable.
-  const runMix = async (ignoreAutomation: boolean) => {
+  const runMix = async (ignoreAutomation: boolean, useNormalize: boolean) => {
     const inputs: string[] = [];
     tracks.forEach((track) => inputs.push("-i", track.srcPath));
     const scriptDir = mkdtempSync(join(outputDir, ".filter-complex-"));
     const scriptPath = join(scriptDir, "graph.txt");
     const fd = openSync(scriptPath, "wx", 0o600);
     try {
-      writeFileSync(fd, buildFilterComplex(ignoreAutomation));
+      writeFileSync(fd, buildFilterComplex(ignoreAutomation, useNormalize));
     } finally {
       closeSync(fd);
     }
@@ -889,10 +828,7 @@ async function mixAudioTracks(
       scriptPath,
       "-map",
       "[out]",
-      "-acodec",
-      "aac",
-      "-b:a",
-      "192k",
+      ...(floatWav ? ["-acodec", "pcm_f32le", "-ar", "48000"] : AAC_ARGS),
       "-t",
       String(totalDuration),
       "-y",
@@ -911,7 +847,17 @@ async function mixAudioTracks(
     }
   };
 
-  let result = await runMix(false);
+  let useNormalize = true;
+  let result = await runMix(false, useNormalize);
+  if (
+    !result.success &&
+    result.failureReason !== "external_interruption" &&
+    !signal?.aborted &&
+    groupNormalizeOptionUnsupported(result.stderr)
+  ) {
+    useNormalize = false;
+    result = await runMix(false, useNormalize);
+  }
 
   // Defense in depth: volume automation is folded into an FFmpeg `volume`
   // expression whose evaluator limits are build-dependent (see
@@ -926,7 +872,7 @@ async function mixAudioTracks(
     !signal?.aborted &&
     hasAutomation
   ) {
-    const retry = await runMix(true);
+    const retry = await runMix(true, useNormalize);
     if (retry.success) {
       result = retry;
       degradedAutomation = true;
@@ -990,8 +936,8 @@ function groupNormalizeOptionUnsupported(stderr: string): boolean {
 
 /**
  * Sub-mix one group's members into a single PCM WAV at full composition
- * length — the same per-input treatment `mixAudioTracks` gives every track
- * (atrim, volume, adelay, `apad` — RULES 6), writing PCM instead of AAC so the
+ * length. Unlike the main mix, this still pads each member (atrim, volume,
+ * adelay, `apad` — RULES 6), writing PCM instead of AAC so the
  * result can feed straight into `applyAudioFxChain` (which reads raw WAV
  * samples, not a decoded container).
  *
@@ -1010,7 +956,10 @@ async function mixGroupMembers(
   totalDuration: number,
   signal?: AbortSignal,
   config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout">>,
-): Promise<{ success: boolean; error?: string; degradedAutomation?: boolean }> {
+): Promise<
+  | { success: true; degradedAutomation?: boolean }
+  | { success: false; error: string; failure: AudioProcessingFailure }
+> {
   const ffmpegProcessTimeout = config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
   const outputDir = dirname(outputPath);
   if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
@@ -1103,10 +1052,54 @@ async function mixGroupMembers(
     }
   }
 
-  if (signal?.aborted) return { success: false, error: "Group sub-mix cancelled" };
-  if (!result.success)
-    return { success: false, error: formatFfmpegError(result.exitCode, result.stderr) };
+  if (signal?.aborted || !result.success) {
+    const failure = ffmpegFailure("mix", result);
+    return { success: false, error: failure.detail, failure };
+  }
   return { success: true, degradedAutomation };
+}
+
+/**
+ * Sum the tracks to a float WAV, run the master chain (if any) over the sum, then AAC-encode.
+ * Groups are already folded into `tracks`, and the sum stays float until the encoder.
+ */
+async function mixThroughFloatSum(
+  tracks: AudioTrack[],
+  masterChain: HfAudioFxChain | undefined,
+  outputPath: string,
+  workDir: string,
+  totalDuration: number,
+  signal?: AbortSignal,
+  config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout" | "audioGain">>,
+): Promise<MixResult> {
+  const sumPath = join(workDir, "master-sum.wav");
+  const sum = await mixAudioTracks(tracks, sumPath, totalDuration, signal, config, true);
+  if (!sum.success) return { ...sum, outputPath };
+
+  const encoderInput = masterChain
+    ? (
+        await applyAudioFxChain(sumPath, masterChain, join(workDir, "master-fx.wav"), {
+          trackId: "master",
+          signal,
+        })
+      ).path
+    : sumPath;
+  const encoded = await encodeAac(encoderInput, outputPath, totalDuration, {
+    signal,
+    timeout: config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout,
+  });
+  if (!encoded.success) {
+    const failure = ffmpegFailure("mix", encoded);
+    return {
+      success: false,
+      outputPath,
+      durationMs: sum.durationMs + encoded.durationMs,
+      tracksProcessed: 0,
+      error: failure.detail,
+      failures: [failure],
+    };
+  }
+  return { ...sum, outputPath, durationMs: sum.durationMs + encoded.durationMs };
 }
 
 export async function processCompositionAudio(
@@ -1116,11 +1109,15 @@ export async function processCompositionAudio(
   outputPath: string,
   totalDuration: number,
   signal?: AbortSignal,
-  config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout" | "audioGain">>,
+  config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout" | "audioGain">> & {
+    /** Serialised master bus chain, from `parseMasterFxChain`. */
+    masterFxChain?: string;
+  },
   compiledDir?: string,
 ): Promise<MixResult> {
   const startMs = Date.now();
   const tracks: AudioTrack[] = [];
+  const preparedTracks = new Array<AudioTrack | undefined>(elements.length);
   const failures: AudioProcessingFailure[] = [];
   // Grouped members are diverted here instead of `tracks` during element
   // processing, then summed into one processed track per group before the
@@ -1152,7 +1149,7 @@ export async function processCompositionAudio(
   }
 
   await Promise.all(
-    elements.map(async (element) => {
+    elements.map(async (element, index) => {
       if (effectiveSignal.aborted) {
         failures.push({
           stage: "cancelled",
@@ -1243,14 +1240,13 @@ export async function processCompositionAudio(
         let audioSrcPath = srcPath;
         if (element.type === "video") {
           const extractedPath = join(workDir, `${element.id}-extracted.wav`);
-          const extractResult = await extractAudioFromVideo(
+          const extractResult = await extractAudioSegment(
             srcPath,
             extractedPath,
-            {
-              startTime: element.mediaStart,
-              duration: element.end - element.start,
-              playbackRate: element.playbackRate,
-            },
+            "extract",
+            element.mediaStart,
+            element.end - element.start,
+            element.playbackRate,
             effectiveSignal,
             config,
           );
@@ -1272,9 +1268,10 @@ export async function processCompositionAudio(
           audioSrcPath = extractedPath;
         } else {
           const trimmedPath = join(workDir, `${element.id}-trimmed.wav`);
-          const prepResult = await prepareAudioTrack(
+          const prepResult = await extractAudioSegment(
             srcPath,
             trimmedPath,
+            "prepare",
             element.mediaStart,
             element.end - element.start,
             element.playbackRate,
@@ -1384,24 +1381,7 @@ export async function processCompositionAudio(
           ...(tailSeconds > 0 ? { tailSeconds } : {}),
         };
 
-        // A grouped member keeps every bit of its OWN processing above
-        // (FX, envelope) exactly like an ungrouped track — it just lands in
-        // the group's bucket instead of the flat list, to be summed into one
-        // processed bus below rather than mixed directly.
-        if (element.groupId) {
-          const bucket = groupTracks.get(element.groupId);
-          if (bucket) bucket.push(track);
-          else groupTracks.set(element.groupId, [track]);
-          if (!groupMeta.has(element.groupId)) {
-            groupMeta.set(element.groupId, {
-              ...(element.groupFxChain ? { fxChain: element.groupFxChain } : {}),
-              ...(element.groupAutomation ? { automation: element.groupAutomation } : {}),
-              volume: element.groupVolume ?? 1,
-            });
-          }
-        } else {
-          tracks.push(track);
-        }
+        preparedTracks[index] = track;
       } catch (err: unknown) {
         // An FX failure is fatal for the whole mix. Every other failure mode
         // degrades gracefully — the track drops and siblings continue — but
@@ -1434,16 +1414,40 @@ export async function processCompositionAudio(
     throw err;
   });
 
+  // FFmpeg's floating-point sum depends on input order. Keep parallel prep,
+  // but assemble flat tracks, group members and groups in authored order.
+  elements.forEach((element, index) => {
+    const track = preparedTracks[index];
+    if (!track) return;
+    if (element.groupId) {
+      const bucket = groupTracks.get(element.groupId);
+      if (bucket) bucket.push(track);
+      else groupTracks.set(element.groupId, [track]);
+      if (!groupMeta.has(element.groupId)) {
+        groupMeta.set(element.groupId, {
+          ...(element.groupFxChain ? { fxChain: element.groupFxChain } : {}),
+          ...(element.groupAutomation ? { automation: element.groupAutomation } : {}),
+          volume: element.groupVolume ?? 1,
+        });
+      }
+    } else {
+      tracks.push(track);
+    }
+  });
+
   // Never turn a per-track preparation failure into a successful partial mix.
   // The producer only surfaces audio failures when `success` is false; mixing
   // the remaining tracks made the omitted cue indistinguishable from a valid
   // render unless someone manually audited that exact audio window.
-  const bail = (): MixResult => {
+  const removeWorkDir = (): void => {
     try {
       rmSync(workDir, { recursive: true, force: true });
     } catch {
       /* ignore */
     }
+  };
+  const bail = (): MixResult => {
+    removeWorkDir();
     return {
       success: false,
       outputPath,
@@ -1456,6 +1460,28 @@ export async function processCompositionAudio(
     };
   };
   if (failures.length > 0) return bail();
+
+  // Parsed before any group is mixed, so a malformed master chain fails fast and
+  // as a failure, the way an unreadable group chain does.
+  let masterChain: HfAudioFxChain | undefined;
+  const masterFxJson = config?.masterFxChain;
+  if (masterFxJson) {
+    try {
+      masterChain = parseAudioFxChain(masterFxJson);
+    } catch (err: unknown) {
+      failures.push({
+        stage: "mix",
+        reason: "internal",
+        owner: "user",
+        retryable: false,
+        elementId: "master",
+        detail: boundedDetail(
+          `Master bus chain is unreadable: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      });
+      return bail();
+    }
+  }
 
   // Sub-mix each group into one processed bus (design doc §1.3), then fold it
   // into the flat track list as a single AudioTrack — everything downstream
@@ -1487,10 +1513,7 @@ export async function processCompositionAudio(
       );
       if (!subMix.success) {
         failures.push({
-          stage: "mix",
-          reason: "ffmpeg_failed",
-          owner: "system",
-          retryable: false,
+          ...subMix.failure,
           elementId: groupId,
           detail: boundedDetail(
             `Group sub-mix failed for group ${groupId}: ${subMix.error ?? "unknown"}`,
@@ -1561,7 +1584,10 @@ export async function processCompositionAudio(
         ...(bakedEnvelope || !laneKeyframes?.length ? {} : { volumeKeyframes: laneKeyframes }),
       });
     } catch (err: unknown) {
-      if (err instanceof AudioFxRenderError) throw err;
+      if (err instanceof AudioFxRenderError) {
+        removeWorkDir();
+        throw err;
+      }
       failures.push({
         stage: "mix",
         reason: "internal",
@@ -1578,12 +1604,22 @@ export async function processCompositionAudio(
   }
   if (failures.length > 0) return bail();
 
-  const mixResult = await mixAudioTracks(tracks, outputPath, totalDuration, signal, config);
-
+  let mixResult: MixResult;
   try {
-    rmSync(workDir, { recursive: true, force: true });
-  } catch {
-    /* ignore */
+    mixResult =
+      (masterChain || aacSegmentCount(totalDuration) > 1) && tracks.length > 0
+        ? await mixThroughFloatSum(
+            tracks,
+            masterChain,
+            outputPath,
+            workDir,
+            totalDuration,
+            signal,
+            config,
+          )
+        : await mixAudioTracks(tracks, outputPath, totalDuration, signal, config);
+  } finally {
+    removeWorkDir();
   }
 
   // A group whose sub-mix had to drop member automation reports it the same

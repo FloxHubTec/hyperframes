@@ -14,8 +14,11 @@ import {
   resolveLockedGopSize,
 } from "./chunkEncoder.js";
 import { renderProvenanceArgs } from "../utils/renderProvenance.js";
-import { SDR_CAPTURE_TO_BT709_FILTER } from "../utils/sdrCaptureColor.js";
-import { getFfmpegBinary } from "../utils/ffmpegBinaries.js";
+import {
+  SDR_CAPTURE_TO_BT709_FILTER,
+  SDR_RGB_TO_TAGGED_BT709_FILTER,
+} from "../utils/sdrCaptureColor.js";
+import { getFfmpegBinary, getFfprobeBinary } from "../utils/ffmpegBinaries.js";
 
 const HAS_FFMPEG = spawnSync(getFfmpegBinary(), ["-version"]).status === 0;
 
@@ -427,6 +430,80 @@ describe("encodeFramesChunkedConcat ffmpegEncodeTimeout", () => {
     expect(result.success).toBe(true);
     expect(result.framesEncoded).toBe(2);
     expect(result.fileSize).toBe(0);
+  });
+});
+
+describe("final mux and faststart ffmpegProcessTimeout", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("reports a mux killed at the configured timeout as a timeout", async () => {
+    vi.useFakeTimers();
+    const { spawn, calls } = createSpawnSpy();
+    vi.resetModules();
+    vi.doMock("child_process", () => ({ spawn }));
+
+    const { muxVideoWithAudio } = await import("./chunkEncoder.js");
+    const muxPromise = muxVideoWithAudio(
+      "/tmp/video-only.mp4",
+      "/tmp/audio.aac",
+      "/tmp/output.mp4",
+      undefined,
+      { ffmpegProcessTimeout: 1000 },
+    );
+
+    await flushMuxCodecResolution();
+    const proc = calls[0]!.proc;
+    vi.advanceTimersByTime(999);
+    expect(proc.kill).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    proc.stderr.emit("data", Buffer.from("frame= 9000 time=00:05:00.00\n"));
+    emitClose(proc, 255);
+
+    const result = await muxPromise;
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/^FFmpeg timed out after 1000 ms/);
+    expect(result.error).toContain("FFMPEG_PROCESS_TIMEOUT_MS");
+    expect(result.error).toContain("frame= 9000");
+  });
+
+  it("reports a faststart killed at the configured timeout as a timeout", async () => {
+    vi.useFakeTimers();
+    const { spawn, calls } = createSpawnSpy();
+    vi.resetModules();
+    vi.doMock("child_process", () => ({ spawn }));
+
+    const { applyFaststart } = await import("./chunkEncoder.js");
+    const faststartPromise = applyFaststart("/tmp/video-only.mp4", "/tmp/output.mp4", undefined, {
+      ffmpegProcessTimeout: 2000,
+    });
+
+    const proc = calls[0]!.proc;
+    vi.advanceTimersByTime(1999);
+    expect(proc.kill).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    emitClose(proc, 255);
+
+    const result = await faststartPromise;
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/^FFmpeg timed out after 2000 ms/);
+  });
+
+  it("leaves an ordinary mux failure's message as it was", async () => {
+    const { spawn, calls } = createSpawnSpy();
+    vi.resetModules();
+    vi.doMock("child_process", () => ({ spawn }));
+
+    const { muxVideoWithAudio } = await import("./chunkEncoder.js");
+    const muxPromise = muxVideoWithAudio("/tmp/video-only.mp4", "/tmp/audio.aac", "/tmp/out.mp4");
+    await flushMuxCodecResolution();
+    calls[0]!.proc.stderr.emit("data", Buffer.from("Invalid data found when processing input\n"));
+    emitClose(calls[0]!.proc, 1);
+
+    const result = await muxPromise;
+    expect(result.error).toMatch(/^FFmpeg exited with code 1/);
+    expect(result.error).not.toContain("timed out");
   });
 });
 
@@ -1152,7 +1229,7 @@ describe("buildEncoderArgs color space", () => {
     expect(args[args.indexOf("-vf") + 1]).toBe("pad=ceil(iw/2)*2:ceil(ih/2)*2");
   });
 
-  it("leaves alpha ProRes untouched (no even-dim pad)", () => {
+  it("converts alpha ProRes to BT.709 without an even-dim pad", () => {
     const args = buildEncoderArgs(
       {
         ...baseOptions,
@@ -1164,7 +1241,7 @@ describe("buildEncoderArgs color space", () => {
       inputArgs,
       "out.mov",
     );
-    expect(args.indexOf("-vf")).toBe(-1);
+    expect(args[args.indexOf("-vf") + 1]).toBe(SDR_RGB_TO_TAGGED_BT709_FILTER);
     expect(args.join(" ")).not.toContain("pad=");
   });
 
@@ -1746,26 +1823,27 @@ describe("buildConcatArgs", () => {
 });
 
 describe.skipIf(!HAS_FFMPEG)("buildEncoderArgs SDR colour", () => {
+  const ffmpeg = getFfmpegBinary();
+  const pixelAt = (file: string, decode: string, x: number, format = "rgb24"): number[] => [
+    ...spawnSync(ffmpeg, [
+      "-v",
+      "error",
+      "-i",
+      file,
+      "-vf",
+      `${decode}format=${format},crop=1:1:${x}:8`,
+      "-frames:v",
+      "1",
+      "-f",
+      "rawvideo",
+      "-",
+    ]).stdout,
+  ];
+
   // Chrome captures are BT.601 JPEGs. A direct YUV-to-YUV scale keeps that matrix under the BT.709
   // tag (ffmpeg 7 and older) or tints greys (8 and newer), so the encode goes through RGB.
   it("delivers Chrome's JPEG colours in the BT.709 the mp4 is tagged with", () => {
-    const ffmpeg = getFfmpegBinary();
     const dir = mkdtempSync(join(tmpdir(), "hf-sdr-colour-"));
-    const rgbAt = (file: string, decode: string, x: number): number[] => [
-      ...spawnSync(ffmpeg, [
-        "-v",
-        "error",
-        "-i",
-        file,
-        "-vf",
-        `${decode}format=rgb24,crop=1:1:${x}:8`,
-        "-frames:v",
-        "1",
-        "-f",
-        "rawvideo",
-        "-",
-      ]).stdout,
-    ];
     try {
       for (const color of ["0xC83C28", "0xFE0000", "0x101010", "0x2050E0"]) {
         const jpg = join(dir, "frame.jpg");
@@ -1805,8 +1883,8 @@ describe.skipIf(!HAS_FFMPEG)("buildEncoderArgs SDR colour", () => {
           [8, 2],
           [32, 2],
         ] as const) {
-          const captured = rgbAt(jpg, "", x);
-          const delivered = rgbAt(out, "scale=in_color_matrix=bt709:in_range=tv,", x);
+          const captured = pixelAt(jpg, "", x);
+          const delivered = pixelAt(out, "scale=in_color_matrix=bt709:in_range=tv,", x);
           const worst = Math.max(...delivered.map((v, i) => Math.abs(v - captured[i]!)));
           expect(
             worst,
@@ -1814,6 +1892,116 @@ describe.skipIf(!HAS_FFMPEG)("buildEncoderArgs SDR colour", () => {
           ).toBeLessThanOrEqual(limit);
         }
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("keeps the rightmost 8 columns of a 1080-wide (16n + 8) mp4", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-sdr-right-edge-"));
+    try {
+      const jpg = join(dir, "frame.jpg");
+      const out = join(dir, "out.mp4");
+      const synth = spawnSync(ffmpeg, [
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=0xC83C28:s=1080x16,format=rgb24",
+        "-frames:v",
+        "1",
+        "-pix_fmt",
+        "yuvj420p",
+        jpg,
+      ]);
+      expect(synth.status).toBe(0);
+      const args = buildEncoderArgs(
+        {
+          fps: { num: 30, den: 1 },
+          width: 1080,
+          height: 16,
+          codec: "h264",
+          preset: "ultrafast",
+          quality: 0,
+        },
+        ["-i", jpg],
+        out,
+      );
+      expect(spawnSync(ffmpeg, args).status).toBe(0);
+      for (const x of [1071, 1075, 1079]) {
+        const captured = pixelAt(jpg, "", x);
+        const delivered = pixelAt(out, "scale=in_color_matrix=bt709:in_range=tv,", x);
+        const worst = Math.max(...delivered.map((v, i) => Math.abs(v - captured[i]!)));
+        expect(worst, `x=${x}: capture ${captured} delivered ${delivered}`).toBeLessThanOrEqual(2);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  // Untagged HD reads as BT.709 in QuickTime, so ProRes has to be BT.709 too. MOV captures are
+  // RGBA PNGs, and the conversion must leave their alpha plane alone. The tags come from
+  // setparams because prores_ks ignores -color_* (ffmpeg 5.1 writes none, 8.1 only the matrix).
+  it("delivers PNG colours and alpha in the BT.709 the ProRes mov is tagged with", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-prores-colour-"));
+    const png = join(dir, "frame.png");
+    const out = join(dir, "out.mov");
+    try {
+      for (const color of ["0xC83C28", "0x00FF00", "0x101010"]) {
+        const synth = spawnSync(ffmpeg, [
+          "-v",
+          "error",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          `color=c=${color}@0.5:s=64x16,format=rgba`,
+          "-frames:v",
+          "1",
+          png,
+        ]);
+        expect(synth.status).toBe(0);
+        const args = buildEncoderArgs(
+          {
+            fps: { num: 30, den: 1 },
+            width: 64,
+            height: 16,
+            codec: "prores",
+            preset: "4444",
+            quality: 23,
+            pixelFormat: "yuva444p10le",
+          },
+          ["-i", png],
+          out,
+        );
+        expect(spawnSync(ffmpeg, args).status).toBe(0);
+
+        const captured = pixelAt(png, "", 8, "rgba");
+        const delivered = pixelAt(out, "scale=in_color_matrix=bt709:in_range=tv,", 8, "rgba");
+        const worst = Math.max(...delivered.map((v, i) => Math.abs(v - captured[i]!)));
+        expect(worst, `${color}: capture ${captured} delivered ${delivered}`).toBeLessThanOrEqual(
+          2,
+        );
+      }
+      // Read the first frame, not the stream: a prores_ks mov's stream-level range depends on
+      // the ffprobe version (7.1 and 8.0 report unknown), while every version tags the frames.
+      const tags = spawnSync(getFfprobeBinary(), [
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-read_intervals",
+        "%+#1",
+        "-show_entries",
+        "frame=color_range,color_space,color_primaries,color_transfer",
+        "-of",
+        "csv=p=0",
+        "--",
+        out,
+      ]);
+      expect(tags.stdout.toString().trim()).toBe("tv,bt709,bt709,bt709");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

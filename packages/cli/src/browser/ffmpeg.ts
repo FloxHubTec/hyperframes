@@ -35,7 +35,7 @@ export function detectH264EncoderMode(ffmpegPath: string, gpuRequested: boolean)
   const encoders = execFileSync(ffmpegPath, ["-hide_banner", "-encoders"], {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
-    timeout: 5000,
+    timeout: FIRST_LAUNCH_TIMEOUT_MS,
     windowsHide: true,
   });
   return resolveH264EncoderMode(encoders, gpuRequested);
@@ -48,7 +48,7 @@ export async function detectH264EncoderModeForRender(
 ): Promise<H264EncoderMode> {
   const result = await runCancellableProcess(ffmpegPath, ["-hide_banner", "-encoders"], {
     signal,
-    timeoutMs: 5000,
+    timeoutMs: FIRST_LAUNCH_TIMEOUT_MS,
   });
   return resolveH264EncoderMode(result.stdout, gpuRequested);
 }
@@ -64,6 +64,7 @@ export function findFFprobe(): string | undefined {
   return findFfBinary("ffprobe", { configuredMustExist: true });
 }
 
+export const FIRST_LAUNCH_TIMEOUT_MS = 60_000;
 const FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html";
 
 /**
