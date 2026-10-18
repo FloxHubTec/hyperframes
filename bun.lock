@@ -17,6 +17,7 @@
         "lefthook": "^2.1.4",
         "oxfmt": "^0.41.0",
         "oxlint": "^1.56.0",
+        "picomatch": "^4.0.4",
         "tsx": "^4.21.0",
         "typescript": "^5.0.0",
         "vitest": "^4.1.11",
@@ -118,7 +119,6 @@
         "@hyperframes/parsers": "workspace:*",
         "@hyperframes/studio-server": "workspace:*",
         "acorn": "^8.17.0",
-        "bpm-detective": "^2.0.5",
         "linkedom": "^0.18.12",
         "postcss": "^8.5.8",
         "wawoff2": "^2.0.1",
@@ -363,7 +363,6 @@
         "@mcp-b/global": "^5.0.1",
         "@phosphor-icons/react": "^2.1.10",
         "@tanstack/react-virtual": "^3.14.13",
-        "bpm-detective": "^2.0.5",
         "cn": "0.2.4",
         "dockview-react": "8.3.1",
         "gsap": "^3.13.0",
@@ -1320,7 +1319,6 @@
 
     "bowser": ["bowser@2.14.1", "", {}, "sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg=="],
 
-    "bpm-detective": ["bpm-detective@2.0.5", "", {}, "sha512-FaHFT5WDCR5zwtjVTqxk01o2MDaf22ORHityX1lxMamBcVNX6NWXB6hw7nx4fmlEseRMv0xfuSybINZylljLfA=="],
 
     "brace-expansion": ["brace-expansion@5.0.6", "", { "dependencies": { "balanced-match": "^4.0.2" } }, "sha512-kLpxurY4Z4r9sgMsyG0Z9uzsBlgiU/EFKhj/h91/8yHu0edo7XuixOIH3VcJ8kkxs6/jPzoI6U9Vj3WqbMQ94g=="],
 

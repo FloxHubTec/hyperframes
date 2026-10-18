@@ -570,6 +570,7 @@ function createPageDriver(page: Page, setTime: (time: number) => void): CheckAud
     getDuration: () => getCompositionDuration(page),
     hasNoTimelineDeclaration: () => hasNoTimelineDeclaration(page),
     getTransitionBoundaries: () => collectTweenBoundaries(page),
+    getClipEdges: () => collectClipEdges(page),
     getCanvas: () =>
       page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })),
     findAmbiguousSelectors: (selectors) => findAmbiguousSelectors(page, selectors),
@@ -641,6 +642,16 @@ async function getCompositionDuration(page: Page): Promise<number> {
       if (duration) return duration;
     }
     return 0;
+  });
+}
+
+async function collectClipEdges(page: Page): Promise<number[]> {
+  return page.evaluate(() => {
+    type Clip = { kind: string; start: number; duration: number };
+    const manifest = Reflect.get(window, "__clipManifest") as { clips?: Clip[] } | undefined;
+    return (manifest?.clips ?? [])
+      .filter((clip) => clip.kind !== "audio")
+      .flatMap((clip) => [clip.start, clip.start + clip.duration]);
   });
 }
 
@@ -1439,7 +1450,9 @@ const LAYOUT_ISSUE_CODES: readonly LayoutIssueCode[] = [
   "canvas_overflow",
   "container_overflow",
   "content_overlap",
+  "visibility_escapes_segment",
   "text_occluded",
+  "video_alpha_unread",
   "text_not_painted",
   "caption_zone_collision",
   "frame_out_of_frame",

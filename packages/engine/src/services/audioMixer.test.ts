@@ -1,6 +1,6 @@
 // fallow-ignore-file code-duplication
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -366,10 +366,10 @@ describe("processCompositionAudio", () => {
     const filter = capturedFilterScripts[1];
 
     expect(filter).toContain("volume=0");
-    expect(filter).toContain("[mixed]volume=1[out]");
+    expect(filter).toContain("[mixed]volume=1,apad,asetpts=N/SR/TB,atrim=0:2[out]");
     expect(filter).toContain("apad,asetpts=N/SR/TB,atrim=0:2");
     expect(filter).not.toContain("whole_dur");
-    expect(filter).not.toContain("normalize=");
+    expect(filter).toContain("normalize=0");
     expect(filter).not.toContain("weights=");
   });
 
@@ -752,7 +752,7 @@ describe("processCompositionAudio", () => {
     expect(filter).toContain("atrim=0:2,");
   });
 
-  it("compensates amix normalization so multi-track master gain equals track count", async () => {
+  it("sums unpadded tracks at authored gain and pads the mixed output once", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
     const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
     tempDirs.push(baseDir, workDir);
@@ -807,9 +807,66 @@ describe("processCompositionAudio", () => {
     const filter = capturedFilterScripts[3];
 
     expect(filter).toContain("amix=inputs=3");
-    expect(filter).not.toContain("normalize=");
-    // masterOutputGain(1) × tracks(3) = 3
-    expect(filter).toContain("[mixed]volume=3[out]");
+    expect(filter).toContain("amix=inputs=3:duration=longest:dropout_transition=0:normalize=0");
+    expect(filter).toContain("[mixed]volume=1,apad,asetpts=N/SR/TB,atrim=0:2[out]");
+    expect((filter.match(/apad,/g) ?? []).length).toBe(1);
+  });
+
+  it("retries the padded graph when ffmpeg does not support amix normalize", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "voice.wav"), "stub");
+
+    runFfmpegMock
+      .mockImplementationOnce(async () => ({
+        success: true,
+        durationMs: 1,
+        stderr: "",
+        exitCode: 0,
+      }))
+      .mockImplementationOnce(async (args: string[]) => {
+        capturedFilterScripts.push(
+          readFileSync(args[args.indexOf("-filter_complex_script") + 1]!, "utf8"),
+        );
+        return {
+          success: false,
+          durationMs: 1,
+          stderr: "Error applying option 'normalize' to filter 'amix': Option not found",
+          exitCode: 1,
+        };
+      })
+      .mockImplementationOnce(async (args: string[]) => {
+        capturedFilterScripts.push(
+          readFileSync(args[args.indexOf("-filter_complex_script") + 1]!, "utf8"),
+        );
+        return { success: true, durationMs: 1, stderr: "", exitCode: 0 };
+      });
+
+    const result = await processCompositionAudio(
+      [
+        {
+          id: "voice",
+          src: "voice.wav",
+          start: 0,
+          end: 2,
+          mediaStart: 0,
+          layer: 0,
+          volume: 1,
+          type: "audio",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+    );
+
+    expect(result.success).toBe(true);
+    expect(runFfmpegMock).toHaveBeenCalledTimes(3);
+    expect(capturedFilterScripts[0]).toContain("normalize=0");
+    expect(capturedFilterScripts[1]).toContain("apad,asetpts=N/SR/TB,atrim=0:2[a0]");
+    expect(capturedFilterScripts[1]).not.toContain("normalize=");
   });
 
   it("fails the audio result instead of silently mixing after one track preparation fails", async () => {
@@ -1268,22 +1325,17 @@ describe("processCompositionAudio", () => {
 
     const filter = capturedFilterScripts.at(-1);
     expect(filter).toContain(`amix=inputs=${trackCount}`);
-    // Each track is trimmed once to its authored clip and once after portable
-    // indefinite `apad` to cap the padded stream at composition duration.
-    expect((filter?.match(/atrim=/g) ?? []).length).toBe(trackCount * 2);
-    expect((filter?.match(/apad,/g) ?? []).length).toBe(trackCount);
+    // Each track is trimmed to its authored clip; only the mixed output is padded.
+    expect((filter?.match(/atrim=/g) ?? []).length).toBe(trackCount + 1);
+    expect((filter?.match(/apad,/g) ?? []).length).toBe(1);
     // 150 real files + 150 existence checks: ~60ms on Linux, but well past the 5s
     // default on the Windows lane, where each file create is orders slower.
   }, 30_000);
 
-  it("renumbers timestamps between apad and atrim on every mixed branch", async () => {
-    // Regression: `apad` then `atrim` is the portable pad-to-length shape --
+  it("renumbers timestamps between apad and atrim on the mixed output", async () => {
     // #2769 moved off `apad=whole_dur=` because some builds reject that option.
-    // But on FFmpeg 5.x-8.0.x the padded samples carry timestamps `atrim`
-    // misreads, so a delayed branch sounds at t=0 and, past three branches, the
-    // last one vanishes from the mix. `asetpts=N/SR/TB` between the two rebuilds
-    // the timestamps from the sample count and costs no portability, since all
-    // three filters exist in every build we support.
+    // Keep the portable apad/asetpts/atrim shape on the mixed output so the
+    // final stream has the requested duration and consistent timestamps.
     const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
     const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
     tempDirs.push(baseDir, workDir);
@@ -1322,10 +1374,8 @@ describe("processCompositionAudio", () => {
 
     const filter = capturedFilterScripts.at(-1) ?? "";
     const branches = filter.match(/apad[^;]*/g) ?? [];
-    expect(branches).toHaveLength(2);
-    for (const branch of branches) {
-      expect(branch).toMatch(/^apad,asetpts=N\/SR\/TB,atrim=0:/);
-    }
+    expect(branches).toHaveLength(1);
+    expect(branches[0]).toMatch(/^apad,asetpts=N\/SR\/TB,atrim=0:/);
     // The portability constraint #2769 established still holds.
     expect(filter).not.toContain("whole_dur");
   });

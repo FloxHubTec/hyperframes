@@ -1897,6 +1897,50 @@ describe.skipIf(!HAS_FFMPEG)("buildEncoderArgs SDR colour", () => {
     }
   }, 30_000);
 
+  it("keeps the rightmost 8 columns of a 1080-wide (16n + 8) mp4", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-sdr-right-edge-"));
+    try {
+      const jpg = join(dir, "frame.jpg");
+      const out = join(dir, "out.mp4");
+      const synth = spawnSync(ffmpeg, [
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=0xC83C28:s=1080x16,format=rgb24",
+        "-frames:v",
+        "1",
+        "-pix_fmt",
+        "yuvj420p",
+        jpg,
+      ]);
+      expect(synth.status).toBe(0);
+      const args = buildEncoderArgs(
+        {
+          fps: { num: 30, den: 1 },
+          width: 1080,
+          height: 16,
+          codec: "h264",
+          preset: "ultrafast",
+          quality: 0,
+        },
+        ["-i", jpg],
+        out,
+      );
+      expect(spawnSync(ffmpeg, args).status).toBe(0);
+      for (const x of [1071, 1075, 1079]) {
+        const captured = pixelAt(jpg, "", x);
+        const delivered = pixelAt(out, "scale=in_color_matrix=bt709:in_range=tv,", x);
+        const worst = Math.max(...delivered.map((v, i) => Math.abs(v - captured[i]!)));
+        expect(worst, `x=${x}: capture ${captured} delivered ${delivered}`).toBeLessThanOrEqual(2);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   // Untagged HD reads as BT.709 in QuickTime, so ProRes has to be BT.709 too. MOV captures are
   // RGBA PNGs, and the conversion must leave their alpha plane alone. The tags come from
   // setparams because prores_ks ignores -color_* (ffmpeg 5.1 writes none, 8.1 only the matrix).

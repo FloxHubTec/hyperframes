@@ -23,6 +23,7 @@ import {
   lintVideoMediaStartPastEof,
 } from "./hevcPreviewLint.js";
 import { lintHyperframeHtml } from "./hyperframeLinter.js";
+import { lintProjectShaderScripts } from "./projectShaders.js";
 import type {
   HyperframeLintFinding,
   HyperframeLintResult,
@@ -256,6 +257,7 @@ export async function lintProject(
   }
 
   const projectFindings = [
+    ...lintProjectShaderScripts(projectDir, allHtmlSources),
     ...lintProjectAudioFiles(projectDir, allHtmlSources),
     ...lintAudioSrcNotFound(projectDir, allHtmlSources),
     ...lintMissingLocalAsset(projectDir, allHtmlSources),

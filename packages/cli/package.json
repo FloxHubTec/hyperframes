@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/cli",
-  "version": "0.8.153",
+  "version": "0.8.169",
   "description": "HyperFrames CLI — create, preview, and render HTML video compositions",
   "license": "Apache-2.0",
   "repository": {
@@ -27,10 +27,9 @@
   "scripts": {
     "test": "vitest run",
     "dev": "tsx src/cli.ts",
-    "build": "bun run build:fonts && tsup && bun run build:runtime && bun run build:beat-analyzer && bun run build:copy",
+    "build": "bun run build:fonts && tsup && bun run build:runtime && bun run build:copy",
     "build:fonts": "node scripts/build-fonts.mjs",
     "build:runtime": "tsx scripts/build-runtime.ts",
-    "build:beat-analyzer": "node scripts/build-beat-analyzer.mjs",
     "build:copy": "node scripts/build-copy.mjs",
     "typecheck": "tsc --noEmit",
     "gen:skills-manifest": "tsx scripts/gen-skills-manifest.ts",

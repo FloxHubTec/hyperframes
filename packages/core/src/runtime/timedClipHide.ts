@@ -15,6 +15,17 @@ const SKIP_ATTR = "data-hf-skip-hidden-images";
 export const SKIPPED_CLIP = `[data-start]:not(video, audio, img, [${STUDIO_PREVIEW_UPCOMING_ATTR}], [${RUNTIME_STAMPED_ATTR}])[style*="visibility: hidden"]`;
 const SKIP_HIDDEN_IMAGES = `${SKIPPED_CLIP} img { display: none !important; }`;
 const STUDIO_PREVIEW_MARK = `meta[name="${STUDIO_PREVIEW_MARK_META}"]`;
+export const CLIP_HIDDEN_ATTR = "data-hf-clip-hidden";
+const CONTENTS_ATTR = "data-hf-hidden-clip-contents";
+const HIDE_HIDDEN_CLIP_CONTENTS = `[${CLIP_HIDDEN_ATTR}][style*="visibility: hidden"] * { visibility: hidden !important; }`;
+
+export function showHiddenClips(): () => void {
+  const hidden = Array.from(document.querySelectorAll<HTMLElement>(`[${CLIP_HIDDEN_ATTR}]`));
+  for (const el of hidden) el.style.visibility = "visible";
+  return () => {
+    for (const el of hidden) el.style.visibility = "hidden";
+  };
+}
 
 type FirstPassWindow = Window & {
   __hfFirstPassHidden?: boolean;
@@ -39,6 +50,8 @@ export function hideTimedClipsUntilFirstPass(): void {
   if (!parent) return;
   const preview = document.querySelector(STUDIO_PREVIEW_MARK) !== null;
   if (preview && !skipsHiddenImages()) appendStyle(parent, SKIP_ATTR, SKIP_HIDDEN_IMAGES);
+  if (!document.querySelector(`style[${CONTENTS_ATTR}]`))
+    appendStyle(parent, CONTENTS_ATTR, HIDE_HIDDEN_CLIP_CONTENTS);
   const win = window as FirstPassWindow;
   // A runtime that already initialised may never run another pass to lift a new rule.
   if (win.__hfFirstPassHidden || win.__hyperframeRuntimeBootstrapped) return;

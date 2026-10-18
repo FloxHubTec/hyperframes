@@ -141,20 +141,55 @@ function rawTextElements(text: string, tag: "script" | "style") {
   }
   return elements;
 }
+export interface HtmlTag {
+  file: string;
+  start: number;
+  end: number;
+  id?: string;
+  hfId?: string;
+  classes: string[];
+  tag: string;
+}
+function htmlTagsOf(file: string, text: string): HtmlTag[] {
+  return [...text.matchAll(/<([a-z][\w-]*)\b[^>]*>/gi)].map((m) => {
+    const attr = (name: string) => {
+      const quoted = new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, "i").exec(m[0]);
+      if (quoted) return quoted[1];
+      return new RegExp(`\\s${name}\\s*=\\s*([^\\s"'=<>]+)`, "i").exec(m[0])?.[1];
+    };
+    return {
+      file,
+      start: m.index,
+      end: m.index + m[0].length,
+      tag: m[1].toLowerCase(),
+      id: attr("id"),
+      hfId: attr("data-hf-id"),
+      classes: (attr("class") ?? "").split(/\s+/).filter(Boolean),
+    };
+  });
+}
+export interface AuthoredHtml {
+  files: Map<string, { text: string }>;
+  htmlTags: HtmlTag[];
+}
+export function authoredHtml(project: string): AuthoredHtml {
+  const html: AuthoredHtml = { files: new Map(), htmlTags: [] };
+  for (const path of sourceFiles(project)) {
+    const file = relative(project, path);
+    if (!file.endsWith(".html") || /(?:^|\/)(?:vendor|lib)\//.test(file)) continue;
+    const text = readFileSync(path, "utf8");
+    if (text.length > 2_000_000) continue;
+    html.files.set(file, { text });
+    html.htmlTags.push(...htmlTagsOf(file, text));
+  }
+  return html;
+}
 export class Sources {
   readonly files = new Map<string, SourceFile>();
   readonly chunks: Chunk[] = [];
   readonly cssRules: { id: string; selector: string; file: string; start: number; end: number }[] =
     [];
-  readonly htmlTags: {
-    file: string;
-    start: number;
-    end: number;
-    id?: string;
-    hfId?: string;
-    classes: string[];
-    tag: string;
-  }[] = [];
+  readonly htmlTags: HtmlTag[] = [];
   constructor(readonly project: string) {
     for (const path of sourceFiles(project)) {
       const file = relative(project, path);
@@ -176,19 +211,7 @@ export class Sources {
             this.addChunk(file, script.content, script.contentStart);
         for (const style of rawTextElements(text, "style"))
           this.addCss(file, style.content, style.contentStart);
-        for (const m of text.matchAll(/<([a-z][\w-]*)\b[^>]*>/gi)) {
-          const attr = (name: string) =>
-            new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, "i").exec(m[0])?.[1];
-          this.htmlTags.push({
-            file,
-            start: m.index,
-            end: m.index + m[0].length,
-            tag: m[1].toLowerCase(),
-            id: attr("id"),
-            hfId: attr("data-hf-id"),
-            classes: (attr("class") ?? "").split(/\s+/).filter(Boolean),
-          });
-        }
+        this.htmlTags.push(...htmlTagsOf(file, text));
       }
     }
   }
@@ -250,15 +273,15 @@ export class Sources {
     };
   }
   markup(element: ElementRef, target: number) {
-    const tags = this.htmlTags.filter(
-      (tag) =>
-        tag.tag === element.tag &&
-        (element.hfId
-          ? tag.hfId === element.hfId
-          : element.id
+    const sameTag = this.htmlTags.filter((tag) => tag.tag === element.tag);
+    const byHfId = element.hfId ? sameTag.filter((tag) => tag.hfId === element.hfId) : [];
+    const tags = byHfId.length
+      ? byHfId
+      : sameTag.filter((tag) =>
+          element.id
             ? tag.id === element.id
-            : element.classes.length > 0 && element.classes.every((c) => tag.classes.includes(c))),
-    );
+            : element.classes.length > 0 && element.classes.every((c) => tag.classes.includes(c)),
+        );
     return tags.length === 1
       ? this.slice(tags[0].file, tags[0].start, tags[0].end, "html opening tag", target)
       : null;

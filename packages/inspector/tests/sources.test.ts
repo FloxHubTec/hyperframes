@@ -89,4 +89,27 @@ describe("source records", () => {
       dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true }));
     }
   });
+  it("finds an element's tag before its served data-hf-id reaches the source", () => {
+    const dir = mkdtempSync(join(tmpdir(), "inspect-source-"));
+    try {
+      writeFileSync(
+        join(dir, "scene.html"),
+        '<div data-composition-id="s"><span id="t" class="w">A</span><i class="dot"></i><i class="dot"></i></div>',
+      );
+      const source = new Sources(dir);
+      const served = {
+        ref: "r",
+        tag: "span",
+        id: "t",
+        hfId: "hf-ab12",
+        classes: ["w"],
+        composition: "s",
+      };
+      expect(source.markup(served, 0)?.code).toContain('<span id="t" class="w">');
+      const twin = { ...served, tag: "i", id: "", classes: ["dot"] };
+      expect(source.markup(twin, 0)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

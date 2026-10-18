@@ -105,6 +105,14 @@ try {
   assert(timeline.text.includes("index.html:"), "timeline maps its animations to source lines");
   const map = await live.elementMap(runner);
   assert(map.text.includes("#title") && map.generation === live.generation);
+  const advance = (on: boolean) => {
+    const h1 = document.querySelector("#other")!;
+    h1.classList.toggle("on", on);
+    h1.textContent = on ? "9.9" : "Two";
+  };
+  await runner.run(advance, true);
+  assert.equal((await live.elementMap(runner)).text, map.text, "runtime class and text");
+  await runner.run(advance, false);
   const reloadDuringQuery = async (
     run: (inspection: typeof live, racingRunner: PageRunner) => Promise<unknown>,
   ) => {

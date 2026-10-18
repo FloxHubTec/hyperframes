@@ -57,7 +57,7 @@ import {
   UrlDownloadError,
   writeUrlDownloadTelemetry,
 } from "../utils/urlDownloader.js";
-import { runFfmpeg, runFfmpegPipeline, type RunFfmpegResult } from "../utils/runFfmpeg.js";
+import { runFfmpeg, type RunFfmpegResult } from "../utils/runFfmpeg.js";
 import { isFfmpegFilterAvailable } from "../utils/psnrFilterAvailability.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { unwrapTemplate } from "../utils/htmlTemplate.js";
@@ -127,9 +127,9 @@ export function isVideoFrameFormat(value: unknown): value is VideoFrameFormat {
 /**
  * Resolve the frame count produced for a requested extraction duration.
  *
- * CFR extraction uses FFmpeg's fps filter, whose end boundary rounds to the
- * nearest frame. The VFR path normalizes with `-fps_mode cfr -r`, whose end
- * boundary rounds up. Keep this calculation shared by superset slicing and
+ * Both paths sample with FFmpeg's fps filter. A CFR window ends at the nearest
+ * frame boundary; a VFR window rounds up, keeping the slot a trailing still
+ * covers. Keep this calculation shared by superset slicing and
  * producer coverage accounting so a complete VFR extraction cannot be
  * rejected because the two paths disagree by one frame.
  */
@@ -258,7 +258,7 @@ const HDR_TO_SDR_ZSCALE_TRANSFORM_KEY = "hdr2sdr-hable-srgb";
 const HDR_TO_SDR_VIDEOTOOLBOX_TRANSFORM_KEY = "hdr2sdr-videotoolbox-hdr";
 const SDR_CANVAS_PASSTHROUGH_FILTER = "setparams=color_primaries=bt709:color_trc=iec61966-2-1";
 const SDR_JPEG_AS_BT601_FULL_RANGE_FILTER =
-  "scale=flags=neighbor,format=gbrp,scale=out_color_matrix=bt601:out_range=pc:flags=neighbor,format=yuv420p";
+  "scale=flags=neighbor+accurate_rnd,format=gbrp,scale=out_color_matrix=bt601:out_range=pc:flags=neighbor,format=yuv420p";
 
 let warnedMissingZscale = false;
 
@@ -297,8 +297,8 @@ function sdrToHdrTransformKey(transfer: HdrTransfer): string {
  *     reflects max-across-parallel-workers, not sum.
  *   - hdrPreflightMs includes its probe-time sibling (hdrProbeMs); the
  *     probe-only field is a finer decomposition, not a separate carve-out.
- *   - vfrPreflightCount reports sources classified as VFR and routed through
- *     the one-pass `-fps_mode cfr -r` extraction path. DEFINITION CHANGE:
+ *   - vfrPreflightCount reports sources classified as VFR and extracted with
+ *     a rounded-up frame count. DEFINITION CHANGE:
  *     before the one-pass refactor, vfrPreflightMs timed a per-source
  *     VFR-to-CFR re-encode and could reach seconds; it now times only the
  *     (promise-cached) classification probe and is expected to be ~0.
@@ -829,61 +829,6 @@ function chromeGuessForUntaggedMatrix(metadata: VideoMetadata): string[] {
   return [`setparams=colorspace=${hd ? "bt709" : "smpte170m"}`];
 }
 
-/** Pixel formats nut carries as raw video unchanged on ffmpeg 5.1 to 8.1 (yuvj only loses its range). */
-const NUT_RAW_PIXEL_FORMATS = new Set([
-  "yuv420p",
-  "yuvj420p",
-  "yuv422p",
-  "yuvj422p",
-  "yuv444p",
-  "yuvj444p",
-  "yuva420p",
-  "yuva444p",
-  "yuv440p",
-  "yuv411p",
-  "yuv410p",
-  "yuva422p",
-  "yuv420p10le",
-  "yuv422p10le",
-  "yuv444p10le",
-  "yuva420p10le",
-  "yuva444p10le",
-  "yuv420p12le",
-  "nv12",
-  "nv21",
-  "yuyv422",
-  "uyvy422",
-  "gray",
-  "gray10le",
-  "ya8",
-  "gbrp",
-  "gbrap",
-  "gbrp10le",
-  "gbrp12le",
-  "gbrap10le",
-  "rgb24",
-  "bgr24",
-  "rgba",
-  "bgra",
-  "argb",
-  "abgr",
-  "rgb48le",
-  "rgba64le",
-]);
-
-/** nut drops colour tags, so raw frames get the source's back before any other filter reads them. */
-function restoreSourceColourFilter(metadata: VideoMetadata): string[] {
-  const tags = [
-    ["range", metadata.colorRange],
-    ["colorspace", metadata.colorSpace?.colorSpace],
-    ["color_primaries", metadata.colorSpace?.colorPrimaries],
-    ["color_trc", metadata.colorSpace?.colorTransfer],
-  ].filter(([, value]) => value && value !== "unknown" && value !== "reserved");
-  return tags.length > 0
-    ? [`setparams=${tags.map(([key, value]) => `${key}=${value}`).join(":")}`]
-    : [];
-}
-
 /**
  * Longest stretch of output one ffmpeg process extracts. `ffmpegProcessTimeout` bounds a
  * single process, so one process over a long clip timed out however much time the render
@@ -1036,8 +981,8 @@ export async function extractVideoFramesRange(
   const toneMappedToSdr = options.toneMapHdrToSdr === true && isHdr && (await toneMapsWithZscale());
   const decodeWithVideoToolbox = isHdr && isMacOS && !toneMappedToSdr;
 
-  const sampleCfrAtOutputFps = !options.finalFrameOnly && !metadata.isVFR;
-  if (options.frameRanges && !sampleCfrAtOutputFps) {
+  const sampleAtOutputFps = !options.finalFrameOnly;
+  if (options.frameRanges && (!sampleAtOutputFps || metadata.isVFR)) {
     throw new Error("frameRanges extraction needs a constant-frame-rate source");
   }
 
@@ -1066,7 +1011,7 @@ export async function extractVideoFramesRange(
     args.push("-i", videoPath, "-ss", String(startTime), "-frames:v", "1");
   } else {
     // An accurate seek drops the frame on screen at startTime; the fps sampling below needs it.
-    if (sampleCfrAtOutputFps) args.push("-noaccurate_seek");
+    if (sampleAtOutputFps) args.push("-noaccurate_seek");
     args.push("-ss", String(startTime), "-i", videoPath, "-t", String(duration));
   }
 
@@ -1074,7 +1019,7 @@ export async function extractVideoFramesRange(
   if (decodeWithVideoToolbox) {
     vfFilters.push("format=nv12");
   }
-  if (sampleCfrAtOutputFps) {
+  if (sampleAtOutputFps) {
     // Each slot takes the last frame starting at or before its time. Ticks of 2 ms or finer
     // first shift half a tick, absorbing container rounding (WebM/MKV use whole ms).
     vfFilters.push(
@@ -1110,59 +1055,31 @@ export async function extractVideoFramesRange(
   encodeArgs.push("-y", outputPattern);
 
   const runOptions = { signal, timeout: ffmpegProcessTimeout };
-  const resampleVfrToCfr = !options.finalFrameOnly && metadata.isVFR;
-  if (resampleVfrToCfr) args.push("-fps_mode", "cfr", "-r", ffmpegFps);
-  let processResult: RunFfmpegResult;
-  if (
-    resampleVfrToCfr &&
-    vfFilters.length > 0 &&
-    !isHdr &&
-    NUT_RAW_PIXEL_FORMATS.has(metadata.pixelFormat ?? "")
-  ) {
-    // ffmpeg <6.1 ignores frame durations in CFR resampling once any -vf is set,
-    // cutting a trailing still short, so the SDR filters run in a second process.
-    processResult = await inExtractionSlot(
-      () =>
-        runFfmpegPipeline(
-          [...args, "-an", "-sn", "-dn", "-c:v", "rawvideo", "-f", "nut", "pipe:1"],
-          [
-            "-f",
-            "nut",
-            "-i",
-            "pipe:0",
-            "-vf",
-            [...restoreSourceColourFilter(metadata), ...vfFilters].join(","),
-            "-fps_mode",
-            "passthrough",
-            ...encodeArgs,
-          ],
+  const filterArgs = vfFilters.length > 0 ? ["-vf", vfFilters.join(",")] : [];
+  const segmentFrames = Math.round(EXTRACTION_SEGMENT_SECONDS * fps);
+  const totalFrames = extractionFrameCountForDuration(duration, normalizedFps, metadata.isVFR);
+  // A VFR window rounds its frame count up, and only the segments' `-frames:v` bound
+  // emits that last slot: the fps filter ends a `-t` window at the nearest slot. A
+  // decimal rate counts zero frames here and keeps the `-t` window.
+  const boundVfrFrameCount = metadata.isVFR && totalFrames > 0;
+  const processResult =
+    sampleAtOutputFps && (options.frameRanges || boundVfrFrameCount || totalFrames > segmentFrames)
+      ? await runSegmentedExtraction({
+          decodeArgs,
+          filterAndEncodeArgs: [...filterArgs, ...encodeArgs],
+          videoPath,
+          startTime,
+          fps,
+          segments: splitFrameRanges(
+            options.frameRanges ?? [{ firstFrame: 0, frames: totalFrames }],
+            segmentFrames,
+          ),
           runOptions,
-        ),
-      signal,
-    );
-  } else {
-    const filterArgs = vfFilters.length > 0 ? ["-vf", vfFilters.join(",")] : [];
-    const segmentFrames = Math.round(EXTRACTION_SEGMENT_SECONDS * fps);
-    const totalFrames = extractionFrameCountForDuration(duration, normalizedFps, false);
-    processResult =
-      sampleCfrAtOutputFps && (options.frameRanges || totalFrames > segmentFrames)
-        ? await runSegmentedExtraction({
-            decodeArgs,
-            filterAndEncodeArgs: [...filterArgs, ...encodeArgs],
-            videoPath,
-            startTime,
-            fps,
-            segments: splitFrameRanges(
-              options.frameRanges ?? [{ firstFrame: 0, frames: totalFrames }],
-              segmentFrames,
-            ),
-            runOptions,
-          })
-        : await inExtractionSlot(
-            () => runFfmpeg([...args, ...filterArgs, ...encodeArgs], runOptions),
-            signal,
-          );
-  }
+        })
+      : await inExtractionSlot(
+          () => runFfmpeg([...args, ...filterArgs, ...encodeArgs], runOptions),
+          signal,
+        );
   if (processResult.failureReason === "external_interruption") {
     throw new VideoSourceExtractionError(
       "external_interruption",
@@ -1714,11 +1631,8 @@ function buildSupersetGroup(
 ): SupersetGroupPlan | null {
   if (misses.length < 2) return null;
   if (misses.some(({ work }) => work.finalFrameOnly)) return null;
-  // VFR normalization (`-fps_mode cfr -r`) establishes its duplicate/drop
-  // phase relative to each seek. A union extraction therefore cannot be
-  // sliced into the same frames as independently sought member ranges, even
-  // when their offsets land on an integral output-frame boundary. Keep VFR
-  // ranges direct until the extractor has a proven absolute timestamp phase.
+  // VFR ranges round their frame counts up, so a union extraction's slices
+  // are not proven to match independently sought member ranges. Keep them direct.
   if (misses.some(({ work }) => work.metadata.isVFR)) return null;
   const baseStart = Math.min(...misses.map(({ work }) => work.video.mediaStart));
   if (!misses.every(({ work }) => isIntegralFrameOffset(work.video.mediaStart - baseStart, fps))) {

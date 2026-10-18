@@ -263,12 +263,15 @@ export {
   parseMasterFxChain,
   processCompositionAudio,
 } from "./services/audioMixer.js";
+export { audioFailureDiagnostics } from "./services/audioFailureDiagnostic.js";
 export { cloneCaptureWarning, cloneCaptureWarnings } from "./services/captureWarning.js";
 export type {
   AudioElement,
   AudioFailureReason,
   AudioFailureStage,
   AudioProcessingFailure,
+  AudioFailureDiagnostic,
+  AudioSubprocessEvidence,
   AudioTrack,
   AudioVolumeKeyframe,
   MixResult,

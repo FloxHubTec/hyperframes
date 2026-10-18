@@ -54,8 +54,8 @@ export function mapInspection(
     return {
       target: index,
       status: result.status,
-      candidates: result.candidates.slice(0, 5),
-      candidatesOmitted: Math.max(0, result.candidates.length - 5),
+      candidates: result.candidates,
+      candidatesOmitted: 0,
       animations: result.animations.length,
       coTargets: [
         ...new Map(
@@ -97,27 +97,32 @@ export function mapInspection(
   const offset = request.offset ?? 0;
   if (!Number.isInteger(offset) || offset < 0)
     throw new Error("offset must be a non-negative integer");
+  const size = () => Buffer.byteLength(JSON.stringify(response));
+  const trimCandidates = (limit: number, keep: number) => {
+    while (size() > limit) {
+      const longest = response.results.reduce((a, b) =>
+        b.candidates.length > a.candidates.length ? b : a,
+      );
+      if (longest.candidates.length <= keep) return;
+      longest.candidates.pop();
+      longest.candidatesOmitted++;
+    }
+  };
+  trimCandidates(maxBytes / 2, 5);
   for (let i = offset; i < selected.length; i++) {
-    const snippet = selected[i];
-    response.snippets.push(snippet);
-    if (Buffer.byteLength(JSON.stringify(response)) > maxBytes - 700) {
+    response.snippets.push(selected[i]);
+    if (size() > maxBytes - 700) {
       response.snippets.pop();
       response.omittedCount = selected.length - i;
       response.omitted = selected
         .slice(i, i + 8)
         .map((item) => ({ id: item.id, bytes: Buffer.byteLength(item.code) }));
-      response.nextOffset = i;
+      const nothingFit = response.snippets.length === 0;
+      response.nextOffset = nothingFit ? (i + 1 < selected.length ? i + 1 : null) : i;
       break;
     }
   }
-  while (
-    Buffer.byteLength(JSON.stringify(response)) > maxBytes &&
-    response.results.some((r) => r.candidates.length)
-  ) {
-    const r = response.results.find((r) => r.candidates.length)!;
-    r.candidates.pop();
-    r.candidatesOmitted++;
-  }
+  trimCandidates(maxBytes, 0);
   if (Buffer.byteLength(JSON.stringify(response)) > maxBytes)
     throw new Error("metadata_exceeds_budget: use fewer targets or increase maxBytes");
   if (request.debug) return { ...response, debug: raw };
