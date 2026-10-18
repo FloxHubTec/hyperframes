@@ -47,7 +47,7 @@ If a fresh request does not identify the subject or input, ask what the video is
 
 ### Check local video dependencies early
 
-For creation or edits that will produce a locally rendered video, run `npx hyperframes doctor --json` from the project directory after initialization or resume, before design work. Fresh setup still writes `BRIEF.md` as its first action after `init`; run the dependency check next. Read [the CLI's dependency check](../hyperframes-cli/references/doctor-browser.md#check-local-video-dependencies-before-design) and inspect **FFmpeg** and **FFprobe** individually; optional-tool failures in the report's top-level `ok` do not block local encoding. Apply this on entry to the selected workflow, including a resumed `BRIEF.md`, and retain the result for the run. Project operations follow their existing command contracts; deck-only, source-port, and explicit cloud-render work use their own prerequisites.
+Before designing a locally rendered video, follow [the CLI's dependency check](../hyperframes-cli/references/doctor-browser.md#check-local-video-dependencies-before-design) after project setup or resume; fresh setup still writes `BRIEF.md` first. Check **FFmpeg** and **FFprobe** individually and retain the result for the run; other project operations and deck, source-port, or explicit cloud-render work follow their own prerequisites.
 
 ### Keep the project's CLI current
 
