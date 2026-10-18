@@ -46,6 +46,7 @@ import {
 import { fetchRemoteTemplate } from "../templates/remote.js";
 import { trackInitTemplate } from "../telemetry/events.js";
 import { DEFAULT_MODEL, hasFFmpeg } from "../whisper/manager.js";
+import { TRANSCRIPT_FILE } from "../whisper/transcriptFile.js";
 import { initialModelForLanguage } from "../whisper/transcribe.js";
 import { findFFmpeg, findFFprobe, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import { VERSION } from "../version.js";
@@ -76,7 +77,7 @@ interface VideoMeta {
   videoCodec: string;
 }
 
-const WEB_CODECS = new Set(["h264", "vp8", "vp9", "av1", "theora"]);
+const WEB_CODECS = new Set(["h264", "vp8", "vp9", "av1"]);
 
 const DEFAULT_META: VideoMeta = {
   durationSeconds: 5,
@@ -210,7 +211,7 @@ export function transcodeToMp4(inputPath: string, outputPath: string): Promise<b
         "-y",
         outputPath,
       ],
-      { stdio: "pipe", windowsHide: true },
+      { stdio: "ignore", windowsHide: true },
     );
 
     child.on("close", (code) => resolvePromise(code === 0));
@@ -393,6 +394,7 @@ async function handleVideoFile(
   videoPath: string,
   destDir: string,
   interactive: boolean,
+  keepOriginal: boolean,
 ): Promise<{ meta: VideoMeta; localVideoName: string }> {
   const probed = probeVideo(videoPath);
   let meta: VideoMeta = { ...DEFAULT_META };
@@ -415,7 +417,7 @@ async function handleVideoFile(
   }
 
   // Check codec compatibility
-  if (probed && !isWebCompatible(probed.videoCodec)) {
+  if (probed && !keepOriginal && !isWebCompatible(probed.videoCodec)) {
     if (interactive) {
       clack.log.warn(
         c.warn(`Video codec "${probed.videoCodec}" is not supported by web browsers.`),
@@ -716,6 +718,10 @@ export default defineCommand({
       type: "boolean",
       description: "Skip whisper transcription",
     },
+    "keep-original": {
+      type: "boolean",
+      description: "Copy the --video file as is, without converting it to H.264 MP4",
+    },
     model: {
       type: "string",
       description:
@@ -777,13 +783,10 @@ export default defineCommand({
       failCommand();
     }
     const exampleFlag = args.example;
-    if (exampleFlag?.startsWith("-")) {
-      console.error(c.error(`--example requires a value; received flag "${exampleFlag}" instead.`));
-      failCommand();
-    }
     const videoFlag = args.video;
     const audioFlag = args.audio;
     const skipTranscribe = args["skip-transcribe"] === true;
+    const keepOriginal = args["keep-original"] === true;
     // Temporary measure while the skills.sh registry sync lags GitHub main: the
     // `--skip-skills` FLAG is neutered so an agent (or user) that passes it can
     // NOT dodge the GitHub skills freshness check. The "don't pass --skip-skills"
@@ -877,7 +880,7 @@ export default defineCommand({
       // Handle video
       if (videoPath) {
         sourceFilePath = videoPath;
-        const result = await handleVideoFile(videoPath, destDir, false);
+        const result = await handleVideoFile(videoPath, destDir, false, keepOriginal);
         localVideoName = result.localVideoName;
         videoHasAudio = result.meta.hasAudio;
         videoDuration = result.meta.durationSeconds;
@@ -942,7 +945,7 @@ export default defineCommand({
         failCommand();
       }
       trackInitTemplate(templateId, { tailwind });
-      const transcriptFile = resolve(destDir, "transcript.json");
+      const transcriptFile = resolve(destDir, TRANSCRIPT_FILE);
       if (existsSync(transcriptFile)) {
         await patchTranscript(destDir, transcriptFile);
       }
@@ -1053,7 +1056,7 @@ export default defineCommand({
       }
       mkdirSync(destDir, { recursive: true });
       sourceFilePath = videoPath;
-      const result = await handleVideoFile(videoPath, destDir, true);
+      const result = await handleVideoFile(videoPath, destDir, true, keepOriginal);
       localVideoName = result.localVideoName;
       videoHasAudio = result.meta.hasAudio;
       videoDuration = result.meta.durationSeconds;
@@ -1179,7 +1182,7 @@ export default defineCommand({
     trackInitTemplate(templateId, { tailwind });
 
     // 4b. Patch captions with transcript if available
-    const transcriptFile = resolve(destDir, "transcript.json");
+    const transcriptFile = resolve(destDir, TRANSCRIPT_FILE);
     if (existsSync(transcriptFile)) {
       await patchTranscript(destDir, transcriptFile);
     }

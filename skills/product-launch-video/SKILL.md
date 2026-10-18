@@ -142,7 +142,7 @@ If there is no narration and no `SCRIPT.md`, skip voice generation. BGM may stil
 
 Goal: Add the visual direction, layout intent, and motion choices to each storyboard frame.
 
-**Sketch the storyboard sheet first (collaborative only).** The moment the plan is approved, run the sketch pass — `../hyperframes/references/review-loop.md` § 2 (don't wait on Step 3.1; sketches don't use timings): wireframe every frame yourself as a cell of `storyboard.html` (`../hyperframes-creative/references/storyboard-recipe.md` § 3), mark each `built`, pause for the one layout question when every frame is `built`, and revise only the sketches named until the sheet is confirmed. Stand-ins: plain labeled blocks for the captured assets — the real files arrive with Step 5's workers. Only then write the visual design below onto the confirmed layouts. In autonomous mode, or when the user chose to skip sketches at Step 3, skip this pass — frames go straight from `outline` to `animated` at Step 5.
+**Sketch the storyboard sheet first (collaborative only).** The moment the plan is approved, run the sketch pass — `../hyperframes/references/review-loop.md` § 2 (don't wait on Step 3.1; the stills don't use timings): pose every frame yourself in its composition, mount each in `index.html` at its planned start, snapshot all the stills in one run and write the board, `boards/storyboard.html` (`../hyperframes-creative/references/storyboard-recipe.md`), mark each `built`, pause for the one layout question when every frame is `built`, and revise only the frames named until the board is confirmed. Stand-ins: plain labeled blocks for the captured assets — the real files arrive with Step 5's workers. Only then write the visual design below onto the confirmed layouts. In autonomous mode, or when the user chose to skip sketches at Step 3, skip this pass — frames go straight from `outline` to `animated` at Step 5.
 
 Edit `STORYBOARD.md` in place. Do not create another storyboard. Use `frame.md` as source of truth for color, type, layout feel, and style.
 
@@ -154,7 +154,7 @@ For every visual frame, write a **time-coded shot sequence** into `STORYBOARD.md
 
 When an element visibly continues across a frame boundary, give both workers the same numerical handoff in `STORYBOARD.md`: add `handoff_out:` to the outgoing frame and a matching `handoff_in:` to the incoming frame. Name the element and its exact x/y position, scale, opacity, and motion direction/speed at the cut — state every field even when it does not change, because a constant is `opacity: 1`, not an omission. Omit the whole block only for a deliberate clean cut. The goal is simple: parallel workers must not invent two different versions of the same seam.
 
-Do not change story, script, asset choices, `asset_candidates`, `transition_in`, or captured source material. Do not write HTML in this step.
+Do not change story, script, asset choices, `asset_candidates`, `transition_in`, or captured source material. Do not write HTML in this step beyond the sketch pass's poses.
 
 Stage named assets after visual design is locked:
 
@@ -216,13 +216,21 @@ Inject transitions, run checks, pause for review, then render.
 
 `node <SKILL_DIR>/scripts/transitions.mjs verify --storyboard ./STORYBOARD.md --index ./index.html`
 
+**When a music bed plays under any voice track, carve the bed after assembly and transition injection, before checks.** The assembler's `data-volume` (0.12 by default under voice) is a fixed whole-bed gain, not the required spectral carve; the carve leaves it in place, so both apply. Read `/hyperframes-audio` → Voiceover carve.
+
+The assembler emits separate narration clips without an audio group. Before carving, add `data-audio-group="voiceover"` to each narration `<audio id="el-<frame_id>-voice">` in `index.html`, including any other voice clips that should join the same narration group. Keep the music bed and SFX outside that group. Multiple voice clips must be carved against their voice group, so later clips remain covered when the analysis is rerun. Then run from the composition project:
+
+`node <HYPERFRAMES_AUDIO_SKILL_DIR>/scripts/carve.mjs --comp ./index.html`
+
+`<HYPERFRAMES_AUDIO_SKILL_DIR>` is the installed `hyperframes-audio` skill directory. The script needs `ffmpeg` on PATH and `@hyperframes/core` installed in the composition project (`npm i -D @hyperframes/core`, or `bun add -D @hyperframes/core` in a Bun project). It detects the bed and overlapping voice tracks; use `--bed el-bgm` and repeat `--voice <voice-element-id>` when detection needs an explicit choice. Confirm the bed carries `data-fx-carve`, `data-fx-chain`, and `data-automation`; when multiple narration clips overlap the bed, `data-fx-carve.sources` should name the `voiceover` group, not individual clip ids. Skip this step only when no music plays under voice. Reassembling replaces `index.html`, so restore the narration group and rerun the carve after any reassembly.
+
 `npx hyperframes lint`
 
 `npx hyperframes check`
 
 `npx hyperframes snapshot --at <frame-midpoints-and-each-cut-minus-0.1s-and-plus-0.2s>`
 
-`snapshot` stitches the captured frames into one contact sheet (`snapshots/contact-sheet.jpg`). Inspect the midpoint frames for layout failures, then compare the two images around every cut. A continuing element must keep the promised position, scale, opacity, and direction; fix any visible pop before rendering.
+`snapshot` stitches the captured frames into one contact sheet (`.hyperframes/artifacts/snapshots/<id>/contact-sheet.jpg`; the command prints the path). Inspect the midpoint frames for layout failures, then compare the two images around every cut. A continuing element must keep the promised position, scale, opacity, and direction; fix any visible pop before rendering.
 
 If a command fails, surface stderr and stop — don't pile on recovery commands. Fix it yourself: the cheapest safe edit to `compositions/frames/NN-*.html`, then rerun the failed check.
 

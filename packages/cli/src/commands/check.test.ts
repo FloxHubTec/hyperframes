@@ -1,5 +1,7 @@
 import { runCommand } from "citty";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const trackCheckReport = vi.fn();
@@ -9,7 +11,19 @@ vi.mock("../telemetry/events.js", () => ({
 }));
 
 import { contrastRatio, parseColorRGBA } from "./contrast-bg.js";
-import { createCheckCommand } from "./check.js";
+import { createCheckCommand, parseCheckRange } from "./check.js";
+import { CheckDeadlineError } from "../utils/checkDeadline.js";
+import { trackCommandFailures } from "../utils/command-failure-tracking.js";
+import type { CommandDef } from "citty";
+
+// Bare `--frame-check` is rewritten by the wrapCommand gate, so run through cli.ts's wrapping.
+async function runViaCli(
+  command: CommandDef<any>,
+  opts: Parameters<typeof runCommand>[1],
+): Promise<ReturnType<typeof runCommand>> {
+  const wrapped = await trackCommandFailures(() => Promise.resolve(command))();
+  return runCommand(wrapped, opts);
+}
 import {
   DEFAULT_CHECK_OPTIONS,
   checkExitCode,
@@ -40,6 +54,7 @@ import type {
   LayoutOverflow,
   LayoutRect,
 } from "../utils/layoutAudit.js";
+import type { SeekClock } from "../utils/checkTypes.js";
 import type { ProjectDir } from "../utils/project.js";
 
 const PROJECT: ProjectDir = {
@@ -148,6 +163,7 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
     getDuration: vi.fn(async () => 9),
     hasNoTimelineDeclaration: vi.fn(async () => false),
     getTransitionBoundaries: vi.fn(async () => []),
+    getClipEdges: vi.fn(async () => []),
     getCanvas: vi.fn(async () => ({ width: 1920, height: 1080 })),
     findAmbiguousSelectors: vi.fn(async (_selectors: string[]) => []),
     seek: vi.fn(async (_time: number) => undefined),
@@ -155,6 +171,7 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
     collectLayout: vi.fn(async (_time: number, _tolerance: number) => []),
     collectOverlap: vi.fn(async (_time: number) => []),
     collectLayoutGeometry: vi.fn(async () => `geometry-${geometryCallCount++}`),
+    collectSeekClock: vi.fn(async () => [{ id: 1, time: 0, done: false }]),
     collectRotationSample: vi.fn(async (_time: number) => []),
     collectOffPivotRotationSample: vi.fn(async (time: number) => ({ time, samples: [] })),
     collectGeometryCandidates: vi.fn(async () => []),
@@ -375,7 +392,7 @@ it("preserves caption-zone after bare --frame-check", async () => {
     withMeta: (value) => value,
   });
 
-  await runCommand(command, {
+  await runViaCli(command, {
     rawArgs: [
       "--frame-check",
       "--caption-zone",
@@ -410,7 +427,7 @@ it("preserves --json after bare --frame-check", async () => {
     withMeta: (value) => value,
   });
 
-  await runCommand(command, {
+  await runViaCli(command, {
     rawArgs: ["--snapshots", "--samples", "15", "--frame-check", "--json"],
   });
 
@@ -423,6 +440,44 @@ it("preserves --json after bare --frame-check", async () => {
     }),
   );
   expect(log).toHaveBeenCalledWith(expect.stringContaining('"ok"'));
+});
+
+it("prints a dash-prefixed --frame-check value's parse failure exactly once, not doubled", async () => {
+  // run()'s own try/catch prints parseFrameCheck's error, so the throw site must not print too.
+  const { report } = await runScenario(fakeDriver());
+  const runPipeline = vi.fn(async (_project: ProjectDir, _options: CheckOptions) => report);
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const command = createCheckCommand({
+    resolveProject: () => PROJECT,
+    runPipeline,
+    withMeta: (value) => value,
+  });
+
+  await runViaCli(command, { rawArgs: ["--frame-check=--json"] });
+
+  expect(runPipeline).not.toHaveBeenCalled();
+  const matching = errorLog.mock.calls.filter(
+    ([arg]) => typeof arg === "string" && arg.includes("Missing value for --frame-check"),
+  );
+  expect(matching).toHaveLength(1);
+});
+
+it("no longer swallows --json after a --layout value (the wider bug class beyond --frame-check)", async () => {
+  const { report } = await runScenario(fakeDriver());
+  const runPipeline = vi.fn(async (_project: ProjectDir, _options: CheckOptions) => report);
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  const command = createCheckCommand({
+    resolveProject: () => PROJECT,
+    runPipeline,
+    withMeta: (value) => value,
+  });
+
+  await expect(runViaCli(command, { rawArgs: ["--layout", "--json"] })).rejects.toThrow(
+    /Missing value for --layout/,
+  );
+
+  expect(runPipeline).not.toHaveBeenCalled();
+  expect(log).not.toHaveBeenCalled();
 });
 
 it("includes local HDR auto-promotion attribution in --json output", async () => {
@@ -477,6 +532,34 @@ it("threads --no-proxy into the browser check options", async () => {
   await runCommand(command, { rawArgs: ["--json", "--no-proxy"] });
 
   expect(runPipeline).toHaveBeenCalledWith(PROJECT, expect.objectContaining({ autoProxy: false }));
+});
+
+it("waits for the project lock declared in HF_TOOL_CONTEXT before running the pipeline", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hf-check-lock-"));
+  const lock = join(dir, ".hyperframes", "project.lock");
+  mkdirSync(join(dir, ".hyperframes"));
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, command: "snapshot", startedAt: 1 }));
+  vi.stubEnv(
+    "HF_TOOL_CONTEXT",
+    JSON.stringify({ version: 1, capabilities: { "project-lock": { waitMs: 0 } } }),
+  );
+  const { report } = await runScenario(fakeDriver());
+  const runPipeline = vi.fn(async () => report);
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  const command = createCheckCommand({
+    resolveProject: () => ({ ...PROJECT, dir }),
+    runPipeline,
+    withMeta: (value) => value,
+  });
+  try {
+    await runCommand(command, { rawArgs: ["--json"] });
+    expect(runPipeline).not.toHaveBeenCalled();
+    expect(consumeCommandResult().exitCode).toBe(1);
+    expect(String(log.mock.calls[0]?.[0])).toContain("hyperframes snapshot");
+  } finally {
+    vi.unstubAllEnvs();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 it("rejects malformed caption-zone specs instead of silently disabling the gate", async () => {
@@ -1471,6 +1554,28 @@ describe("check pipeline", () => {
     expect(noErrors).not.toHaveBeenCalled();
   });
 
+  it("reports the total deadline during crops while retaining the audit failure", async () => {
+    const { report } = await runScenario(
+      fakeDriver({
+        collectLayout: vi.fn(async (time: number) => [layoutIssue("error", { time })]),
+      }),
+      { snapshots: true },
+      {
+        captureFindingCrops: async () => {
+          throw new CheckDeadlineError();
+        },
+      },
+    );
+    expect(report.ok).toBe(false);
+    expect(report.layout.errorCount).toBeGreaterThan(0);
+    expect(report.runtime.findings).toContainEqual(
+      expect.objectContaining({
+        code: "check_runtime_failure",
+        message: "Check did not finish within its deadline.",
+      }),
+    );
+  });
+
   it("--strict flips a warnings-only result from exit 0 to exit 1", async () => {
     const warningDriver = () =>
       fakeDriver({
@@ -1528,9 +1633,70 @@ describe("check pipeline", () => {
             finding.code === "sweep_static" &&
             finding.severity === "error" &&
             finding.message.includes("did not advance") &&
-            finding.fixHint?.includes("data-no-timeline"),
+            finding.fixHint?.includes("window.__timelines"),
         ),
       ).toBe(true);
+    });
+
+    function stillCard(clocks: (sample: number) => SeekClock[]) {
+      let sample = 0;
+      return fakeDriver({
+        getDuration: vi.fn(async () => 4),
+        collectLayoutGeometry: vi.fn(async () => "frozen"),
+        collectSeekClock: vi.fn(async () => clocks(sample++)),
+      });
+    }
+
+    function sweepOf(report: CheckReport): [string, string][] {
+      return report.layout.findings
+        .filter((finding) => finding.code === "sweep_static")
+        .map((finding) => [finding.severity, finding.message]);
+    }
+
+    it.each([
+      [
+        "whose timeline follows the seek",
+        (sample: number) => [{ id: 1, time: sample, done: false }],
+      ],
+      ["with nothing that could move", () => []],
+      ["whose only animation already holds at its end", () => [{ id: 1, time: 4, done: true }]],
+      [
+        "whose timeline is seen, listed twice, at only one sample",
+        (sample: number) =>
+          sample === 2
+            ? [
+                { id: 1, time: 0, done: false },
+                { id: 1, time: 0, done: false },
+              ]
+            : [],
+      ],
+    ])("warns, without failing, on a still card %s", async (_case, clocks) => {
+      const { report } = await runScenario(stillCard(clocks));
+
+      expect(sweepOf(report)).toEqual([["warning", "Nothing on screen moved under seek."]]);
+      expect(report.ok).toBe(true);
+    });
+
+    it.each([
+      [
+        "one animation is stuck while another follows the seek",
+        (sample: number) => [
+          { id: 1, time: 0, done: false },
+          { id: 2, time: sample, done: false },
+        ],
+      ],
+      [
+        "a tween created mid-run is stuck",
+        (sample: number) => [
+          { id: 1, time: sample, done: false },
+          ...(sample >= 2 ? [{ id: 2, time: 0, done: false }] : []),
+        ],
+      ],
+    ])("fails when %s", async (_case, clocks) => {
+      const { report } = await runScenario(stillCard(clocks));
+
+      expect(sweepOf(report).map(([severity]) => severity)).toEqual(["error"]);
+      expect(report.ok).toBe(false);
     });
 
     it("warns, without failing, when only the audio advanced and nothing on screen moved", async () => {
@@ -1649,7 +1815,7 @@ describe("frame-check flag grammar", () => {
     const { parseFrameCheck } = await import("./check.js");
 
     expect(() => parseFrameCheck("--json")).toThrow(
-      'Invalid --frame-check: value "--json" appears to have swallowed the next option; use --frame-check= or move --frame-check to the end',
+      'Missing value for --frame-check: value "--json" appears to have swallowed the next option; use --frame-check= or move --frame-check to the end',
     );
     expect(() => parseFrameCheck("severity")).toThrow("Invalid --frame-check");
   });
@@ -1746,6 +1912,7 @@ describe("sampled finding reporting", () => {
           bbox: { x: 500, y: 20, width: 300, height: 80 },
         },
       ],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });
 
@@ -2146,4 +2313,166 @@ describe("dense motion-overlap re-sampling", () => {
     expect(driver.collectOverlap).toHaveBeenCalled();
     expect(report.layout.findings.some((f) => f.code === "content_overlap")).toBe(true);
   });
+
+  it("keeps a long film's dense pass to a fixed number of seeks", async () => {
+    const clipEdges = Array.from({ length: 433 }, (_, i) => [i * 1.2, i * 1.2 + 1.1]).flat();
+    const driver = fakeDriver({
+      getDuration: vi.fn(async () => 540),
+      getClipEdges: async () => clipEdges,
+    });
+    await runScenario(driver);
+    expect(vi.mocked(driver.seekGeometry).mock.calls.length).toBeLessThanOrEqual(240);
+  });
+
+  it("still promotes an overlap held on a long film", async () => {
+    const held = (time: number): boolean => time >= 200 && time <= 260;
+    const driver = fakeDriver({
+      getDuration: vi.fn(async () => 540),
+      collectLayout: vi.fn(async (_time: number) => []),
+      collectOverlap: vi.fn(async (time: number) =>
+        held(time) ? [layoutIssue("warning", { time, code: "content_overlap" })] : [],
+      ),
+    });
+    const { report } = await runScenario(driver);
+    expect(report.layout.findings).toContainEqual(
+      expect.objectContaining({ code: "content_overlap", severity: "error" }),
+    );
+    expect(vi.mocked(driver.seekGeometry).mock.calls.length).toBeLessThanOrEqual(240);
+  });
+
+  it("spends one hold probe on an overlap that stays the whole film", async () => {
+    const driver = fakeDriver({
+      getDuration: vi.fn(async () => 540),
+      collectLayout: vi.fn(async (_time: number) => []),
+      collectOverlap: vi.fn(async (time: number) => [
+        layoutIssue("warning", { time, code: "content_overlap" }),
+      ]),
+    });
+    await runScenario(driver);
+    expect(vi.mocked(driver.seekGeometry).mock.calls.length).toBeLessThanOrEqual(181);
+  });
+
+  it("samples a short clip the uniform grid steps over", async () => {
+    const inShortClip = (time: number): boolean => time > 101 && time < 101.8;
+    const driver = fakeDriver({
+      getDuration: vi.fn(async () => 540),
+      getClipEdges: async () => [101, 101.8],
+      collectLayout: vi.fn(async (_time: number) => []),
+      collectOverlap: vi.fn(async (time: number) =>
+        inShortClip(time) ? [layoutIssue("warning", { time, code: "content_overlap" })] : [],
+      ),
+    });
+    const { report } = await runScenario(driver);
+    expect(report.layout.findings.some((f) => f.code === "content_overlap")).toBe(true);
+  });
+});
+
+describe("scoped check", () => {
+  it("bounds all runtime seeks, including dense overlap and transition samples", async () => {
+    const times: number[] = [];
+    const overlapTimes: number[] = [];
+    const driver = fakeDriver({
+      getDuration: async () => 10,
+      getTransitionBoundaries: async () => [1, 7.9, 9],
+      seek: async (t) => {
+        times.push(t);
+      },
+      seekGeometry: async (t) => {
+        times.push(t);
+        overlapTimes.push(t);
+      },
+    });
+    const { report } = await runScenario(driver, { range: [7.8, 8.2], atTransitions: true });
+    expect(times.length).toBeGreaterThan(3);
+    expect(times.every((t) => t >= 7.8 && t <= 8.2)).toBe(true);
+    expect(times).toContain(7.9);
+    expect(overlapTimes.every((time) => (String(time).split(".")[1]?.length ?? 0) <= 3)).toBe(true);
+    expect(report.scope?.range).toEqual([7.8, 8.2]);
+  });
+  it("keeps the full-check failure when the only error is hidden by filtering", async () => {
+    const driver = fakeDriver({
+      collectLayout: async () => [layoutIssue("error")],
+      matchComponents: async (_c, f) => f.map(() => false),
+    });
+    const { report } = await runScenario(driver, {
+      components: ["#selected"],
+      collapseStatic: false,
+    });
+    expect(report.ok).toBe(false);
+    expect(report.layout.findings).toHaveLength(0);
+    expect(report.layout.errorCount).toBe(1);
+    expect(report.runtime.findings).toHaveLength(0);
+    expect(report.scope?.hiddenFindings).toBe(1);
+  });
+  it.each([
+    {
+      flag: "--caption-zone",
+      options: {
+        range: [1, 2] as [number, number],
+        captionZone: { x0: 0, y0: 0.5, x1: 1, y1: 0.7 },
+      },
+    },
+    {
+      flag: "--frame-check",
+      options: { range: [0, 1] as [number, number], frameCheck: {} },
+    },
+  ])(
+    "refuses $flag when none of its gate samples lie within --range",
+    async ({ flag, options }) => {
+      const { report } = await runScenario(fakeDriver({ getDuration: async () => 4 }), options);
+      expect(report.ok).toBe(false);
+      expect(report.browserSkipped).toBe(true);
+      expect(report.runtime.findings).toEqual([
+        expect.objectContaining({ message: expect.stringContaining(`No ${flag} seek samples`) }),
+      ]);
+    },
+  );
+  it("marks a motion spec disabled when a range skips whole-timeline assertions", async () => {
+    const motion: MotionSpecResolution = {
+      kind: "valid",
+      path: "/project/index.motion.json",
+      spec: { assertions: [] },
+    };
+    const { report } = await runScenario(
+      fakeDriver({ getDuration: async () => 4 }),
+      { range: [1, 2] },
+      { motion },
+    );
+    expect(report.motion).toEqual(
+      expect.objectContaining({
+        enabled: false,
+        specPath: "/project/index.motion.json",
+        samples: 0,
+      }),
+    );
+  });
+  it("rejects a range outside the film rather than passing an empty check", async () => {
+    const { report } = await runScenario(fakeDriver({ getDuration: async () => 2 }), {
+      range: [3, 4],
+    });
+    expect(report.ok).toBe(false);
+    expect(report.browserSkipped).toBe(true);
+    expect(report.runtime.findings[0]?.message).toContain("2 seconds");
+  });
+});
+
+it("validates range syntax before running a check", () => {
+  expect(parseCheckRange("7.8,8.2")).toEqual([7.8, 8.2]);
+  expect(parseCheckRange("7.8:8.2")).toEqual([7.8, 8.2]);
+  for (const value of ["", "1", "1,1", "2,1", "-1,2", "NaN,2", "1,Infinity", ",2", "1,2,3"])
+    expect(() => parseCheckRange(value)).toThrow();
+});
+
+it("applies transition sample limits within the requested range", async () => {
+  const driver = fakeDriver({
+    getDuration: async () => 10,
+    getTransitionBoundaries: async () => [0, 1, 2, 3, 4, 5, 6, 7.8, 7.9, 8, 9, 10],
+  });
+  const { report } = await runScenario(driver, {
+    range: [7.8, 8],
+    atTransitions: true,
+    maxTransitionSamples: 2,
+  });
+  expect(report.layout.transitionSamples).toEqual([7.8, 8]);
+  expect(report.layout.transitionSamplesDropped).toBe(3);
 });

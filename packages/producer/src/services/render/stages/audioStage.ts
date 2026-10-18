@@ -20,6 +20,7 @@
 import { join } from "node:path";
 import {
   MIXED_AUDIO_FILENAME,
+  audioFailureDiagnostics,
   processCompositionAudio,
   type AudioProcessingFailure,
 } from "@hyperframes/engine";
@@ -40,6 +41,7 @@ export interface AudioStageInput {
   audioGain: number;
   /** Read-only view of `composition.audios`. */
   audios: CompositionMetadata["audios"];
+  masterFxChain?: string;
   abortSignal: AbortSignal | undefined;
   assertNotAborted: () => void;
   /** Where a per-track failure's detail goes. Optional so tests need not pass one. */
@@ -63,6 +65,13 @@ export interface AudioStageResult {
   audioFailures?: AudioProcessingFailure[];
 }
 
+function triggerFirst(
+  failures: readonly AudioProcessingFailure[] | undefined,
+  trigger: AudioProcessingFailure,
+): AudioProcessingFailure[] {
+  return [trigger, ...(failures ?? []).filter((failure) => failure !== trigger)];
+}
+
 export async function runAudioStage(input: AudioStageInput): Promise<AudioStageResult> {
   const {
     projectDir,
@@ -72,6 +81,7 @@ export async function runAudioStage(input: AudioStageInput): Promise<AudioStageR
     ffmpegProcessTimeout,
     audioGain,
     audios,
+    masterFxChain,
     abortSignal,
     assertNotAborted,
     log,
@@ -99,7 +109,7 @@ export async function runAudioStage(input: AudioStageInput): Promise<AudioStageR
         audioOutputPath,
         duration,
         abortSignal,
-        { ffmpegProcessTimeout, audioGain },
+        { ffmpegProcessTimeout, audioGain, masterFxChain },
         compiledDir,
       );
     } catch (err) {
@@ -138,6 +148,7 @@ export async function runAudioStage(input: AudioStageInput): Promise<AudioStageR
       throw encoderFailureError("Audio processing failed", {
         error: interrupted.detail,
         failureReason: "external_interruption",
+        audioFailures: audioFailureDiagnostics(triggerFirst(audioResult.failures, interrupted)),
       });
     }
 

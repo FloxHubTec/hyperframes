@@ -31,7 +31,7 @@ import {
   getPreparedWavDurationSeconds,
   prepareWav,
   type TranscribeProgress,
-  type TranscribeResult,
+  type RunnerResult,
 } from "./transcribe.js";
 
 const RUNTIME = "sherpa-onnx-node";
@@ -82,8 +82,9 @@ const PARAKEET_MODEL_FILES: readonly ModelFile[] = [
   },
 ];
 
-/** At least 30 minutes, and twice the audio length for slow CPUs. */
-const decodeTimeoutMs = (audioSeconds: number) => Math.max(1_800_000, audioSeconds * 2000);
+/** At least 30 minutes, twice the audio length for slow CPUs; whole ms, within Node's timer limit. */
+export const decodeTimeoutMs = (audioSeconds: number) =>
+  Math.min(2 ** 31 - 1, Math.max(1_800_000, Math.ceil(audioSeconds * 2000)));
 
 /** The platforms sherpa-onnx-node publishes a native package for. */
 const SUPPORTED_TARGETS = [
@@ -439,12 +440,13 @@ function decode(
 }
 
 /** Prepares the audio for Parakeet and its fallback alike; ffmpeg stopped by Ctrl-C is a cancel. */
-export function prepareSherpaWav(
+export async function prepareSherpaWav(
   inputPath: string,
   onProgress?: (message: string) => void,
-): string {
+  signal?: AbortSignal,
+): Promise<string> {
   try {
-    return prepareWav(inputPath, onProgress);
+    return await prepareWav(inputPath, onProgress, signal);
   } catch (err) {
     if ((err as { cancelled?: boolean }).cancelled) {
       throw new DecodeCancelled("Transcription cancelled");
@@ -464,7 +466,7 @@ export async function transcribeWithSherpa(
     cliUrl?: string;
     onEvent?: (event: TranscribeProgress) => void;
   },
-): Promise<TranscribeResult> {
+): Promise<RunnerResult> {
   options.onProgress?.("Transcribing with Parakeet...");
   options.onEvent?.({
     type: "progress",

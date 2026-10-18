@@ -31,8 +31,12 @@ import {
 } from "../utils/gpuEncoder.js";
 import { type HdrTransfer, getHdrEncoderColorParams } from "../utils/hdr.js";
 import { withEvenDimensionPad } from "../utils/evenDimensions.js";
-import { SDR_CAPTURE_TO_BT709_FILTER } from "../utils/sdrCaptureColor.js";
 import {
+  SDR_CAPTURE_TO_BT709_FILTER,
+  SDR_RGB_TO_TAGGED_BT709_FILTER,
+} from "../utils/sdrCaptureColor.js";
+import {
+  describeFfmpegFailure,
   ffmpegStatsReader,
   formatFfmpegError,
   isExternalFfmpegInterruption,
@@ -98,6 +102,8 @@ export interface MuxVideoWithAudioOptions extends Partial<
    * depend on the file extension alone.
    */
   audioCodec?: "aac";
+  /** Replaces `-i <videoPath>` (which is then unused), e.g. with a concat-demuxer input. */
+  videoInputArgs?: readonly string[];
   /**
    * @deprecated No longer used. `-avoid_negative_ts` is never passed for
    * mp4/mov muxing (ffmpeg's `auto` default already resolves to `disabled`
@@ -106,7 +112,6 @@ export interface MuxVideoWithAudioOptions extends Partial<
    * source compatibility; it will be removed in a future major.
    */
   preserveAudioPrimingEditList?: boolean;
-  /** Hard cap copied audio to the already-encoded video's exact duration. */
 }
 
 async function shouldCopyAacSidecar(
@@ -407,6 +412,7 @@ export function buildEncoderArgs(
     }
   } else if (codec === "prores") {
     args.push("-c:v", "prores_ks", "-profile:v", preset, "-vendor", "apl0");
+    args.push("-vf", SDR_RGB_TO_TAGGED_BT709_FILTER);
     args.push("-pix_fmt", pixelFormat);
     appendRenderProvenanceArgs(args, outputPath);
     return [...args, "-y", outputPath];
@@ -780,7 +786,7 @@ export async function muxVideoWithAudio(
   const isWebm = outputPath.endsWith(".webm");
   const isMov = outputPath.endsWith(".mov");
   const shouldCopyAudio = isWebm ? false : await shouldCopyAacSidecar(audioPath, config);
-  const args = ["-i", videoPath, "-i", audioPath, "-c:v", "copy"];
+  const args = [...(config?.videoInputArgs ?? ["-i", videoPath]), "-i", audioPath, "-c:v", "copy"];
 
   if (isWebm) {
     args.push("-c:a", "libopus", "-b:a", "128k");
@@ -845,7 +851,7 @@ export async function muxVideoWithAudio(
     success: result.success,
     outputPath,
     durationMs: result.durationMs,
-    error: !result.success ? formatFfmpegError(result.exitCode, result.stderr) : undefined,
+    error: !result.success ? describeFfmpegFailure(result, processTimeout) : undefined,
     failureReason: result.failureReason,
   };
 }
@@ -993,7 +999,7 @@ export async function packageHls(
     success: result.success,
     outputPath: outputDir,
     durationMs: result.durationMs,
-    error: !result.success ? formatFfmpegError(result.exitCode, result.stderr) : undefined,
+    error: !result.success ? describeFfmpegFailure(result, processTimeout) : undefined,
     failureReason: result.failureReason,
   };
 }
@@ -1041,7 +1047,7 @@ export async function applyFaststart(
     success: result.success,
     outputPath,
     durationMs: result.durationMs,
-    error: !result.success ? formatFfmpegError(result.exitCode, result.stderr) : undefined,
+    error: !result.success ? describeFfmpegFailure(result, processTimeout) : undefined,
     failureReason: result.failureReason,
   };
 }

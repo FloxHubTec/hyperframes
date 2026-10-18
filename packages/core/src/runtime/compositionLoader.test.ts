@@ -697,6 +697,30 @@ describe("loadCompositions external hosts", () => {
     expect(hostB.querySelector('[data-hf-authored-id="scene-root"]')).toBeTruthy();
   });
 
+  it("gives a mount that shares the page root's id its own runtime id", async () => {
+    const root = document.createElement("div");
+    root.setAttribute("data-composition-id", "main");
+    document.body.appendChild(root);
+    const host = document.createElement("div");
+    host.setAttribute("data-composition-src", "https://example.com/scene.html");
+    host.setAttribute("data-composition-id", "main");
+    root.appendChild(host);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(
+          `<html><body><div data-composition-id="main" data-width="1920" data-height="1080"><h1>Scene</h1></div></body></html>`,
+          { status: 200 },
+        ),
+    );
+
+    await loadFixture();
+
+    expect(root.getAttribute("data-composition-id")).toBe("main");
+    expect(host.getAttribute("data-composition-id")).toBe("main__hf1");
+    expect(host.getAttribute("data-hf-original-composition-id")).toBe("main");
+    expect(host.querySelector("h1")?.textContent).toBe("Scene");
+  });
+
   it("normalizes a runtime composition id back to the authored id when only one host remains", async () => {
     const hostA = document.createElement("div");
     hostA.setAttribute("data-composition-src", "https://example.com/scene.html");
@@ -1501,6 +1525,54 @@ describe("loadCompositions inline templates", () => {
 
     expect(injectedScripts.length).toBeGreaterThan(0);
     expect(injectedScripts[0].textContent).toContain("inline template script");
+  });
+
+  it("leaves a JSON data script in the mounted content instead of running it", async () => {
+    const template = document.createElement("template");
+    template.id = "data-comp-template";
+    template.innerHTML = `
+      <div data-composition-id="data-comp" data-width="1920" data-height="1080">
+        <script type="application/json" id="meta">{"title": "x"}</script>
+        <script>window.__dataCompRan = 1;</script>
+      </div>
+    `;
+    document.body.appendChild(template);
+    const host = document.createElement("div");
+    host.setAttribute("data-composition-id", "data-comp");
+    document.body.appendChild(host);
+
+    const { injectedScripts } = await loadFixture();
+
+    expect(injectedScripts.map((script) => script.textContent).join("\n")).not.toContain("title");
+    expect(injectedScripts.some((script) => script.textContent?.includes("__dataCompRan"))).toBe(
+      true,
+    );
+    const meta = host.querySelector("#meta");
+    expect(meta?.getAttribute("type")).toBe("application/json");
+    expect(JSON.parse(meta?.textContent ?? "")).toEqual({ title: "x" });
+  });
+
+  it("mounts a JSON data script authored beside the composition root, and never runs a nomodule script", async () => {
+    const template = document.createElement("template");
+    template.id = "beside-comp-template";
+    template.innerHTML = `
+      <script type="application/json" id="beside">{"where": "template"}</script>
+      <script nomodule>window.__legacyOnly = 1;</script>
+      <div data-composition-id="beside-comp" data-width="1920" data-height="1080"></div>
+    `;
+    document.body.appendChild(template);
+    const host = document.createElement("div");
+    host.setAttribute("data-composition-id", "beside-comp");
+    document.body.appendChild(host);
+
+    const { injectedScripts } = await loadFixture();
+
+    expect(JSON.parse(host.querySelector("#beside")?.textContent ?? "")).toEqual({
+      where: "template",
+    });
+    expect(injectedScripts.some((script) => script.textContent?.includes("__legacyOnly"))).toBe(
+      false,
+    );
   });
 
   it("copies dimension attributes from template inner root to host", async () => {

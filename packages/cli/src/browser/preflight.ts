@@ -3,7 +3,12 @@ import { platform } from "node:os";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { ensureBrowser, findBrowser, type BrowserResult } from "./manager.js";
 import { describeBrowserInstall, type BrowserInstallFacts } from "./installFacts.js";
-import { FFMPEG_PATH_ENV, FFPROBE_PATH_ENV, getFFmpegInstallHint } from "./ffmpeg.js";
+import {
+  FFMPEG_PATH_ENV,
+  FFPROBE_PATH_ENV,
+  FIRST_LAUNCH_TIMEOUT_MS,
+  getFFmpegInstallHint,
+} from "./ffmpeg.js";
 import {
   chromeDepsInstallCommand,
   detectLinuxDistro,
@@ -12,6 +17,7 @@ import {
 } from "./linuxDeps.js";
 import { getFreeDiskMb } from "../telemetry/system.js";
 import { runCancellableProcess } from "../utils/cancellableProcess.js";
+import { normalizeErrorMessage } from "../utils/errorMessage.js";
 
 export type EnvironmentCheckLevel = "ok" | "warn" | "error";
 
@@ -48,13 +54,13 @@ export interface EnvironmentCheckOptions {
 }
 
 export function parseToolVersion(raw: string): string {
-  const m = raw.match(/(ffmpeg|ffprobe)\s+version\s+([\d][\d.\-\w]*)/i);
+  const m = raw.match(/(ffmpeg|ffprobe)\s+version\s+(n?\d[\d.\-\w]*)/i);
   return m ? `${m[1]} ${m[2]}` : raw.trim();
 }
 
-/** First `X.Y`-shaped number in a version banner (ffmpeg/ffprobe/Chrome all share this shape). */
+/** First `X.Y`-shaped number in a version banner, allowing the "n" of release-branch ffmpeg builds (n8.0.1). */
 export function extractMajorVersion(raw: string): number | undefined {
-  const m = raw.match(/\b(\d+)\.\d+/);
+  const m = raw.match(/\bn?(\d+)\.\d+/);
   return m?.[1] ? Number(m[1]) : undefined;
 }
 
@@ -77,7 +83,7 @@ async function readToolVersion(
     const output = (
       await runCancellableProcess(binaryPath, ["-version"], {
         signal,
-        timeoutMs: 5000,
+        timeoutMs: FIRST_LAUNCH_TIMEOUT_MS,
       })
     ).stdout;
     const raw = output.split("\n")[0] ?? "";
@@ -259,7 +265,7 @@ async function chromeLaunchOutcome(
   try {
     const { stdout } = await runCancellableProcess(executablePath, ["--version"], {
       signal,
-      timeoutMs: 5000,
+      timeoutMs: FIRST_LAUNCH_TIMEOUT_MS,
       maxBufferBytes: 64 * 1024,
     });
     return { ...found, versionMajor: extractMajorVersion(stdout) };
@@ -314,13 +320,15 @@ async function checkChrome(
   // failure as "Chrome not found" rather than letting it crash the caller
   // (notably `doctor`, which is documented to exit 0 even when checks fail).
   let info: Awaited<ReturnType<typeof findBrowser>>;
+  let failure: string | undefined;
   try {
     info = signal
       ? await ensureBrowser({ preferManagedChrome: true, signal })
       : await findBrowser();
-  } catch {
+  } catch (error) {
     if (signal?.aborted) signal.throwIfAborted();
     info = undefined;
+    failure = normalizeErrorMessage(error);
   }
   if (info) {
     return chromeLaunchOutcome(
@@ -341,7 +349,7 @@ async function checkChrome(
     ok: false,
     level: "error",
     title: "Chrome not found",
-    detail: "Chrome Headless Shell is required for local rendering.",
+    detail: failure ?? "Chrome Headless Shell is required for local rendering.",
     hint: "Run: npx hyperframes browser ensure",
   };
 }

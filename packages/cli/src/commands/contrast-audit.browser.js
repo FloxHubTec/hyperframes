@@ -286,6 +286,16 @@ window.__contrastAuditPrepare = function () {
     var fontWeight = Number(cs.fontWeight) || 400;
     var large = fontSize >= 24 || (fontSize >= 19 && fontWeight >= 700);
 
+    // Glyphs sit on this element's own fill. The bounding box also contains
+    // border-radius corners and neighbouring pixels, and those read as the
+    // panel behind a circular avatar. An opaque background with no image is
+    // the fill; pixel sampling stays for transparent text.
+    var ownBg = null;
+    if ((cs.backgroundImage || "none") === "none") {
+      var parsedOwnBg = parseColor(cs.backgroundColor || "");
+      if (parsedOwnBg && parsedOwnBg[3] >= 0.99) ownBg = parsedOwnBg;
+    }
+
     // Hide this element's OWN text paint so the caller's next screenshot
     // reveals the true pixels behind the glyphs. Layout-neutral: color/fill
     // never affect box geometry. `!important` beats any non-!important rule
@@ -341,6 +351,7 @@ window.__contrastAuditPrepare = function () {
       fontSize: fontSize,
       fontWeight: fontWeight,
       large: large,
+      ownBg: ownBg,
       bbox: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
     });
   }
@@ -465,15 +476,21 @@ window.__contrastAuditFinish = async function (imgBase64, time, candidates) {
     }
     if (rr.length === 0) continue;
 
-    // A transparent sampled backdrop is supplied by the downstream editor,
-    // not this composition. WCAG contrast cannot be inferred until that live
-    // video/image is known, so do not invent an opaque browser default and
-    // hard-fail an otherwise valid alpha overlay.
-    if (median(aa) < 255) continue;
-
-    var bgR = median(rr),
-      bgG = median(gg),
+    var bgR, bgG, bgB;
+    if (c.ownBg && c.ownBg.length >= 4 && c.ownBg[3] >= 0.99) {
+      bgR = c.ownBg[0];
+      bgG = c.ownBg[1];
+      bgB = c.ownBg[2];
+    } else {
+      // A transparent sampled backdrop is supplied by the downstream editor,
+      // not this composition. WCAG contrast cannot be inferred until that live
+      // video/image is known, so do not invent an opaque browser default and
+      // hard-fail an otherwise valid alpha overlay.
+      if (median(aa) < 255) continue;
+      bgR = median(rr);
+      bgG = median(gg);
       bgB = median(bb);
+    }
 
     // Composite foreground alpha over the measured background
     var fg = c.fg;
