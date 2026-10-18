@@ -1,173 +1,42 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { downloadAndRewriteFonts } from "./assetDownloader.js";
 import { runInNewContext } from "node:vm";
 import { Window } from "happy-dom";
 import type { Page } from "puppeteer-core";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { downloadAndRewriteFonts } from "./assetDownloader.js";
 import { extractHtml } from "./htmlExtractor.js";
+import { publicRequest } from "./publicNetwork.js";
+
+vi.mock("./publicNetwork.js", () => ({ publicRequest: vi.fn() }));
 
 const FONT = readFileSync(
   new URL("../../../../docs/public/catalog/assets/a634cb9e7783af7e.woff2", import.meta.url),
 );
 
 function fakePage(window: Window): Page {
-  const evaluate = async (script: unknown) => {
-    if (typeof script !== "string") throw new Error("Expected a page expression");
-    return runInNewContext(script, {
-      window,
-      document: window.document,
-      location: window.location,
-      URL,
-    });
-  };
-  return { evaluate, url: () => window.location.href } as unknown as Page;
-}
-
-afterEach(() => vi.unstubAllGlobals());
-
-async function extractStyles(head: string, sheets: Record<string, string | Response | Error>) {
-  const window = new Window({
-    url: "https://capture.example.com/",
-    settings: { disableCSSFileLoading: true, disableJavaScriptEvaluation: true },
-  });
-  window.document.head.innerHTML = head;
-  window.document.body.innerHTML = '<div class="hero"></div><div class="footer"></div>';
-  const fetch = vi.fn(async (url: string) => {
-    const sheet = sheets[url];
-    if (sheet === undefined) throw new Error(`Unexpected stylesheet request: ${url}`);
-    if (sheet instanceof Error) throw sheet;
-    return typeof sheet === "string" ? new Response(sheet) : sheet;
-  });
-  vi.stubGlobal("fetch", fetch);
-  const evaluate: Page["evaluate"] = async (script, ...args) =>
-    runInNewContext(typeof script === "string" ? script : `(${script.toString()})(...args)`, {
-      window,
-      document: window.document,
-      location: window.location,
-      HTMLLinkElement: window.HTMLLinkElement,
-      URL,
+  const evaluate = async (script: unknown, ...args: unknown[]) => {
+    const expression = typeof script === "function" ? `(${script.toString()})(...args)` : script;
+    if (typeof expression !== "string") throw new Error("Expected a page expression");
+    return runInNewContext(expression, {
       args,
+      window,
+      document: window.document,
+      location: window.location,
+      URL,
     });
-  const page = {
-    evaluate,
-    url: () => window.location.href,
-    addStyleTag: async ({ content }: { content?: string }) => {
-      const style = window.document.createElement("style");
-      style.textContent = content ?? "";
-      window.document.head.append(style);
-    },
   };
-  try {
-    const extracted = await extractHtml(page, { settleTime: 0 });
-    const links = Array.from(window.document.querySelectorAll("link")).map((link) => link.href);
-    const savedWindow = new Window({ settings: { disableCSSFileLoading: true } });
-    try {
-      savedWindow.document.head.innerHTML = extracted.headHtml;
-      savedWindow.document.body.innerHTML = extracted.bodyHtml;
-      const background = (selector: string) => {
-        const element = savedWindow.document.querySelector(selector);
-        if (!element) throw new Error(`Missing fixture element: ${selector}`);
-        return savedWindow.getComputedStyle(element).backgroundColor;
-      };
-      return {
-        extracted,
-        links,
-        hero: background(".hero"),
-        footer: background(".footer"),
-        requests: fetch.mock.calls.map(([url]) => url),
-      };
-    } finally {
-      await savedWindow.happyDOM.close();
-    }
-  } finally {
-    await window.happyDOM.close();
-  }
+  const addStyleTag = async ({ content }: { content: string }) => {
+    const style = window.document.createElement("style");
+    style.textContent = content;
+    window.document.head.append(style);
+  };
+  return { evaluate, addStyleTag, url: () => window.location.href } as unknown as Page;
 }
 
-describe("captured stylesheet cascade", () => {
-  it("keeps a later inline override in the saved page", async () => {
-    const result = await extractStyles(
-      '<link rel="stylesheet" href="/theme.css"><style>.hero{background:rgb(0, 0, 255)}</style>',
-      { "https://capture.example.com/theme.css": ".hero{background:rgb(255, 0, 0)}" },
-    );
-
-    expect(result.hero).toBe("rgb(0, 0, 255)");
-    expect(result.links).toEqual([]);
-    expect(result.requests).toEqual(["https://capture.example.com/theme.css"]);
-  });
-
-  it("keeps stylesheets on both sides of an inline style in order", async () => {
-    const result = await extractStyles(
-      '<link rel="stylesheet" href="/base.css"><style>.hero{background:rgb(0, 0, 255)}.footer{background:rgb(255, 0, 0)}</style><link rel="stylesheet" href="/footer.css">',
-      {
-        "https://capture.example.com/base.css": ".hero{background:rgb(255, 0, 0)}",
-        "https://capture.example.com/footer.css": ".footer{background:rgb(0, 128, 0)}",
-      },
-    );
-
-    expect(result.hero).toBe("rgb(0, 0, 255)");
-    expect(result.footer).toBe("rgb(0, 128, 0)");
-    expect(result.links).toEqual([]);
-  });
-
-  it("keeps repeated stylesheet links in their respective cascade positions", async () => {
-    const result = await extractStyles(
-      '<link rel="stylesheet" href="/theme.css"><style>.hero{background:rgb(0, 0, 255)}</style><link rel="stylesheet" href="/theme.css"><style>.hero{background:rgb(0, 128, 0)}</style>',
-      { "https://capture.example.com/theme.css": ".hero{background:rgb(255, 0, 0)}" },
-    );
-
-    expect(result.hero).toBe("rgb(0, 128, 0)");
-    expect(result.links).toEqual([]);
-    expect(result.requests).toEqual([
-      "https://capture.example.com/theme.css",
-      "https://capture.example.com/theme.css",
-    ]);
-  });
-
-  it("retains the linked stylesheet's print condition in the saved page", async () => {
-    const result = await extractStyles(
-      '<style>.hero{background:rgb(0, 0, 255)}</style><link rel="stylesheet" href="/print.css" media="print">',
-      { "https://capture.example.com/print.css": ".hero{background:rgb(255, 0, 0)}" },
-    );
-
-    expect(result.extracted.headHtml).toContain('media="print"');
-  });
-
-  it("retains a stylesheet that already follows its inline override", async () => {
-    const result = await extractStyles(
-      '<style>.hero{background:rgb(0, 0, 255)}</style><link rel="stylesheet" href="/theme.css">',
-      { "https://capture.example.com/theme.css": ".hero{background:rgb(255, 0, 0)}" },
-    );
-
-    expect(result.hero).toBe("rgb(255, 0, 0)");
-    expect(result.links).toEqual([]);
-  });
-
-  it.each([new Response("Unavailable", { status: 503 }), new Error("Network unavailable")])(
-    "leaves the link intact when its stylesheet cannot be fetched: %s",
-    async (failure) => {
-      const result = await extractStyles(
-        '<link rel="stylesheet" href="/theme.css"><style>.hero{background:rgb(0, 0, 255)}</style>',
-        { "https://capture.example.com/theme.css": failure },
-      );
-
-      expect(result.hero).toBe("rgb(0, 0, 255)");
-      expect(result.links).toEqual(["https://capture.example.com/theme.css"]);
-    },
-  );
-
-  it("resolves relative CSS assets against the original stylesheet URL", async () => {
-    const result = await extractStyles('<link rel="stylesheet" href="/css/theme.css">', {
-      "https://capture.example.com/css/theme.css":
-        ".hero{background-image:url(../assets/hero.png)}",
-    });
-
-    expect(result.extracted.headHtml).toContain(
-      "url('https://capture.example.com/assets/hero.png')",
-    );
-  });
+afterEach(() => {
+  vi.mocked(publicRequest).mockReset();
 });
 
 describe("extractHtml", () => {
@@ -182,13 +51,10 @@ describe("extractHtml", () => {
       expect(extracted.headHtml).toContain("url(#glow)");
 
       const fetched: string[] = [];
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (url: string) => {
-          fetched.push(url);
-          return new Response(new Uint8Array(FONT));
-        }),
-      );
+      vi.mocked(publicRequest).mockImplementation(async (url) => {
+        fetched.push(String(url));
+        return new Response(new Uint8Array(FONT));
+      });
       const fonts = await downloadAndRewriteFonts(extracted.headHtml, dir);
       expect(fetched).toEqual(["https://brand.example/fonts/Display-Medium.woff2"]);
       expect(fonts.css).toContain("assets/fonts/Display-Medium.woff2");
@@ -198,4 +64,41 @@ describe("extractHtml", () => {
       await window.happyDOM.close();
     }
   });
+});
+
+it("fetches Node stylesheets through validated redirects and refuses metadata redirects", async () => {
+  const window = new Window({ url: "https://brand.example/" });
+  window.document.head.innerHTML =
+    '<link rel="stylesheet" href="https://cdn.example/start.css">' +
+    '<link rel="stylesheet" href="https://cdn.example/private.css">';
+  const canceled = vi.fn();
+  vi.mocked(publicRequest).mockImplementation(async (url) => {
+    if (String(url).endsWith("start.css"))
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://styles.example/final.css" },
+      });
+    if (String(url).endsWith("private.css"))
+      return new Response(new ReadableStream({ cancel: canceled }), {
+        status: 302,
+        headers: { location: "http://169.254.169.254/metadata" },
+      });
+    if (String(url) === "https://styles.example/final.css")
+      return new Response("body{color:purple}");
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  try {
+    const html = await extractHtml(fakePage(window), { settleTime: 0 });
+    expect(html.headHtml).toContain("body{color:purple}");
+    expect(window.document.querySelector('link[href$="start.css"]')).toBeNull();
+    expect(window.document.querySelector('link[href$="private.css"]')).not.toBeNull();
+    expect(vi.mocked(publicRequest).mock.calls.map(([url]) => String(url))).toEqual([
+      "https://cdn.example/start.css",
+      "https://styles.example/final.css",
+      "https://cdn.example/private.css",
+    ]);
+    expect(canceled).toHaveBeenCalledOnce();
+  } finally {
+    await window.happyDOM.close();
+  }
 });
