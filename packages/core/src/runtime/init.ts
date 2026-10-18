@@ -4603,12 +4603,9 @@ export function initSandboxRuntimeModular(): void {
     const revision = readCompositionTimingRevision();
     if (revision !== tweensRenderedThrough.revision)
       tweensRenderedThrough = { revision, time: Number.NEGATIVE_INFINITY };
-    let hideClipsAgain: (() => void) | null = null;
-    if (t > tweensRenderedThrough.time) {
-      const jumped = !(Math.abs(t - lastTransportSeekTime) <= 1.5 / state.canonicalFps);
-      const visibleAt = jumped ? () => true : timedVisibilityAt(revision);
-      hideClipsAgain = showHiddenClips((clip) => visibleAt(clip, t));
-    }
+    const jumped = !(Math.abs(t - lastTransportSeekTime) <= 1.5 / state.canonicalFps);
+    const firstRenders = jumped && t > tweensRenderedThrough.time;
+    const hideClipsAgain = firstRenders ? showHiddenClips() : null;
     if (tl) {
       // #10: when data-duration exceeds the timeline's intrinsic length the
       // engine requests frames past the last tween. Seeking a paused GSAP
