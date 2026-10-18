@@ -176,12 +176,16 @@ function useGuide(route: DesktopRoute | null, setRoute: (route: DesktopRoute) =>
   const [slow, setSlow] = useState(false);
   const [arrived, setArrived] = useState(false);
   const installed = route?.context.app_installed === true;
+  // The funnel counts one install per page, even if the app is removed and found again.
+  const installCounted = useRef(false);
 
   const onAnswer = useCallback(
     (answered: DesktopRoute) => {
       if (!answered.context.app_installed) return;
       setRoute(answered);
       setArrived(true);
+      if (installCounted.current) return;
+      installCounted.current = true;
       trackStudioEvent("desktop_cta_guide", { step: "install_detected", ...answered.context });
     },
     [setRoute],

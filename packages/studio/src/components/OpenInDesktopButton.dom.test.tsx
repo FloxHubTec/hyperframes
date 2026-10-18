@@ -251,6 +251,38 @@ it("finds the install only from the preview server, asking only while the card i
     expect(gets).toBe(settled);
   }));
 
+it("records the install once per page, even when the app goes and comes back", () =>
+  withFakeTimers(async () => {
+    let answer = routeBody();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST")
+          return Response.json({ opened: false, reason: "not-installed", downloadUrl: DOWNLOAD });
+        return Response.json(answer);
+      }),
+    );
+    await mount();
+    await act(async () => button()!.click());
+    answer = routeBody({ handoff: true, installed: true });
+    await act(async () => vi.advanceTimersByTime(2000));
+    expect(stepState(2)).toBe("done");
+
+    // The app is removed: the hand-off finds it gone, and the server stops reporting it.
+    answer = routeBody();
+    await act(async () => cardButton("Open in desktop app")!.click());
+    expect(stepState(2)).toBe("todo");
+    // Installed again: the card finds it a second time.
+    answer = routeBody({ handoff: true, installed: true });
+    await act(async () => vi.advanceTimersByTime(2000));
+    expect(stepState(2)).toBe("done");
+
+    const detected = events("desktop_cta_guide").filter(
+      (e) => (e as { step: string }).step === "install_detected",
+    );
+    expect(detected).toHaveLength(1);
+  }));
+
 it("stops asking the preview server when the card closes", () =>
   withFakeTimers(async () => {
     let gets = 0;
