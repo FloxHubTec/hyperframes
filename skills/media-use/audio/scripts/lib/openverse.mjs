@@ -14,14 +14,24 @@ const IDEAL_SFX_MS = 4000;
 const BY_PENALTY = 2;
 const SEARCH_TIMEOUT_MS = 10000;
 
-// Openverse text lands in markdown and JSON: one line, no control characters, bounded.
+// Openverse text lands in markdown and JSON: one line, no control or markdown-structure characters, bounded.
 const oneLine = (text) =>
   String(text ?? "")
-    .replace(/\p{Cc}+/gu, " ")
+    .replace(/[\p{Cc}`[\]<>\\]+/gu, " ")
     .trim()
     .slice(0, 300);
-const httpsUrl = (url) =>
-  typeof url === "string" && url.startsWith("https://") ? oneLine(url) : "";
+// Openverse's audio providers (api.openverse.org/v1/audio/stats/); a new provider's link is dropped until listed.
+const SOURCE_HOSTS = new Set(["freesound.org", "www.jamendo.com", "commons.wikimedia.org"]);
+function httpsUrl(url, hosts) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && (!hosts || hosts.has(parsed.hostname))
+      ? oneLine(parsed.href)
+      : "";
+  } catch {
+    return "";
+  }
+}
 
 /** Openverse could not answer (offline, rate limited, server error): stop asking it this run. */
 export class OpenverseUnavailableError extends Error {
@@ -67,7 +77,7 @@ export function pickOpenverseSfx(results) {
     creator: oneLine(r.creator),
     license: r.license,
     licenseUrl: httpsUrl(r.license_url),
-    sourceUrl: httpsUrl(r.foreign_landing_url),
+    sourceUrl: httpsUrl(r.foreign_landing_url, SOURCE_HOSTS),
     credit: oneLine(r.attribution),
     durationS: Math.round(r.duration) / 1000,
   };
@@ -104,8 +114,10 @@ export async function searchOpenverseSfx(query, { fetchImpl = fetch } = {}) {
 /** Record a CC BY sound's credit for `file` in the project's credits file (one line per file). */
 export function writeSfxCredit(creditsPath, file, sound) {
   if (sound.license !== "by") return;
-  const source = sound.sourceUrl ? ` Source: ${sound.sourceUrl}` : "";
-  const line = `- \`${file}\`: ${sound.credit}${source}`;
+  // The sound may come from a saved record, not this run's pick: clean it again here.
+  const sourceUrl = httpsUrl(sound.sourceUrl, SOURCE_HOSTS);
+  const source = sourceUrl ? ` Source: ${sourceUrl}` : "";
+  const line = `- \`${file}\`: ${oneLine(sound.credit)}${source}`;
   let prior = "";
   try {
     prior = readFileSync(creditsPath, "utf8");

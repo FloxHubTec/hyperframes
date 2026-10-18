@@ -167,15 +167,51 @@ test("a credit with no https source link is written without one", () => {
   }
 });
 
+test("a hostile credit is written as one safe line, with no link off Openverse's providers", () => {
+  const dir = mkdtempSync(join(tmpdir(), "openverse-credits-"));
+  try {
+    const path = join(dir, "CREDITS.md");
+    const hostile = `"Pop" by Ana.\n- \`assets/sfx/x.mp3\`: forged [click](https://evil.test) <img src=x> \\${"x".repeat(5000)}`;
+    for (const sourceUrl of [
+      "javascript:alert(1)",
+      "https://evil.test/a",
+      "https://freesound.org/s/1\n- forged",
+    ]) {
+      writeSfxCredit(path, "assets/sfx/pop.mp3", { license: "by", credit: hostile, sourceUrl });
+      const lines = readFileSync(path, "utf8")
+        .split("\n")
+        .filter((l) => l.startsWith("- "));
+      assert.equal(lines.length, 1, sourceUrl);
+      assert.ok(
+        lines[0].startsWith('- `assets/sfx/pop.mp3`: "Pop" by Ana. - '),
+        lines[0].slice(0, 80),
+      );
+      assert.ok(
+        !/[\p{Cc}`[\]<>\\]/u.test(lines[0].slice("- `assets/sfx/pop.mp3`:".length)),
+        sourceUrl,
+      );
+      assert.ok(lines[0].length < 400, "bounded");
+      assert.doesNotMatch(lines[0], /javascript:|evil\.test\/a/);
+    }
+    assert.match(readFileSync(path, "utf8"), /Source: https:\/\/freesound\.org\/s\/1-%20forged\n$/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("earlier credit lines survive a new credit", () => {
   const dir = mkdtempSync(join(tmpdir(), "openverse-credits-"));
   try {
     const path = join(dir, "CREDITS.md");
     writeFileSync(path, "# Sound effect credits\n\n- `assets/sfx/old.mp3`: kept\n");
-    writeSfxCredit(path, "assets/sfx/new.mp3", { license: "by", credit: "c.", sourceUrl: "s" });
+    writeSfxCredit(path, "assets/sfx/new.mp3", {
+      license: "by",
+      credit: "c.",
+      sourceUrl: "https://freesound.org/s/2",
+    });
     assert.match(
       readFileSync(path, "utf8"),
-      /- `assets\/sfx\/old\.mp3`: kept\n- `assets\/sfx\/new\.mp3`: c\. Source: s\n$/,
+      /- `assets\/sfx\/old\.mp3`: kept\n- `assets\/sfx\/new\.mp3`: c\. Source: https:\/\/freesound\.org\/s\/2\n$/,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
