@@ -836,6 +836,10 @@ function chromeGuessForUntaggedMatrix(metadata: VideoMetadata): string[] {
  * same absolute times as a single pass, so their frames are byte-identical to it.
  */
 const EXTRACTION_SEGMENT_SECONDS = 120;
+const UNDO_TICK_ROUNDING_ON_THE_SOURCE_FRAME_GRID = [
+  "settb=AVTB",
+  "setpts=if(isnan(FR)\\,PTS\\,STARTPTS+round((PTS-STARTPTS)*TB*FR)/(FR*TB))",
+];
 
 // Caps extraction ffmpeg runs across all clips; uncapped, dozens of clips starved each other into timeouts.
 const EXTRACTION_SLOTS = Math.max(1, Math.floor(cpus().length / 2));
@@ -1022,11 +1026,9 @@ export async function extractVideoFramesRange(
   if (sampleAtOutputFps) {
     // Each slot takes the last frame starting at or before its time. Ticks of 2 ms or finer
     // first shift half a tick, absorbing container rounding (WebM/MKV use whole ms).
-    vfFilters.push(
-      "settb=intb/2",
-      "setpts=PTS-lte(TB\\,0.001)",
-      `fps=${ffmpegFps}:start_time=0:round=up`,
-    );
+    vfFilters.push("settb=intb/2", "setpts=PTS-lte(TB\\,0.001)");
+    if (!metadata.isVFR) vfFilters.push(...UNDO_TICK_ROUNDING_ON_THE_SOURCE_FRAME_GRID);
+    vfFilters.push(`fps=${ffmpegFps}:start_time=0:round=up`);
   }
   if (options.sdrToHdrTransfer) {
     // Ordering intent: fps sampling runs BEFORE the colorspace remap so only
