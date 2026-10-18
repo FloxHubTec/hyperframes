@@ -144,14 +144,19 @@ function ImportButton({ importing, onClick }: { importing: boolean; onClick: () 
   );
 }
 
+const chooseFilesClassName =
+  "px-2.5 py-1 text-[11px] font-medium rounded-md bg-panel-input text-panel-text-3 hover:text-panel-text-1 active:scale-[0.98] transition-colors focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+
 /** Empty list body. A query that matched nothing says so and offers a way out;
  *  a genuinely empty project gets the drop hint. */
 function EmptyState({
   searchQuery,
   onClearSearch,
+  onChooseFiles,
 }: {
   searchQuery: string;
   onClearSearch: () => void;
+  onChooseFiles?: () => void;
 }) {
   if (searchQuery) {
     return (
@@ -188,7 +193,14 @@ function EmptyState({
         <polyline points="17 8 12 3 7 8" strokeLinecap="round" strokeLinejoin="round" />
         <line x1="12" y1="3" x2="12" y2="15" strokeLinecap="round" />
       </svg>
-      <p className="text-[10px] text-neutral-600 text-center">Drop media files here</p>
+      <p className="text-[10px] text-neutral-600 text-center">
+        Drop media files here or choose files to get started
+      </p>
+      {onChooseFiles ? (
+        <button type="button" onClick={onChooseFiles} className={chooseFilesClassName}>
+          Choose files
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -452,7 +464,11 @@ export const AssetsTab = memo(function AssetsTab({
         {viewMode === "global" ? (
           <GlobalAssetsView searchQuery={searchQuery} />
         ) : mediaAssets.length === 0 ? (
-          <EmptyState searchQuery={searchQuery} onClearSearch={() => setSearchQuery("")} />
+          <EmptyState
+            searchQuery={searchQuery}
+            onClearSearch={() => setSearchQuery("")}
+            onChooseFiles={onImport ? () => fileInputRef.current?.click() : undefined}
+          />
         ) : (
           visibleCategories.map((cat) => (
             <div key={cat} className="mb-1">

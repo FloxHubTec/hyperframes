@@ -20,20 +20,35 @@ afterEach(() => {
   usePlayerStore.setState({ thumbnailRevisions: {} });
 });
 
+const defaultCompositionsTabProps: Pick<
+  ComponentProps<typeof CompositionsTab>,
+  "projectId" | "compositions" | "activeComposition"
+> = {
+  projectId: "demo",
+  compositions: ["compositions/headline.html"],
+  activeComposition: null,
+};
+
+function renderCompositionsTab(props: Partial<ComponentProps<typeof CompositionsTab>> = {}): void {
+  act(() => {
+    root?.render(
+      <CompositionsTab {...defaultCompositionsTabProps} onSelect={vi.fn()} {...props} />,
+    );
+  });
+}
+
 export function mountCompositionsTab(props: Partial<ComponentProps<typeof CompositionsTab>> = {}) {
+  if (root) act(() => root?.unmount());
   const host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
-  act(() => {
-    root?.render(
-      <CompositionsTab
-        projectId="demo"
-        compositions={["compositions/headline.html"]}
-        activeComposition={null}
-        onSelect={vi.fn()}
-        {...props}
-      />,
-    );
-  });
+  renderCompositionsTab(props);
   return host;
+}
+
+export function rerenderCompositionsTab(
+  props: Partial<ComponentProps<typeof CompositionsTab>> = {},
+): void {
+  if (!root) throw new Error("mountCompositionsTab first");
+  renderCompositionsTab(props);
 }

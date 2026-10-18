@@ -18,6 +18,7 @@ import { usePlayerStore } from "../../player/store/playerStore";
 import { thumbnailRevisionOf } from "../../player/store/thumbnailSlice";
 import { encodePreviewPath } from "../../player/components/thumbnailUtils";
 import { TIMELINE_COMPOSITION_MIME } from "../../utils/timelineCompositionDrop";
+import { useDockLayoutStore } from "../dock/dockLayoutStore";
 import { Tooltip } from "../ui/Tooltip";
 
 interface CompositionsTabProps {
@@ -453,6 +454,43 @@ function CompCard({
   );
 }
 
+function openCatalogPanel(): void {
+  useDockLayoutStore.getState().activatePanel("catalog");
+}
+
+const browseStarterScenesClassName =
+  "px-2.5 py-1 text-[11px] font-medium rounded-md bg-panel-input text-panel-text-3 hover:text-panel-text-1 active:scale-[0.98] transition-colors focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+
+function BrowseStarterScenesButton() {
+  return (
+    <button type="button" onClick={openCatalogPanel} className={browseStarterScenesClassName}>
+      Browse starter scenes
+    </button>
+  );
+}
+
+function CompositionsZeroState() {
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center px-4 gap-2">
+      <p className="text-xs text-neutral-600 text-center">
+        Add a scene from the catalog to get started.
+      </p>
+      <BrowseStarterScenesButton />
+    </div>
+  );
+}
+
+function CompositionsSingleGuidance() {
+  return (
+    <div className="shrink-0 flex flex-col items-center px-4 py-3 gap-2 border-t border-panel-border">
+      <p className="text-[11px] text-neutral-600 text-center">
+        Add another scene from the catalog.
+      </p>
+      <BrowseStarterScenesButton />
+    </div>
+  );
+}
+
 export const CompositionsTab = memo(function CompositionsTab({
   projectId,
   compositions,
@@ -467,31 +505,30 @@ export const CompositionsTab = memo(function CompositionsTab({
   const thumbnailRevisions = usePlayerStore((state) => state.thumbnailRevisions);
   const previewBooted = usePlayerStore((state) => state.previewBooted);
   if (compositions.length === 0) {
-    return (
-      <div className="flex-1 flex items-center justify-center px-4">
-        <p className="text-xs text-neutral-600 text-center">No compositions found</p>
-      </div>
-    );
+    return <CompositionsZeroState />;
   }
 
   return (
-    <div className="flex-1 overflow-y-auto" data-composition-list>
-      {compositions.map((comp) => (
-        <CompCard
-          key={`${projectId}:${comp}`}
-          projectId={projectId}
-          comp={comp}
-          isActive={activeComposition === comp}
-          isRoot={comp === masterCompositionPath}
-          onSelect={() => onSelect(comp)}
-          onRender={onRenderComposition ? () => onRenderComposition(comp) : undefined}
-          onAddToTimeline={onAddToTimeline ? () => onAddToTimeline(comp) : undefined}
-          isRendering={isRendering}
-          lintInfo={lintFindingsByFile?.get(comp)}
-          contentRevision={thumbnailRevisionOf(thumbnailRevisions, comp)}
-          previewBooted={previewBooted}
-        />
-      ))}
+    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+      <div className="flex-1 min-h-0 overflow-y-auto" data-composition-list>
+        {compositions.map((comp) => (
+          <CompCard
+            key={`${projectId}:${comp}`}
+            projectId={projectId}
+            comp={comp}
+            isActive={activeComposition === comp}
+            isRoot={comp === masterCompositionPath}
+            onSelect={() => onSelect(comp)}
+            onRender={onRenderComposition ? () => onRenderComposition(comp) : undefined}
+            onAddToTimeline={onAddToTimeline ? () => onAddToTimeline(comp) : undefined}
+            isRendering={isRendering}
+            lintInfo={lintFindingsByFile?.get(comp)}
+            contentRevision={thumbnailRevisionOf(thumbnailRevisions, comp)}
+            previewBooted={previewBooted}
+          />
+        ))}
+      </div>
+      {compositions.length === 1 ? <CompositionsSingleGuidance /> : null}
     </div>
   );
 });
