@@ -1,13 +1,4 @@
-/**
- * Run `worker` against every input with at most `limit` concurrent
- * invocations. Preserves input order in the returned array; each output
- * is positional with its input.
- *
- * Implementation: index-cursor + N concurrent producers each picking the
- * next index until the input is drained. Uses `Promise.all` and
- * propagates the first worker rejection — partial-failure isolation is
- * the caller's responsibility.
- */
+/** Runs `worker` over `inputs` with at most `limit` in flight; results keep input order and the first rejection rejects the run. */
 export async function runWithConcurrencyLimit<T, R>(
   inputs: readonly T[],
   limit: number,
