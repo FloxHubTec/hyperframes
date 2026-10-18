@@ -48,6 +48,11 @@ export const COLOR_GRADING_ADJUST_KEYS = [
   "saturation",
 ] as const;
 
+export const COLOR_GRADING_EXAMPLE = {
+  adjust: { exposure: 0.1, contrast: 0.05, temperature: 0.08 },
+  details: { vignette: 0.15 },
+} as const;
+
 export const COLOR_GRADING_WHEEL_KEYS = ["shadows", "midtones", "highlights"] as const;
 export const COLOR_GRADING_CURVE_KEYS = ["master", "red", "green", "blue"] as const;
 export const COLOR_GRADING_HUE_CURVE_KEYS = ["hueVsHue", "hueVsSaturation", "hueVsLuma"] as const;
@@ -185,7 +190,7 @@ function unknownKeysHint(path: string, unknown: readonly string[]): string {
   );
   return sections.size === 1
     ? `Move those controls under "${[...sections][0]}".`
-    : "Use only the documented media-treatment keys at the top level.";
+    : `Top-level keys are ${COLOR_GRADING_TOP_LEVEL_KEYS.map((key) => `"${key}"`).join(", ")}.`;
 }
 
 function validateObject(

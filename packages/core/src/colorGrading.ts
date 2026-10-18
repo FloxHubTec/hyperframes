@@ -2,6 +2,7 @@ import { DEFAULT_MAX_CUBE_LUT_SIZE } from "./colorLuts";
 import type { HfColorCurvePoint, HfHueCurvePoint } from "./colorGradingCurves";
 import {
   COLOR_GRADING_ADJUST_KEYS,
+  COLOR_GRADING_EXAMPLE,
   COLOR_GRADING_ADVANCED_LIMITS,
   COLOR_GRADING_COLOR_SPACE,
   COLOR_GRADING_CONTRACT_VERSION,
@@ -967,7 +968,8 @@ export function getHfColorGradingCapabilities() {
         intensity: preset.intensity,
       }),
     ),
-    adjustments: HF_COLOR_GRADING_ADJUST_KEYS.map((key) => ({
+    example: COLOR_GRADING_EXAMPLE,
+    adjust: HF_COLOR_GRADING_ADJUST_KEYS.map((key) => ({
       key,
       identity: ADJUST_ZERO[key],
       ...ADJUST_LIMITS[key],
@@ -1038,7 +1040,7 @@ export function getHfColorGradingCapabilities() {
       },
     },
     effectFamilies: EFFECT_FAMILIES,
-    finishing: HF_COLOR_GRADING_DETAIL_KEYS.map((key) => ({
+    details: HF_COLOR_GRADING_DETAIL_KEYS.map((key) => ({
       key,
       identity: DETAIL_DEFAULTS[key],
       ...DETAIL_LIMITS[key],

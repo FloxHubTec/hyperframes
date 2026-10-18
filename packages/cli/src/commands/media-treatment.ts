@@ -47,6 +47,7 @@ export function getMediaTreatmentCapabilityOverview() {
     version: capabilities.version,
     targetTags: capabilities.targetTags,
     colorSpace: capabilities.colorSpace,
+    example: capabilities.example,
     families: [
       family("correction", "Adjust", "Fix exposure, tonal balance, color casts, and saturation."),
       family(
@@ -137,7 +138,7 @@ export function getMediaTreatmentCapabilityDetail(id: string): unknown {
     };
   }
 
-  const adjustment = capabilities.adjustments.find(({ key }) => key === id);
+  const adjustment = capabilities.adjust.find(({ key }) => key === id);
   if (adjustment) {
     return {
       id,
@@ -149,7 +150,7 @@ export function getMediaTreatmentCapabilityDetail(id: string): unknown {
     };
   }
 
-  const finishing = capabilities.finishing.find(({ key }) => key === id);
+  const finishing = capabilities.details.find(({ key }) => key === id);
   if (finishing) {
     return {
       id,
@@ -193,7 +194,8 @@ export function getMediaTreatmentCapabilityDetail(id: string): unknown {
     correction: {
       id,
       description: "Fix exposure, tonal balance, color casts, and saturation.",
-      controls: capabilities.adjustments,
+      controls: capabilities.adjust,
+      apply: { adjust: capabilities.example.adjust },
     },
     wheels: {
       id,
@@ -272,7 +274,8 @@ export function getMediaTreatmentCapabilityDetail(id: string): unknown {
     finishing: {
       id,
       description: "Vignette and deterministic film-grain controls.",
-      controls: capabilities.finishing,
+      controls: capabilities.details,
+      apply: { details: capabilities.example.details },
     },
     palettes: {
       id,
