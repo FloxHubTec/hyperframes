@@ -202,6 +202,64 @@ test("SFX resolve from Openverse with the licence on the record and a credit", (
   cleanup();
 });
 
+// Node args that hold each resolve just after its credits read until two have read (2 s at most), and give each
+// sound its own bytes.
+function creditRaceImport(barrier) {
+  const stub = `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const read = fs.readFileSync;
+fs.readFileSync = (path, ...rest) => {
+  if (!String(path).endsWith("CREDITS.md")) return read(path, ...rest);
+  let text, error;
+  try {
+    text = read(path, ...rest);
+  } catch (e) {
+    error = e;
+  }
+  fs.writeFileSync(${JSON.stringify(barrier)} + "/" + process.pid, "");
+  const until = Date.now() + 2000;
+  while (fs.readdirSync(${JSON.stringify(barrier)}).length < 2 && Date.now() < until)
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  if (error) throw error;
+  return text;
+};
+syncBuiltinESMExports();
+const prior = globalThis.fetch;
+globalThis.fetch = async (url, init) =>
+  String(url).startsWith("https://cdn.openverse.test/") ? new Response("ID3 " + url) : prior(url, init);`;
+  return [`--import=data:text/javascript,${encodeURIComponent(stub)}`];
+}
+
+test("two SFX resolves at once each keep their Openverse credit line", async () => {
+  setup();
+  const barrier = join(tmp, "credit-barrier");
+  mkdirSync(barrier);
+  const runs = await Promise.all(
+    ["swoosh", "thud"].map((intent) =>
+      spawnResolveAsync(["--type", "sfx", "--intent", intent, "--project", tmp, "--json"], {
+        env: { HOME: tmp, PATH: tmp },
+        nodeArgs: [
+          ...openverseImport([
+            {
+              ...OPENVERSE_BY_WHOOSH,
+              id: `ov-${intent}`,
+              url: `https://cdn.openverse.test/${intent}.mp3`,
+            },
+          ]),
+          ...creditRaceImport(barrier),
+        ],
+      }),
+    ),
+  );
+  for (const run of runs) assert.equal(run.status, 0, run.stderr);
+  const credited = readFileSync(join(tmp, ".media/audio/sfx/CREDITS.md"), "utf8")
+    .split("\n")
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(3, line.indexOf("`:")));
+  assert.deepEqual(credited.sort(), runs.map((run) => JSON.parse(run.stdout).path).sort());
+  cleanup();
+});
+
 test("missing bundled SFX install returns a typed recovery command", () => {
   setup();
   const missingLibrary = join(tmp, "missing-sfx-library");

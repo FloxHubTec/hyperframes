@@ -13,6 +13,7 @@ import {
   findByEntity,
   nextId,
   typeDirPath,
+  withMediaLock,
   withReservedFile,
   withReservedFileSync,
 } from "./lib/manifest.mjs";
@@ -1284,12 +1285,15 @@ async function reuseGlobal(shaArg) {
 
 async function result(record, source) {
   const { provider, license, credit, source_url: sourceUrl } = record.provenance ?? {};
+  // Under the media lock: two resolves at once each read, then rewrite, the whole credits file.
   if (provider === OPENVERSE_SFX_PROVIDER)
-    writeSfxCredit(join(typeDirPath(projectDir, "sfx"), "CREDITS.md"), record.path, {
-      license,
-      credit,
-      sourceUrl,
-    });
+    withMediaLock(projectDir, () =>
+      writeSfxCredit(join(typeDirPath(projectDir, "sfx"), "CREDITS.md"), record.path, {
+        license,
+        credit,
+        sourceUrl,
+      }),
+    );
   // Non-PII usage event: which media type, how it resolved, which provider won.
   // Never the intent text or paths. Awaited so a short-lived run flushes it.
   await track("media_use_resolve", {
