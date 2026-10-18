@@ -21,8 +21,10 @@ const HIDDEN_CLIP = `[${CLIP_HIDDEN_ATTR}][style*="visibility: hidden"]`;
 const HIDE_HIDDEN_CLIP_CONTENTS = `${HIDDEN_CLIP} * { visibility: hidden !important; }`;
 const HIDE_GENERATED_FILTER_OUTPUT = `${HIDDEN_CLIP}, ${HIDDEN_CLIP} * { filter: none !important; }`;
 
-export function showHiddenClips(): () => void {
-  const hidden = Array.from(document.querySelectorAll<HTMLElement>(`[${CLIP_HIDDEN_ATTR}]`));
+export function showHiddenClips(shows: (clip: HTMLElement) => boolean): () => void {
+  const hidden = Array.from(document.querySelectorAll<HTMLElement>(`[${CLIP_HIDDEN_ATTR}]`)).filter(
+    shows,
+  );
   for (const el of hidden) el.style.visibility = "visible";
   return () => {
     for (const el of hidden) el.style.visibility = "hidden";

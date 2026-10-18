@@ -369,6 +369,34 @@ describe("core runtime browser contract", () => {
     }
   }, 30_000);
 
+  it("starts a scene's filter tween from its stylesheet filter when frames step into the scene", async () => {
+    const tweenPage = await browser.newPage();
+    try {
+      await tweenPage.setContent(`<!doctype html>
+        <style>#probe { filter: blur(10px); }</style>
+        <div data-composition-id="root" data-start="0" data-duration="3" data-width="320" data-height="180">
+          <div class="clip" data-start="2" data-duration="1" style="position:absolute;inset:0"><div id="probe"></div></div>
+        </div>`);
+      await tweenPage.addScriptTag({
+        path: resolve(import.meta.dirname, "../../../core/node_modules/gsap/dist/gsap.min.js"),
+      });
+      await tweenPage.addScriptTag({
+        content:
+          'window.__timelines = {root:gsap.timeline({paused:true}).to("#probe",{filter:"blur(0px)",duration:1,ease:"none",lazy:false},2)};',
+      });
+      await tweenPage.addScriptTag({ content: readFileSync(RUNTIME_PATH, "utf8") });
+      await tweenPage.waitForFunction(() => window.__playerReady && window.__renderReady);
+
+      const filter = await tweenPage.evaluate(() => {
+        for (let frame = 0; frame <= 75; frame++) window.__player!.renderSeek!(frame / 30);
+        return getComputedStyle(document.getElementById("probe")!).filter;
+      });
+      expect(filter).toBe("blur(5px)");
+    } finally {
+      await tweenPage.close();
+    }
+  }, 30_000);
+
   it("renders a later clip's authored lazy image as it is: laid out at setup, fetched before any seek", async () => {
     // A chunked render starts a worker straight at a later clip, so its image must already be loaded.
     const assets = "https://assets.test/";
