@@ -30,7 +30,7 @@ describe("the GPU probe where nothing may listen", () => {
     await resolveManagedGpuMode("auto", "/chrome");
     expect(probe.options[0]).toMatchObject({
       pipe: true,
-      args: ["--headless", "--single-process"],
+      args: ["--headless", "--single-process", "--disable-gpu-compositing"],
     });
     expect(probe.options[1]!.pipe).toBeUndefined();
     expect(probe.options[1]!.args).toEqual(["--headless"]);

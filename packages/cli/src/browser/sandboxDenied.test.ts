@@ -58,7 +58,10 @@ describe("a browser inside an agent's macOS seatbelt", () => {
     const { puppeteer, launches } = recordingPuppeteer([]);
     await launchManagedBrowser(puppeteer, { args: ["--headless"] });
     expect(launches).toHaveLength(1);
-    expect(launches[0]).toMatchObject({ pipe: true, args: ["--headless", "--single-process"] });
+    expect(launches[0]).toMatchObject({
+      pipe: true,
+      args: ["--headless", "--single-process", "--disable-gpu-compositing"],
+    });
   });
 
   it("relaunches as one process over a pipe when an unnamed sandbox refuses the mach service", async () => {
@@ -66,7 +69,11 @@ describe("a browser inside an agent's macOS seatbelt", () => {
     const { puppeteer, launches } = recordingPuppeteer([SEATBELT_LAUNCH_FAILURE]);
     await expect(launchManagedBrowser(puppeteer, { args: ["--headless"] })).resolves.toBeDefined();
     expect(launches.map((options) => options.pipe ?? false)).toEqual([false, true]);
-    expect(launches[1]!.args).toEqual(["--headless", "--single-process"]);
+    expect(launches[1]!.args).toEqual([
+      "--headless",
+      "--single-process",
+      "--disable-gpu-compositing",
+    ]);
   });
 });
 
