@@ -72,8 +72,8 @@ for the function instead; every render then runs at most `N` chunks at once.
 Upgrading: redeploying an existing stack without `--concurrency` keeps the
 reservation it already has, and `deploy` prints it. Stacks deployed by earlier
 CLI versions reserved 8 by default, so they stay at 8 until you pass
-`--concurrency=N`. To drop the reservation, redeploy the template with
-`ReservedConcurrency=-1` (Path 2).
+`--concurrency=N`. Pass `--concurrency=none` to remove the reservation so each
+render sizes itself to the account.
 
 After `deploy`, render anything with:
 

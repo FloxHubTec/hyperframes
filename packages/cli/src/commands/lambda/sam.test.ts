@@ -3,7 +3,12 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fetchStackOutputs, locateSamTemplate, samDeploy } from "./sam.js";
+import {
+  fetchStackOutputs,
+  locateSamTemplate,
+  parseReservedConcurrency,
+  samDeploy,
+} from "./sam.js";
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
@@ -68,5 +73,18 @@ describe("fetchStackOutputs", () => {
     expect(fetchStackOutputs({ stackName: "s", region: "r" }).reservedConcurrency).toBe(8);
     vi.mocked(execFileSync).mockReturnValue(stack("-1"));
     expect(fetchStackOutputs({ stackName: "s", region: "r" }).reservedConcurrency).toBeUndefined();
+  });
+});
+
+describe("parseReservedConcurrency", () => {
+  it("maps none to -1, keeps N, leaves an omitted flag undefined and rejects anything else", () => {
+    expect(parseReservedConcurrency("none")).toBe(-1);
+    expect(parseReservedConcurrency("8")).toBe(8);
+    expect(parseReservedConcurrency(undefined)).toBeUndefined();
+    for (const bad of ["abc", "0", "-1", "2.5"]) {
+      expect(() => parseReservedConcurrency(bad)).toThrow('positive integer or "none"');
+    }
+    samDeploy({ repoRoot: "/repo", stackName: "s", region: "r", reservedConcurrency: -1 });
+    expect(vi.mocked(spawnSync).mock.lastCall?.[1]).toContain("ReservedConcurrency=-1");
   });
 });

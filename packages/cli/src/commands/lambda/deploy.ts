@@ -19,7 +19,7 @@ export interface DeployArgs {
   stackName: string;
   region: string;
   awsProfile?: string;
-  /** Omitted: a redeploy keeps the stack's reservation; a new stack reserves none and each render sizes itself to the account. */
+  /** -1 removes the reservation. Omitted: a redeploy keeps it; a new stack reserves none. */
   reservedConcurrency?: number;
   chromeSource: "sparticuz" | "chrome-headless-shell";
   lambdaMemoryMb: number;
@@ -87,7 +87,16 @@ export async function runDeploy(args: Partial<DeployArgs> = {}): Promise<void> {
     deployedAt: new Date().toISOString(),
   });
 
-  if (resolved.reservedConcurrency === undefined && outputs.reservedConcurrency !== undefined) {
+  if (resolved.reservedConcurrency === -1) {
+    console.log(
+      c.warn(
+        "Removed the stack's reserved concurrency; each render now sizes itself to the account.",
+      ),
+    );
+  } else if (
+    resolved.reservedConcurrency === undefined &&
+    outputs.reservedConcurrency !== undefined
+  ) {
     console.log(
       c.warn(
         `Kept the stack's reserved concurrency of ${outputs.reservedConcurrency}. Pass --concurrency=N to change it.`,

@@ -75,6 +75,19 @@ export function locateSamTemplate(repoRoot: string): string {
   return candidate;
 }
 
+/** `--concurrency`: a positive integer, or `none` (-1, the template's "unreserved"). */
+export function parseReservedConcurrency(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (raw === "none") return -1;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(
+      `[lambda] --concurrency must be a positive integer or "none"; got ${String(raw)}`,
+    );
+  }
+  return n;
+}
+
 /** Run `sam deploy` non-interactively. Returns when SAM exits 0; throws on non-zero. */
 export function samDeploy(opts: DeployOptions): void {
   assertSamAvailable();
