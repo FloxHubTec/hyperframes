@@ -113,7 +113,7 @@ export default defineCommand({
     concurrency: {
       type: "string",
       description:
-        "Lambda reserved concurrency (default: none; each render runs up to 90% of the account's unreserved concurrency)",
+        "Lambda reserved concurrency (default: keep the stack's; a new stack reserves none and each render runs up to 90% of the account's unreserved concurrency)",
     },
     "chrome-source": {
       type: "string",

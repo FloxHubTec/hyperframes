@@ -1932,7 +1932,7 @@ deploy:
 | `--stack-name`    | `hyperframes-default`                | CloudFormation stack name                                |
 | `--region`        | `AWS_REGION`, else `us-east-1`       | AWS region                                               |
 | `--profile`       | `AWS_PROFILE`                        | AWS profile name                                         |
-| `--concurrency`   | none                                 | Lambda reserved concurrency. Without it, each render runs up to 90% of the account's unreserved concurrency |
+| `--concurrency`   | none                                 | Lambda reserved concurrency. Without it, a new stack reserves none and each render runs up to 90% of the account's unreserved concurrency; a redeploy keeps the stack's current reservation |
 | `--memory`        | `10240`                              | Lambda memory in MB                                      |
 | `--chrome-source` | `sparticuz`                          | `sparticuz` or `chrome-headless-shell`                   |
 | `--skip-build`    | off                                  | Reuse the existing `handler.zip`                         |

@@ -69,6 +69,12 @@ unreserved Lambda concurrency when it plans, and runs up to 90% of it at once
 plan logs the number it chose. Pass `--concurrency=N` to reserve `N` executions
 for the function instead; every render then runs at most `N` chunks at once.
 
+Upgrading: redeploying an existing stack without `--concurrency` keeps the
+reservation it already has, and `deploy` prints it. Stacks deployed by earlier
+CLI versions reserved 8 by default, so they stay at 8 until you pass
+`--concurrency=N`. To drop the reservation, redeploy the template with
+`ReservedConcurrency=-1` (Path 2).
+
 After `deploy`, render anything with:
 
 ```bash

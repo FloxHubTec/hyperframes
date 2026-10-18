@@ -19,7 +19,7 @@ export interface DeployArgs {
   stackName: string;
   region: string;
   awsProfile?: string;
-  /** Omitted = unreserved: each render sizes itself to the account's concurrency. */
+  /** Omitted: a redeploy keeps the stack's reservation; a new stack reserves none and each render sizes itself to the account. */
   reservedConcurrency?: number;
   chromeSource: "sparticuz" | "chrome-headless-shell";
   lambdaMemoryMb: number;
@@ -83,9 +83,17 @@ export async function runDeploy(args: Partial<DeployArgs> = {}): Promise<void> {
     stateMachineArn: outputs.stateMachineArn,
     functionName: outputs.functionName,
     lambdaMemoryMb: resolved.lambdaMemoryMb,
-    reservedConcurrency: resolved.reservedConcurrency,
+    reservedConcurrency: outputs.reservedConcurrency,
     deployedAt: new Date().toISOString(),
   });
+
+  if (resolved.reservedConcurrency === undefined && outputs.reservedConcurrency !== undefined) {
+    console.log(
+      c.warn(
+        `Kept the stack's reserved concurrency of ${outputs.reservedConcurrency}. Pass --concurrency=N to change it.`,
+      ),
+    );
+  }
 
   console.log();
   console.log(c.success("Stack deployed."));
