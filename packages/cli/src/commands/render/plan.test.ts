@@ -210,6 +210,22 @@ describe("createRenderPlan", () => {
     ).toBe("10M");
   });
 
+  it("plans an audio bitrate and rejects a blank one", () => {
+    expect(createRenderPlan({ dir: projectDir }).audioBitrate).toBeUndefined();
+    expect(createRenderPlan({ dir: projectDir, "audio-bitrate": " 128k " }).audioBitrate).toBe(
+      "128k",
+    );
+    expect(
+      createRenderPlan({ dir: projectDir, format: "mov", "audio-bitrate": "256k" }).audioBitrate,
+    ).toBe("256k");
+    expect(() => createRenderPlan({ dir: projectDir, "audio-bitrate": "   " })).toThrow(
+      CliUsageError,
+    );
+    expect(() => createRenderPlan({ dir: projectDir, "audio-bitrate": "128" })).toThrow(
+      CliUsageError,
+    );
+  });
+
   it("rejects batch and single-render variables before execution", () => {
     expect(() =>
       createRenderPlan({ dir: projectDir, batch: "rows.json", variables: '{"name":"Ada"}' }),

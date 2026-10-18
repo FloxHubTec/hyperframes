@@ -28,6 +28,7 @@ import {
   extractAudioMetadata,
   getFfprobeBinary,
   ManagedChildProcess,
+  resolveAacAudioBitrate,
   runFfmpeg,
   trackChildProcess,
   type AudioMetadata,
@@ -88,6 +89,7 @@ export interface PadTrimAudioInput {
     error?: string;
     failureReason?: "external_interruption";
   }>;
+  audioBitrate?: string;
 }
 
 export type PadTrimOperation = "pad" | "trim" | "copy";
@@ -127,6 +129,7 @@ function buildAacTruePeakCorrectionArgs(
   outputPath: string,
   targetDurationSeconds: number,
   attenuationDb: number,
+  audioBitrate?: string,
 ): string[] {
   return [
     "-i",
@@ -141,7 +144,7 @@ function buildAacTruePeakCorrectionArgs(
     "-c:a",
     "aac",
     "-b:a",
-    "192k",
+    resolveAacAudioBitrate(audioBitrate),
     "-y",
     outputPath,
   ];
@@ -166,9 +169,11 @@ export function buildPadTrimAudioPlan(
   outputPath: string,
   sourceDurationSeconds: number,
   targetDurationSeconds: number,
+  audioBitrate?: string,
 ): PadTrimAudioPlan {
   const delta = targetDurationSeconds - sourceDurationSeconds;
   const targetSec = formatSeconds(targetDurationSeconds);
+  const aacBitrate = resolveAacAudioBitrate(audioBitrate);
   if (Math.abs(delta) < AUDIO_DURATION_TOLERANCE_SECONDS) {
     return {
       operation: "copy",
@@ -192,7 +197,7 @@ export function buildPadTrimAudioPlan(
             "-c:a",
             "aac",
             "-b:a",
-            "192k",
+            aacBitrate,
             "-y",
             outputPath,
           ],
@@ -223,7 +228,7 @@ export function buildPadTrimAudioPlan(
           "-c:a",
           "aac",
           "-b:a",
-          "192k",
+          aacBitrate,
           "-y",
           outputPath,
         ],
@@ -238,12 +243,14 @@ export function buildPadTrimAudioArgs(
   outputPath: string,
   sourceDurationSeconds: number,
   targetDurationSeconds: number,
+  audioBitrate?: string,
 ): { args: string[]; operation: PadTrimOperation } {
   const plan = buildPadTrimAudioPlan(
     audioPath,
     outputPath,
     sourceDurationSeconds,
     targetDurationSeconds,
+    audioBitrate,
   );
   return { operation: plan.operation, args: plan.steps[0]?.args ?? [] };
 }
@@ -364,6 +371,7 @@ export async function padOrTrimAudioToVideoFrameCount(
     input.outputPath,
     audioInfo.durationSeconds,
     targetDurationSeconds,
+    input.audioBitrate,
   );
 
   try {
@@ -404,6 +412,7 @@ export async function padOrTrimAudioToVideoFrameCount(
       signal: input.signal,
       probeTruePeak,
       runner,
+      audioBitrate: input.audioBitrate,
     });
     if (!correction.success) {
       return {
@@ -438,6 +447,7 @@ interface EnforceAacTruePeakInput {
     error?: string;
     failureReason?: "external_interruption";
   }>;
+  audioBitrate?: string;
 }
 
 async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
@@ -478,6 +488,7 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
           correctedPath,
           input.targetDurationSeconds,
           attenuationDb,
+          input.audioBitrate,
         ),
       );
       if (!result.success) {

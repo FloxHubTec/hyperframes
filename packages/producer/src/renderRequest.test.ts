@@ -82,6 +82,48 @@ describe("RenderRequest", () => {
     expect(distributed).not.toHaveProperty("producerConfig");
   });
 
+  it("keeps audioBitrate on the local render config", () => {
+    const value = createRenderRequest({
+      projectDir: "/project",
+      outputPath: "/output/video.mp4",
+      engineConfig: DEFAULT_CONFIG,
+      options: {
+        fps: { num: 30, den: 1 },
+        quality: "standard",
+        format: "mp4",
+        audioBitrate: "128k",
+      },
+    });
+
+    expect(renderConfigFromRequest(value).audioBitrate).toBe("128k");
+    expect(parseRenderRequest(serializeRenderRequest(value)).options.audioBitrate).toBe("128k");
+  });
+
+  it("rejects an audio bitrate that omits its unit", () => {
+    expect(() =>
+      createRenderRequest({
+        projectDir: "/project",
+        outputPath: "/output/video.mp4",
+        engineConfig: DEFAULT_CONFIG,
+        options: {
+          fps: { num: 30, den: 1 },
+          quality: "standard",
+          format: "mp4",
+          audioBitrate: "128",
+        },
+      }),
+    ).toThrow('audioBitrate must be a bitrate such as "128k"');
+  });
+
+  it("refuses to convert a request with audio-bitrate to a distributed config", () => {
+    const value = request();
+    value.options.audioBitrate = "128k";
+
+    expect(() => distributedConfigFromRequest(value)).toThrow(
+      "Distributed render does not support audio-bitrate",
+    );
+  });
+
   it("round-trips distributed adapter fields back into the shared request", () => {
     const value = request();
     const distributed = distributedConfigFromRequest(value);

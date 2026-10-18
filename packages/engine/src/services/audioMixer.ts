@@ -15,7 +15,7 @@ import {
 } from "../utils/urlDownloader.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { formatFfmpegError, runFfmpeg, type RunFfmpegResult } from "../utils/runFfmpeg.js";
-import { AAC_ARGS, aacSegmentCount, encodeAac } from "./aacEncode.js";
+import { aacArgs, aacSegmentCount, encodeAac } from "./aacEncode.js";
 import { audioSubprocessEvidence } from "./audioFailureDiagnostic.js";
 import { unwrapTemplate } from "../utils/htmlTemplate.js";
 import { resolveMediaElementSrc, resolveProjectRelativeSrc } from "./videoFrameExtractor.js";
@@ -756,12 +756,16 @@ async function generateSilence(
   };
 }
 
+type AudioMixConfig = Partial<Pick<EngineConfig, "ffmpegProcessTimeout" | "audioGain">> & {
+  audioBitrate?: string;
+};
+
 async function mixAudioTracks(
   tracks: AudioTrack[],
   outputPath: string,
   totalDuration: number,
   signal?: AbortSignal,
-  config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout" | "audioGain">>,
+  config?: AudioMixConfig,
   floatWav = false,
 ): Promise<MixResult> {
   const ffmpegProcessTimeout = config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
@@ -828,7 +832,7 @@ async function mixAudioTracks(
       scriptPath,
       "-map",
       "[out]",
-      ...(floatWav ? ["-acodec", "pcm_f32le", "-ar", "48000"] : AAC_ARGS),
+      ...(floatWav ? ["-acodec", "pcm_f32le", "-ar", "48000"] : aacArgs(config?.audioBitrate)),
       "-t",
       String(totalDuration),
       "-y",
@@ -1070,7 +1074,7 @@ async function mixThroughFloatSum(
   workDir: string,
   totalDuration: number,
   signal?: AbortSignal,
-  config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout" | "audioGain">>,
+  config?: AudioMixConfig,
 ): Promise<MixResult> {
   const sumPath = join(workDir, "master-sum.wav");
   const sum = await mixAudioTracks(tracks, sumPath, totalDuration, signal, config, true);
@@ -1087,6 +1091,7 @@ async function mixThroughFloatSum(
   const encoded = await encodeAac(encoderInput, outputPath, totalDuration, {
     signal,
     timeout: config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout,
+    audioBitrate: config?.audioBitrate,
   });
   if (!encoded.success) {
     const failure = ffmpegFailure("mix", encoded);
@@ -1109,7 +1114,7 @@ export async function processCompositionAudio(
   outputPath: string,
   totalDuration: number,
   signal?: AbortSignal,
-  config?: Partial<Pick<EngineConfig, "ffmpegProcessTimeout" | "audioGain">> & {
+  config?: AudioMixConfig & {
     /** Serialised master bus chain, from `parseMasterFxChain`. */
     masterFxChain?: string;
   },

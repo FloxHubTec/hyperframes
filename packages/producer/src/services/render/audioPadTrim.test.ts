@@ -65,6 +65,13 @@ describe("buildPadTrimAudioArgs", () => {
     expect(args.at(-1)).toBe("/tmp/out.m4a");
   });
 
+  it("re-encodes pad and trim at the requested audio bitrate", () => {
+    const pad = buildPadTrimAudioPlan("/tmp/in.aac", "/tmp/out.aac", 4, 5, "96k");
+    expect(pad.steps[0]!.args[pad.steps[0]!.args.indexOf("-b:a") + 1]).toBe("96k");
+    const trim = buildPadTrimAudioArgs("/tmp/in.aac", "/tmp/out.m4a", 15.018667, 15, "256k");
+    expect(trim.args[trim.args.indexOf("-b:a") + 1]).toBe("256k");
+  });
+
   it("emits a plain copy when source duration matches target within ~1ms", () => {
     const { args, operation } = buildPadTrimAudioArgs("/tmp/in.aac", "/tmp/out.aac", 5.0, 5.0);
     expect(operation).toBe("copy");
@@ -332,6 +339,14 @@ describe("padOrTrimAudioToVideoFrameCount", () => {
     const correctionArgs = calls[1]!;
     expect(correctionArgs[correctionArgs.indexOf("-af") + 1]).toBe("volume=-3.000dB");
     expect(correctionArgs[correctionArgs.indexOf("-t") + 1]).toBe("3.000000");
+    expect(correctionArgs[correctionArgs.indexOf("-b:a") + 1]).toBe("192k");
+
+    calls.length = 0;
+    input.audioBitrate = "96k";
+    const overridden = await padOrTrimAudioToVideoFrameCount(input);
+    expect(overridden.success).toBe(false);
+    expect(calls[0]![calls[0]!.indexOf("-b:a") + 1]).toBe("96k");
+    expect(calls[1]![calls[1]!.indexOf("-b:a") + 1]).toBe("96k");
   });
 
   it("keeps the end of a long correction failure, where ffmpeg says what went wrong", async () => {

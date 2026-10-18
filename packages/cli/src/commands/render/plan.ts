@@ -79,6 +79,7 @@ export interface RenderCommandArgs {
   sdr?: boolean;
   crf?: string;
   "video-bitrate"?: string;
+  "audio-bitrate"?: string;
   "vp9-cpu-used"?: string;
   gpu?: boolean;
   "browser-gpu"?: boolean;
@@ -156,6 +157,7 @@ export interface RenderPlan {
   crf?: number;
   vp9CpuUsed?: number;
   videoBitrate?: string;
+  audioBitrate?: string;
   hdrMode: HdrMode;
   pageSideCompositing: boolean;
   experimentalFastCapture: boolean;
@@ -498,6 +500,17 @@ export function createRenderPlan(args: RenderCommandArgs, now = new Date()): Ren
     );
     failUsage();
   }
+  const audioBitrate = args["audio-bitrate"]?.trim();
+  if (
+    args["audio-bitrate"] != null &&
+    (!audioBitrate || !/^\d+(\.\d+)?[kKmM]$/.test(audioBitrate))
+  ) {
+    errorBox(
+      "Invalid audio-bitrate",
+      `Got "${args["audio-bitrate"]}". Must be a bitrate such as "128k" or "256k".`,
+    );
+    failUsage();
+  }
   if (format === "mov" && (crf !== undefined || videoBitrate !== undefined)) {
     const flag = crf !== undefined ? "--crf" : "--video-bitrate";
     errorBox(
@@ -553,6 +566,7 @@ export function createRenderPlan(args: RenderCommandArgs, now = new Date()): Ren
     crf,
     vp9CpuUsed,
     videoBitrate,
+    audioBitrate,
     hdrMode: args.sdr ? "force-sdr" : args.hdr ? "force-hdr" : "auto",
     pageSideCompositing: args["page-side-compositing"] !== false,
     experimentalFastCapture: args["experimental-fast-capture"] === true,

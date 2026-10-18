@@ -6,6 +6,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runFfmpeg, type RunFfmpegResult } from "../utils/runFfmpeg.js";
+import { resolveAacAudioBitrate } from "./audioBitrate.js";
 
 const SAMPLE_RATE = 48_000;
 const FRAME_SAMPLES = 1024;
@@ -16,7 +17,11 @@ const MAX_SEGMENTS = 8;
 // 10 s to settle (its error is higher until then), so a segment starts 10 s before its cut.
 const PRE_ROLL_FRAMES = 469;
 const POST_ROLL_FRAMES = 8;
-export const AAC_ARGS = ["-acodec", "aac", "-b:a", "192k"];
+const AAC_ARGS = ["-acodec", "aac", "-b:a", "192k"] as const;
+
+export function aacArgs(audioBitrate?: string): string[] {
+  return [AAC_ARGS[0], AAC_ARGS[1], AAC_ARGS[2], resolveAacAudioBitrate(audioBitrate)];
+}
 
 export function aacSegmentCount(totalDuration: number): number {
   return Math.max(1, Math.min(MAX_SEGMENTS, Math.floor(totalDuration / MIN_SEGMENT_SECONDS)));
@@ -57,11 +62,16 @@ export async function encodeAac(
   input: string,
   outputPath: string,
   totalDuration: number,
-  { signal, timeout }: { signal?: AbortSignal; timeout: number },
+  {
+    signal,
+    timeout,
+    audioBitrate,
+  }: { signal?: AbortSignal; timeout: number; audioBitrate?: string },
 ): Promise<RunFfmpegResult> {
+  const codecArgs = aacArgs(audioBitrate);
   const count = aacSegmentCount(totalDuration);
   if (count === 1) {
-    const args = ["-i", input, "-t", String(totalDuration), ...AAC_ARGS, "-y", outputPath];
+    const args = ["-i", input, "-t", String(totalDuration), ...codecArgs, "-y", outputPath];
     return runFfmpeg(args, { signal, timeout });
   }
 
@@ -73,7 +83,7 @@ export async function encodeAac(
     }));
     const results = await Promise.all(
       segments.map(({ trim, path }) =>
-        runFfmpeg(["-i", input, "-af", trim, ...AAC_ARGS, "-f", "adts", "-y", path], {
+        runFfmpeg(["-i", input, "-af", trim, ...codecArgs, "-f", "adts", "-y", path], {
           signal,
           timeout,
         }),

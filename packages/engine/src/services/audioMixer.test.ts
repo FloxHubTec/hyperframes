@@ -31,6 +31,14 @@ const { runFfmpegMock, capturedFilterScripts, extractAudioMetadataMock } = vi.ho
       } else {
         capturedFilterScripts.push("");
       }
+      if (args[args.indexOf("-f") + 1] === "adts") {
+        const { writeFileSync } = await import("node:fs");
+        const frame = Buffer.from([0xff, 0xf1, 0x50, 0x80, 0x00, 0xe0, 0x00]);
+        writeFileSync(
+          args[args.length - 1]!,
+          Buffer.concat(Array.from({ length: 4000 }, () => frame)),
+        );
+      }
       return { success: true, durationMs: 1, stderr: "", exitCode: 0 };
     }),
   };
@@ -371,6 +379,106 @@ describe("processCompositionAudio", () => {
     expect(filter).not.toContain("whole_dur");
     expect(filter).toContain("normalize=0");
     expect(filter).not.toContain("weights=");
+  });
+
+  it("encodes the AAC mix at 192k unless audioBitrate is set", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "voice.wav"), "stub");
+    const element = {
+      id: "voice",
+      src: "voice.wav",
+      start: 0,
+      end: 2,
+      mediaStart: 0,
+      layer: 0,
+      volume: 1,
+      type: "audio" as const,
+    };
+
+    await processCompositionAudio([element], baseDir, workDir, join(baseDir, "out.m4a"), 2);
+    const defaultArgs = runFfmpegMock.mock.calls.at(-1)?.[0] as string[];
+    expect(defaultArgs[defaultArgs.indexOf("-b:a") + 1]).toBe("192k");
+
+    runFfmpegMock.mockClear();
+    await processCompositionAudio(
+      [element],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+      undefined,
+      { audioBitrate: "256k" },
+    );
+    const overrideArgs = runFfmpegMock.mock.calls.at(-1)?.[0] as string[];
+    expect(overrideArgs[overrideArgs.indexOf("-b:a") + 1]).toBe("256k");
+  });
+
+  it("encodes the master-bus AAC at the requested audio bitrate", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "voice.wav"), "stub");
+
+    await processCompositionAudio(
+      [
+        {
+          id: "voice",
+          src: "voice.wav",
+          start: 0,
+          end: 2,
+          mediaStart: 0,
+          layer: 0,
+          volume: 1,
+          type: "audio",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+      undefined,
+      { audioBitrate: "128k", masterFxChain: gainChain },
+    );
+
+    const encodeArgs = runFfmpegMock.mock.calls.at(-1)?.[0] as string[];
+    expect(encodeArgs).toEqual(expect.arrayContaining(["-acodec", "aac", "-b:a", "128k"]));
+  });
+
+  it("encodes a mix of 120s or more at the requested audio bitrate", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "voice.wav"), "stub");
+
+    await processCompositionAudio(
+      [
+        {
+          id: "voice",
+          src: "voice.wav",
+          start: 0,
+          end: 120,
+          mediaStart: 0,
+          layer: 0,
+          volume: 1,
+          type: "audio",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      120,
+      undefined,
+      { audioBitrate: "96k" },
+    );
+
+    const bitrates = runFfmpegMock.mock.calls
+      .map((call) => call[0] as string[])
+      .filter((args) => args.includes("-b:a"))
+      .map((args) => args[args.indexOf("-b:a") + 1]);
+    expect(bitrates.length).toBeGreaterThan(1);
+    expect(bitrates).toEqual(bitrates.map(() => "96k"));
   });
 
   it("trims the consumed source span and applies pitch-preserving tempo at 2x", async () => {

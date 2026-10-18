@@ -193,6 +193,7 @@ export {
   type PackageHlsOptions,
 } from "./services/chunkEncoder.js";
 export type { EncoderOptions, EncodeResult, MuxResult } from "./services/chunkEncoder.types.js";
+export { resolveAacAudioBitrate } from "./services/audioBitrate.js";
 
 export {
   spawnStreamingEncoder,

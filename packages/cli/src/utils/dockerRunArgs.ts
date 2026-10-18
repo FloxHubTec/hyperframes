@@ -50,6 +50,7 @@ export interface DockerRenderOptions {
   crf?: number;
   vp9CpuUsed?: number;
   videoBitrate?: string;
+  audioBitrate?: string;
   videoFrameFormat?: "auto" | "jpg" | "png";
   quiet: boolean;
   debug?: boolean;
@@ -142,6 +143,7 @@ export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
     ...(options.crf != null ? ["--crf", String(options.crf)] : []),
     ...(options.vp9CpuUsed != null ? ["--vp9-cpu-used", String(options.vp9CpuUsed)] : []),
     ...(options.videoBitrate ? ["--video-bitrate", options.videoBitrate] : []),
+    ...(options.audioBitrate ? ["--audio-bitrate", options.audioBitrate] : []),
     ...(options.videoFrameFormat && options.videoFrameFormat !== "auto"
       ? ["--video-frame-format", options.videoFrameFormat]
       : []),

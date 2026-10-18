@@ -247,6 +247,11 @@ export default defineCommand({
       description:
         "Target MP4/WebM video bitrate such as 10M. Mutually exclusive with --crf; unsupported for MOV.",
     },
+    "audio-bitrate": {
+      type: "string",
+      description:
+        "Target audio bitrate such as 128k or 256k. The unit is required. Unset keeps AAC at 192k and Opus at 128k.",
+    },
     "vp9-cpu-used": {
       type: "string",
       description:
@@ -502,6 +507,7 @@ export interface RenderOptions {
   crf?: number;
   vp9CpuUsed?: number;
   videoBitrate?: string;
+  audioBitrate?: string;
   videoFrameFormat?: VideoFrameFormat;
   quiet: boolean;
   debug?: boolean;
@@ -831,6 +837,7 @@ async function renderDocker(
       crf: options.crf,
       vp9CpuUsed: options.vp9CpuUsed,
       videoBitrate: options.videoBitrate,
+      audioBitrate: options.audioBitrate,
       videoFrameFormat: options.videoFrameFormat,
       quiet: options.quiet,
       variables: options.variables,
@@ -1105,6 +1112,7 @@ async function executeLocalRender(
       hdrMode: options.hdrMode,
       crf: options.crf,
       videoBitrate: options.videoBitrate,
+      audioBitrate: options.audioBitrate,
       videoFrameFormat: options.videoFrameFormat,
       variables: options.variables,
       entryFile: options.entryFile,

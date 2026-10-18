@@ -404,6 +404,7 @@ export interface RenderConfig {
   crf?: number;
   /** Target video bitrate (e.g. "10M"). Mutually exclusive with `crf`. */
   videoBitrate?: string;
+  audioBitrate?: string;
   /**
    * Source-video frame extraction format. Defaults to `"auto"`, which preserves
    * the historical behavior: alpha/alpha-capable sources extract as PNG, all
@@ -3360,6 +3361,7 @@ async function executeRenderPipeline(input: {
           duration: probeResult.duration,
           ffmpegProcessTimeout: cfg.ffmpegProcessTimeout,
           audioGain: cfg.audioGain,
+          audioBitrate: job.config.audioBitrate,
           audios: composition.audios,
           masterFxChain: composition.masterFxChain,
           abortSignal: executionSignal,
@@ -5036,6 +5038,7 @@ async function executeRenderPipeline(input: {
             format: outputFormat,
             hlsSegmentSeconds,
             ffmpegProcessTimeout: cfg.ffmpegProcessTimeout,
+            audioBitrate: job.config.audioBitrate,
             abortSignal: executionSignal,
             assertNotAborted,
             onProgress,

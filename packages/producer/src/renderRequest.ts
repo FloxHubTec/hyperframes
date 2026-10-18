@@ -55,6 +55,7 @@ export interface RenderRequestOptions {
   entryFile?: string;
   crf?: number;
   videoBitrate?: string;
+  audioBitrate?: string;
   videoFrameFormat?: VideoFrameFormat;
   hdrMode?: RenderConfig["hdrMode"];
   variables?: Record<string, unknown>;
@@ -122,6 +123,14 @@ function assertOptionalString(options: Record<string, unknown>, field: string): 
   }
 }
 
+function assertOptionalAudioBitrate(options: Record<string, unknown>): void {
+  const value = options.audioBitrate;
+  if (value === undefined) return;
+  if (typeof value !== "string" || !/^\d+(\.\d+)?[kKmM]$/.test(value)) {
+    throw new Error('Render request audioBitrate must be a bitrate such as "128k"');
+  }
+}
+
 function assertOptionalEnum(
   options: Record<string, unknown>,
   field: string,
@@ -178,6 +187,7 @@ function assertRequestOptionScalars(options: Record<string, unknown>): void {
   for (const field of ["entryFile", "videoBitrate"] as const) {
     assertOptionalString(options, field);
   }
+  assertOptionalAudioBitrate(options);
   assertOptionalEnum(options, "strictness", ["strict", "best-effort"]);
   assertOptionalEnum(options, "hdrMode", ["auto", "force-hdr", "force-sdr"]);
   if (options.videoFrameFormat !== undefined && !isVideoFrameFormat(options.videoFrameFormat)) {
@@ -288,6 +298,9 @@ export function distributedConfigFromRequest(
   }
   if (options.hdrMode === "force-hdr") {
     throw new Error("Distributed render does not support force-hdr");
+  }
+  if (options.audioBitrate !== undefined) {
+    throw new Error("Distributed render does not support audio-bitrate");
   }
   return {
     fps: distributedFps(options.fps),

@@ -1239,6 +1239,7 @@ Quality and file size:
 | ---------------------- | --------------- | -------------------------------------------------------------------------------------------------------- |
 | `--crf`                | from `--quality`| Override MP4/WebM encoder CRF, 0–51. Lower is better quality. Not with `--video-bitrate`; rejected for MOV. |
 | `--video-bitrate`      | from `--quality`| Target MP4/WebM bitrate, e.g. `10M` or `5000k`. Not with `--crf`; rejected for MOV.                       |
+| `--audio-bitrate`      | 192k AAC, 128k Opus | Target audio bitrate, e.g. `128k` or `256k`. Unset keeps those defaults. Applied where audio is encoded, including the AAC sidecar that MP4 and MOV copy. |
 | `--vp9-cpu-used`       | encoder default | libvpx-vp9 speed/quality trade-off for WebM, -8 to 8. Env: `PRODUCER_VP9_CPU_USED`.                       |
 | `--gif-loop`           | `0`             | GIF loop count, `0` for forever. Range 0–65535, `--format gif` only.                                     |
 | `--hls-segment-seconds`| `4`             | HLS target segment length in whole seconds, 1–60. `--format hls` only. Also fixes the encoder GOP so every segment starts on a keyframe. |
