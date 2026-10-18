@@ -1,9 +1,11 @@
 import type { Ref } from "react";
 
 // Framey, the desktop app's cursor mascot, as hyperframes-internal packages/nib draws it: a rounded triangle with a
-// white rim and one eye. The viewBox frames the body with its rim; the tip points up and left like a cursor.
+// white rim and one eye, framed square around the body and rim like the app's FrameyMark.
 const BODY = "M77.55 48.44 L122.77 65.85 L99.3 89.41 Z";
 const EYE = { cx: 111.6, cy: 68.2, r: 11.5 };
+const RIM = 24;
+const VIEW_BOX = "65.55 34.315 69.22 69.22";
 
 /** `eyeRef` moves the pupils (a translate of a few px) without re-rendering. */
 export function FrameyGlyph({
@@ -16,19 +18,12 @@ export function FrameyGlyph({
   eyeRef?: Ref<SVGGElement>;
 }) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="58 30 82 76"
-      aria-hidden="true"
-      className={className}
-      overflow="visible"
-    >
+    <svg width={size} height={size} viewBox={VIEW_BOX} aria-hidden="true" className={className}>
       <path
         d={BODY}
         fill="var(--color-white)"
         stroke="var(--color-white)"
-        strokeWidth={24}
+        strokeWidth={RIM}
         strokeLinejoin="round"
       />
       <path
@@ -41,7 +36,7 @@ export function FrameyGlyph({
       <circle cx={EYE.cx} cy={EYE.cy} r={EYE.r} fill="var(--color-white)" />
       <g ref={eyeRef} className="hf-framey-eye">
         <path
-          d={`M${EYE.cx - 2.6} ${EYE.cy - 2} V${EYE.cy + 2} M${EYE.cx + 2.6} ${EYE.cy - 2} V${EYE.cy + 2}`}
+          d={`M${EYE.cx - 2.6} ${EYE.cy - 2.4} V${EYE.cy + 2.4} M${EYE.cx + 2.6} ${EYE.cy - 2.4} V${EYE.cy + 2.4}`}
           stroke="var(--color-framey-ink)"
           strokeWidth={2.4}
           strokeLinecap="round"

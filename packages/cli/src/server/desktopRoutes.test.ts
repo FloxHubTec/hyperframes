@@ -46,6 +46,21 @@ describe("open-in-desktop routes", () => {
     expect(await get(false)).toMatchObject({ available: false });
   });
 
+  it("offers the hand-off only where the app is installed, so a press without it goes to the download", async () => {
+    const get = async (installed: boolean) =>
+      (
+        await server(true, { platform: "darwin", installed: () => installed }).app.request(
+          "/api/open-in-desktop",
+        )
+      ).json();
+    expect(await get(true)).toMatchObject({ available: true, handoff: true });
+    expect(await get(false)).toEqual({
+      available: true,
+      handoff: false,
+      downloadUrl: desktopDownloadUrl("darwin"),
+    });
+  });
+
   it("refuses a POST from another site, or through a rebound host name", async () => {
     const { open, post } = server(true);
     const crossSite = { ...STUDIO, origin: "https://evil.example", "sec-fetch-site": "cross-site" };

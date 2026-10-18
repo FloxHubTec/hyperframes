@@ -19,7 +19,7 @@ export function sameOriginPost(headers: {
   return origin === undefined || origin === `http://${host}`;
 }
 
-/** Edit with Framey's route: whether to show it, where to download, and whether the app takes the project. */
+/** The desktop-app button's route: show it or not, the download, and whether the app here takes the project. */
 export function mountDesktopRoutes(
   app: Hono,
   projectDir: string,
@@ -31,9 +31,16 @@ export function mountDesktopRoutes(
   } = {},
 ): void {
   const downloadUrl = desktopDownloadUrl(platform);
-  app.get("/api/open-in-desktop", (c) =>
-    c.json({ available: downloadUrl !== null || installed(), handoff: ready, downloadUrl }),
-  );
+  app.get("/api/open-in-desktop", (c) => {
+    const here = installed();
+    return c.json({
+      available: downloadUrl !== null || here,
+      handoff: ready && here,
+      downloadUrl,
+      os: platform,
+      installed: here,
+    });
+  });
   app.post("/api/open-in-desktop", (c) => {
     const allowed = sameOriginPost({
       host: c.req.header("host"),

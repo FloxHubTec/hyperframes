@@ -3,10 +3,10 @@ import { useStudioShellContext } from "../contexts/StudioContext";
 import { studioApiFetch } from "../utils/studioApiFetch";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 import { FrameyGlyph } from "./FrameyGlyph";
-import { Button, buttonBase, buttonSizes, buttonVariants, cn, Popover } from "./ui";
+import { Button, buttonBase, buttonSizes, buttonVariants, cn } from "./ui";
 
-// "Edit with Framey": the preview server (`/api/open-in-desktop`) says whether to show it and whether the app can
-// take the project yet (its gate is the CLI's HANDOFF_READY); until then a press introduces Framey with the download.
+// "Install the desktop app": the preview server (`/api/open-in-desktop`) says whether to show it and whether the app
+// here takes the project; a press opens the project in the app, or goes to hyperframes.dev's download.
 const ROUTE = "/api/open-in-desktop";
 /** How far the pupils travel towards the pointer, in the glyph's own units. */
 const GAZE = 2.2;
@@ -64,23 +64,46 @@ function useGaze(
   }, [anchor, eye]);
 }
 
+const LABEL = "Install the desktop app";
+const LOOK =
+  "hf-framey-trigger gap-1.5 border border-accent/40 bg-accent/10 pl-1 font-semibold text-text-0 enabled:hover:bg-accent/20 hover:bg-accent/20";
+
 export function OpenInDesktopButton() {
   const { showToast } = useStudioShellContext();
   const route = useDesktopRoute();
   const [opening, setOpening] = useState(false);
-  // The card under the button, introducing Framey with the app's download.
-  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
+  const trigger = useRef<HTMLElement>(null);
   const eye = useRef<SVGGElement>(null);
   useGaze(trigger, eye);
   if (!route) return null;
+  const icon = <FrameyGlyph size={24} className="hf-framey" eyeRef={eye} />;
+
+  if (!route.handoff) {
+    if (!route.downloadUrl) return null;
+    return (
+      <a
+        ref={trigger as React.RefObject<HTMLAnchorElement>}
+        href={route.downloadUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        data-testid="header-open-in-desktop"
+        title="Download the free HyperFrames desktop app from hyperframes.dev"
+        className={cn(buttonBase, buttonVariants.ghost, buttonSizes.md, LOOK)}
+        onClick={() => trackStudioEvent("toolbar_action", { action: "get_desktop_app" })}
+      >
+        {icon}
+        {LABEL}
+      </a>
+    );
+  }
+
+  const download = (url: string) => {
+    const tab = window.open(url, "_blank");
+    if (tab) tab.opener = null;
+    else showToast(`Get the HyperFrames desktop app at ${url}`, "info");
+  };
 
   const open = async () => {
-    if (!route.handoff) {
-      trackStudioEvent("toolbar_action", { action: "open_in_desktop" });
-      setDownloadUrl(route.downloadUrl);
-      return;
-    }
     if (opening) return;
     setOpening(true);
     trackStudioEvent("toolbar_action", { action: "open_in_desktop" });
@@ -88,9 +111,9 @@ export function OpenInDesktopButton() {
       const res = await studioApiFetch(ROUTE, { method: "POST" });
       const result = (await res.json()) as OpenResult;
       if (result.opened) {
-        showToast("Framey is opening this project in the HyperFrames desktop app", "info");
+        showToast("Opening this project in the HyperFrames desktop app", "info");
         await new Promise((done) => setTimeout(done, OPENING_MS));
-      } else setDownloadUrl(result.downloadUrl);
+      } else download(result.downloadUrl);
     } catch {
       showToast("Couldn't reach the preview server to open the app", "error");
     } finally {
@@ -99,62 +122,17 @@ export function OpenInDesktopButton() {
   };
 
   return (
-    <Popover
-      open={downloadUrl !== null}
-      // The popover owns the trigger's press: a press runs the hand-off, and the card shows only when there is
-      // something to say (the download). A second handler on the button raced this one.
-      onOpenChange={(next) => {
-        if (next) void open();
-        else setDownloadUrl(null);
-      }}
-      side="bottom"
-      align="end"
-      arrow
-      aria-label="Meet Framey"
-      className="w-72"
-      trigger={
-        <Button
-          ref={trigger}
-          variant="ghost"
-          data-testid="header-open-in-desktop"
-          data-opening={opening || undefined}
-          title="Open this project in the HyperFrames desktop app and edit it with Framey"
-          className="hf-framey-trigger gap-1.5 border border-accent/40 bg-accent/10 pl-1 font-semibold text-text-0 enabled:hover:bg-accent/20"
-          icon={<FrameyGlyph size={24} className="hf-framey" eyeRef={eye} />}
-        >
-          {opening ? "Opening in the app…" : "Edit with Framey"}
-          {!opening && (
-            <span className="rounded-full bg-accent px-1.5 text-[10px] leading-4 font-bold text-on-accent">
-              New
-            </span>
-          )}
-        </Button>
-      }
+    <Button
+      ref={trigger as React.RefObject<HTMLButtonElement>}
+      variant="ghost"
+      data-testid="header-open-in-desktop"
+      data-opening={opening || undefined}
+      title="Open this project in the HyperFrames desktop app"
+      className={LOOK}
+      icon={icon}
+      onClick={() => void open()}
     >
-      <div className="flex items-center gap-2.5">
-        <FrameyGlyph size={36} />
-        <p className="text-step-12 font-medium text-text-0">Meet Framey</p>
-      </div>
-      <p className="mt-2 text-balance text-text-3">I live in the free HyperFrames desktop app:</p>
-      <ul className="mt-1.5 grid gap-1 text-text-1">
-        <li>Chat to change anything in the video</li>
-        <li>Draw on a frame to point at it</li>
-        <li>Watch me act out each edit</li>
-      </ul>
-      <div className="mt-3 flex items-center justify-end gap-2 whitespace-nowrap">
-        <Button variant="ghost" onClick={() => setDownloadUrl(null)}>
-          Not now
-        </Button>
-        <a
-          href={downloadUrl ?? undefined}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={cn(buttonBase, buttonVariants.primary, buttonSizes.md)}
-          onClick={() => trackStudioEvent("toolbar_action", { action: "get_desktop_app" })}
-        >
-          Get the desktop app
-        </a>
-      </div>
-    </Popover>
+      {opening ? "Opening in the app…" : LABEL}
+    </Button>
   );
 }

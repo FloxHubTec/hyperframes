@@ -956,7 +956,7 @@
   }
 }
 
-/* Framey on the header's "Edit with Framey" (OpenInDesktopButton.tsx): a pulse as the page opens, a wiggle
+/* Framey on the header's "Install the desktop app" (OpenInDesktopButton.tsx): a pulse as the page opens, a wiggle
  * on hover, a flight towards the app while it opens. The eye follows the pointer from script. */
 @keyframes hf-framey-wiggle {
   0%,

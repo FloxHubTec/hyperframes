@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 
 /**
- * "Edit with Framey": shown where the preview server has the app or its download to offer; a press opens the project in the app,
- * or introduces Framey with the download while the app cannot take it or is missing.
+ * "Install the desktop app": shown where the preview server has the app or its download to offer; a press opens the
+ * project in the app here, or goes to hyperframes.dev's download.
  */
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -42,11 +42,6 @@ async function mount(): Promise<HTMLElement> {
   await act(async () => root.render(<OpenInDesktopButton />));
   return host;
 }
-
-const downloadHref = () =>
-  [...document.querySelectorAll("a")]
-    .find((a) => a.textContent?.includes("Get the desktop app"))
-    ?.getAttribute("href");
 
 const button = () =>
   document.querySelector<HTMLButtonElement>('[data-testid="header-open-in-desktop"]');
@@ -90,14 +85,24 @@ it("opens the project in an installed app that has no download (Windows)", async
   expect(posts).toBe(1);
 });
 
-it("while the app cannot take a project yet, introduces Framey with the download and opens nothing", async () => {
+it("reads exactly 'Install the desktop app' beside Framey", async () => {
+  serve(Response.json({ available: true, handoff: true, downloadUrl: DOWNLOAD }));
+  await mount();
+  expect(button()!.textContent).toBe("Install the desktop app");
+  expect(button()!.querySelector("svg .hf-framey-eye")).not.toBeNull();
+});
+
+it("without the app here, is a link to hyperframes.dev's download and opens nothing", async () => {
   const linux = `${DOWNLOAD}?os=linux`;
   serve(Response.json({ available: true, handoff: false, downloadUrl: linux }), { opened: true });
   await mount();
-  await act(async () => button()!.click());
+  const link = button()!;
+  expect(link.tagName).toBe("A");
+  expect(link.getAttribute("href")).toBe(linux);
+  expect(link.getAttribute("target")).toBe("_blank");
+  expect(link.textContent).toBe("Install the desktop app");
+  await act(async () => link.click());
   expect(posts).toBe(0);
-  expect(document.body.textContent).toContain("Meet Framey");
-  expect(downloadHref()).toBe(linux);
 });
 
 it("opens the project in the app and says so", async () => {
@@ -109,14 +114,28 @@ it("opens the project in the app and says so", async () => {
   await act(async () => button()!.click());
   expect(posts).toBe(1);
   expect(showToast).toHaveBeenCalledWith(
-    "Framey is opening this project in the HyperFrames desktop app",
+    "Opening this project in the HyperFrames desktop app",
     "info",
   );
   expect(button()!.dataset.opening).toBe("true");
-  expect(document.body.textContent).not.toContain("Meet Framey");
 });
 
-it("introduces Framey and offers the download when the app is missing", async () => {
+it("goes to the download when the app could not take the project", async () => {
+  const opened: string[] = [];
+  vi.stubGlobal("open", (url: string) => (opened.push(url), {}));
+  serve(Response.json({ available: true, handoff: true, downloadUrl: DOWNLOAD }), {
+    opened: false,
+    reason: "open-failed",
+    downloadUrl: DOWNLOAD,
+  });
+  await mount();
+  await act(async () => button()!.click());
+  expect(opened).toEqual([DOWNLOAD]);
+  expect(showToast).not.toHaveBeenCalled();
+});
+
+it("names the download when the browser blocks the new tab", async () => {
+  vi.stubGlobal("open", () => null);
   serve(Response.json({ available: true, handoff: true, downloadUrl: DOWNLOAD }), {
     opened: false,
     reason: "not-installed",
@@ -124,7 +143,5 @@ it("introduces Framey and offers the download when the app is missing", async ()
   });
   await mount();
   await act(async () => button()!.click());
-  expect(showToast).not.toHaveBeenCalled();
-  expect(document.body.textContent).toContain("Meet Framey");
-  expect(downloadHref()).toBe(DOWNLOAD);
+  expect(showToast).toHaveBeenCalledWith(`Get the HyperFrames desktop app at ${DOWNLOAD}`, "info");
 });

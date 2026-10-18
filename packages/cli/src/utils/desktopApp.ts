@@ -1,8 +1,10 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, win32 } from "node:path";
+import { isHyperframesProject } from "@hyperframes/core";
 import { addCatchUpNote, markSeen, readSeen } from "./appHistory.js";
+import { createProjectConfig } from "./projectConfig.js";
 import { writeRecord } from "./projectRecords.js";
 
 // The HyperFrames desktop app (not "Studio"): `open -b` on macOS, its executable elsewhere; released, then Canary.
@@ -131,6 +133,17 @@ function leaveHandoff(dir: string, session: AgentSession | null): AgentSession |
   return session;
 }
 
+function markBareIndexAsProject(dir: string): void {
+  try {
+    if (existsSync(join(dir, "index.html")) && !isHyperframesProject(readdirSync(dir)))
+      createProjectConfig(dir);
+  } catch (error) {
+    console.warn(
+      `◇  Couldn't add hyperframes.json to ${dir}, so the app may not open it: ${error}`,
+    );
+  }
+}
+
 // ponytail: success on Windows and Linux means the spawn started, not that the app took the folder; wait for the
 // app's own acknowledgement if a broken install ever needs reporting.
 export function openInDesktop(
@@ -163,6 +176,7 @@ export function openInDesktop(
     handedOver: leaveHandoff(dir, agentSession(env)),
   });
   if (!ready) return notOpened("handoff-unavailable");
+  markBareIndexAsProject(dir);
   if (platform === "darwin") {
     const bundleId = DESKTOP_BUNDLE_IDS.find((id) => open(id, dir));
     if (!bundleId) return notOpened(installed() ? "open-failed" : "not-installed");
