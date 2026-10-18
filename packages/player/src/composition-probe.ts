@@ -122,20 +122,20 @@ export class CompositionProbe {
           };
         }
       }
+      outcome ??= this._deadlineOutcome(attempts);
       if (outcome) {
         this.stop();
         if (outcome.kind === "error") {
           this._failure = { document: this._iframe.contentDocument };
           this._callbacks.onError(outcome.message);
         } else this._callbacks.onReady(outcome.result);
-        return;
-      }
-      if (attempts >= 40 && !this._callbacks.hostOwnsDeadline?.()) {
-        this.stop();
-        this._failure = { document: this._iframe.contentDocument };
-        this._callbacks.onError("Composition timeline not found after 8s");
       }
     }, 200);
+  }
+
+  private _deadlineOutcome(attempts: number): ProbeOutcome {
+    if (attempts < 40 || this._callbacks.hostOwnsDeadline?.()) return null;
+    return { kind: "error", message: "Composition timeline not found after 8s" };
   }
 
   private _poll(attempts: number): ProbeOutcome {
