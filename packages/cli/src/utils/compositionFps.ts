@@ -5,8 +5,7 @@ import { parseHTML } from "linkedom";
 import { c } from "../ui/colors.js";
 
 function getHtmlAttribute(element: Element, name: string): string | null {
-  // linkedom preserves attribute spelling; HTML names are case-insensitive and
-  // browsers keep the first occurrence when duplicate attributes are present.
+  // linkedom preserves spelling; HTML names match without case and keep the first duplicate.
   return (
     Array.from(element.attributes).find((attribute) => attribute.name.toLowerCase() === name)
       ?.value ?? null
