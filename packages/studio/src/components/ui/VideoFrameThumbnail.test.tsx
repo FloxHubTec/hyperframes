@@ -107,6 +107,27 @@ describe("VideoFrameThumbnail", () => {
     return videos[videos.length - 1];
   };
 
+  it("shows a still, unanimated loading box until the frame decodes", () => {
+    render({ src: "clip.mp4" });
+    const video = videos[0];
+    const box = container.querySelector("div");
+    expect(box).not.toBeNull();
+    // The pulse read as busy with many thumbnails loading at once (#5584).
+    expect(box?.className).not.toMatch(/animate-/);
+    expect(box?.className).toContain("bg-panel-surface");
+    // Same footprint as the frame that replaces it: no layout shift on decode.
+    expect(box?.className).toContain("w-full");
+    expect(box?.className).toContain("h-full");
+
+    act(() => video.dispatch("loadedmetadata"));
+    act(() => video.dispatch("seeked"));
+
+    const img = container.querySelector("img");
+    expect(img?.className).toContain("w-full");
+    expect(img?.className).toContain("h-full");
+    expect(container.querySelector("div.animate-pulse")).toBeNull();
+  });
+
   it("renders the fallback label when the video errors", () => {
     render({ src: "missing.mp4", fallbackLabel: "VIDEO" });
     const video = videos[0];

@@ -69,9 +69,10 @@ export function VideoFrameThumbnail({
   }
 
   if (!frame) {
-    return (
-      <div className="w-full h-full bg-neutral-800 animate-pulse motion-reduce:animate-none" />
-    );
+    // A still surface box. Many of these load at once on the timeline, and a
+    // pulse on each reads as busy and slow. Same w-full h-full footprint as
+    // the decoded frame, so the swap shifts no layout.
+    return <div className="w-full h-full bg-panel-surface" />;
   }
 
   return <img src={frame} alt="" draggable={false} className="w-full h-full object-contain" />;
