@@ -3,14 +3,12 @@ import { c } from "./colors.js";
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  // Round first so 1048575 B reads "1.0 MB", never "1024.0 KB".
   const kb = Math.round((bytes / 1024) * 10) / 10;
   if (kb < 1024) return `${kb.toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function formatDuration(ms: number): string {
-  // Work in rounded tenths so 59.96s reads "1m 0.0s", never "60.0s" or "1m 60.0s".
   const tenths = Math.round(ms / 100);
   if (tenths < 600) return `${(tenths / 10).toFixed(1)}s`;
   const minutes = Math.floor(tenths / 600);
