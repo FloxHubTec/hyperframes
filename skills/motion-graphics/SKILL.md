@@ -118,7 +118,7 @@ Dispatch a subagent (prompt = `agents/director.md` Part 2 + dispatch context inc
 
 Include the shared [motion principles](../hyperframes-creative/references/motion-principles.md) in the Builder's dispatch context. For `charts` and `stat`, also include [data in motion](../hyperframes-creative/references/data-in-motion.md). The Builder reads these guides before writing the timeline.
 
-Dispatch a subagent. prompt = full `agents/builder.md` + dispatch context (shot-plan.json, `catalog-map.md`, the category's `module.md`, `references/motion-vocabulary.md`, `references/builder-contract.md`). **Reuse-first**: `npx hyperframes add <block>` + customize in place; hand-author only gaps + the asset-fusion affordance. Output the project's root `index.html` — the scaffold's main composition that `check`, `snapshot` and `render` target by default (`compositions/` holds only blocks added via `hyperframes add`, mounted from `index.html` via `data-composition-src`). Honor the HF contract (paused GSAP timeline on `window.__timelines`, `class="clip"` + stable ids, `tl.seek(0)`, deterministic).
+Dispatch a subagent. prompt = full `agents/builder.md` + dispatch context (`shot-plan.json`, `catalog-map.md`, the category's `module.md`, `references/motion-vocabulary.md`, `references/builder-contract.md`). **Reuse-first**: `npx hyperframes add <block>` + customize in place; hand-author only gaps + the asset-fusion affordance. Output the project's root `index.html` — the scaffold's main composition that `check`, `snapshot` and `render` target by default (`compositions/` holds only blocks added via `hyperframes add`, mounted from `index.html` via `data-composition-src`). Honor the HF contract (paused GSAP timeline on `window.__timelines`, `class="clip"` + stable ids, `tl.seek(0)`, deterministic).
 
 ### Step 5 — Verify (Bash → repair subagent on failure)
 
@@ -148,14 +148,14 @@ Verify the output exists, is non-empty, and has the intended duration. The final
 
 ## Resume table
 
-| State                                                    | Continue from              |
-| -------------------------------------------------------- | -------------------------- |
-| no `shot-plan.json`                                      | Step 1 (plan)              |
-| `shot-plan.json` has `asset_needs`, no `assets/`         | Step 2 (source)            |
-| `shot-plan.json` final, root `index.html` still scaffold | Step 3/4 (design+build)    |
-| root `index.html` authored, proof snapshots absent       | Step 5 (verify)            |
-| checks and proof snapshots pass, no approved render      | Step 6 (approval)          |
-| approved render exists                                   | verify output, then report |
+| State                                                                                                           | Continue from              |
+| --------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| no `shot-plan.json`                                                                                             | Step 1 (plan)              |
+| `shot-plan.json` has `asset_needs`, no `assets/`                                                                | Step 2 (source)            |
+| `shot-plan.json` final, root `index.html` has no `shot-plan.json` elements (still the blank `main` composition) | Step 3/4 (design+build)    |
+| root `index.html` authored, proof snapshots absent                                                              | Step 5 (verify)            |
+| checks and proof snapshots pass, no approved render                                                             | Step 6 (approval)          |
+| approved render exists                                                                                          | verify output, then report |
 
 ## Design notes (maintainers — execution does not read this)
 
