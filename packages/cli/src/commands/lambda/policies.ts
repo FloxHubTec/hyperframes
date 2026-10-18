@@ -98,6 +98,7 @@ const REQUIRED_ACTIONS = {
     "lambda:AddPermission",
     "lambda:CreateFunction",
     "lambda:DeleteFunction",
+    "lambda:DeleteFunctionConcurrency",
     "lambda:GetFunction",
     "lambda:GetFunctionConfiguration",
     "lambda:InvokeFunction",
