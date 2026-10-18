@@ -1,7 +1,7 @@
 import type { Ref } from "react";
 
-// Framey, the desktop app's cursor mascot, as hyperframes-internal packages/nib draws it: a rounded triangle with a
-// white rim and one eye, framed square around the body and rim like the app's FrameyMark.
+// Framey, the desktop app's cursor mascot, as the app draws it: a rounded triangle with a white rim and one eye,
+// framed square around the body and rim.
 const BODY = "M77.55 48.44 L122.77 65.85 L99.3 89.41 Z";
 const EYE = { cx: 111.6, cy: 68.2, r: 11.5 };
 const RIM = 24;
