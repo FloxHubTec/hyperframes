@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 
 /**
- * "Install the desktop app": shown where the preview server has the app or its download to offer; a press opens the
- * project in the app here, or goes to hyperframes.dev's download.
+ * "Install the desktop app": shown where the preview server has the app or its download to offer. With the app ready a
+ * press opens the project in it; otherwise it opens the guide card (download, install, open).
  */
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -14,6 +14,14 @@ const showToast = vi.fn();
 vi.mock("../contexts/StudioContext", () => ({ useStudioShellContext: () => ({ showToast }) }));
 const track = vi.fn();
 vi.mock("../utils/studioTelemetry", () => ({ trackStudioEvent: track }));
+const FOLDER = "/work/launch-teaser";
+vi.mock("../contexts/FileManagerContext", () => ({
+  useFileManagerContextOptional: () => ({ projectDir: FOLDER }),
+}));
+const copied: string[] = [];
+vi.mock("../utils/clipboard", () => ({
+  copyTextToClipboard: async (text: string) => (copied.push(text), true),
+}));
 
 const { OpenInDesktopButton } = await import("./OpenInDesktopButton");
 const { resolveTabId } = await import("../telemetry/tabId");
@@ -117,25 +125,153 @@ it("opens the project in an installed app that has no download (Windows)", async
   expect(posts).toBe(1);
 });
 
-it("reads exactly 'Install the desktop app' beside Framey", async () => {
-  serve(Response.json({ available: true, handoff: true, downloadUrl: DOWNLOAD }));
+/** Runs `body` with the poll and slow-download timers under test control. */
+async function withFakeTimers(body: () => Promise<void>) {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+  try {
+    await body();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+const guide = () => document.querySelector<HTMLElement>('[data-testid="desktop-guide"]');
+const stepState = (n: number) =>
+  guide()?.querySelector<HTMLElement>(`[data-step="${n}"]`)?.dataset.state ?? null;
+const cardButton = (text: string) =>
+  [...(guide()?.querySelectorAll("button") ?? [])].find((b) => b.textContent === text) ?? null;
+const noApp = { os: "darwin", app_installed: false, download_available: true };
+const routeBody = (over: Record<string, unknown> = {}) => ({
+  ...noApp,
+  available: true,
+  handoff: false,
+  downloadUrl: DOWNLOAD,
+  installed: false,
+  ...over,
+});
+
+it("reads 'Install the desktop app' beside Framey, and 'Open in desktop app' once the app takes projects", async () => {
+  serve(Response.json(routeBody()));
   await mount();
   expect(button()!.textContent).toBe("Install the desktop app");
   expect(button()!.querySelector("svg .hf-framey-eye")).not.toBeNull();
+  act(() => mounted!.root.unmount());
+  mounted = null;
+
+  serve(Response.json(routeBody({ handoff: true, installed: true, app_installed: true })));
+  await mount();
+  expect(button()!.textContent).toBe("Open in desktop app");
 });
 
-it("without the app here, is a link to hyperframes.dev's download and opens nothing", async () => {
-  const linux = `${DOWNLOAD}?os=linux`;
-  serve(Response.json({ available: true, handoff: false, downloadUrl: linux }), { opened: true });
+it("without the app, a press opens the guide at step 1 and hands nothing over", async () => {
+  serve(Response.json(routeBody()), { opened: true });
   await mount();
-  const link = button()!;
-  expect(link.tagName).toBe("A");
-  expect(link.getAttribute("href")).toBe(tagged(linux));
-  expect(link.getAttribute("target")).toBe("_blank");
-  expect(link.textContent).toBe("Install the desktop app");
-  await act(async () => link.click());
+  await act(async () => button()!.click());
+  expect(guide()).not.toBeNull();
+  expect([stepState(1), stepState(2), stepState(3)]).toEqual(["now", "todo", "todo"]);
+  expect(cardButton("Open in desktop app")!.disabled).toBe(true);
   expect(posts).toBe(0);
+  expect(events("desktop_cta_guide")).toEqual([{ step: "opened", ...noApp }]);
 });
+
+it("step 1 opens the tagged download in a new tab, then the button says what is left", async () => {
+  const opened: string[] = [];
+  const tab = { opener: {} as unknown };
+  vi.stubGlobal("open", (url: string) => (opened.push(url), tab));
+  serve(Response.json(routeBody()));
+  await mount();
+  await act(async () => button()!.click());
+  await act(async () => cardButton("Download for Mac")!.click());
+  expect(opened).toEqual([tagged(DOWNLOAD)]);
+  expect(tab.opener).toBeNull();
+  expect([stepState(1), stepState(2)]).toEqual(["done", "now"]);
+  expect(guide()!.textContent).toContain("Looking for the app…");
+  expect(button()!.textContent).toBe("Finish installing2 of 3");
+  expect(events("desktop_cta_outcome")).toEqual([{ outcome: "sent_to_download", ...noApp }]);
+  expect(events("desktop_cta_guide").map((e) => (e as { step: string }).step)).toEqual([
+    "opened",
+    "download_opened",
+  ]);
+});
+
+it("names the download when the browser blocks the new tab, and leaves step 1 to do", async () => {
+  vi.stubGlobal("open", () => null);
+  serve(Response.json(routeBody()));
+  await mount();
+  await act(async () => button()!.click());
+  await act(async () => cardButton("Download for Mac")!.click());
+  expect(showToast).toHaveBeenCalledWith(`Get the HyperFrames desktop app at ${DOWNLOAD}`, "info");
+  expect(stepState(1)).toBe("now");
+  expect(events("desktop_cta_outcome")).toEqual([
+    { outcome: "failed", reason: "download_tab_blocked", ...noApp },
+  ]);
+});
+
+it("finds the install only from the preview server, asking only while the card is open", () =>
+  withFakeTimers(async () => {
+    let answer = routeBody();
+    let gets = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return Response.json({ opened: true });
+        gets += 1;
+        return Response.json(answer);
+      }),
+    );
+    vi.stubGlobal("open", () => ({ opener: null }));
+    await mount();
+    expect(gets).toBe(1);
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(gets).toBe(1);
+
+    await act(async () => button()!.click());
+    await act(async () => cardButton("Download for Mac")!.click());
+    await act(async () => vi.advanceTimersByTime(2000));
+    const asked = gets;
+    expect(asked).toBeGreaterThan(1);
+    expect(events("desktop_cta_guide").map((e) => (e as { step: string }).step)).not.toContain(
+      "install_detected",
+    );
+
+    answer = routeBody({ handoff: true, installed: true });
+    await act(async () => vi.advanceTimersByTime(2000));
+    expect([stepState(2), stepState(3)]).toEqual(["done", "now"]);
+    expect(cardButton("Open in desktop app")!.disabled).toBe(false);
+    expect(button()!.textContent).toBe("Open in desktop app");
+    expect(guide()!.querySelector('svg[data-mood="found"]')).not.toBeNull();
+    const detected = events("desktop_cta_guide").filter(
+      (e) => (e as { step: string }).step === "install_detected",
+    );
+    expect(detected).toEqual([
+      { step: "install_detected", os: "darwin", app_installed: true, download_available: true },
+    ]);
+    const settled = gets;
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(gets).toBe(settled);
+  }));
+
+it("stops asking the preview server when the card closes", () =>
+  withFakeTimers(async () => {
+    let gets = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ((gets += 1), Response.json(routeBody()))),
+    );
+    await mount();
+    await act(async () => button()!.click());
+    await act(async () => vi.advanceTimersByTime(4000));
+    expect(gets).toBeGreaterThan(2);
+    await act(async () => button()!.click());
+    expect(guide()).toBeNull();
+    const closedAt = gets;
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(gets).toBe(closedAt);
+    expect(events("desktop_cta_guide").map((e) => (e as { step: string }).step)).toEqual([
+      "opened",
+      "closed",
+    ]);
+  }));
 
 it("opens the project in the app and says so", async () => {
   serve(Response.json({ available: true, handoff: true, downloadUrl: DOWNLOAD }), {
@@ -146,6 +282,7 @@ it("opens the project in the app and says so", async () => {
   await act(async () => button()!.click());
   expect(posts).toBe(1);
   expect(postBodies).toEqual([{ cta: resolveTabId() }]);
+  expect(guide()).toBeNull();
   expect(showToast).toHaveBeenCalledWith(
     "Opening this project in the HyperFrames desktop app",
     "info",
@@ -153,30 +290,63 @@ it("opens the project in the app and says so", async () => {
   expect(button()!.dataset.opening).toBe("true");
 });
 
-it("goes to the download when the app could not take the project", async () => {
+it("a failed hand-off opens the card at step 3 with the folder to copy and Try again", async () => {
   const opened: string[] = [];
   vi.stubGlobal("open", (url: string) => (opened.push(url), {}));
-  serve(Response.json({ available: true, handoff: true, downloadUrl: DOWNLOAD }), {
+  copied.length = 0;
+  serve(Response.json(routeBody({ handoff: true, installed: true })), {
     opened: false,
     reason: "open-failed",
     downloadUrl: DOWNLOAD,
   });
   await mount();
   await act(async () => button()!.click());
-  expect(opened).toEqual([tagged(DOWNLOAD)]);
-  expect(showToast).not.toHaveBeenCalled();
+  expect(opened).toEqual([]);
+  expect(button()!.textContent).toBe("Couldn't open");
+  expect(stepState(3)).toBe("bad");
+  expect(guide()!.textContent).toContain("Almost there: the last step needs another try.");
+  expect(guide()!.textContent).not.toContain("Everything is ready");
+  expect(guide()!.querySelector('[data-testid="desktop-guide-folder"]')!.textContent).toBe(FOLDER);
+  await act(async () =>
+    guide()!.querySelector<HTMLButtonElement>('[aria-label="Copy folder path"]')!.click(),
+  );
+  expect(copied).toEqual([FOLDER]);
+  await act(async () => cardButton("Try again")!.click());
+  expect(posts).toBe(2);
 });
 
-it("names the download when the browser blocks the new tab", async () => {
-  vi.stubGlobal("open", () => null);
-  serve(Response.json({ available: true, handoff: true, downloadUrl: DOWNLOAD }), {
+it("a hand-off that finds the app gone goes back to the download step", async () => {
+  serve(Response.json(routeBody({ handoff: true, installed: true })), {
     opened: false,
     reason: "not-installed",
     downloadUrl: DOWNLOAD,
   });
   await mount();
   await act(async () => button()!.click());
-  expect(showToast).toHaveBeenCalledWith(`Get the HyperFrames desktop app at ${DOWNLOAD}`, "info");
+  expect([stepState(1), stepState(3)]).toEqual(["now", "todo"]);
+  expect(button()!.textContent).toBe("Install the desktop app");
+});
+
+it("where the app is installed but cannot take a project (Linux), step 3 shows the folder to drop in", async () => {
+  const linux = { os: "linux", app_installed: true, download_available: true };
+  serve(
+    Response.json({
+      ...linux,
+      available: true,
+      handoff: false,
+      downloadUrl: `${DOWNLOAD}?os=linux`,
+      installed: true,
+    }),
+    { opened: true },
+  );
+  await mount();
+  await act(async () => button()!.click());
+  expect([stepState(1), stepState(2), stepState(3)]).toEqual(["done", "done", "now"]);
+  expect(guide()!.textContent).toContain("Found HyperFrames on this computer.");
+  expect(guide()!.textContent).toContain("Open HyperFrames and drop this folder in:");
+  expect(guide()!.querySelector('[data-testid="desktop-guide-folder"]')!.textContent).toBe(FOLDER);
+  expect(cardButton("Open in desktop app")).toBeNull();
+  expect(posts).toBe(0);
 });
 
 it("counts where the button can show, the app here, and platforms with no app", async () => {
@@ -234,10 +404,9 @@ it("records one impression, only once the button is on screen", async () => {
   expect(reveal).toBeNull();
 });
 
-it("records the click and its outcome for each way a press ends", async () => {
-  const outcomes = async (post: unknown, open: (url: string) => unknown = () => ({})) => {
+it("records the click and its outcome for each way a hand-off ends", async () => {
+  const outcomes = async (post: unknown) => {
     track.mockReset();
-    vi.stubGlobal("open", open);
     serve(
       Response.json({
         ...MAC,
@@ -259,13 +428,12 @@ it("records the click and its outcome for each way a press ends", async () => {
     clicks: [{ action: "open_in_desktop", ...MAC }],
     outcomes: [{ outcome: "opened", ...MAC }],
   });
-  const missing = { opened: false, reason: "not-installed", downloadUrl: DOWNLOAD };
-  expect((await outcomes(missing)).outcomes).toEqual([
-    { outcome: "sent_to_download", reason: "not-installed", ...MAC },
-  ]);
-  expect((await outcomes(missing, () => null)).outcomes).toEqual([
-    { outcome: "failed", reason: "download_tab_blocked", ...MAC },
-  ]);
+  expect(
+    (await outcomes({ opened: false, reason: "open-failed", downloadUrl: DOWNLOAD })).outcomes,
+  ).toEqual([{ outcome: "failed", reason: "open-failed", ...MAC }]);
+  expect(
+    (await outcomes({ opened: false, reason: "not-installed", downloadUrl: DOWNLOAD })).outcomes,
+  ).toEqual([{ outcome: "failed", reason: "not-installed", ...MAC }]);
 });
 
 it("records a press the preview server never answered as failed", async () => {
@@ -289,8 +457,9 @@ it("records a press the preview server never answered as failed", async () => {
   ]);
 });
 
-it("records the download link's press as sent to the download, never as an install", async () => {
+it("records the download press as sent to the download, never as an install", async () => {
   const linux = { os: "linux", app_installed: false, download_available: true };
+  vi.stubGlobal("open", () => ({ opener: null }));
   serve(
     Response.json({
       ...linux,
@@ -302,9 +471,10 @@ it("records the download link's press as sent to the download, never as an insta
   );
   await mount();
   await act(async () => button()!.click());
+  await act(async () => cardButton("Download for Linux")!.click());
   expect(events("toolbar_action")).toEqual([{ action: "get_desktop_app", ...linux }]);
   expect(events("desktop_cta_outcome")).toEqual([{ outcome: "sent_to_download", ...linux }]);
   const sent = JSON.stringify(track.mock.calls);
-  expect(sent).not.toMatch(/"outcome":"[a-z_]*install/);
+  expect(sent).not.toMatch(/"(outcome|step)":"[a-z_]*install/);
   expect(sent).not.toContain("/");
 });
