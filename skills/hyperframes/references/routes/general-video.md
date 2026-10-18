@@ -8,5 +8,6 @@
 
 - **Open-ended requests only:** first derive a one-sentence `message`. Ask `audience` only when it is unclear and would change the story or terminology. Ask `destination` only when it would change aspect or composition. Ask for a priority only when the brief contains a real trade-off. Default to one best version; ask about variations only when the user requests options or comparison.
 - **Specific requests:** a complete ask such as "a static title card with our logo for a website hero" needs no discovery questions.
+- **Conditional:** a multi-scene or longer piece with no voice signal adds **`narration`** — narrated or silent? Otherwise infer it and state it: a title card, poster, or loop is `no`; a requested voiceover is `yes`.
 - **Pitch round:** `message` — the unformed open-ended request is this round's home case.
 - **Run-shape:** both questions apply. `/general-video` is also the companion host, so `flow: companion` stays on this route with the full toolbox.

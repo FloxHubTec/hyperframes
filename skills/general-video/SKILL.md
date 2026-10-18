@@ -155,6 +155,7 @@ A run is complete only when:
 
 - requested scope is implemented;
 - for `flow: companion`, the treatment is delivered, not just the scope: every scene's cited blueprint or rules realized, the audio identity present (or the silence chosen and said), the open and close designed rather than defaulted;
+- when `narration` is `yes` or `minimal`, `index.html` carries the voice track; a missing track blocks render;
 - `npx hyperframes check` passes, including its built-in lint stage;
 - design adherence is reviewed against `/hyperframes-creative` → `references/design-adherence.md` when a design spec exists;
 - contrast findings are resolved;

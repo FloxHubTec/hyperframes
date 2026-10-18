@@ -71,7 +71,7 @@ Ask only fields used by the selected route. Route entries identify their must-ha
 | `audience`    | Who will watch                                                 | Infer when clear. Ask only when a different answer changes the story or terminology.                                                                |
 | `message`     | The one thing the video must communicate                       | Derive and echo one sentence. Do not storyboard until this is clear.                                                                                |
 | `angle`       | Route-specific story shape                                     | Recommend one route-defined option with a reason.                                                                                                   |
-| `narration`   | `yes`, `minimal`, or `no`, plus route-specific modes           | Follow the selected route.                                                                                                                          |
+| `narration`   | `yes`, `minimal`, or `no`, plus route-specific modes           | Follow the route and its workflow. If neither sets a default, infer from the request and state it. Ask only when unknown and it changes the build.  |
 
 ### Remembered defaults
 
