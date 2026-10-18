@@ -68,6 +68,20 @@ describe("openInDesktop", () => {
     }
   });
 
+  it("leaves the press's page id for the app only when the app took the folder", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-cta-"));
+    const record = join(dir, ".hyperframes", "desktop-cta.json");
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>");
+      openInDesktop(dir, { ...LIVE, cta: "page-1", open: () => false, installed: () => false });
+      expect(existsSync(record)).toBe(false);
+      openInDesktop(dir, { ...LIVE, cta: "page-1", open: () => true });
+      expect(JSON.parse(readFileSync(record, "utf8"))).toMatchObject({ cta: "page-1" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("leaves a project's own marker file alone", () => {
     const dir = mkdtempSync(join(tmpdir(), "hf-marked-"));
     try {

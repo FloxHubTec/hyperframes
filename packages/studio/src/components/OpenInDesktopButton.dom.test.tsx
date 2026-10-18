@@ -16,18 +16,27 @@ const track = vi.fn();
 vi.mock("../utils/studioTelemetry", () => ({ trackStudioEvent: track }));
 
 const { OpenInDesktopButton } = await import("./OpenInDesktopButton");
+const { resolveTabId } = await import("../telemetry/tabId");
+const tagged = (url: string) => {
+  const withId = new URL(url);
+  withId.searchParams.set("hf_cta", resolveTabId());
+  return withId.toString();
+};
 
 const DOWNLOAD = "https://hyperframes.dev/studio/download";
 let mounted: { root: Root; host: HTMLElement } | null = null;
 let posts: number;
+let postBodies: unknown[];
 
 function serve(get: Response | null, post?: unknown) {
   posts = 0;
+  postBodies = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_url: string, init?: RequestInit) => {
       if (init?.method === "POST") {
         posts += 1;
+        postBodies.push(JSON.parse(String(init.body ?? "null")));
         return Response.json(post);
       }
       return get ?? new Response("Not found", { status: 404 });
@@ -121,7 +130,7 @@ it("without the app here, is a link to hyperframes.dev's download and opens noth
   await mount();
   const link = button()!;
   expect(link.tagName).toBe("A");
-  expect(link.getAttribute("href")).toBe(linux);
+  expect(link.getAttribute("href")).toBe(tagged(linux));
   expect(link.getAttribute("target")).toBe("_blank");
   expect(link.textContent).toBe("Install the desktop app");
   await act(async () => link.click());
@@ -136,6 +145,7 @@ it("opens the project in the app and says so", async () => {
   await mount();
   await act(async () => button()!.click());
   expect(posts).toBe(1);
+  expect(postBodies).toEqual([{ cta: resolveTabId() }]);
   expect(showToast).toHaveBeenCalledWith(
     "Opening this project in the HyperFrames desktop app",
     "info",
@@ -153,7 +163,7 @@ it("goes to the download when the app could not take the project", async () => {
   });
   await mount();
   await act(async () => button()!.click());
-  expect(opened).toEqual([DOWNLOAD]);
+  expect(opened).toEqual([tagged(DOWNLOAD)]);
   expect(showToast).not.toHaveBeenCalled();
 });
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useStudioShellContext } from "../contexts/StudioContext";
+import { resolveTabId } from "../telemetry/tabId";
 import { studioApiFetch } from "../utils/studioApiFetch";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 import { FrameyGlyph } from "./FrameyGlyph";
@@ -22,6 +23,13 @@ type DesktopRoute = {
 };
 
 type Eligibility = "open_in_app" | "download" | "no_app_for_platform";
+
+/** The download, tagged with this page's telemetry `tab_id` so a later install can be matched to the press. */
+const withCta = (url: string): string => {
+  const tagged = new URL(url);
+  tagged.searchParams.set("hf_cta", resolveTabId());
+  return tagged.toString();
+};
 
 const eligibilityOf = (route: DesktopRoute): Eligibility =>
   route.handoff ? "open_in_app" : route.downloadUrl ? "download" : "no_app_for_platform";
@@ -141,7 +149,7 @@ export function OpenInDesktopButton() {
     return (
       <a
         ref={trigger as React.RefObject<HTMLAnchorElement>}
-        href={route.downloadUrl}
+        href={withCta(route.downloadUrl)}
         target="_blank"
         rel="noopener noreferrer"
         data-testid="header-open-in-desktop"
@@ -159,7 +167,7 @@ export function OpenInDesktopButton() {
   }
 
   const download = (url: string, reason: string) => {
-    const tab = window.open(url, "_blank");
+    const tab = window.open(withCta(url), "_blank");
     if (tab) {
       tab.opener = null;
       outcome("sent_to_download", reason);
@@ -174,7 +182,11 @@ export function OpenInDesktopButton() {
     setOpening(true);
     trackStudioEvent("toolbar_action", { action: "open_in_desktop", ...route.context });
     try {
-      const res = await studioApiFetch(ROUTE, { method: "POST" });
+      const res = await studioApiFetch(ROUTE, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cta: resolveTabId() }),
+      });
       const result = (await res.json()) as OpenResult;
       if (result.opened) {
         outcome("opened");

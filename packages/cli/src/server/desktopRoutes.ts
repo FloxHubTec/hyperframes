@@ -7,6 +7,8 @@ import {
 } from "../utils/desktopApp.js";
 import { identityAllowed } from "./telemetryIdentity.js";
 
+const CTA_ID = /^[A-Za-z0-9-]{1,64}$/;
+
 /** A bodiless POST is a simple request, so any page can send one to localhost: it has to come from this Studio. */
 export function sameOriginPost(headers: {
   host?: string;
@@ -25,7 +27,7 @@ export function mountDesktopRoutes(
   projectDir: string,
   {
     ready = HANDOFF_READY,
-    open = openInDesktop,
+    open = (dir: string, cta?: string) => openInDesktop(dir, { cta }),
     platform = process.platform,
     installed = () => desktopInstalled({ platform }),
   } = {},
@@ -41,7 +43,7 @@ export function mountDesktopRoutes(
       installed: here,
     });
   });
-  app.post("/api/open-in-desktop", (c) => {
+  app.post("/api/open-in-desktop", async (c) => {
     const allowed = sameOriginPost({
       host: c.req.header("host"),
       origin: c.req.header("origin"),
@@ -54,6 +56,8 @@ export function mountDesktopRoutes(
         reason: "handoff-unavailable",
         downloadUrl,
       });
-    return c.json(open(projectDir));
+    const body: unknown = await c.req.json().catch(() => null);
+    const cta = (body as { cta?: unknown } | null)?.cta;
+    return c.json(open(projectDir, typeof cta === "string" && CTA_ID.test(cta) ? cta : undefined));
   });
 }

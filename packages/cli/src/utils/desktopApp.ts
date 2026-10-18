@@ -34,6 +34,8 @@ export interface AgentSession {
 }
 
 export const AGENT_HANDOFF_FILE = join(".hyperframes", "agent-handoff.json");
+/** The Studio page's telemetry `tab_id`, left for the app to report its first open and export against. */
+const DESKTOP_CTA_RECORD = "desktop-cta.json";
 
 // ponytail: Claude Code, then Codex, then Grok; an agent started inside another's shell carries both, unsorted.
 export function agentSession(env: NodeJS.ProcessEnv = process.env): AgentSession | null {
@@ -155,8 +157,10 @@ export function openInDesktop(
     launch = launchApp,
     installed = () => desktopInstalled({ platform }),
     env = process.env,
+    cta,
     ...where
   }: AppLookup & {
+    cta?: string;
     ready?: boolean;
     open?: (bundleId: string, dir: string) => boolean;
     launch?: (executable: string, dir: string) => boolean;
@@ -170,11 +174,14 @@ export function openInDesktop(
     reason,
     downloadUrl: desktopDownloadUrl(platform) ?? STUDIO_PAGE,
   });
-  const opened = (canary: boolean): DesktopOpenResult => ({
-    opened: true,
-    app: canary ? "HyperFrames Canary" : "the HyperFrames desktop app",
-    handedOver: leaveHandoff(dir, agentSession(env)),
-  });
+  const opened = (canary: boolean): DesktopOpenResult => {
+    if (cta) writeRecord(dir, DESKTOP_CTA_RECORD, JSON.stringify({ cta, at: Date.now() }));
+    return {
+      opened: true,
+      app: canary ? "HyperFrames Canary" : "the HyperFrames desktop app",
+      handedOver: leaveHandoff(dir, agentSession(env)),
+    };
+  };
   if (!ready) return notOpened("handoff-unavailable");
   markBareIndexAsProject(dir);
   if (platform === "darwin") {
