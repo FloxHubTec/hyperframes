@@ -69,6 +69,7 @@ import { applyRenderWarningPolicy } from "../renderOrchestrator.js";
 import { runEncodeStage } from "../render/stages/encodeStage.js";
 import { runCaptureStage } from "../render/stages/captureStage.js";
 import { resolveVideoCaptureBeyondViewport } from "../render/captureBeyondViewport.js";
+import { resolveCaptureJpegQuality } from "../render/captureImageFormat.js";
 import { createCapturePlan } from "../render/capturePlan.js";
 import {
   type ChunkSliceJson,
@@ -92,7 +93,9 @@ import {
   PLAN_VIDEOS_META_RELATIVE_PATH,
   type PlanVideosJson,
   readFfmpegVersion,
+  resolvePlanAudioPath,
 } from "./shared.js";
+import { muxChunkWithAudio } from "./chunkAudio.js";
 import { DISTRIBUTED_RENDER_CAPABILITIES, readPlanProtocolV1 } from "./planProtocol.js";
 import { validatePlanV2MaterializedTarget } from "./planV2.js";
 
@@ -819,7 +822,10 @@ export async function renderChunk(
       height: plan.dimensions.height,
       fps: { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen },
       format: plan.dimensions.format === "mp4" ? "jpeg" : "png",
-      quality: plan.dimensions.format === "mp4" ? 80 : undefined,
+      quality:
+        plan.dimensions.format === "mp4"
+          ? resolveCaptureJpegQuality(job.config.quality)
+          : undefined,
       deviceScaleFactor: encoder.deviceScaleFactor,
       // Re-inject the controller's snapshotted variables so the chunk's
       // first capture sees the same `window.__hfVariables` the in-process
@@ -1051,9 +1057,11 @@ export async function renderChunk(
       const effectiveQuality = encoder.crf ?? preset.quality;
       const effectiveBitrate = encoder.crf != null ? undefined : encoder.bitrate;
       // For non-pngseq, encodeStage writes to `outputPath` when `isPngSequence`
-      // is false. `videoOnlyPath` is the encoder's direct output (no mux —
-      // mux happens in assemble()).
-      const videoOnlyPath = outputChunkPath;
+      // is false. `videoOnlyPath` is the encoder's direct output: assemble muxes
+      // the audio, or a chunk that carries audio muxes its own below.
+      const videoOnlyPath = encoder.chunksCarryAudio
+        ? `${outputChunkPath}.video.mp4`
+        : outputChunkPath;
       if (isPngSequence) {
         if (!existsSync(outputChunkPath)) mkdirSync(outputChunkPath, { recursive: true });
       } else {
@@ -1065,16 +1073,16 @@ export async function renderChunk(
       await runEncodeStage({
         job,
         log,
-        outputPath: outputChunkPath,
+        outputPath: videoOnlyPath,
         framesDir,
         videoOnlyPath,
-        width: plan.dimensions.width * encoder.deviceScaleFactor,
-        height: plan.dimensions.height * encoder.deviceScaleFactor,
+        width: Math.round(plan.dimensions.width * encoder.deviceScaleFactor),
+        height: Math.round(plan.dimensions.height * encoder.deviceScaleFactor),
         needsAlpha: plan.dimensions.format !== "mp4",
         captureImageFormat: captureOptions.format ?? "jpeg",
-        // Each chunk produces video only — audio is muxed once at assemble
-        // time. Suppressing `hasAudio` skips the png-sequence audio sidecar
-        // AND the mp4 audio mux.
+        // The encoder writes video only; audio joins at assemble time or in the
+        // chunk that carries audio. Suppressing `hasAudio` skips the png-sequence audio
+        // sidecar AND the mp4 audio mux.
         hasAudio: false,
         isPngSequence,
         // `DistributedFormat` has no "gif" member — distributed chunks are
@@ -1100,6 +1108,18 @@ export async function renderChunk(
         lockGopForChunkConcat: !isPngSequence,
         gopSize: framesInChunk,
       });
+      if (encoder.chunksCarryAudio) {
+        await muxChunkWithAudio({
+          videoPath: videoOnlyPath,
+          audioPath: resolvePlanAudioPath(planDir),
+          outputPath: outputChunkPath,
+          chunks,
+          chunkIndex,
+          fps: { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen },
+          timeoutMs: cfg.ffmpegProcessTimeout,
+        });
+        rmSync(videoOnlyPath, { force: true });
+      }
       encodeStageMs = Date.now() - encodeStarted;
     } finally {
       // Cleanest path: captureStage closed the session for us. The defensive

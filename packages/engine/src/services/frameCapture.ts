@@ -9,6 +9,7 @@
  */
 
 import {
+  CDPSession,
   type Browser,
   type Page,
   type Protocol,
@@ -48,6 +49,7 @@ import {
   forceReleaseBrowser,
   buildChromeArgs,
   resolveBrowserGpuMode,
+  captureWithoutWaylandDisplay,
   resolveHeadlessShellPath,
   compositionRequiresWebGpu,
   assertWebGpuAdapterAvailable,
@@ -107,6 +109,16 @@ export type { CaptureOptions, CaptureResult, CaptureBufferResult, CapturePerfSum
  * `heldVideoTime` (motion-blur samples only) is the output frame's time: a video on screen at
  * both times shows its frame for `heldVideoTime`, so footage does not smear. */
 export type BeforeCaptureHook = (page: Page, time: number, heldVideoTime?: number) => Promise<void>;
+
+/** The per-frame wait a capture is in, worded for the stall error a user reads. */
+type CaptureStep =
+  | "seeking the timeline"
+  | "decoding CSS background images"
+  | "injecting video frames"
+  | "waiting for page seek handlers"
+  | "loading color-grading LUTs"
+  | "compositing the page"
+  | "capturing the frame";
 
 export interface CaptureSession {
   browser: Browser;
@@ -298,6 +310,7 @@ export interface CaptureSession {
    * retries via screenshot.
    */
   deFrameTimeouts?: number;
+  captureStep?: CaptureStep;
   /**
    * drawElement init passed every gate but stopped before verification +
    * canvas injection: the session has no video-frame injector yet (probe
@@ -894,18 +907,18 @@ async function waitForCloseWithTimeout(promise: Promise<unknown>): Promise<boole
  * screenshots carry a real alpha channel (Chrome resets the override on every
  * navigation, so this must run after page load).
  *
- * drawElement is also skipped when supersampling (deviceScaleFactor > 1):
+ * drawElement is also skipped when scaling (deviceScaleFactor other than 1):
  * `drawElementImage` reads the canvas at CSS pixels and has no equivalent of
  * `Page.captureScreenshot`'s clip+scale, so it would silently capture at 1x and
  * drop the requested supersample. Such renders fall through to the screenshot
- * path (preMode already forces "screenshot" for DPR > 1).
+ * path (preMode already forces "screenshot" for DPR other than 1).
  */
 async function initDrawElementOrTransparentBackground(
   session: CaptureSession,
   page: Page,
   logInitPhase: (phase: string) => void,
 ): Promise<void> {
-  const supersampling = (session.options.deviceScaleFactor ?? 1) > 1;
+  const supersampling = (session.options.deviceScaleFactor ?? 1) !== 1;
   // forceScreenshot is an explicit routing decision made upstream (render-mode
   // compat hints like raw requestAnimationFrame, alpha formats, low-memory) —
   // drawElement must not override it. Concretely: an rAF-compat comp on
@@ -935,14 +948,14 @@ async function initDrawElementOrTransparentBackground(
     session.deFallbackTrigger = "supersampling";
     console.log(
       "[engine] --experimental-fast-capture disabled for this render: drawElementImage " +
-        "ignores deviceScaleFactor, so supersampled (DPR > 1) output uses screenshot capture.",
+        "ignores deviceScaleFactor, so scaled (DPR other than 1) output uses screenshot capture.",
     );
   }
   if ((session.config?.useDrawElement ?? false) && !supersampling && forceScreenshot) {
     session.deGateReason = "render_mode_hint";
     session.deFallbackTrigger = "render_mode_hint";
     console.log(
-      "[engine] fast capture: falling back to screenshot — render-mode compatibility " +
+      "[engine] fast capture falls back to screenshot: render-mode compatibility " +
         "hint forced screenshot capture (e.g. raw requestAnimationFrame composition).",
     );
   }
@@ -994,7 +1007,7 @@ async function initDrawElementOrTransparentBackground(
       session.deGateReason = "unsupported_chrome";
       session.deFallbackTrigger = "unsupported_chrome";
       console.log(
-        `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
+        `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ` +
           "this Chrome build does not implement canvas.drawElementImage (Dev/Canary-only " +
           "feature); run `hyperframes browser ensure --force` to fetch a supported " +
           "build, or set HYPERFRAMES_BROWSER_PATH to one.",
@@ -1015,7 +1028,7 @@ async function initDrawElementOrTransparentBackground(
       session.deGateReason = "ffmpeg_no_psnr_filter";
       session.deFallbackTrigger = "ffmpeg_no_psnr_filter";
       console.warn(
-        `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
+        `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ` +
           "host ffmpeg is missing or was built without the `psnr` filter " +
           "(libpostproc), so drawElement self-verification cannot run. Install " +
           "an ffmpeg build that includes libpostproc (or set HYPERFRAMES_FFMPEG_PATH " +
@@ -1046,8 +1059,8 @@ async function initDrawElementOrTransparentBackground(
       // Page.captureScreenshot hangs for the full protocol timeout, while
       // beginFrameCapture is the platform's normal baseline path.
       console.log(
-        `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
-          "SwiftShader (software rasterizer — no GPU egress to skip, drawElement is " +
+        `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ` +
+          "SwiftShader (software rasterizer, no GPU egress to skip, drawElement is " +
           "parity-or-slower; see fast-capture-limitations.md)",
       );
       await routeToFallback();
@@ -1061,13 +1074,12 @@ async function initDrawElementOrTransparentBackground(
         const cssFx = await detectCssEffectRisk(page);
         if (cssFx) {
           session.deGateReason = `css_effect:${(cssFx.split(":")[0] ?? "").replace(/[^a-z-]/gi, "")}`;
-          // Full specific effect ("filter:blur" / "filter:drop-shadow" /
-          // "backdrop-filter" / "clip-path") — `deGateReason` sanitizes
-          // this to the low-cardinality prefix; `deFallbackTrigger` keeps
-          // the fine-grained value for the diagnostic profile emission.
+          // Full specific effect from `detectCssEffectRisk` (e.g. "filter:blur",
+          // "mix-blend-mode", "webgl-context") — `deGateReason` keeps its
+          // low-cardinality prefix, `deFallbackTrigger` the full value.
           session.deFallbackTrigger = cssFx;
           console.log(
-            `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
+            `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ` +
               `${cssFx} detected (drawElementImage cannot reproduce it; see fast-capture-limitations.md)`,
           );
           await routeToFallback();
@@ -1102,7 +1114,7 @@ async function initDrawElementOrTransparentBackground(
           session.deGateReason = "at_risk_timeline";
           session.deFallbackTrigger = "at_risk_timeline";
           console.log(
-            `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
+            `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ` +
               `${atRisk.size}/${totalFrames} frames animate a compositor-incompatible prop ` +
               `(blend/3D/clip/mask); drawElementImage drops these mid-animation ` +
               `(deterministic timeline gate; see fast-capture-limitations.md Lim 7)`,
@@ -1120,7 +1132,7 @@ async function initDrawElementOrTransparentBackground(
         session.deGateReason = "3d_init_failed";
         session.deFallbackTrigger = "3d_init_failed";
         console.log(
-          `[engine] fast capture: falling back to ${session.launchCaptureMode} capture — ` +
+          `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ` +
             `3D projection init failed (${threeD.reason ?? "unknown"})`,
         );
         await routeToFallback();
@@ -1265,7 +1277,7 @@ export async function createCaptureSession(
     (config?.enablePageSideCompositing ?? DEFAULT_CONFIG.enablePageSideCompositing)
   ) {
     console.warn(
-      "[engine] useDrawElement is incompatible with page-side shader compositing — " +
+      "[engine] useDrawElement is incompatible with page-side shader compositing, " +
         "ignoring enablePageSideCompositing for this render. Prefer resolveConfig, " +
         "which disables page-side compositing automatically for fast-capture renders.",
     );
@@ -1274,8 +1286,8 @@ export async function createCaptureSession(
   // (the captured surface is sized by the OS window in CSS pixels regardless
   // of `Emulation.setDeviceMetricsOverride`'s DPR). When supersampling we
   // need explicit clip+scale on `Page.captureScreenshot`, so fall back to
-  // the screenshot path for any DPR > 1.
-  const supersampling = (options.deviceScaleFactor ?? 1) > 1;
+  // the screenshot path for any DPR other than 1.
+  const supersampling = (options.deviceScaleFactor ?? 1) !== 1;
   const requestedGpuMode = config?.browserGpuMode ?? DEFAULT_CONFIG.browserGpuMode;
   const resolvedGpuMode = await resolveBrowserGpuMode(requestedGpuMode, {
     chromePath: headlessShell ?? undefined,
@@ -1319,7 +1331,8 @@ export async function createCaptureSession(
     gpuConfig,
   );
 
-  const browserLease = await acquireBrowser(chromeArgs, config);
+  const withoutWaylandDisplay = await captureWithoutWaylandDisplay(resolvedGpuMode);
+  const browserLease = await acquireBrowser(chromeArgs, { ...config, withoutWaylandDisplay });
   return constructCaptureSessionWithRollback({
     browserLease,
     serverUrl,
@@ -1404,6 +1417,15 @@ async function constructCaptureSession(
 
   const page = await browser.newPage();
   onPageCreated(page);
+  // Cap the existing session's inspection buffer; new sessions have separate buffers.
+  const frame = page.mainFrame();
+  // Frame.client is runtime-only, so keep capture working when it is absent.
+  if ("client" in frame && frame.client instanceof CDPSession) {
+    await frame.client.send("Network.enable", {
+      maxTotalBufferSize: 32 * 1024 * 1024,
+      maxResourceBufferSize: 16 * 1024 * 1024,
+    });
+  }
   // Polyfill esbuild's keepNames helper inside the page.
   //
   // The engine is published as raw TypeScript (`packages/engine/package.json`
@@ -1454,7 +1476,7 @@ async function constructCaptureSession(
   // of silently ignoring the old escape hatch.
   if (process.env.HF_FAST_CAPTURE_AUTOALPHA !== undefined) {
     console.warn(
-      "[engine] HF_FAST_CAPTURE_AUTOALPHA is retired and ignored — the requestPaint " +
+      "[engine] HF_FAST_CAPTURE_AUTOALPHA is retired and ignored: the requestPaint " +
         "paint contract captures animated opacity natively (see drawElementService.ts).",
     );
   }
@@ -1627,7 +1649,7 @@ export const HF_READY_DIAGNOSTIC_EXPR = `(async function() {
     await new Promise(function(r) { setTimeout(r, 0); });
   }
   // A thenable resolving via its own setTimeout(0) can still misreport as
-  // pending here (macrotask registration order, not resolution order) — a
+  // pending here (macrotask registration order, not resolution order), a
   // narrow case that self-corrects on the next ~1s diagnostic tick.
   var pendingBuildReadyKeys = keys.filter(function(key) { return !settled[key]; });
   var rejectedBuildReadyKeys = keys.filter(function(key) { return settled[key] === "rejected"; });
@@ -1662,24 +1684,24 @@ export function buildZeroDurationDiagnostic(diag: HfDiagnostic): string {
   if (diag.pendingBuildReadyKeys.length > 0) {
     hints.push(
       `window.__hf.buildReady never resolved for: ${diag.pendingBuildReadyKeys.join(", ")}. ` +
-        "The runtime holds render-ready until every registered buildReady promise settles — " +
-        "find where the composition registers that key and confirm it actually resolves.",
+        "The runtime holds render-ready until every registered buildReady promise settles. " +
+        "Find where the composition registers that key and confirm it actually resolves.",
     );
   }
   if (diag.rejectedBuildReadyKeys.length > 0) {
     hints.push(
       `window.__hf.buildReady rejected for: ${diag.rejectedBuildReadyKeys.join(", ")}. ` +
-        "That key's build promise failed rather than hanging — find why it rejects.",
+        "That key's build promise failed rather than hanging. Find why it rejects.",
     );
   }
   if (!diag.hasPlayer) {
-    hints.push("window.__player was never set — the HyperFrames runtime did not initialize.");
+    hints.push("window.__player was never set: the HyperFrames runtime did not initialize.");
   }
   if (!diag.hasTimeline) {
     hints.push(
       "No GSAP timeline registered (window.__timelines is empty). " +
         "CSS/WAAPI/Lottie animations are usually auto-detected (the runtime infers " +
-        "duration from the longest running animation) — this composition's duration " +
+        "duration from the longest running animation), but this composition's duration " +
         "could not be inferred, which usually means an infinite/unbounded animation " +
         "(e.g. animation-iteration-count: infinite, repeat: -1 WAAPI, or a looping Lottie " +
         "clip) or a Three.js scene with no discoverable AnimationClip.",
@@ -1691,7 +1713,7 @@ export function buildZeroDurationDiagnostic(diag: HfDiagnostic): string {
     );
   }
   if (diag.hasSeek && diag.duration === 0 && diag.renderReady) {
-    hints.push("The runtime finished initializing but reported zero duration — this is permanent.");
+    hints.push("The runtime finished initializing but reported zero duration. This is permanent.");
   }
   return (
     `[FrameCapture] Composition has zero duration.\n` +
@@ -1706,7 +1728,11 @@ async function evaluateHfDiagnostic(page: Page): Promise<HfDiagnostic> {
   return (await page.evaluate(HF_READY_DIAGNOSTIC_EXPR)) as HfDiagnostic;
 }
 
-async function pollHfReady(page: Page, timeoutMs: number, intervalMs: number = 100): Promise<void> {
+export async function pollHfReady(
+  page: Page,
+  timeoutMs: number,
+  intervalMs: number = 100,
+): Promise<void> {
   const readyExpr = `!!(window.__hf && typeof window.__hf.seek === "function" && window.__hf.duration > 0)`;
   const FAST_FAIL_AFTER_MS = 10_000;
   // Throttle diagnostic CDP calls to ~1000ms — running evaluateHfDiagnostic on
@@ -1717,8 +1743,11 @@ async function pollHfReady(page: Page, timeoutMs: number, intervalMs: number = 1
   let lastDiagnosticAt = 0;
 
   while (Date.now() < deadline) {
-    const ready = Boolean(await page.evaluate(readyExpr));
-    if (ready) return;
+    const state = await page.evaluate(
+      `typeof window.__hfStartupError === "string" ? window.__hfStartupError : ${readyExpr}`,
+    );
+    if (typeof state === "string") throw new Error(state);
+    if (state) return;
 
     const elapsed = timeoutMs - (deadline - Date.now());
     if (elapsed >= FAST_FAIL_AFTER_MS) {
@@ -1867,7 +1896,7 @@ export async function pollSubCompositionTimelines(
       scriptFailureBail = true;
       console.warn(
         `[FrameCapture] Sub-composition timeline wait cut short after ${now - start}ms: ` +
-          `script resource(s) failed to load (${failures.join(", ")}) — ` +
+          `script resource(s) failed to load (${failures.join(", ")}), so ` +
           `the timeline registration they carry can never arrive. ` +
           `Fix the script reference; the render proceeds without those animations.`,
       );
@@ -2134,7 +2163,7 @@ export function buildLiveMapWarning(libraries: readonly string[]): CaptureWarnin
     message:
       `Live map viewport(s) detected in the composition (${libraries.join(", ")}). ` +
       `Map tiles load over the network at render time, which the deterministic-render ` +
-      `contract forbids — frames captured before tiles arrive ship a blank or partial map ` +
+      `contract forbids: frames captured before tiles arrive ship a blank or partial map ` +
       `with no error. Bake the map to a video first (see the motion-graphics maps skill / ` +
       `bake-basemap.mjs) and use the baked file as the imagery layer.`,
     details: { sources: [...libraries] },
@@ -2188,7 +2217,34 @@ async function decodeAllImages(page: Page): Promise<void> {
   });
 }
 
-async function applyVideoMetadataHints(
+/** Out-of-band videos a poster now sizes, so dropping their media cannot move layout. */
+export function releasableVideoIds(options: CaptureOptions): string[] {
+  const hinted = new Set((options.videoMetadataHints ?? []).map((hint) => hint.id));
+  return (options.skipReadinessVideoIds ?? []).filter((id) => hinted.has(id));
+}
+
+/** FFmpeg supplies these videos' frames, so their own players would only hold decoders and buffers in every worker. */
+export async function releaseInjectedVideoMedia(
+  page: Page,
+  videoIds: readonly string[],
+): Promise<void> {
+  if (videoIds.length === 0) return;
+  await page.evaluate(
+    (ids: string[]) => {
+      for (const id of ids) {
+        const video = window.__hfMediaEl?.(id) ?? document.getElementById(id);
+        if (!(video instanceof HTMLVideoElement)) continue;
+        video.pause();
+        for (const source of video.querySelectorAll("source")) source.remove();
+        video.removeAttribute("src");
+        video.load();
+      }
+    },
+    [...videoIds],
+  );
+}
+
+export async function applyVideoMetadataHints(
   page: Page,
   hints: readonly CaptureVideoMetadataHint[] | undefined,
 ): Promise<void> {
@@ -2196,7 +2252,8 @@ async function applyVideoMetadataHints(
 
   // fallow-ignore-next-line complexity
   await page.evaluate(
-    (metadataHints: CaptureVideoMetadataHint[]) => {
+    async (metadataHints: CaptureVideoMetadataHint[]) => {
+      const posters = new Set<string>();
       for (const hint of metadataHints) {
         if (
           !hint.id ||
@@ -2210,19 +2267,20 @@ async function applyVideoMetadataHints(
 
         const video = (window.__hfMediaEl?.(hint.id) ??
           document.getElementById(hint.id)) as HTMLVideoElement | null;
-        if (!video) continue;
+        if (!video || video.hasAttribute("poster")) continue;
 
-        if (!video.hasAttribute("width")) video.setAttribute("width", String(hint.width));
-        if (!video.hasAttribute("height")) video.setAttribute("height", String(hint.height));
-
-        const computed = window.getComputedStyle(video);
-        if (
-          !video.style.aspectRatio &&
-          (!computed.aspectRatio || computed.aspectRatio === "auto")
-        ) {
-          video.style.aspectRatio = `${hint.width} / ${hint.height}`;
-        }
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${hint.width}" height="${hint.height}"/>`;
+        const intrinsicSizePoster = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+        video.poster = intrinsicSizePoster;
+        posters.add(intrinsicSizePoster);
       }
+      await Promise.all(
+        [...posters].map((src) => {
+          const image = new Image();
+          image.src = src;
+          return image.decode();
+        }),
+      );
     },
     [...hints],
   );
@@ -2474,6 +2532,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     recordSubTimelineWarning(session, pageReadyTimeout);
 
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
+    await releaseInjectedVideoMedia(page, releasableVideoIds(session.options));
     logInitPhase("applyVideoMetadataHints complete");
 
     // Run independent readiness checks in parallel — videos, images, fonts,
@@ -2496,7 +2555,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
           });
           console.warn(
             `[FrameCapture] Some image elements did not load within ${pageReadyTimeout}ms: ${failedImages}. ` +
-              `Continuing render — affected images may appear blank/missing in early frames.`,
+              `Continuing render. Affected images may appear blank/missing in early frames.`,
           );
         }
         await decodeAllImages(page);
@@ -2518,7 +2577,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
       }, skipVideoIds);
       console.warn(
         `[FrameCapture] Some video elements did not decode within ${pageReadyTimeout}ms: ${failedVideos}. ` +
-          `Continuing render — affected videos will appear as blank/black frames.`,
+          `Continuing render. Affected videos will appear as blank/black frames.`,
       );
     }
     recordCaptureWarnings(
@@ -2630,6 +2689,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     recordSubTimelineWarning(session, pageReadyTimeout);
 
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
+    await releaseInjectedVideoMedia(page, releasableVideoIds(session.options));
     logInitPhase("applyVideoMetadataHints complete");
 
     // Run independent readiness checks in parallel — videos, images, fonts,
@@ -2652,7 +2712,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
           });
           console.warn(
             `[FrameCapture] Some image elements did not load within ${pageReadyTimeout}ms: ${failedImages}. ` +
-              `Continuing render — affected images may appear blank/missing in early frames.`,
+              `Continuing render. Affected images may appear blank/missing in early frames.`,
           );
         }
         await decodeAllImages(page);
@@ -2674,7 +2734,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
       }, bfSkipVideoIds);
       console.warn(
         `[FrameCapture] Some video elements did not decode within ${pageReadyTimeout}ms: ${failedVideos}. ` +
-          `Continuing render — affected videos will appear as blank/black frames.`,
+          `Continuing render. Affected videos will appear as blank/black frames.`,
       );
     }
     recordCaptureWarnings(
@@ -2850,8 +2910,10 @@ async function prepareFrameForCapture(
   );
 
   const seekStart = Date.now();
+  session.captureStep = "seeking the timeline";
   const hasPendingComposite = await seekPageTimeline(page, quantizedTime, seekOptions);
 
+  session.captureStep = "decoding CSS background images";
   await decodeDynamicCssBackgroundImages(page);
 
   const seekMs = Date.now() - seekStart;
@@ -2861,9 +2923,12 @@ async function prepareFrameForCapture(
   // replacements for <video> elements.
   const beforeCaptureStart = Date.now();
   if (session.onBeforeCapture) {
+    session.captureStep = "injecting video frames";
     await session.onBeforeCapture(page, quantizedTime, heldVideoTime);
   }
+  session.captureStep = "waiting for page seek handlers";
   await waitForPendingSeekCompletion(page);
+  session.captureStep = "loading color-grading LUTs";
   await page.evaluate(async () => {
     const runtime = (
       window as Window & {
@@ -2883,6 +2948,7 @@ async function prepareFrameForCapture(
     session.captureMode !== "beginframe" &&
     session.captureMode !== "drawelement"
   ) {
+    session.captureStep = "compositing the page";
     await page.evaluate(async () => {
       const w = window as unknown as { __hf_page_composite_prepare?: () => Promise<boolean> };
       if (typeof w.__hf_page_composite_prepare === "function") {
@@ -2903,6 +2969,7 @@ async function prepareFrameForCapture(
     });
   }
 
+  session.captureStep = "capturing the frame";
   return { quantizedTime, seekMs, beforeCaptureMs };
 }
 
@@ -3417,6 +3484,7 @@ export async function createStaticVerificationPage(session: CaptureSession): Pro
       knownUnregisteredIds: session.subTimelineWaitMemo.unregisteredIds,
     });
     await applyVideoMetadataHints(page, session.options.videoMetadataHints);
+    await releaseInjectedVideoMedia(page, releasableVideoIds(session.options));
 
     const skipVideoIds = session.options.skipReadinessVideoIds ?? [];
     await Promise.all([
@@ -3696,7 +3764,7 @@ async function armStaticDedup(
  * compositor-incompatible properties (blend-mode, 3D transforms, clip-path, mask).
  * drawElement cannot reproduce these effects mid-tween → capture those frames via
  * screenshot instead. opacity/filter fades were dropped from the set once Chrome 151
- * fixed crbug 521861819. See docs/fast-capture-limitations.md Lim 7.
+ * fixed crbug 521861819.
  *
  * Returns the union of at-risk frame indices (±1 margin around each tween interval)
  * and totalFrames (for fraction computation by the caller).
@@ -4183,12 +4251,14 @@ async function captureAccumulatedFrame(
   const frameTime = quantizeSeekTime(absFrameIndex / fps, fps);
 
   const eventfulSeekStart = Date.now();
+  session.captureStep = "seeking the timeline";
   await seekPageTimeline(session.page, frameTime, undefined);
   const totals = { seekMs: Date.now() - eventfulSeekStart, beforeCaptureMs: 0, screenshotMs: 0 };
   if (session.onBeforeCapture) {
     // The injector copies a video's own style only when its frame changes: inject at frameTime
     // first so the held frame carries frameTime's style, not the first sample's.
     const injectStart = Date.now();
+    session.captureStep = "injecting video frames";
     await session.onBeforeCapture(session.page, frameTime, frameTime);
     totals.beforeCaptureMs += Date.now() - injectStart;
   }
@@ -4231,6 +4301,7 @@ async function captureAccumulatedFrame(
   }
 
   const restoreSeekStart = Date.now();
+  session.captureStep = "seeking the timeline";
   await seekPageTimeline(session.page, frameTime, { suppressEvents: true });
   totals.seekMs += Date.now() - restoreSeekStart;
 
@@ -4385,7 +4456,7 @@ export async function captureFrameToBuffer(
             // deadline rejects from outside it, so that catch never runs.
             session.deFrameTimeouts = (session.deFrameTimeouts ?? 0) + 1;
             console.log(
-              `[engine] fast capture: frame ${frameIndex} — capture exceeded ` +
+              `[engine] fast capture frame ${frameIndex}: capture exceeded ` +
                 `${DE_FRAME_TIMEOUT_MS}ms; renderer stalled after drawElementImage ` +
                 `(PRINFRA-488). Failing the drawElement attempt so the whole render ` +
                 `retries via screenshot.`,
@@ -4597,6 +4668,7 @@ export async function captureFramesBatchPipelined(
   const fps = fpsToNumber(options.fps);
   const quantized = times.map((t) => quantizeTimeToFrame(t, fps));
 
+  session.captureStep = "capturing the frame";
   const { encodeResults, failedAt, error } = await produceDrawElementFrameBatch(
     page,
     quantized,

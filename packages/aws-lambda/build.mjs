@@ -29,7 +29,6 @@ const sharedOpts = {
   target: "node22",
   format: "esm",
   minify: false,
-  sourcemap: true,
   external: [
     "@aws-sdk/client-s3",
     "@aws-sdk/client-sfn",
@@ -57,6 +56,9 @@ await Promise.all([
 // through node_modules to the sibling package's already-built `dist/`
 // types instead of pulling its full source tree into emit (which would
 // violate rootDir).
-execSync("tsc -p tsconfig.build.json --emitDeclarationOnly", { stdio: "inherit" });
+execSync(
+  "tsc -p tsconfig.build.json --emitDeclarationOnly && node ../../scripts/rewrite-relative-import-extensions.mjs dist",
+  { stdio: "inherit" },
+);
 
 console.log("[Build] Complete: dist/{index,handler,sdk/index,cdk/index}.js + .d.ts");

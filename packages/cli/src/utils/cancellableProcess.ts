@@ -90,13 +90,7 @@ export function runCancellableProcess(
     };
     const finishReject = async (error: unknown): Promise<void> => {
       if (settled) return;
-      if (terminationTask) {
-        try {
-          terminationSignal = await terminationTask;
-        } catch (terminationError) {
-          error = terminationError;
-        }
-      }
+      if (terminationTask) terminationSignal = await terminationTask.catch(() => terminationSignal);
       if (settled) return;
       settled = true;
       cleanup();
@@ -130,14 +124,7 @@ export function runCancellableProcess(
     // fallow-ignore-next-line complexity
     child.once("close", async (status, closeSignal) => {
       if (settled) return;
-      if (terminationTask) {
-        try {
-          terminationSignal = await terminationTask;
-        } catch (error) {
-          await finishReject(error);
-          return;
-        }
-      }
+      if (terminationTask) terminationSignal = await terminationTask.catch(() => terminationSignal);
       if (settled) return;
       settled = true;
       cleanup();
@@ -196,6 +183,14 @@ function renderSetupError(error: unknown): unknown {
   return reason ? new Error(reason, { cause: error }) : error;
 }
 
+function tsxLoaderFromCliInstall(): string {
+  try {
+    return import.meta.resolve("tsx");
+  } catch {
+    return "tsx";
+  }
+}
+
 export async function runRenderSetupWorker<T>(
   mode: "browser" | "lint" | "orphan-cleanup",
   input: unknown,
@@ -206,7 +201,8 @@ export async function runRenderSetupWorker<T>(
     sourceMode ? "../renderSetupWorker.ts" : "./renderSetupWorker.js",
     import.meta.url,
   );
-  const execArgv = sourceMode ? ["--import", "tsx"] : [];
+  const execArgv =
+    sourceMode && !process.versions.bun ? ["--import", tsxLoaderFromCliInstall()] : [];
   let result: CancellableProcessResult;
   try {
     result = await runCancellableProcess(

@@ -246,6 +246,7 @@ export type FontFamilyDeclaration = {
 };
 
 function collectCssCustomProperties(css: string, customProperties: Map<string, string>): void {
+  if (!css.includes("--")) return;
   const root = parseCssRoot(css);
   if (!root) return;
   root.walkDecls((decl) => {
@@ -272,6 +273,7 @@ function* iterateCssRootFontFamilyDeclarations(
 }
 
 function* iterateCssFontFamilyDeclarations(css: string): Generator<FontFamilyDeclaration> {
+  if (!/font-family/i.test(css)) return;
   const root = parseCssRoot(css);
   if (!root) return;
   yield* iterateCssRootFontFamilyDeclarations(root);
@@ -778,11 +780,11 @@ async function systemFamilyFaceRules(
   }
   if (totalBytes > SYSTEM_FONT_SIZE_LIMIT) {
     log.warn(
-      `[Compiler] System font "${lookupFamily}" is large (${(totalBytes / 1024 / 1024).toFixed(1)} MB total across ${variants.length} variant(s)) — embedding anyway. Consider font subsetting for production.`,
+      `[Compiler] System font "${lookupFamily}" is large (${(totalBytes / 1024 / 1024).toFixed(1)} MB total across ${variants.length} variant(s)), embedding anyway. Consider font subsetting for production.`,
     );
   }
   log.info(
-    `[Compiler] Embedded system font "${lookupFamily}" — ${variants.length} variant(s), ${(totalBytes / 1024).toFixed(0)} KB total`,
+    `[Compiler] Embedded system font "${lookupFamily}": ${variants.length} variant(s), ${(totalBytes / 1024).toFixed(0)} KB total`,
   );
   return rules;
 }
@@ -1126,7 +1128,7 @@ function fontCacheDir(slug: string): string {
       if (firstFallback) {
         STDERR_LOGGER.warn(
           `Font cache directory is unwritable (${dir}). ` +
-            `Using temporary fallback — fonts will re-download each run. ` +
+            `Using temporary fallback, so fonts will re-download each run. ` +
             `Fix with: chmod 755 ${resolveFontCacheRoot()}`,
         );
       }

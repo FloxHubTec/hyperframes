@@ -7,6 +7,7 @@
  */
 
 import { tmpdir } from "node:os";
+import { DISTRIBUTED_FPS, type DistributedFps } from "@hyperframes/core/distributed-fps";
 import { chromeMajorCeiling } from "./services/chromeHostCeiling.js";
 import { join } from "node:path";
 import {
@@ -23,7 +24,7 @@ import { DEFAULT_VP9_CPU_USED, normalizeVp9CpuUsed } from "./services/vp9Options
  */
 export interface EngineConfig {
   // ── Rendering ────────────────────────────────────────────────────────
-  fps: 24 | 30 | 60;
+  fps: DistributedFps;
   quality: "draft" | "standard" | "high";
   format: "jpeg" | "png";
   jpegQuality: number;
@@ -378,7 +379,7 @@ const POSITIVE_NUMBER_ENGINE_CONFIG_FIELDS = [
 ] as const;
 
 const ENUM_ENGINE_CONFIG_FIELDS = {
-  fps: [24, 30, 60],
+  fps: DISTRIBUTED_FPS,
   quality: ["draft", "standard", "high"],
   format: ["jpeg", "png"],
   browserGpuMode: ["software", "hardware", "auto"],
@@ -1071,7 +1072,7 @@ export function resolveConfig(overrides?: Partial<EngineConfig>): EngineConfig {
     merged.enableStreamingEncode = false;
     merged.streamingEncodeAutoDisabledOnWin32Compound = true;
     console.error(
-      "[hyperframes] Windows compound-workaround auto-detected — disabling streaming-encode " +
+      "[hyperframes] Windows compound-workaround auto-detected, disabling streaming-encode " +
         "(platform=win32, software-GPU forced, workers=1). Field signal ts=1784131903. " +
         "Override: PRODUCER_ENABLE_STREAMING_ENCODE=true.",
     );

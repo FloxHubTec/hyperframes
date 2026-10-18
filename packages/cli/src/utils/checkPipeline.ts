@@ -1,3 +1,10 @@
+import { BrowserCleanupError } from "../browser/launch.js";
+import { CheckDeadline, CheckDeadlineError } from "./checkDeadline.js";
+import {
+  checkSnapshotDirectory,
+  beginCheckSnapshots,
+  finishCheckSnapshots,
+} from "./checkSnapshotDirectory.js";
 import { findingElementKey, groupSampledFindings } from "./checkFindings.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -10,6 +17,7 @@ import {
   buildLayoutSampleTimes,
   buildTransitionSampleTimes,
   collapseStaticLayoutIssues,
+  CONTENT_OVERLAP_HELD_ERROR_MS,
   longestContiguousRunMs,
   dedupeLayoutIssues,
   limitLayoutIssues,
@@ -56,6 +64,7 @@ import type {
   OffPivotFrame,
   OffPivotRotationSample,
   RotationSample,
+  SeekClock,
 } from "./checkTypes.js";
 
 export type {
@@ -131,31 +140,74 @@ function gateSampleTimes(
   return mergeSampleTimes(fractions.map((fraction) => fraction * duration));
 }
 
+function validateSampleRange([start, end]: [number, number], duration: number): void {
+  if (!Number.isFinite(start + end) || start < 0 || end <= start || end > duration)
+    throw new Error(`Check range must lie within the composition duration (${duration} seconds)`);
+}
+
+function gateSamplesInRange(
+  flag: "--caption-zone" | "--frame-check",
+  samples: number[],
+  inRange: (time: number) => boolean,
+  range: [number, number] | undefined,
+): number[] {
+  if (!range) return samples;
+  const selected = samples.filter(inRange);
+  if (samples.length > 0 && selected.length === 0) {
+    throw new Error(`No ${flag} seek samples lie within --range`);
+  }
+  return selected;
+}
+
+function layoutSamplesInRange(options: CheckOptions, duration: number) {
+  if (!options.range)
+    return {
+      inRange: (_t: number) => true,
+      baseSamples: buildLayoutSampleTimes({ duration, samples: options.samples, at: options.at }),
+    };
+  validateSampleRange(options.range, duration);
+  const [start, end] = options.range;
+  const inRange = (t: number) => t >= start && t <= end;
+  const selected = (options.at ?? []).filter(inRange);
+  if (options.at?.length && !selected.length) throw new Error("No --at samples lie within --range");
+  const baseSamples = buildLayoutSampleTimes({
+    duration: end - start,
+    samples: options.samples,
+    at: selected.map((t) => t - start),
+  }).map((t) => t + start);
+  return { inRange, baseSamples };
+}
+
 async function buildSampleGrid(
   driver: CheckAuditDriver,
   options: CheckOptions,
 ): Promise<SampleGrid> {
   const duration = await driver.getDuration();
-  const baseSamples = buildLayoutSampleTimes({
-    duration,
-    samples: options.samples,
-    at: options.at,
-  });
+  const { inRange, baseSamples } = layoutSamplesInRange(options, duration);
   const transitions = options.atTransitions
     ? buildTransitionSampleTimes({
         duration,
-        boundaries: await driver.getTransitionBoundaries(),
+        boundaries: (await driver.getTransitionBoundaries()).filter(inRange),
         cap: options.maxTransitionSamples,
       })
     : { times: [], dropped: 0 };
-  const captionSamples = options.captionZone
-    ? gateSampleTimes(duration, options.captionZone.seek, 1)
-    : [];
-  const frameSamples = options.frameCheck
-    ? gateSampleTimes(duration, options.frameCheck.seek, 0.5)
-    : [];
-  const auditSamples = mergeSampleTimes(baseSamples, transitions.times);
-  const layoutSamples = mergeSampleTimes(auditSamples, captionSamples, frameSamples);
+  const captionSamples = gateSamplesInRange(
+    "--caption-zone",
+    options.captionZone ? gateSampleTimes(duration, options.captionZone.seek, 1) : [],
+    inRange,
+    options.range,
+  );
+  const frameSamples = gateSamplesInRange(
+    "--frame-check",
+    options.frameCheck ? gateSampleTimes(duration, options.frameCheck.seek, 0.5) : [],
+    inRange,
+    options.range,
+  );
+  transitions.times = transitions.times.filter(inRange);
+  const auditSamples = mergeSampleTimes(baseSamples, transitions.times).filter(inRange);
+  const layoutSamples = mergeSampleTimes(auditSamples, captionSamples, frameSamples).filter(
+    inRange,
+  );
   if (layoutSamples.length === 0) {
     throw new Error("Could not determine composition duration — no layout samples run");
   }
@@ -217,8 +269,8 @@ interface GridSamples {
   contrastEntries: ContrastAuditEntry[];
   screenshots: CheckScreenshot[];
   contrastMs: number;
-  /** One visible-state fingerprint per layout sample (#U10 frozen-sweep guard). */
-  layoutStateSignatures: { time: number; signature: string }[];
+  /** One visible-state fingerprint and seek clock per layout sample (#U10 frozen-sweep guard). */
+  layoutStateSignatures: { time: number; signature: string; clock: SeekClock[] }[];
   /** Every rotatable element's geometry at each layout sample; grouped by
    * selector after the run to detect rotation_pivot_drift. */
   rotationSamples: RotationSample[];
@@ -404,6 +456,7 @@ async function collectGridSamples(
       collected.layoutStateSignatures.push({
         time,
         signature: await driver.collectLayoutGeometry(),
+        clock: await driver.collectSeekClock(),
       });
       collected.rotationSamples.push(...(await driver.collectRotationSample(time)));
       collected.indicatorFrames.push(await driver.collectOffPivotRotationSample(time));
@@ -431,25 +484,80 @@ async function collectGridSamples(
       collected.screenshots.push({ time, pngBase64: capture.pngBase64 });
     }
   }
-  await collectMotionOverlapSamples(driver, grid, collected);
+  await collectMotionOverlapSamples(driver, grid, collected, options.range);
   return collected;
 }
 
 // Dense grid catches mid-motion text collisions the sparse layout grid seeks past; text-only overlap collection is cheap enough to afford it.
 const OVERLAP_SAMPLE_FPS = 8;
-// Ceiling that bounds dense seeks; past ~75s the grid degrades below 8fps rather than growing the seek budget without limit.
-const OVERLAP_MAX_SAMPLES = 600;
+// A fixed ceiling, so check's work does not grow with film length: half uniform, half in clip windows it misses.
+const OVERLAP_MAX_SAMPLES = 240;
+// Part of it re-looks at an overlap half a second on where the grid is too sparse to show it held.
+const OVERLAP_HOLD_PROBES = 60;
 
-function buildOverlapSampleTimes(duration: number): number[] {
+function evenlyPicked(times: number[], count: number): number[] {
+  if (times.length <= count) return times;
+  const last = Math.max(1, count - 1);
+  return Array.from(
+    { length: count },
+    (_, i) => times[Math.floor((i * (times.length - 1)) / last)] ?? 0,
+  );
+}
+
+function uniformTimes(duration: number, fill: number): number[] {
+  const step = duration / Math.max(1, fill - 1);
+  return Array.from({ length: fill }, (_, i) => i * step);
+}
+
+function buildOverlapSampleTimes(duration: number, clipEdges: number[]): number[] {
   if (!Number.isFinite(duration) || duration <= 0) return [];
   const count = Math.min(
-    OVERLAP_MAX_SAMPLES,
+    OVERLAP_MAX_SAMPLES - OVERLAP_HOLD_PROBES,
     Math.max(2, Math.ceil(duration * OVERLAP_SAMPLE_FPS) + 1),
   );
-  const step = duration / (count - 1);
+  const cuts: number[] = [];
+  for (const time of mergeSampleTimes(
+    [0, duration],
+    clipEdges.filter((t) => t > 0 && t < duration),
+  ))
+    if (time - (cuts.at(-1) ?? -Infinity) >= CONTENT_OVERLAP_HELD_ERROR_MS / 1000) cuts.push(time);
+  // A stretch where the visible clips stay the same, and that the uniform half steps over, gets one sample.
+  const uncovered = (fill: number): number[] => {
+    const step = duration / Math.max(1, fill - 1);
+    return cuts.slice(1).flatMap((end, i) => {
+      const start = cuts[i] ?? 0;
+      return Math.floor(start / step) === Math.floor(end / step) ? [(start + end) / 2] : [];
+    });
+  };
+  let fill = count - Math.floor(count / 2);
+  let windows = uncovered(fill);
+  if (windows.length < count - fill) {
+    fill = count - windows.length;
+    windows = uncovered(fill);
+  }
+  const picked = evenlyPicked(windows, count - fill);
   return mergeSampleTimes(
-    Array.from({ length: count }, (_, index) => Math.round(index * step * 1000) / 1000),
+    [...picked, ...uniformTimes(duration, fill)].map((t) => Math.round(t * 1000) / 1000),
   );
+}
+
+/** Looks once more half a second on, where the grid is too sparse to show an overlap is held; each overlap once. */
+function holdProber(driver: CheckAuditDriver, collected: GridSamples, end: number) {
+  const holdS = CONTENT_OVERLAP_HELD_ERROR_MS / 1000;
+  const held = new Set<string>();
+  const keyOf = (issue: AnchoredLayoutIssue) => `${issue.code} ${issue.selector}`;
+  let probes = 0;
+  return async (time: number, next: number, issues: AnchoredLayoutIssue[]): Promise<void> => {
+    const unproven = new Set(issues.map(keyOf).filter((key) => !held.has(key)));
+    const probe = Math.round((time + holdS) * 1000) / 1000;
+    const sparse = next - time > 2 * holdS && probe <= end;
+    if (!unproven.size || !sparse || probes >= OVERLAP_HOLD_PROBES) return;
+    probes += 1;
+    await driver.seekGeometry(probe);
+    const later = await driver.collectOverlap(probe);
+    collected.layoutIssues.push(...later);
+    for (const key of later.map(keyOf)) if (unproven.has(key)) held.add(key);
+  };
 }
 
 /** Reruns content_overlap on a fine grid, unconditionally rather than gated on fingerprint change, since an animation aliased to the sparse grid collides between identical-fingerprint samples. */
@@ -457,13 +565,23 @@ async function collectMotionOverlapSamples(
   driver: CheckAuditDriver,
   grid: SampleGrid,
   collected: GridSamples,
+  range?: [number, number],
 ): Promise<void> {
   const baseTimes = new Set(grid.layoutSamples);
-  for (const time of buildOverlapSampleTimes(grid.duration)) {
+  const offset = range?.[0] ?? 0;
+  const edges = (await driver.getClipEdges()).map((time) => time - offset);
+  const overlapTimes = buildOverlapSampleTimes(range ? range[1] - range[0] : grid.duration, edges);
+  const shiftedTimes = range
+    ? mergeSampleTimes(overlapTimes.map((time) => time + range[0]))
+    : overlapTimes;
+  const probeHold = holdProber(driver, collected, range ? range[1] : grid.duration);
+  for (const [index, time] of shiftedTimes.entries()) {
     if (baseTimes.has(time)) continue;
     // Settle-free seek: collectOverlap reads getBoundingClientRect geometry, valid synchronously after setTime, so the dense pass skips the per-seek paint settle.
     await driver.seekGeometry(time);
-    collected.layoutIssues.push(...(await driver.collectOverlap(time)));
+    const issues = await driver.collectOverlap(time);
+    collected.layoutIssues.push(...issues);
+    await probeHold(time, shiftedTimes[index + 1] ?? Number.POSITIVE_INFINITY, issues);
   }
 }
 
@@ -486,21 +604,39 @@ const ZERO_LAYOUT_RECT: LayoutRect = {
  * verdict from this run is meaningless, not just a missed defect. Skips
  * short (<3s) compositions, single-sample runs (nothing to compare), and
  * runs where a `motion_frozen` finding already reported the same underlying
- * symptom (no double-reporting the one thing that's wrong).
+ * symptom (no double-reporting the one thing that's wrong). A frame that never
+ * changes is an error only when an animation it can see is stuck and never finished.
  */
 function detectSweepStatic(
   duration: number,
-  layoutStateSignatures: string[],
+  samples: { signature: string; clock: SeekClock[] }[],
   motionIssues: AnchoredLayoutIssue[],
   hasNoTimelineDeclaration: boolean,
 ): AnchoredLayoutIssue[] {
   if (hasNoTimelineDeclaration) return [];
   if (duration < SWEEP_STATIC_MIN_DURATION_SEC) return [];
-  if (layoutStateSignatures.length < 2) return [];
+  if (samples.length < 2) return [];
   if (motionIssues.some((issue) => issue.code === "motion_frozen")) return [];
-  if (allSame(layoutStateSignatures)) return [sweepStaticIssue("error")];
-  if (allSame(layoutStateSignatures.map(seenPart))) return [sweepStaticIssue("warning")];
+  const signatures = samples.map((sample) => sample.signature);
+  if (allSame(signatures))
+    return [sweepStaticIssue(anAnimationIsStuck(samples) ? "error" : "still")];
+  if (allSame(signatures.map(seenPart))) return [sweepStaticIssue("audio")];
   return [];
+}
+
+function anAnimationIsStuck(samples: { clock: SeekClock[] }[]): boolean {
+  const seenById = new Map<number, SeekClock[]>();
+  for (const sample of samples) {
+    for (const clock of new Map(sample.clock.map((clock) => [clock.id, clock])).values()) {
+      seenById.set(clock.id, [...(seenById.get(clock.id) ?? []), clock]);
+    }
+  }
+  return [...seenById.values()].some(
+    (seen) =>
+      seen.length > 1 &&
+      allSame(seen.map((clock) => clock.time)) &&
+      seen.every((clock) => !clock.done),
+  );
 }
 
 // motion-signature.browser.js appends audio time after this; a signature without it is all "seen".
@@ -510,26 +646,34 @@ function seenPart(signature: string): string {
   return signature.split(AUDIO_TIME_SEPARATOR)[0] ?? signature;
 }
 
-function allSame(values: string[]): boolean {
+function allSame(values: readonly unknown[]): boolean {
   return values.every((value) => value === values[0]);
 }
 
-function sweepStaticIssue(severity: "error" | "warning"): AnchoredLayoutIssue {
+const STILL_FIX_HINT =
+  "If the composition is meant to be still, add `data-no-timeline` to the element with `data-composition-id`. Otherwise confirm it seeks a paused GSAP/CSS timeline under `data-*` timing attributes rather than only autoplaying.";
+
+const SWEEP_STATIC_MESSAGES = {
+  error: "Timeline did not advance under seek; every green verdict on this run is unreliable.",
+  still: "Nothing on screen moved under seek.",
+  audio: "Only the audio advanced under seek; nothing on screen moved.",
+};
+
+function sweepStaticIssue(kind: keyof typeof SWEEP_STATIC_MESSAGES): AnchoredLayoutIssue {
   return {
     code: "sweep_static",
-    severity,
+    severity: kind === "error" ? "error" : "warning",
     time: 0,
     selector: "[data-composition-id]",
     dataAttributes: {},
     sourceFile: "index.html",
     bbox: ZERO_BBOX,
     rect: ZERO_LAYOUT_RECT,
-    message:
-      severity === "error"
-        ? "Timeline did not advance under seek; every green verdict on this run is unreliable."
-        : "Only the audio advanced under seek; nothing on screen moved.",
+    message: SWEEP_STATIC_MESSAGES[kind],
     fixHint:
-      "If the composition is meant to be still, add `data-no-timeline` to the element with `data-composition-id`. Otherwise confirm it seeks a paused GSAP/CSS timeline under `data-*` timing attributes rather than only autoplaying.",
+      kind === "error"
+        ? "An animation on the page never moved under seek. Build it on the paused GSAP timeline registered in `window.__timelines[compositionId]`, or as a CSS animation, so the seek drives it."
+        : STILL_FIX_HINT,
   };
 }
 
@@ -1070,7 +1214,11 @@ export async function runAuditGrid(
 ): Promise<CheckBrowserResult> {
   await driver.initialize(options.contrast);
   const grid = await buildSampleGrid(driver, options);
-  const plan = await planMotionSampling(driver, motion, grid.duration);
+  const plan = await planMotionSampling(
+    driver,
+    options.range ? { kind: "none" } : motion,
+    grid.duration,
+  );
   const seekLoopStart = Date.now();
   const collected = await collectGridSamples(driver, options, grid, plan);
   const seekLoopMs = Date.now() - seekLoopStart;
@@ -1085,20 +1233,36 @@ export async function runAuditGrid(
     motionIssues = [...motionIssues, ...(await driver.anchorMotionIssues(evaluated))];
   }
   const userPicked = new Set(grid.userPickedSamples);
-  const sweepFindings = detectSweepStatic(
-    grid.duration,
-    collected.layoutStateSignatures
-      .filter((sample) => !userPicked.has(sample.time))
-      .map((sample) => sample.signature),
-    motionIssues,
-    await driver.hasNoTimelineDeclaration(),
-  );
+  const sweepFindings = options.range
+    ? []
+    : detectSweepStatic(
+        grid.duration,
+        collected.layoutStateSignatures.filter((sample) => !userPicked.has(sample.time)),
+        motionIssues,
+        await driver.hasNoTimelineDeclaration(),
+      );
   const rotationFindings = detectRotationPivotDrift(
     collected.rotationSamples,
     await driver.getCanvas(),
   );
   const offPivotFindings = detectOffPivotRotation(collected.indicatorFrames);
   const contrast = buildContrastResults(collected.contrastEntries);
+  if (options.components?.length) {
+    if (!driver.matchComponents)
+      throw new Error("Component filtering unavailable in this check driver");
+    const findings = [
+      ...collected.layoutIssues,
+      ...sweepFindings,
+      ...rotationFindings,
+      ...offPivotFindings,
+      ...motionIssues,
+      ...contrast.findings,
+    ];
+    const matches = await driver.matchComponents(options.components, findings);
+    findings.forEach((finding, i) => {
+      finding.componentMatch = matches[i];
+    });
+  }
   return {
     duration: grid.duration,
     layoutSamples: grid.layoutSamples,
@@ -1128,80 +1292,119 @@ export async function runCheckPipeline(
   options: CheckOptions,
   dependencies: CheckDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<CheckReport> {
-  let lintResult: ProjectLintResult;
-  const lintStartedAt = Date.now();
+  beginCheckSnapshots(project.dir);
   try {
-    lintResult = await dependencies.lintProject(project.dir);
-  } catch (error) {
-    // The linter itself crashed (unreadable file, internal error) — distinct
-    // from lint findings; a runtime-failure code would send the agent hunting
-    // for a script problem that doesn't exist.
-    return failureReport(options, runtimeFailure(error, "check_lint_failure"));
-  }
-  trackLintRun(project.dir, lintResult, {
-    command: "check",
-    durationMs: Date.now() - lintStartedAt,
-    ...(getRunId() !== undefined ? { runId: getRunId() } : {}),
-  });
+    let lintResult: ProjectLintResult;
+    const lintStartedAt = Date.now();
+    try {
+      lintResult = await dependencies.lintProject(project.dir);
+    } catch (error) {
+      // The linter itself crashed (unreadable file, internal error) — distinct
+      // from lint findings; a runtime-failure code would send the agent hunting
+      // for a script problem that doesn't exist.
+      return failureReport(options, runtimeFailure(error, "check_lint_failure"));
+    }
+    trackLintRun(project.dir, lintResult, {
+      command: "check",
+      durationMs: Date.now() - lintStartedAt,
+      ...(getRunId() !== undefined ? { runId: getRunId() } : {}),
+    });
 
-  const lint = buildLintSection(lintResult);
-  let hdrPromotion: CheckReport["hdr"]["autoPromotion"] = null;
-  let hdrInspection: CheckReport["hdr"]["inspection"] = "available";
-  try {
-    hdrPromotion = await (dependencies.inspectHdrAutoPromotion ?? inspectHdrAutoPromotion)(project);
-  } catch {
-    hdrInspection = "unavailable";
-  }
-  if (shouldBlockRender(true, false, lintResult.totalErrors, lintResult.totalWarnings)) {
-    return buildReport(
-      options,
-      lint,
-      emptyBrowserResult(),
-      { kind: "none" },
-      [],
-      [],
-      hdrPromotion,
-      hdrInspection,
-    );
-  }
+    const lint = buildLintSection(lintResult);
+    let hdrPromotion: CheckReport["hdr"]["autoPromotion"] = null;
+    let hdrInspection: CheckReport["hdr"]["inspection"] = "available";
+    try {
+      hdrPromotion = await (dependencies.inspectHdrAutoPromotion ?? inspectHdrAutoPromotion)(
+        project,
+      );
+    } catch {
+      hdrInspection = "unavailable";
+    }
+    if (shouldBlockRender(true, false, lintResult.totalErrors, lintResult.totalWarnings)) {
+      return buildReport(
+        options,
+        lint,
+        emptyBrowserResult(),
+        { kind: "none" },
+        [],
+        [],
+        hdrPromotion,
+        hdrInspection,
+      );
+    }
 
-  const motion = dependencies.resolveMotionSpec(project.dir);
-  const specFindings =
-    motion.kind === "invalid"
-      ? [
-          findingAtRoot(
-            "motion_spec_invalid",
-            "error",
-            motion.message,
-            relative(project.dir, motion.path) || "index.motion.json",
-          ),
-        ]
-      : [];
+    const motion = dependencies.resolveMotionSpec(project.dir);
+    const specFindings =
+      motion.kind === "invalid"
+        ? [
+            findingAtRoot(
+              "motion_spec_invalid",
+              "error",
+              motion.message,
+              relative(project.dir, motion.path) || "index.motion.json",
+            ),
+          ]
+        : [];
 
-  let browser: CheckBrowserResult;
-  try {
-    browser = await dependencies.runBrowserCheck(project, options, motion);
-  } catch (error) {
-    browser = emptyBrowserResult();
-    browser.runtimeFindings.push(runtimeFailure(error));
+    const deadline = new CheckDeadline();
+    let outcome: { kind: "report"; report: CheckReport } | { kind: "failed"; error: unknown };
+    try {
+      let browser: CheckBrowserResult;
+      try {
+        browser = await deadline.run(() =>
+          dependencies.runBrowserCheck(project, options, motion, deadline),
+        );
+      } catch (error) {
+        browser = emptyBrowserResult();
+        browser.runtimeFindings.push(runtimeFailure(error));
+      }
+
+      const snapshotFiles = options.snapshots
+        ? await writeContrastSnapshots(dependencies, project.dir, browser)
+        : [];
+      const report = buildReport(
+        options,
+        lint,
+        browser,
+        motion,
+        specFindings,
+        snapshotFiles,
+        hdrPromotion,
+        hdrInspection,
+      );
+      outcome = {
+        kind: "report",
+        report: options.snapshots
+          ? await withFindingCrops(dependencies, project, options, report, deadline)
+          : report,
+      };
+    } catch (error) {
+      outcome = { kind: "failed", error };
+    }
+    try {
+      await deadline.close();
+    } catch (error) {
+      if (outcome.kind === "failed") {
+        throw new BrowserCleanupError(
+          [outcome.error, error],
+          `${normalizeErrorMessage(outcome.error)}; ${normalizeErrorMessage(error)}`,
+        );
+      }
+      const report = outcome.report;
+      return {
+        ...report,
+        ok: false,
+        runtime: section([
+          ...report.runtime.findings,
+          runtimeFailure(error, "check_cleanup_failure"),
+        ]),
+      };
+    }
+    if (outcome.kind === "failed") throw outcome.error;
+    return outcome.report;
+  } finally {
+    await finishCheckSnapshots(project.dir).catch(() => undefined);
   }
-
-  const snapshotFiles = options.snapshots
-    ? await writeContrastSnapshots(dependencies, project.dir, browser)
-    : [];
-  const report = buildReport(
-    options,
-    lint,
-    browser,
-    motion,
-    specFindings,
-    snapshotFiles,
-    hdrPromotion,
-    hdrInspection,
-  );
-  return options.snapshots
-    ? await withFindingCrops(dependencies, project, options, report)
-    : report;
 }
 
 /** Persists the contrast pass's already-captured overview PNGs (or the
@@ -1233,13 +1436,20 @@ async function withFindingCrops(
   project: ProjectDir,
   options: CheckOptions,
   report: CheckReport,
+  deadline: CheckDeadline,
 ): Promise<CheckReport> {
   const cropRequests = selectFindingCropRequests(report);
   if (cropRequests.length === 0) return report;
   try {
-    const findingFiles = await dependencies.captureFindingCrops(project, options, cropRequests);
+    const findingFiles = await deadline.run(() =>
+      dependencies.captureFindingCrops(project, options, cropRequests, deadline),
+    );
     return { ...report, snapshots: { ...report.snapshots, findingFiles } };
   } catch (error) {
+    if (error instanceof CheckDeadlineError) {
+      const finding = runtimeFailure(error);
+      return { ...report, ok: false, runtime: section([...report.runtime.findings, finding]) };
+    }
     // Still non-gating, but observable: rollouts need the crop-failure rate
     // (a second Chrome launch failing/timing out) without failing the run.
     console.error("   finding crops skipped: " + normalizeErrorMessage(error));
@@ -1387,8 +1597,11 @@ function buildReport(
   hdrPromotion: CheckReport["hdr"]["autoPromotion"] = null,
   hdrInspection: CheckReport["hdr"]["inspection"] = "available",
 ): CheckReport {
-  const layout = shapeLayoutSection(browser.layoutIssues, browser, options);
-  const shapedMotion = shapeLayoutFindings(browser.motionIssues, options);
+  const shaping = options.components?.length
+    ? { ...options, maxIssues: Number.MAX_SAFE_INTEGER }
+    : options;
+  const layout = shapeLayoutSection(browser.layoutIssues, browser, shaping);
+  const shapedMotion = shapeLayoutFindings(browser.motionIssues, shaping);
   const motionFindings: CheckFinding[] = [...shapedMotion.findings, ...extraMotionFindings];
   const runtime = section(browser.runtimeFindings);
   const motionSection = section(motionFindings);
@@ -1414,7 +1627,7 @@ function buildReport(
     layout,
     motion: {
       ...motionSection,
-      enabled: motion.kind !== "none",
+      enabled: motion.kind !== "none" && !options.range,
       specPath: motion.kind === "none" ? undefined : motion.path,
       samples: browser.motionSampleCount,
     },
@@ -1435,7 +1648,7 @@ function buildReport(
   };
   trackCheckReport({
     contrastGate: options.contrast,
-    motionGate: motion.kind !== "none",
+    motionGate: motion.kind !== "none" && !options.range,
     captionZoneGate: options.captionZone !== undefined,
     frameCheckGate: options.frameCheck !== undefined,
     snapshotsGate: options.snapshots,
@@ -1458,6 +1671,38 @@ function buildReport(
     exitCode: checkExitCode(report),
     runId: getRunId(),
   });
+  return filterComponentReport(report, options);
+}
+
+function filterComponentReport(report: CheckReport, options: CheckOptions): CheckReport {
+  if (!options.range && !options.components?.length) return report;
+  {
+    report.scope = {
+      range: options.range,
+      components: options.components,
+      hiddenFindings: 0,
+      notes: [
+        "Static lint and unscoped runtime failures remain project-wide.",
+        ...(options.range
+          ? [
+              "Whole-timeline motion assertions and frozen-sweep detection are skipped for range checks.",
+            ]
+          : []),
+      ],
+    };
+    for (const group of [report.layout, report.motion, report.contrast]) {
+      const before = group.findings.length;
+      group.findings = group.findings.filter((f) => f.componentMatch !== false);
+      report.scope.hiddenFindings += before - group.findings.length;
+      if (group !== report.contrast && group.findings.length > options.maxIssues) {
+        group.findings = group.findings.slice(0, options.maxIssues);
+        report.scope.notes.push(
+          "Selected findings exceed --max-issues; increase it to see the remainder.",
+        );
+        if (group === report.layout) report.layout.truncated = true;
+      }
+    }
+  }
   return report;
 }
 
@@ -1550,7 +1795,12 @@ function emptyBrowserResult(): CheckBrowserResult {
 }
 
 function runtimeFailure(error: unknown, code = "check_runtime_failure"): CheckFinding {
-  return findingAtRoot(code, "error", normalizeErrorMessage(error), "index.html");
+  return findingAtRoot(
+    code,
+    "error",
+    normalizeErrorMessage(error),
+    error instanceof CheckDeadlineError ? (error.sourceFile ?? "index.html") : "index.html",
+  );
 }
 
 function findingAtRoot(
@@ -1605,11 +1855,12 @@ async function runBrowserCheck(
   project: ProjectDir,
   options: CheckOptions,
   motion: MotionSpecResolution,
+  deadline?: CheckDeadline,
 ): Promise<CheckBrowserResult> {
   const module = await import("./checkBrowser.js");
   // runAuditGrid is handed over as a callback so checkBrowser never imports
   // this module back (no import cycle).
-  return module.runBrowserCheck(project, options, motion, runAuditGrid);
+  return module.runBrowserCheck(project, options, motion, runAuditGrid, deadline);
 }
 
 async function writeSnapshot(
@@ -1618,22 +1869,23 @@ async function writeSnapshot(
   time: number,
   pngBase64: string,
 ): Promise<string> {
-  const snapshotDir = join(projectDir, "snapshots");
+  const snapshotDir = checkSnapshotDirectory(projectDir);
   mkdirSync(snapshotDir, { recursive: true });
   const filename = `frame-${String(index).padStart(2, "0")}-at-${time.toFixed(1)}s.png`;
   const path = join(snapshotDir, filename);
   writeFileSync(path, Buffer.from(pngBase64, "base64"));
-  return join("snapshots", filename);
+  return relative(projectDir, path);
 }
 
 async function captureFindingCrops(
   project: ProjectDir,
   options: CheckOptions,
   requests: CheckFindingCropRequest[],
+  deadline?: CheckDeadline,
 ): Promise<string[]> {
   const module = await import("./checkBrowser.js");
   // Handed over the same way runBrowserCheck is (checkBrowser never imports this module back).
-  return module.captureFindingCrops(project, options, requests);
+  return module.captureFindingCrops(project, options, requests, deadline);
 }
 
 const DEFAULT_DEPENDENCIES: CheckDependencies = {

@@ -448,7 +448,7 @@ function describeRootDimensionsDrift(
   const declared = `Root composition declares data-width="${dataWidth}" data-height="${dataHeight}"`;
   if (!bodyCssMismatch) {
     return {
-      message: `${declared}, but ${viewportMismatch}. The viewport meta has no effect on capture — the renderer sizes the viewport from the root's own data-width/data-height — so this is stale metadata, not a clipping risk.`,
+      message: `${declared}, but ${viewportMismatch}. The viewport meta has no effect on capture (the renderer sizes the viewport from the root's own data-width/data-height), so this is stale metadata, not a clipping risk.`,
       fixHint:
         "update the meta viewport to match, or scaffold with `hyperframes init --resolution portrait`",
     };
@@ -490,7 +490,7 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
 
   // root_missing_composition_id + root_missing_dimensions
   // fallow-ignore-next-line complexity
-  ({ rootTag }) => {
+  ({ rootTag, options }) => {
     const findings: HyperframeLintFinding[] = [];
     if (!rootTag || !readDecodedAttr(rootTag.raw, "data-composition-id")) {
       findings.push({
@@ -502,7 +502,10 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
         snippet: truncateSnippet(rootTag?.raw || ""),
       });
     }
-    if (!rootTag || !readAttr(rootTag.raw, "data-width") || !readAttr(rootTag.raw, "data-height")) {
+    if (
+      !options.isSubComposition &&
+      (!rootTag || !readAttr(rootTag.raw, "data-width") || !readAttr(rootTag.raw, "data-height"))
+    ) {
       findings.push({
         code: "root_missing_dimensions",
         severity: "error",
@@ -773,7 +776,7 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
       findings.push({
         code: "unclosed_tag_swallowed_element",
         severity: "error",
-        message: `<${tag.name}> is missing its closing \`>\` before the next \`<\` — the following element is swallowed as bogus attribute text and never becomes a real node.`,
+        message: `<${tag.name}> is missing its closing \`>\` before the next \`<\`, so the following element is swallowed as bogus attribute text and never becomes a real node.`,
         fixHint: "Close the previous tag's `>` before opening the next element.",
         snippet: truncateSnippet(tag.raw),
       });

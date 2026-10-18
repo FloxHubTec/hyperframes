@@ -56,6 +56,7 @@ function project() {
   historyDeps.historyRoot = tempDir("hf-history-cli-root-");
   historyDeps.findServer = async () => null;
   historyDeps.turnIdleMs = 60_000;
+  historyDeps.ownerWaitMs = undefined;
   clock.at = Date.now() + 86_400_000;
   historyDeps.now = () => clock.at;
   const write = (path: string, text: string) => {
@@ -503,6 +504,131 @@ describe("hyperframes history, refusals", () => {
     expect(read("added.html")).toBe("new");
   });
 
+  it.each(["direct", "preview"])(
+    "begin --exclusive starts once another agent's turn has been idle (%s)",
+    async (mode) => {
+      const { dir, hf } = project();
+      await hf();
+      if (mode === "preview") await preview(dir);
+      historyDeps.turnIdleMs = 300;
+      await hf("begin", "--who", "codex", "--label", "Retitle");
+      advance(1_000);
+
+      const begun = await hf("begin", "--who", "claude", "--label", "Notes", "--exclusive");
+      expect([begun.code, begun.err]).toEqual([0, ""]);
+      expect((await hf("end", "--who", "claude")).code).toBe(0);
+    },
+  );
+
+  it("begin --exclusive through a preview refuses another agent's open turn", async () => {
+    const { dir, hf } = project();
+    await hf();
+    await preview(dir);
+    await hf("begin", "--who", "codex", "--label", "Retitle");
+    const refused = await hf("begin", "--who", "claude", "--label", "Notes", "--exclusive");
+    expect([refused.code, refused.err]).toEqual([
+      2,
+      "codex's turn is open; it has to end before yours begins",
+    ]);
+  });
+
+  it("begin --exclusive through a preview lets only one of two agents win", async () => {
+    const { dir, hf } = project();
+    await hf();
+    await preview(dir);
+    const begin = (who: string) =>
+      withOwner(dir, async (owner) => {
+        await owner.begin({ kind: "agent", name: who }, who, true);
+      }).then(
+        () => "won",
+        (error: Error) => error.message,
+      );
+    const results = await Promise.all([begin("codex"), begin("claude")]);
+    expect(results.filter((result) => result === "won")).toHaveLength(1);
+    expect(results.find((result) => result !== "won")).toMatch(
+      /^(codex|claude)'s turn is open; it has to end before yours begins$/,
+    );
+  });
+
+  it("begin --exclusive refuses another agent's open turn and keeps it open", async () => {
+    const { write, hf, json } = project();
+    await hf();
+    await hf("begin", "--who", "codex", "--label", "Retitle");
+    write("index.html", "A2");
+
+    const refused = await hf("begin", "--who", "claude", "--label", "Notes", "--exclusive");
+    expect([refused.code, refused.err]).toEqual([
+      2,
+      "codex's turn is open; it has to end before yours begins",
+    ]);
+    expect((await hf("end", "--who", "codex")).code).toBe(0);
+    const entries = (await json()).entries as Array<{ who: { name: string }; files: string[] }>;
+    expect(entries.filter((entry) => entry.who.name === "codex")).toMatchObject([
+      { files: ["index.html"] },
+    ]);
+  });
+
+  it("serializes concurrent begin --exclusive claims under the history owner lock", async () => {
+    const { dir } = project();
+    const historyRoot = tempDir("hf-history-cli-root-");
+    const held = await openProjectHistory({ projectDir: dir, historyRoot });
+    const home = join(historyRoot, held.projectId);
+    const claimers = new Set<string>();
+    const bothWaiting = new Promise<void>((resolveWaiting) => {
+      const inspect = (_event: string, name: string | null) => {
+        const pid = name?.match(/^owner\.pid-(\d+)-/)?.[1];
+        if (pid) claimers.add(pid);
+        if (claimers.size < 2) return;
+        watcher.close();
+        resolveWaiting();
+      };
+      const watcher = watch(home, inspect);
+      onTestFinished(() => watcher.close());
+    });
+    const cli = resolve(fileURLToPath(import.meta.url), "..", "..", "cli.ts");
+    const begin = (who: string) => {
+      const child = spawn(
+        "bun",
+        ["run", cli, "history", "begin", "--who", who, "--label", who, "--exclusive", "--dir", dir],
+        {
+          env: {
+            ...process.env,
+            HYPERFRAMES_HISTORY_ROOT: historyRoot,
+            HYPERFRAMES_SKIP_UPDATE_CHECK: "1",
+            HYPERFRAMES_NO_TELEMETRY: "1",
+          },
+        },
+      );
+      onTestFinished(() => void child.kill());
+      return new Promise<{ code: number | null; error: string }>((done) => {
+        let error = "";
+        child.stderr.on("data", (chunk) => (error += chunk));
+        child.on("exit", (code) => done({ code, error: error.trim() }));
+      });
+    };
+    const results = [begin("codex"), begin("claude")];
+    await bothWaiting;
+    await held.close();
+
+    const settled = await Promise.all(results);
+    expect(settled.map((result) => result.code).sort()).toEqual([0, 2]);
+    expect(settled.find((result) => result.code === 2)?.error).toMatch(
+      /'s turn is open; it has to end before yours begins$/,
+    );
+  });
+
+  it("end --who refuses another agent's turn, and --if-open succeeds with none open", async () => {
+    const { hf, json } = project();
+    await hf();
+    expect(await json("end", "--if-open")).toMatchObject({ entry: null, parts: [] });
+    expect((await hf("end")).code).toBe(2);
+
+    await hf("begin", "--who", "codex", "--label", "Retitle");
+    const refused = await hf("end", "--who", "claude", "--if-open");
+    expect([refused.code, refused.err]).toEqual([2, "The open turn is codex's, not claude's"]);
+    expect((await hf("end", "--who", "codex")).code).toBe(0);
+  });
+
   it("--json refusals go to stdout as {ok: false, error}", async () => {
     const { hf } = project();
     await hf();
@@ -524,15 +650,63 @@ describe("hyperframes history, refusals", () => {
     expect(readdirSync(historyDeps.historyRoot)).toEqual([]);
   });
 
-  it("exits 2 with the holder's pid when another process keeps the history past the wait", async () => {
-    const { dir, hf } = project();
-    await openProjectHistory({ projectDir: dir, historyRoot: historyDeps.historyRoot }).then(
-      (held) => onTestFinished(() => held.close()),
-    );
-    const busy = await hf();
-    expect([busy.code, busy.err]).toEqual([
+  it("reads the history while another app keeps it open, and refuses to change it there", async () => {
+    const { dir, read, hf, turn } = project();
+    await hf();
+    const first = await turn("claude", "Retitle", "index.html", "A2");
+    await turn("claude", "Again", "index.html", "A3");
+    await hf("begin", "--who", "codex", "--label", "Open turn");
+    const marker = () => readFileSync(join(dir, ".hyperframes", "history-turn.json"), "utf-8");
+    const before = marker();
+    const held = await openProjectHistory({
+      projectDir: dir,
+      historyRoot: historyDeps.historyRoot,
+    });
+    onTestFinished(() => held.close());
+    historyDeps.ownerWaitMs = 0;
+
+    const listed = await hf("--json", "--limit", "2");
+    expect(listed.code).toBe(0);
+    const labels = JSON.parse(listed.out).entries.map((entry: { label: string }) => entry.label);
+    expect(labels).toEqual(["Again", "Retitle"]);
+    expect((await hf("show", first.id)).out).toContain("M index.html");
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await hf("peek", first.id, "index.html");
+    expect(String(stdout.mock.calls[0]?.[0])).toBe("A2");
+    stdout.mockRestore();
+    expect(marker()).toBe(before);
+
+    const refused = await hf("undo", first.id);
+    expect([refused.code, refused.err]).toEqual([
       2,
-      `This project's history is open in another process (pid ${process.pid}).`,
+      `This project is open in another app (pid ${process.pid}), which keeps its history: undo, restore or pin there.`,
     ]);
-  }, 15_000);
+    expect(read("index.html")).toBe("A3");
+  });
+
+  it("still refuses a history id it cannot read, instead of reading the history as empty", async () => {
+    const { dir, hf } = project();
+    mkdirSync(join(dir, ".hyperframes"), { recursive: true });
+    writeFileSync(join(dir, ".hyperframes", "history-id"), "garbage\n");
+    const refused = await hf();
+    expect(refused.code).toBe(2);
+    expect(refused.err).toContain("holds no history id this version can read");
+  });
+
+  it("peek refuses cleanly when another app pruned the point's file after its log was read", async () => {
+    const { dir, hf, turn } = project();
+    await hf();
+    const first = await turn("claude", "Retitle", "index.html", "A2");
+    const held = await openProjectHistory({
+      projectDir: dir,
+      historyRoot: historyDeps.historyRoot,
+    });
+    onTestFinished(() => held.close());
+    historyDeps.ownerWaitMs = 0;
+    const hash = held.peek(first.id)!["index.html"]!;
+    rmSync(join(historyDeps.historyRoot, held.projectId, "blobs", hash.slice(0, 2), hash));
+
+    const refused = await hf("peek", first.id, "index.html");
+    expect([refused.code, refused.err]).toEqual([2, "That point is no longer kept"]);
+  });
 });
