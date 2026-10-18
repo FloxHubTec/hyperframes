@@ -18,7 +18,7 @@ import {
 import { windowsChromeCrashRemediation } from "../browser/windowsCrash.js";
 import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
-import { resolveDiagnosticNavigationTimeoutMs } from "../utils/renderArgs.js";
+import { pageNavigationTimeoutMs } from "../utils/renderArgs.js";
 import { gotoWhenSent } from "./navigateForCapture.js";
 
 const SHADER_TRANSITIONS_TIMEOUT_MS = 90_000;
@@ -94,8 +94,7 @@ export interface SettledCompositionPage {
 }
 
 export interface OpenSettledCompositionPageOptions {
-  // Separate from the post-navigation render-ready budget. Diagnostic callers
-  // without their own navigation knob keep the historical 10-second minimum.
+  // Separate from the post-navigation render-ready budget; can only lengthen render's page-load budget.
   navigationTimeoutMs?: number;
   renderReadyTimeoutMs: number;
   renderReadyWarningSuffix: string;
@@ -281,11 +280,7 @@ export async function openSettledCompositionPage(
     await page.setViewport(viewport);
     if (answer) await answerPageInProcess(page, url, answer);
     await options.beforeNavigate?.(page);
-    await gotoWhenSent(
-      page,
-      url,
-      resolveDiagnosticNavigationTimeoutMs(process.env, options.navigationTimeoutMs),
-    );
+    await gotoWhenSent(page, url, pageNavigationTimeoutMs(options.navigationTimeoutMs));
     await assertWebGpuAdapterAvailable(page, requiresWebGpu, softwareWebGpu);
     const renderReadyTimedOut = !(await waitForCompositionSettle(page, options));
     return { browser: chromeBrowser, page, renderReadyTimedOut };
