@@ -69,3 +69,12 @@ describe("a browser inside an agent's macOS seatbelt", () => {
     expect(launches[1]!.args).toEqual(["--headless", "--single-process"]);
   });
 });
+
+describe("a browser launch that never settles", () => {
+  it("gives up at its timeout, as when Chrome dies while puppeteer waits for its first targets", async () => {
+    const stuck = { launch: () => new Promise<Browser>(() => {}) } as unknown as PuppeteerNode;
+    await expect(launchManagedBrowser(stuck, { timeout: 50 })).rejects.toThrow(
+      "The browser did not finish starting within 50 ms.",
+    );
+  });
+});
