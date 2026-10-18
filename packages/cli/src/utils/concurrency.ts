@@ -1,4 +1,5 @@
-/** Runs `worker` over `inputs` with at most `limit` in flight; results keep input order and the first rejection rejects the run. */
+/** Runs `worker` over `inputs` with at most `limit` in flight. Results keep input order, and the
+ * first rejection rejects the run. */
 export async function runWithConcurrencyLimit<T, R>(
   inputs: readonly T[],
   limit: number,
