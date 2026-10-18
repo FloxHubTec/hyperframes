@@ -1578,6 +1578,7 @@ export async function runEmbeddedMode(
   // Compute everything that may throw before acquiring the fs.watch handle.
   // Once createStudioServer returns, every subsequent exit path must close it.
   const serverBuildSignature = await loadPreviewServerBuildSignature();
+  let listening: string | undefined;
   const {
     app,
     watcher,
@@ -1587,6 +1588,7 @@ export async function runEmbeddedMode(
     projectName: pName,
     autoProxy: options?.autoProxy,
     browserGpuMode: options?.browserGpuMode,
+    origin: () => listening,
   });
   let result: FindPortResult;
   try {
@@ -1643,6 +1645,7 @@ export async function runEmbeddedMode(
   }
 
   const url = `http://localhost:${result.port}`;
+  listening = `http://127.0.0.1:${result.port}`;
   if (options?.json) {
     writeLifecycleJson(foregroundPreviewReadyPayload(pName, url, dir, process.pid));
   } else {
