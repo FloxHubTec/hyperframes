@@ -2,42 +2,28 @@
 // Loaded as a raw string and injected via page.addScriptTag to avoid
 // esbuild mangling (page.evaluate serializes functions; __name helpers break).
 //
-// Two-phase API — see packages/cli/src/commands/validate.ts's
-// runContrastAudit() for the calling contract:
+// Two-phase API — see collectContrast in packages/cli/src/utils/checkBrowser.ts:
 //
 //   1. window.__contrastAuditPrepare() walks the DOM for text-bearing
 //      elements, computes each one's foreground paint (CSS `color`, or SVG
-//      `fill` for SVG text — fill and color are independent CSS properties
-//      in SVG), and HIDES that element's own text paint (color/fill set to
-//      transparent). Hiding is layout-neutral — it doesn't reflow anything —
-//      so the caller can screenshot the frame right after with the glyphs
-//      invisible but everything else unchanged. Returns the candidate list
-//      (selector, text, fg, bbox, font metrics).
-//   2. Caller takes ONE screenshot (page.screenshot()) — same number of
-//      screenshots as before, just moved to after prepare() instead of
-//      before it.
+//      `fill` for SVG text), and HIDES that element's own text paint. Hiding
+//      is layout-neutral, so a screenshot right after shows everything but
+//      the glyphs. Returns the candidate list (selector, text, fg, bbox, font metrics).
+//   2. The caller takes one screenshot, of the full frame or clipped to the
+//      candidates' boxes.
 //   3. window.__contrastAuditFinish(imgBase64, time, candidates, region) restores
 //      the original paint FIRST (so a slow/failed decode can't leave the
-//      page's text stuck invisible), then decodes the screenshot and, for
-//      each candidate, samples the real composited pixels directly INSIDE
-//      its own bounding box for the true background.
+//      page's text stuck invisible), then decodes the screenshot (`region`
+//      says where a clipped one sits in the frame) and samples the real
+//      composited pixels INSIDE each candidate's own box for the background.
 //
-// Why sample inside the box instead of the 4px ring just outside it (the
-// previous approach): the ring is a proximity heuristic that's wrong
-// whenever what's immediately outside the text differs from what's actually
-// behind it — a neighboring panel/component just past the text's edge, a
-// rounded pill/button whose corner falls inside the ring, a
-// backdrop-filter-blurred glass panel sized only a couple pixels larger
-// than the text, or a translucent decoration that only partially overlaps
-// the ring (or sits entirely inside the bbox, never touching the ring at
-// all). Hiding the glyphs and sampling their own box side-steps all of
-// that: it reads the exact pixels that were behind them.
+// Sampling inside the box reads the exact pixels behind the glyphs; a ring
+// just outside the text misreads neighbouring panels, rounded pills, blurred
+// glass and partial decorations.
 //
-// window.__contrastAuditRestoreIfPending() is a safety net: if the caller's
-// screenshot or finish() call throws between prepare() and finish(), calling
-// this restores any still-hidden paint so the next sample in the loop
-// doesn't audit a page with stale invisible text. It's a no-op after a
-// normal finish() call.
+// window.__contrastAuditRestoreIfPending() is a safety net: if the screenshot
+// or finish() throws between prepare() and finish(), it restores any
+// still-hidden paint. It's a no-op after a normal finish() call.
 //
 // NOTE: this logic (DOM-walk, foreground/paint-hide, background sampling)
 // plus the pure WCAG math (relLum, wcagRatio, median) is duplicated in
