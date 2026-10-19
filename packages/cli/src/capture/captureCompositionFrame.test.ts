@@ -113,7 +113,7 @@ describe("seekCompositionTimeline", () => {
     expect(evaluate.mock.calls[2]?.[0]).toContain("window.setTimeout(finish, 100)");
     // Post-seek font settle: a seek can reveal glyphs whose unicode-range
     // subsets only start loading after the next layout (CJK snapshot reports).
-    expect(evaluate).toHaveBeenNthCalledWith(4, expect.any(Function), 500);
+    expect(evaluate).toHaveBeenNthCalledWith(4, expect.any(Function), { ms: 500, frames: 1 });
   });
 
   it("waitForFontsMs: 0 disables the post-seek font wait", async () => {
@@ -216,7 +216,7 @@ describe("seekCompositionTimeline", () => {
     expect(evaluate).toHaveBeenCalledWith(expect.any(Function), 3, true, false, false);
   });
 
-  it("supports layout's ordered double-frame, bounded font, and sleep settles", async () => {
+  it("checks fonts on the double settle's second frame instead of waiting a third", async () => {
     vi.useFakeTimers();
     const { page, evaluate } = fakeSeekPage();
 
@@ -229,11 +229,34 @@ describe("seekCompositionTimeline", () => {
     await vi.advanceTimersByTimeAsync(120);
     await pending;
 
-    expect(evaluate).toHaveBeenCalledTimes(4);
+    expect(evaluate).toHaveBeenCalledTimes(3);
     expect(evaluate).toHaveBeenNthCalledWith(1, expect.any(Function), 4, true, false, false);
     expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function), { videoFrames: true });
-    expect(evaluate).toHaveBeenNthCalledWith(3, expect.any(Function));
-    expect(evaluate).toHaveBeenNthCalledWith(4, expect.any(Function), 500);
+    expect(evaluate).toHaveBeenNthCalledWith(3, expect.any(Function), { ms: 500, frames: 2 });
+
+    const frames: (() => void)[] = [];
+    const statusReadAt: number[] = [];
+    let frame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: () => void) => frames.push(callback));
+    vi.stubGlobal("document", {
+      body: { offsetHeight: 0 },
+      fonts: {
+        get status() {
+          statusReadAt.push(frame);
+          return "loaded";
+        },
+        ready: Promise.resolve(),
+      },
+    });
+    const fontWait = evaluate.mock.calls[2]?.[0];
+    if (typeof fontWait !== "function") throw new Error("Expected the font wait page function");
+    const waited = Reflect.apply(fontWait, undefined, [{ ms: 500, frames: 2 }]);
+    while (frames.length > 0) {
+      frame += 1;
+      frames.shift()?.();
+    }
+    await waited;
+    expect(statusReadAt).toEqual([2]);
   });
 
   it("awaits GPU completion registered by the seek event before settling", async () => {

@@ -64,12 +64,14 @@ export interface SeekCompositionTimelineOptions {
 }
 
 type SeekBarrierOptions = { videoFrames: boolean };
+type FontWaitOptions = { ms: number; frames: number };
 
 type CompositionPageFunction =
   | string
   | (() => unknown)
   | ((value: number) => unknown)
   | ((barrier: SeekBarrierOptions) => unknown)
+  | ((wait: FontWaitOptions) => unknown)
   | ((
       value: number,
       fallbackToBridgeAndTimelines: boolean,
@@ -80,7 +82,7 @@ type CompositionPageFunction =
 export interface CompositionEvaluationPage {
   evaluate(
     pageFunction: CompositionPageFunction,
-    value?: number | SeekBarrierOptions,
+    value?: number | SeekBarrierOptions | FontWaitOptions,
     fallbackToBridgeAndTimelines?: boolean,
     exactTime?: boolean,
     skipWebglDraws?: boolean,
@@ -457,6 +459,7 @@ export async function seekCompositionTimeline(
   );
 
   const animationFrameSettle = options.animationFrameSettle ?? "race";
+  const waitForFontsMs = options.waitForFontsMs ?? DEFAULT_POST_SEEK_FONT_WAIT_MS;
   if (animationFrameSettle === "race") {
     await page.evaluate(`new Promise(function(r) {
       var settled = false;
@@ -464,7 +467,7 @@ export async function seekCompositionTimeline(
       window.setTimeout(finish, 100);
       requestAnimationFrame(function() { requestAnimationFrame(finish); });
     })`);
-  } else if (animationFrameSettle === "double") {
+  } else if (animationFrameSettle === "double" && !(waitForFontsMs > 0)) {
     await page.evaluate(
       () =>
         new Promise<void>((resolveFrame) =>
@@ -477,9 +480,8 @@ export async function seekCompositionTimeline(
   // check, compare, validate, layout) and a seek that reveals unrequested
   // glyphs must not screenshot before their font subsets load. Costs one
   // evaluate + one rAF when nothing is loading. Pass 0 to disable.
-  const waitForFontsMs = options.waitForFontsMs ?? DEFAULT_POST_SEEK_FONT_WAIT_MS;
   if (waitForFontsMs > 0) {
-    await waitForCompositionFonts(page, waitForFontsMs);
+    await waitForCompositionFonts(page, waitForFontsMs, animationFrameSettle === "double" ? 2 : 1);
   }
   if (options.waitForImagesMs) await waitForCompositionImages(page, options.waitForImagesMs);
   if (options.settleMs !== undefined) {
@@ -535,37 +537,43 @@ async function waitForCompositionImages(
 export async function waitForCompositionFonts(
   page: CompositionEvaluationPage,
   timeoutMs: number,
+  frames = 1,
 ): Promise<void> {
   await page
-    .evaluate((ms: number) => {
-      const fonts = Reflect.get(document, "fonts");
-      if (typeof fonts !== "object" || fonts === null) return Promise.resolve();
-      // A seek can reveal glyphs whose font faces were never requested —
-      // CJK @font-face splits into unicode-range subsets that only load when
-      // first laid out. `fonts.ready` is already-resolved at that moment, so
-      // awaiting it immediately races the load request and screenshots blank
-      // glyphs (wild reports: Traditional Chinese / Microsoft YaHei check
-      // snapshots). Force a synchronous layout so pending subsets actually
-      // start loading, give the loader one frame to flip `fonts.status`,
-      // THEN await readiness.
-      void document.body?.offsetHeight;
-      return new Promise<void>((resolveWait) => {
-        const deadline = setTimeout(resolveWait, ms);
-        requestAnimationFrame(() => {
-          const status = Reflect.get(fonts, "status");
-          const ready = Reflect.get(fonts, "ready");
-          if (status !== "loading" || !ready) {
-            clearTimeout(deadline);
-            resolveWait();
-            return;
-          }
-          Promise.resolve(ready).then(() => {
-            clearTimeout(deadline);
-            resolveWait();
+    .evaluate(
+      ({ ms, frames: count }: FontWaitOptions) => {
+        const fonts = Reflect.get(document, "fonts");
+        // A seek can reveal glyphs whose font faces were never requested —
+        // CJK @font-face splits into unicode-range subsets that only load when
+        // first laid out. `fonts.ready` is already-resolved at that moment, so
+        // awaiting it immediately races the load request and screenshots blank
+        // glyphs (wild reports: Traditional Chinese / Microsoft YaHei check
+        // snapshots). Force a synchronous layout so pending subsets actually
+        // start loading, give the loader one frame to flip `fonts.status`,
+        // THEN await readiness.
+        void document.body?.offsetHeight;
+        const afterFrames = (left: number, then: () => void): void => {
+          requestAnimationFrame(() => (left > 1 ? afterFrames(left - 1, then) : then()));
+        };
+        return new Promise<void>((resolveWait) => {
+          const deadline = setTimeout(resolveWait, ms);
+          afterFrames(count, () => {
+            const status = fonts ? Reflect.get(fonts, "status") : undefined;
+            const ready = fonts ? Reflect.get(fonts, "ready") : undefined;
+            if (status !== "loading" || !ready) {
+              clearTimeout(deadline);
+              resolveWait();
+              return;
+            }
+            Promise.resolve(ready).then(() => {
+              clearTimeout(deadline);
+              resolveWait();
+            });
           });
         });
-      });
-    }, timeoutMs)
+      },
+      { ms: timeoutMs, frames },
+    )
     .catch(() => {});
 }
 
