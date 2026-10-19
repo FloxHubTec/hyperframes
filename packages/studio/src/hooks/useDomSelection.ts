@@ -356,8 +356,11 @@ export function useDomSelection({
 
   const refreshDomEditSelectionFromPreview = useCallback(
     // fallow-ignore-next-line complexity
-    async (selection: DomEditSelection) => {
-      const iframe = previewIframeRef.current;
+    async (selection: DomEditSelection, iframe = previewIframeRef.current) => {
+      // A save resyncs after it returns; by then the user may have deselected or picked another element.
+      const stillSelected = () =>
+        domEditSelectionsTargetSame(domEditSelectionRef.current, selection);
+      if (!stillSelected()) return;
       let doc: Document | null = null;
       try {
         doc = iframe?.contentDocument ?? null;
@@ -384,7 +387,7 @@ export function useDomSelection({
       }
 
       const nextSelection = await buildDomSelectionFromTarget(element, { previous: selection });
-      if (nextSelection) {
+      if (nextSelection && stillSelected()) {
         applyDomSelection(nextSelection, {
           revealPanel: false,
           preserveGroup: true,
@@ -547,7 +550,6 @@ export function useDomSelection({
     buildDomSelectionForTimelineElement,
     handleTimelineElementSelect,
     refreshDomEditSelectionFromPreview,
-    refreshDomEditGroupSelectionsFromPreview,
     applyMarqueeSelection,
   };
 }

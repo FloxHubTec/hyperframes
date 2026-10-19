@@ -89,7 +89,10 @@ export interface UseDomSelectionReturn {
     element: TimelineElement,
   ) => Promise<DomEditSelection | null>;
   handleTimelineElementSelect: (element: TimelineElement | null) => Promise<void>;
-  refreshDomEditSelectionFromPreview: (selection: DomEditSelection) => Promise<void>;
-  refreshDomEditGroupSelectionsFromPreview: (selections: DomEditSelection[]) => Promise<void>;
+  /** Re-resolves `selection` against `iframe` (default: the preview ref) only while it is still selected. */
+  refreshDomEditSelectionFromPreview: (
+    selection: DomEditSelection,
+    iframe?: HTMLIFrameElement | null,
+  ) => Promise<void>;
   applyMarqueeSelection: (selections: DomEditSelection[], additive: boolean) => DomSelectionResult;
 }
