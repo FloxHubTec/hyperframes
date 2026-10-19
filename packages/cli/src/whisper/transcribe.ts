@@ -666,7 +666,7 @@ export function withoutPaths(text: string): string {
   return text
     .split(homedir())
     .join("~")
-    .replace(/(?<=^|[\s'"(=])(?:~|[A-Za-z]:)?[\\/](?:[^\s'"`\\/]+[\\/])*([^\s'"`\\/]+)/g, "$1");
+    .replace(/(?<=^|[\s'"(=:[])(?:~|[A-Za-z]:)?[\\/](?:[^\s'"`\\/]+[\\/])*([^\s'"`\\/]+)/g, "$1");
 }
 
 function whisperVersion(executable: string): string {

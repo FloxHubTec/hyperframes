@@ -19,9 +19,11 @@ describe("withoutPaths", () => {
   it("leaves only file names of absolute paths, and leaves other slashes alone", () => {
     expect(
       withoutPaths(
-        `loading '${join(homedir(), ".cache", "m", "ggml-tiny.bin")}' from /opt/x/lib/libwhisper.1.dylib (C:\\Users\\me\\w.exe), 1/2 done`,
+        `loading '${join(homedir(), ".cache", "m", "ggml-tiny.bin")}' from /opt/x/lib/libwhisper.1.dylib (C:\\Users\\me\\w.exe), file:/srv/a/talk.wav [/srv/b/c.wav] 1/2 done`,
       ),
-    ).toBe("loading 'ggml-tiny.bin' from libwhisper.1.dylib (w.exe), 1/2 done");
+    ).toBe(
+      "loading 'ggml-tiny.bin' from libwhisper.1.dylib (w.exe), file:talk.wav [c.wav] 1/2 done",
+    );
   });
 });
 
