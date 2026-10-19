@@ -742,6 +742,40 @@ describe("extractVideoFrameToBuffer", () => {
       }
     },
   );
+
+  it.skipIf(noProbe)(
+    "extracts a frame at its displayed size, never larger than the source",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-displayed-"));
+      try {
+        const size = async (clip: string, displayedPixels: number) => {
+          const png = await extractVideoFrameToBuffer(clip, 0.5, false, false, displayedPixels);
+          return [png!.readUInt32BE(16), png!.readUInt32BE(20)];
+        };
+        for (const [name, source] of [
+          ["landscape", "160x90"],
+          ["portrait", "90x160"],
+        ]) {
+          const clip = join(dir, `${name}.mp4`);
+          const input = [
+            "-f",
+            "lavfi",
+            "-i",
+            `testsrc=d=1:r=24:s=${source}`,
+            "-pix_fmt",
+            "yuv420p",
+          ];
+          execFileSync(ffmpeg!, ["-hide_banner", "-loglevel", "error", ...input, clip]);
+          const [width, height] = source.split("x").map(Number);
+          expect(await size(clip, 0)).toEqual([width, height]);
+          expect(await size(clip, 1000)).toEqual([width, height]);
+          expect(Math.min(...(await size(clip, 32)))).toBe(32);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("resolveSnapshotVideoClipStart", () => {
