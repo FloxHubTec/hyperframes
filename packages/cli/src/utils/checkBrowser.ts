@@ -17,6 +17,7 @@ import {
   seekCompositionTimeline,
   waitForPreferredSeekTarget,
   seekInPage,
+  type PrelaunchedBrowser,
 } from "../capture/captureCompositionFrame.js";
 import {
   auditClipDurations,
@@ -106,7 +107,6 @@ interface PreparedContrast {
   // what it sends back. `candidate` is the parsed copy for Node-side reporting.
   raw: unknown;
   candidate: ContrastCandidate;
-  // ownBg or solidBg: finish reads its background from styles, not pixels.
   knownBackdrop: boolean;
   anchor: CheckAnchor;
 }
@@ -207,6 +207,7 @@ export async function runBrowserCheck(
   motion: MotionSpecResolution,
   runGrid: RunAuditGrid,
   deadline?: CheckDeadline,
+  prelaunched?: PrelaunchedBrowser,
 ): Promise<CheckBrowserResult> {
   const { bundleWithLocalizedFonts } = await import("./bundleWithLocalizedFonts.js");
   const html = await bundleWithLocalizedFonts(project.dir);
@@ -241,6 +242,7 @@ export async function runBrowserCheck(
       navigationTimeoutMs: options.timeout,
       renderReadyTimeoutMs: options.timeout,
       renderReadyWarningSuffix: "checking the current page state",
+      prelaunched,
       browserGpuMode: options.browserGpuMode ?? resolveCliChromeGpuMode(),
       signal: deadline?.signal,
       onBrowser: deadline?.ownBrowser,
@@ -1149,7 +1151,6 @@ async function collectContrast(
   }
 }
 
-// Null shot when every backdrop is known from styles.
 async function measurementShot(
   page: Page,
   prepared: PreparedContrast[],
