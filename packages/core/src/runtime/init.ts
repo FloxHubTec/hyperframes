@@ -4784,11 +4784,8 @@ export function initSandboxRuntimeModular(): void {
     armParkTimer();
   };
 
-  // A hidden document runs no animation frames, but its media keeps playing, so the
-  // transport that ends a clip's window and starts the next one has to tick on a
-  // timer while hidden. Chromium does not throttle the timers of a page playing audio;
-  // a page playing only muted or silent media is clamped to about one timer a second,
-  // so a clip there can end up to a second late.
+  // Hidden documents run no animation frames but their media plays on, so tick on a timer.
+  // Chromium clamps it to ~1 s unless audio is audible: a clip may end up to 1 s late.
   let transportTickTimerId: number | null = null;
   const transportTickPending = () => state.transportRafId != null || transportTickTimerId != null;
   const requestTransportTick = () => {
@@ -4811,8 +4808,7 @@ export function initSandboxRuntimeModular(): void {
       transportTickTimerId = null;
     }
   };
-  // A frame requested just before the tab hid never fires; a timer set just before it
-  // showed again ticks at timer rate for no reason. Move a pending tick across.
+  // A frame requested just before the tab hid never fires: move a pending tick across.
   const onTransportVisibilityChange = () => {
     if (state.tornDown || !transportTickPending()) return;
     cancelTransportTick();
