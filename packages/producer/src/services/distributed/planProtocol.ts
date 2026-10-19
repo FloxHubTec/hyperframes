@@ -71,6 +71,11 @@ export interface DistributedRenderCapabilities {
     chunk: Readonly<PlanProtocolConsumerCapabilities>;
     assembler: Readonly<PlanProtocolConsumerCapabilities>;
   }>;
+  /**
+   * `renderChunk` accepts `frameRange` and `assemble` accepts the ordered
+   * parts of a chunk in place of its single output. Absent means neither.
+   */
+  readonly chunkFrameRange?: boolean;
 }
 
 /** Serializable capability payload for fleet rollout and worker handshakes. */
@@ -89,6 +94,7 @@ export const DISTRIBUTED_RENDER_CAPABILITIES: Readonly<DistributedRenderCapabili
         acceptsLegacyV1WithoutDescriptor: true,
       }),
     }),
+    chunkFrameRange: true,
   });
 
 export function getDistributedRenderCapabilities(): Readonly<DistributedRenderCapabilities> {
