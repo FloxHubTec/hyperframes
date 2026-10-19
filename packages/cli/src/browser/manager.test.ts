@@ -1067,7 +1067,7 @@ describe("findBrowser — cache resolution", () => {
     await expect(findBrowser()).resolves.toEqual({ executablePath: HF_BINARY, source: "cache" });
   });
 
-  it("never uses a puppeteer-cache shell at another build, even with nothing else cached", async () => {
+  it("skips another build in the puppeteer cache that does not answer --version", async () => {
     const oldBinary = join(
       PUPPETEER_CACHE,
       "linux-121.0.6167.85",
@@ -1083,6 +1083,34 @@ describe("findBrowser — cache resolution", () => {
     const { findBrowser } = await import("./manager.js");
 
     expect((await findBrowser())?.executablePath).not.toBe(oldBinary);
+  });
+
+  it("keeps the newest working shell in the puppeteer cache when the pinned build is absent", async () => {
+    const shared = (version: string) =>
+      join(
+        PUPPETEER_CACHE,
+        `linux-${version}`,
+        "chrome-headless-shell-linux64",
+        "chrome-headless-shell",
+      );
+    installFsMocks({
+      existing: new Set([PUPPETEER_CACHE, shared("99.0.6533.123"), shared("148.0.7778.97")]),
+      dirs: { [PUPPETEER_CACHE]: ["linux-99.0.6533.123", "linux-148.0.7778.97"] },
+    });
+    installPuppeteerBrowsersMock();
+    vi.doMock("node:child_process", () => ({
+      execSync: vi.fn(() => {
+        throw new Error("not found");
+      }),
+      spawnSync: vi.fn(() => ({ status: 0 })),
+    }));
+
+    const { findBrowser } = await import("./manager.js");
+
+    await expect(findBrowser()).resolves.toEqual({
+      executablePath: shared("148.0.7778.97"),
+      source: "cache",
+    });
   });
 
   it("falls back to system Chrome and warns on Linux when no cache has headless-shell", async () => {

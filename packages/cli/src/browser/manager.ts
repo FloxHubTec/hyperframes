@@ -15,7 +15,7 @@ import {
 import { homedir } from "node:os";
 import { debuglog } from "node:util";
 import { basename, dirname, join, relative } from "node:path";
-import { isManagedChromeDir, managedChromeVersion } from "@hyperframes/engine/chrome-host-ceiling";
+import { managedChromeVersion, pickSharedShell } from "@hyperframes/engine/chrome-host-ceiling";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
 
@@ -364,8 +364,7 @@ async function findFromHyperframesCache(): Promise<CacheLookupResult> {
 }
 
 async function findFromCache(): Promise<CacheLookupResult> {
-  // Our pinned build first, as the engine's resolveHeadlessShellPath reads it. Another tool's Puppeteer
-  // cache counts only at that same build: an older shell there may not start on this host.
+  // Our pinned build first, as the engine's resolveHeadlessShellPath reads it; then the shared cache's pick.
   const ours = await findFromHyperframesCache();
   if (ours.result) return ours;
   const fromPuppeteer = findFromPuppeteerCache();
@@ -405,10 +404,11 @@ function findFromPuppeteerCache(): BrowserResult | undefined {
   } catch {
     return undefined;
   }
-  const version = versions.find(isManagedChromeDir);
-  if (!version) return undefined;
-  const binary = join(PUPPETEER_CACHE_DIR, version, ...executable);
-  return isUsableExecutable(binary) ? { executablePath: binary, source: "cache" } : undefined;
+  const binary = pickSharedShell(versions, (version) => {
+    const candidate = join(PUPPETEER_CACHE_DIR, version, ...executable);
+    return isUsableExecutable(candidate) ? candidate : undefined;
+  });
+  return binary ? { executablePath: binary, source: "cache" } : undefined;
 }
 
 /**

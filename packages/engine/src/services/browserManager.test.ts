@@ -960,7 +960,7 @@ describe("resolveHeadlessShellPath", () => {
     },
   );
 
-  it("never uses another tool's older shell from the shared puppeteer cache", () => {
+  it("never uses another tool's shell that does not answer --version", () => {
     // Field report: only mac_arm-121 in the shared cache, and that shell died at launch.
     const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-shared-old-"));
     try {
@@ -1013,6 +1013,42 @@ describe("resolveHeadlessShellPath", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  // Stand-in shells are shell scripts.
+  it.skipIf(process.platform === "win32")(
+    "keeps the newest shared shell that answers --version and skips one that dies",
+    () => {
+      const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-shared-starts-"));
+      try {
+        const shell = (version: string, script: string) => {
+          const binary = join(
+            home,
+            ".cache",
+            "puppeteer",
+            "chrome-headless-shell",
+            `linux-${version}`,
+            "chrome-headless-shell-linux64",
+            "chrome-headless-shell",
+          );
+          mkdirSync(join(binary, ".."), { recursive: true });
+          writeFileSync(binary, script, { mode: 0o755 });
+          return binary;
+        };
+        shell("149.0.7800.1", "#!/bin/sh\nkill -TRAP $$\n");
+        const working = shell("148.0.7778.97", "#!/bin/sh\nexit 0\n");
+        shell("99.0.6533.123", "#!/bin/sh\nexit 0\n");
+        const env = { ...process.env, HOME: home, USERPROFILE: home };
+        delete env.PRODUCER_HEADLESS_SHELL_PATH;
+        delete env.HYPERFRAMES_BROWSER_PATH;
+
+        expect(resolveHeadlessShellInSubprocess(env, { platform: "linux", arch: "x64" })).toBe(
+          working,
+        );
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("reuses chrome-headless-shell from the HyperFrames-managed cache", () => {
     const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-cache-"));

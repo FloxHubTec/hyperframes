@@ -163,27 +163,6 @@ async function readWebGlInfo(browser: Browser): Promise<WebGlProbeInfo> {
 
 export type AcquiredBrowser = BrowserLease;
 
-function compareBrowserVersionsDescending(left: string, right: string): number {
-  const parse = (value: string): number[] => {
-    const version = value.slice(value.indexOf("-") + 1);
-    const segments: number[] = [];
-    for (const segment of version.split(".")) {
-      const parsed = Number.parseInt(segment, 10);
-      if (!Number.isFinite(parsed)) break;
-      segments.push(parsed);
-    }
-    return segments;
-  };
-  const leftSegments = parse(left);
-  const rightSegments = parse(right);
-  const length = Math.max(leftSegments.length, rightSegments.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (rightSegments[index] ?? 0) - (leftSegments[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  return 0;
-}
-
 const CACHED_HEADLESS_SHELL_EXECUTABLES: Readonly<
   Record<string, readonly [directory: string, executable: string]>
 > = {
@@ -234,6 +213,19 @@ function findCachedHeadlessShell(baseDir: string): string | undefined {
   return undefined;
 }
 
+function findSharedHeadlessShell(baseDir: string): string | undefined {
+  const executable = cachedHeadlessShellExecutable();
+  if (!executable || !existsSync(baseDir)) return undefined;
+  try {
+    return pickSharedShell(readdirSync(baseDir), (version) => {
+      const binary = join(baseDir, version, ...executable);
+      return isNonEmptyFile(binary) ? binary : undefined;
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 function findManagedHeadlessShell(baseDir: string): string | undefined {
   const executable = cachedHeadlessShellExecutable();
   if (!executable || !existsSync(baseDir)) return undefined;
@@ -281,7 +273,7 @@ export function resolveHeadlessShellPath(
   const shared = join(homedir(), ".cache", "puppeteer", "chrome-headless-shell");
   return (
     findManagedHeadlessShell(ours) ??
-    findManagedHeadlessShell(shared) ??
+    findSharedHeadlessShell(shared) ??
     findCachedHeadlessShell(ours)
   );
 }
