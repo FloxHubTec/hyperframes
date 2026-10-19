@@ -21,8 +21,7 @@ import { parseSetAssignments, type SetAssignment } from "./a2Mutations.js";
 
 export type MutationVerb = "move" | "trim" | "split" | "delete" | "set" | "duplicate";
 
-// The only options each verb reads: its CLI flags and apply-plan keys, so no verb accepts one it ignores.
-export const MUTATION_FIELDS: Record<MutationVerb, readonly string[]> = {
+export const FIELDS_READ_BY_VERB: Record<MutationVerb, readonly string[]> = {
   move: ["time", "overwrite"],
   trim: ["start", "end", "duration", "overwrite"],
   split: ["time"],
@@ -353,7 +352,6 @@ function deleteMutation(context: MutationContext, args: Record<string, unknown>)
   const { row, resolved } = context;
   const range = deleteRange(context, args);
   if (!range.ok) return range;
-  // Cut the kept tail off, then the removed middle, exactly as split, split, delete would.
   let html = context.before;
   if (!sameInstant(range.end, row.end)) {
     const tail = splitSource(context, html, resolved.target, range.end, row.duration);

@@ -18,7 +18,7 @@ import {
   diff,
   fpsFor,
   isRecord,
-  MUTATION_FIELDS,
+  FIELDS_READ_BY_VERB,
   mutationConflict,
   positional,
   publicReceipt,
@@ -105,7 +105,7 @@ function preparePlanEdit(
       fix: "use move, trim, split, delete, set, or duplicate",
     };
   }
-  const fields = MUTATION_FIELDS[edit.verb as MutationVerb];
+  const fields = FIELDS_READ_BY_VERB[edit.verb as MutationVerb];
   const unused = Object.keys(edit).find(
     (key) => key !== "verb" && key !== "ref" && !fields.includes(key),
   );

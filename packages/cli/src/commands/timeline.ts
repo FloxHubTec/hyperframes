@@ -7,7 +7,7 @@ import { resolveProject } from "../utils/project.js";
 import { withMeta } from "../utils/updateCheck.js";
 import { runApply, runIds, runUndo } from "../timeline/a2Commands.js";
 import { runMutation } from "../timeline/a2MutationCommand.js";
-import { MUTATION_FIELDS, type MutationVerb } from "../timeline/a2Shared.js";
+import { FIELDS_READ_BY_VERB, type MutationVerb } from "../timeline/a2Shared.js";
 import { resolveExtraPositionals } from "../utils/reject-extra-positionals.js";
 import { assertKnownFlags } from "../utils/reject-unknown-flags.js";
 
@@ -30,7 +30,7 @@ const MUTATION_OPTIONS: Record<string, ArgDef> = {
 };
 
 function mutationCommand(verb: MutationVerb) {
-  const fields = MUTATION_FIELDS[verb];
+  const fields = FIELDS_READ_BY_VERB[verb];
   return defineCommand({
     meta: { name: verb, description: `${verb} a timeline clip` },
     args: {
