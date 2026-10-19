@@ -2532,8 +2532,6 @@ export function initSandboxRuntimeModular(): void {
       handleMetadataForProxy(event.currentTarget);
     }
   };
-  // A video that loads a new source (its authoring proxy, or that copy's larger size) starts over at 0. Playing, the
-  // next tick seeks it back; paused, nothing would, and it showed another moment under its stacked twin.
   const onMediaLoadedMetadataForPlayhead = () => {
     if (state.tornDown || clock.isPlaying() || isExportRenderDrivingFrames()) return;
     lastSyncedMediaTimeSeconds = null;
