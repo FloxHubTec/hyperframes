@@ -255,6 +255,22 @@ it("runs the dense overlap grid in one page task, keeping each sample's time on 
   );
 });
 
+it("takes no contrast screenshot at a sample with no text to measure", async () => {
+  mountCanvasFixture();
+  const page = fakePage();
+  page.screenshot = vi.fn(async () => "c3R1Yg==");
+  installSessionMock(page);
+
+  await runBrowserCheck(
+    PROJECT,
+    { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: true },
+    { kind: "none" },
+    runAuditGrid,
+  );
+
+  expect(page.screenshot).not.toHaveBeenCalled();
+});
+
 it("uses check --timeout for both navigation and render-ready settling", async () => {
   mountCanvasFixture();
   const page = fakePage();
@@ -430,6 +446,13 @@ it.each([
     );
 
     expect(page.screenshot).toHaveBeenCalledTimes(shots);
+    expect(page.screenshot).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        clip: { x: 50, y: 50, width: 300, height: 40 },
+        captureBeyondViewport: false,
+      }),
+    );
     expect(seekCompositionTimeline).toHaveBeenCalledWith(page, 5, SCREENSHOT_SEEK_OPTIONS);
     expect(result.screenshots.map((shot) => shot.pngBase64)).toEqual(saved);
   },
@@ -1086,6 +1109,7 @@ function fakeConsoleMessage(type: string, text: string) {
 function fakePage() {
   return Object.assign(Object.create(null), {
     on: vi.fn(),
+    viewport: () => ({ width: 640, height: 360 }),
     addScriptTag: vi.fn(async ({ content }: { content: string }) => {
       window.eval(content);
     }),

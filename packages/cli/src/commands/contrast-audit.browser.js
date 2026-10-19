@@ -16,7 +16,7 @@
 //   2. Caller takes ONE screenshot (page.screenshot()) — same number of
 //      screenshots as before, just moved to after prepare() instead of
 //      before it.
-//   3. window.__contrastAuditFinish(imgBase64, time, candidates) restores
+//   3. window.__contrastAuditFinish(imgBase64, time, candidates, region) restores
 //      the original paint FIRST (so a slow/failed decode can't leave the
 //      page's text stuck invisible), then decodes the screenshot and, for
 //      each candidate, samples the real composited pixels directly INSIDE
@@ -394,7 +394,7 @@ window.__contrastAuditRestoreIfPending = function () {
   __contrastAuditRestoreAll();
 };
 
-window.__contrastAuditFinish = async function (imgBase64, time, candidates) {
+window.__contrastAuditFinish = async function (imgBase64, time, candidates, region) {
   function relLum(r, g, b) {
     function ch(v) {
       var s = v / 255;
@@ -438,8 +438,11 @@ window.__contrastAuditFinish = async function (imgBase64, time, candidates) {
   if (!ctx) return [];
   ctx.drawImage(img, 0, 0);
   var px = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-  var w = canvas.width;
-  var h = canvas.height;
+  // A clipped shot holds `region.clip` of the frame: clamp to the frame, read at the offset.
+  var w = region ? region.frameWidth : canvas.width;
+  var h = region ? region.frameHeight : canvas.height;
+  var ox = region ? region.clip.x : 0;
+  var oy = region ? region.clip.y : 0;
 
   var out = [];
   for (var ci = 0; ci < candidates.length; ci++) {
@@ -467,7 +470,7 @@ window.__contrastAuditFinish = async function (imgBase64, time, candidates) {
       aa = [];
     for (var y = y0; y <= y1; y += stepY) {
       for (var x = x0; x <= x1; x += stepX) {
-        var idx = (y * w + x) * 4;
+        var idx = ((y - oy) * canvas.width + (x - ox)) * 4;
         rr.push(px[idx]);
         gg.push(px[idx + 1]);
         bb.push(px[idx + 2]);

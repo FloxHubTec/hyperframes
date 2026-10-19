@@ -1107,6 +1107,8 @@ async function collectContrast(
   let prepared: PreparedContrast[] = [];
   try {
     prepared = parsePreparedContrast(await prepareContrast(page, time));
+    if (prepared.length === 0 && !snapshotAnnotations) return { entries: [] };
+    const region = textRegion(prepared, page.viewport());
     // This screenshot is the one contrast math is sampled from below — it must
     // stay untouched by the annotation overlay (finishContrast reads real
     // painted pixels), so annotation only ever happens on a SECOND shot.
@@ -1114,6 +1116,7 @@ async function collectContrast(
       encoding: "base64",
       type: "png",
       omitBackground: true,
+      ...(region ? { clip: region.clip, captureBeyondViewport: false } : {}),
     });
     if (typeof measurementShot !== "string") throw new Error("Contrast screenshot was not base64");
     const raw = await finishContrast(
@@ -1121,6 +1124,7 @@ async function collectContrast(
       measurementShot,
       time,
       prepared.map((entry) => entry.raw),
+      region,
     );
     const finished = raw.flatMap(parseFinishedContrast);
     const entries = joinContrastEntries(finished, prepared);
@@ -1288,24 +1292,57 @@ async function prepareContrast(page: Page, time: number): Promise<unknown[]> {
   }, time);
 }
 
+interface TextRegion {
+  clip: { x: number; y: number; width: number; height: number };
+  frameWidth: number;
+  frameHeight: number;
+}
+
+// The smallest whole-pixel rect holding every box contrast samples; undefined means the full frame.
+function textRegion(
+  prepared: PreparedContrast[],
+  viewport: { width: number; height: number; deviceScaleFactor?: number } | null,
+): TextRegion | undefined {
+  if (!viewport || (viewport.deviceScaleFactor ?? 1) !== 1 || prepared.length === 0)
+    return undefined;
+  const boxes = prepared.map((entry) => entry.candidate.bbox);
+  const x = Math.max(0, Math.floor(Math.min(...boxes.map((box) => box.x))));
+  const y = Math.max(0, Math.floor(Math.min(...boxes.map((box) => box.y))));
+  const right = Math.min(viewport.width, Math.ceil(Math.max(...boxes.map((b) => b.x + b.width))));
+  const bottom = Math.min(
+    viewport.height,
+    Math.ceil(Math.max(...boxes.map((b) => b.y + b.height))),
+  );
+  if (right <= x || bottom <= y) return undefined;
+  const clip = { x, y, width: right - x, height: bottom - y };
+  return { clip, frameWidth: viewport.width, frameHeight: viewport.height };
+}
+
 async function finishContrast(
   page: Page,
   screenshot: string,
   time: number,
   candidates: unknown[],
+  region: TextRegion | undefined,
 ): Promise<unknown[]> {
   return page.evaluate(
-    async (payload: { screenshot: string; time: number; candidates: unknown[] }) => {
+    async (payload: {
+      screenshot: string;
+      time: number;
+      candidates: unknown[];
+      region: TextRegion | null;
+    }) => {
       const finish = Reflect.get(window, "__contrastAuditFinish");
       if (typeof finish !== "function") return [];
       const result = await Reflect.apply(finish, window, [
         payload.screenshot,
         payload.time,
         payload.candidates,
+        payload.region,
       ]);
       return Array.isArray(result) ? result : [];
     },
-    { screenshot, time, candidates },
+    { screenshot, time, candidates, region: region ?? null },
   );
 }
 
