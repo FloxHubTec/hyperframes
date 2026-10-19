@@ -960,7 +960,7 @@ describe("resolveHeadlessShellPath", () => {
     },
   );
 
-  it("never uses another tool's shell that does not answer --version", () => {
+  it("never uses another tool's shell that does not start", () => {
     // Field report: only mac_arm-121 in the shared cache, and that shell died at launch.
     const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-shared-old-"));
     try {
@@ -1016,7 +1016,7 @@ describe("resolveHeadlessShellPath", () => {
 
   // Stand-in shells are shell scripts.
   it.skipIf(process.platform === "win32")(
-    "keeps the newest shared shell that answers --version and skips one that dies",
+    "keeps the newest shared shell that starts and skips one that dies",
     () => {
       const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-shared-starts-"));
       try {

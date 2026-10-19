@@ -14,8 +14,10 @@ import { join } from "path";
 import { homedir } from "os";
 import {
   chromeMajorCeiling,
+  compareBrowserVersionsDescending,
   exceedsChromeCeiling,
   isManagedChromeDir,
+  pickSharedShell,
 } from "./chromeHostCeiling.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { getSystemTotalMb, LOW_MEMORY_TOTAL_MB_THRESHOLD } from "./systemMemory.js";

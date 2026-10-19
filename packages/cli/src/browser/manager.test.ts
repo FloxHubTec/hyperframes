@@ -1067,7 +1067,7 @@ describe("findBrowser — cache resolution", () => {
     await expect(findBrowser()).resolves.toEqual({ executablePath: HF_BINARY, source: "cache" });
   });
 
-  it("skips another build in the puppeteer cache that does not answer --version", async () => {
+  it("skips another build in the puppeteer cache that does not start", async () => {
     const oldBinary = join(
       PUPPETEER_CACHE,
       "linux-121.0.6167.85",

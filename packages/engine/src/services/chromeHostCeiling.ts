@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { debuglog } from "node:util";
 import { release } from "node:os";
 
 /** Chrome 151 dropped macOS 12 and older (Darwin < 22); 150 is the last major that launches there. */
@@ -60,12 +61,15 @@ export function compareBrowserVersionsDescending(left: string, right: string): n
 }
 
 const starts = new Map<string, boolean>();
+const debug = debuglog("hyperframes:browser");
 
-/** Whether a shell answers `--version`: an old build can die at launch on a newer OS. Asked once per path. */
+/** Whether a shell loads a blank page and exits: an old build can die at launch on a newer OS. Asked once per path. */
 export function shellStarts(binary: string): boolean {
   let answer = starts.get(binary);
   if (answer === undefined) {
-    answer = spawnSync(binary, ["--version"], { stdio: "ignore", timeout: 10_000 })?.status === 0;
+    const probe = ["--no-sandbox", "--dump-dom", "about:blank"];
+    answer = spawnSync(binary, probe, { stdio: "ignore", timeout: 10_000 })?.status === 0;
+    if (!answer) debug("skipping %s: it did not start", binary);
     starts.set(binary, answer);
   }
   return answer;
