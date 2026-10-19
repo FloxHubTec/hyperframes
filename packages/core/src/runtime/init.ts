@@ -67,6 +67,7 @@ import {
 import {
   handleErrorForProxy,
   handleMetadataForProxy,
+  isRenderMode,
   maybeProxyProactively,
   setProxyDisplayScale,
 } from "./mediaProxy";
@@ -2532,8 +2533,9 @@ export function initSandboxRuntimeModular(): void {
       handleMetadataForProxy(event.currentTarget);
     }
   };
-  const onMediaLoadedMetadataForPlayhead = () => {
-    if (state.tornDown || clock.isPlaying() || isExportRenderDrivingFrames()) return;
+  const onMediaLoadedMetadataForPlayhead = (event: Event) => {
+    const el = event.currentTarget;
+    if (state.tornDown || clock.isPlaying() || !isMediaElement(el) || isRenderMode(el)) return;
     lastSyncedMediaTimeSeconds = null;
     state.mediaForceSyncNextTick = true;
     syncMediaForCurrentState();

@@ -15,9 +15,7 @@ function loadedVideo(el: HTMLVideoElement) {
   });
 }
 
-// A clip and its own cutout stacked at the same start: when the clip's authoring proxy (or that copy's larger size)
-// loads while paused, the clip restarted at 0 and showed another moment of the person under the cutout.
-it("a paused video that loads a new source goes back to the playhead, level with its stacked twin", () => {
+function reloadClipPausedAt4s() {
   resetRuntimeFixtureDom();
   document.body.innerHTML =
     '<div data-composition-id="main" data-root="true" data-duration="6.27">' +
@@ -34,18 +32,30 @@ it("a paused video that loads a new source goes back to the playhead, level with
   expect(clip.currentTime).toBe(4);
   expect(cutout.currentTime).toBe(4);
 
-  // What mediaProxy's loadProxy does to the clip, then the browser's answer once the copy's metadata is in.
   evictMediaSyncState(clip);
   clip.src = "/clip.mp4?hf-proxy=h264";
   clip.load();
   clip.dispatchEvent(new Event("loadedmetadata"));
+  return { clip, cutout };
+}
 
+// When the clip's authoring proxy (or that copy's larger size) loaded while paused, the clip restarted at 0 and
+// showed another moment of the person under the cutout.
+it("a paused video that loads a new source goes back to the playhead, level with its stacked twin", () => {
+  const { clip, cutout } = reloadClipPausedAt4s();
   expect(clip.currentTime).toBe(4);
   expect(cutout.currentTime).toBe(4);
 });
 
+it("leaves a render's videos to the render", () => {
+  window.__HF_EXPORT_RENDER_SEEK_CONFIG = { fps: 30, fpsSource: "render-options" };
+  const { clip } = reloadClipPausedAt4s();
+  expect(clip.currentTime).toBe(0);
+});
+
 afterEach(() => {
   window.__hfRuntimeTeardown?.();
+  delete window.__HF_EXPORT_RENDER_SEEK_CONFIG;
   vi.restoreAllMocks();
   resetRuntimeFixtureDom();
 });
