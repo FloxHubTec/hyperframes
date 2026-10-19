@@ -1,14 +1,9 @@
 #!/usr/bin/env bun
 /**
- * Release step: pin the handler ZIP to this package version. Moves the freshly
- * built `dist/handler.zip` (if any) to the release asset path, then writes
- * `prebuilt/handler-zip.json` (asset URL + sha256) and `prebuilt/template.yaml`
- * (the SAM template with `CodeUri: handler.zip`) for `npm publish` to carry.
- *
- * Run from the repo root after `build:zip`, or with the asset already in
- * `dist/` when a previous run attached it to the release.
+ * Release step: move the built handler ZIP to the release asset path, then write the
+ * pinned manifest (asset URL + sha256) and SAM template into the package for npm.
+ * A retried release run passes the asset it downloaded instead of a fresh build.
  */
-
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";

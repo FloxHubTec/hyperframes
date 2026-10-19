@@ -24,7 +24,6 @@ export interface DestroyArgs {
 export async function runDestroy(args: DestroyArgs): Promise<void> {
   const stack = requireStack(args.stackName);
   console.log(c.dim(`→ sam delete (stack=${stack.stackName} region=${stack.region})`));
-  // `sam delete` reads the stack from CloudFormation; outside a checkout no template is needed.
   const root = repoRoot();
   // Mirror deploy.ts's AWS_PROFILE env fallback — `AWS_PROFILE=prod
   // hyperframes lambda destroy` should hit the same account `deploy`

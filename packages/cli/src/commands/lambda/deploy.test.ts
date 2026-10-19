@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const root = vi.hoisted(() => ({ value: undefined as string | undefined }));
 vi.mock("./repoRoot.js", () => ({ repoRoot: () => root.value }));
-vi.mock("@hyperframes/aws-lambda/sdk", () => ({}));
+vi.mock("@hyperframes/aws-lambda/sdk", () => ({ prebuiltHandler: () => undefined }));
 vi.mock("./sam.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./sam.js")>()),
   samDeploy: vi.fn(),

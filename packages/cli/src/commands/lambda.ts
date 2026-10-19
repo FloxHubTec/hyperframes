@@ -230,9 +230,8 @@ export default defineCommand({
     // The lambda subverbs dynamic-import `@hyperframes/aws-lambda` at call
     // time. We keep aws-lambda as a workspace devDependency (not a runtime
     // dep) so the published CLI install stays small for users who don't
-    // deploy to Lambda. These subverbs need aws-lambda; catch the
-    // missing-module error here and turn it into a friendly hint. `deploy`
-    // reports a missing adapter itself (prebuiltHandler.ts); `destroy` needs only SAM.
+    // deploy to Lambda. These subverbs need it and get a friendly hint when it
+    // is missing; `deploy` reports that itself and `destroy` needs only SAM.
     const verbsNeedingSDK = new Set(["sites", "render", "render-batch", "progress"]);
     if (verbsNeedingSDK.has(subcommand)) {
       try {
