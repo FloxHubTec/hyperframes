@@ -357,7 +357,6 @@ export function useDomSelection({
   const refreshDomEditSelectionFromPreview = useCallback(
     // fallow-ignore-next-line complexity
     async (selection: DomEditSelection, iframe = previewIframeRef.current) => {
-      // A save resyncs after it returns; by then the user may have deselected or picked another element.
       const stillSelected = () =>
         domEditSelectionsTargetSame(domEditSelectionRef.current, selection);
       if (!stillSelected()) return;

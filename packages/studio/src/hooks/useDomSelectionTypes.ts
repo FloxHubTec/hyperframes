@@ -89,7 +89,6 @@ export interface UseDomSelectionReturn {
     element: TimelineElement,
   ) => Promise<DomEditSelection | null>;
   handleTimelineElementSelect: (element: TimelineElement | null) => Promise<void>;
-  /** Re-resolves `selection` against `iframe` (default: the preview ref) only while it is still selected. */
   refreshDomEditSelectionFromPreview: (
     selection: DomEditSelection,
     iframe?: HTMLIFrameElement | null,
