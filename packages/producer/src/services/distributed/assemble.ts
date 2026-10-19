@@ -83,12 +83,6 @@ interface PlanJsonForAssemble {
   };
 }
 
-/**
- * One entry per chunk, ordered by index: the chunk's output, or the ordered
- * outputs of the frame sub-ranges it was rendered as (`renderChunk`'s
- * `frameRange`). Each part is a self-contained chunk output, so parts join
- * exactly as whole chunks do.
- */
 export type AssembleChunkPaths = readonly (string | readonly string[])[];
 
 type CfrRateControlSource = Partial<Pick<LockedRenderConfig, "quality" | "crf" | "bitrate">>;
@@ -146,7 +140,6 @@ export async function assemble(
   const cfr = options?.cfr === true;
 
   const plan = readAssemblePlan(planDir, chunkOutputs);
-  // Every join below is per output file, so parts take their chunk's place in order.
   const chunkPaths = chunkOutputs.flat();
   if (plan.dimensions.format === "png-sequence") {
     // ── 2a. png-sequence: merge frame directories with global re-numbering

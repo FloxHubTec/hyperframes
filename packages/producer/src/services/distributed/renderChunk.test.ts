@@ -883,7 +883,6 @@ describe("renderChunk() — frameRange", () => {
       videoPts(fromParts).forEach((pts, i) => expect(Math.abs(pts - i / 30)).toBeLessThan(0.002));
       // The parts are separate encodes, so compare their pixels to the whole's.
       expect(minPsnr(fromParts, fromWhole)).toBeGreaterThan(35);
-      // The audio does not depend on how a chunk was split.
       expect(pcm(fromParts) === pcm(fromWhole)).toBe(true);
     },
     180_000,

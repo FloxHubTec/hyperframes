@@ -71,10 +71,6 @@ export interface DistributedRenderCapabilities {
     chunk: Readonly<PlanProtocolConsumerCapabilities>;
     assembler: Readonly<PlanProtocolConsumerCapabilities>;
   }>;
-  /**
-   * `renderChunk` accepts `frameRange` and `assemble` accepts the ordered
-   * parts of a chunk in place of its single output. Absent means neither.
-   */
   readonly chunkFrameRange?: boolean;
 }
 

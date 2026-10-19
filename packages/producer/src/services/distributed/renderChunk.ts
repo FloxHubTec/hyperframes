@@ -142,11 +142,6 @@ export interface ChunkResult {
   /** `"file"` for mp4/mov; `"frame-dir"` for png-sequence. */
   outputKind: "file" | "frame-dir";
   framesEncoded: number;
-  /**
-   * Absolute frames `[startFrame, endFrame)` this output holds: the chunk's
-   * slice, or the requested {@link RenderChunkOptions.frameRange}. Optional
-   * so adapters can accept results from older or injected chunk renderers.
-   */
   frameRange?: ChunkFrameRange;
   sha256: string;
   durationMs: number;
@@ -193,7 +188,7 @@ export interface EffectiveChunkResult extends ChunkResult {
   frameRange: ChunkFrameRange;
 }
 
-/** Absolute composition frame indices, end exclusive (the `chunks.json` slice convention). */
+/** Absolute composition frame indices, end exclusive, like a chunk's slice. */
 export interface ChunkFrameRange {
   startFrame: number;
   endFrame: number;
@@ -443,7 +438,6 @@ export function resolveLockedVp9CpuUsed(
  * argument is a file for mp4/mov outputs and a directory for png-sequence
  * outputs — the caller picks the right shape based on `meta/encoder.json`.
  * `renderChunk` enforces the same choice via `outputKind` on the result.
- * `options.frameRange` renders one part of the chunk instead of all of it.
  */
 // fallow-ignore-next-line complexity
 export async function renderChunk(

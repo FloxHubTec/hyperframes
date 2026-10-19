@@ -57,11 +57,7 @@ export function audioCutForChunk(
   return { seekSeconds, durationSeconds, firstPacket: first, packetCount: end - first };
 }
 
-/**
- * `chunks` with chunk `index` split around `range`, and the index of `range` in the result.
- * `audioCutForChunk` over it gives `range` the packets it would own as a chunk of its own, so
- * the parts of a chunk together carry exactly that chunk's packets, each once and in order.
- */
+/** Chunk `index` split around `range`, so `audioCutForChunk` treats `range` as a chunk. */
 export function chunksWithSubRange(
   chunks: readonly ChunkSliceJson[],
   index: number,
