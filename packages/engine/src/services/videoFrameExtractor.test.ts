@@ -2083,23 +2083,29 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling at the output frame rate", () => {
   );
 
   it("keeps a run that outlasts the timeout while it still writes frames", async () => {
+    const source = join(FIXTURE_DIR, "paced-5s.mp4");
+    const synth = await runFfmpeg([
+      ...["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi"],
+      ...["-i", `testsrc=s=${WIDTH}x${HEIGHT}:r=30:d=5`, "-pix_fmt", "yuv420p", source],
+    ]);
+    if (!synth.success) throw new Error(`paced fixture synthesis failed: ${synth.stderr}`);
     const { runFfmpeg: real } =
       await vi.importActual<typeof import("../utils/runFfmpeg.js")>("../utils/runFfmpeg.js");
-    // Real-time pacing makes 1.5 s of source take 1.5 s, over twice the timeout.
+    // Real-time pacing makes 5 s of source take 5 s against a 2 s timeout.
     vi.mocked(runFfmpeg).mockImplementation((args, opts) =>
       real(["-stats_period", "0.1", "-re", ...args], opts),
     );
     try {
       const extracted = await extractVideoFramesRange(
-        sourcePath("mkv-30"),
+        source,
         "paced-past-timeout",
         0,
-        1.5,
+        5,
         { fps: 10, outputDir: FIXTURE_DIR, format: "png" },
         undefined,
-        { ffmpegProcessTimeout: 700 },
+        { ffmpegProcessTimeout: 2000 },
       );
-      expect(extracted.totalFrames).toBe(15);
+      expect(extracted.totalFrames).toBe(50);
     } finally {
       vi.mocked(runFfmpeg).mockImplementation(real);
     }
