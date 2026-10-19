@@ -16,6 +16,7 @@ function setup(body: Buffer = ZIP) {
   const templatePath = join(root, "template.yaml");
   writeFileSync(templatePath, "CodeUri: handler.zip\n");
   const downloads: string[] = [];
+  const logs: string[] = [];
   const deps: StageDeps = {
     loadAdapter: async () => ({
       prebuiltHandler: () => ({
@@ -31,9 +32,9 @@ function setup(body: Buffer = ZIP) {
       writeFileSync(dest, body);
     },
     cacheDir: join(root, "cache"),
-    log: () => {},
+    log: (line) => logs.push(line),
   };
-  return { deps, downloads };
+  return { deps, downloads, logs };
 }
 
 function missingModule(): Error {
@@ -49,9 +50,10 @@ afterEach(() => {
 
 describe("stagePrebuiltHandler", () => {
   it("downloads the pinned zip once, then reuses the verified copy beside the template", async () => {
-    const { deps, downloads } = setup();
+    const { deps, downloads, logs } = setup();
 
     const dir = await stagePrebuiltHandler(deps);
+    expect(logs).toContain(`→ Verified sha256 ${SHA}`);
     expect(dir).toBe(join(deps.cacheDir, `9.8.7-${SHA}`));
     expect(readFileSync(join(dir, "handler.zip"))).toEqual(ZIP);
     expect(readFileSync(join(dir, "template.yaml"), "utf-8")).toBe("CodeUri: handler.zip\n");
@@ -71,9 +73,14 @@ describe("stagePrebuiltHandler", () => {
   });
 
   it("refuses a download whose sha256 does not match and keeps nothing to deploy", async () => {
+    vi.stubEnv("HYPERFRAMES_LAMBDA_HANDLER_URL", "https://b.example/h.zip?X-Amz-Signature=secret");
     const { deps } = setup(Buffer.from("something else"));
 
-    await expect(stagePrebuiltHandler(deps)).rejects.toThrow(/Refusing the handler ZIP .* sha256/);
+    const refusal = stagePrebuiltHandler(deps);
+    await expect(refusal).rejects.toThrow(
+      /Refusing the handler ZIP from https:\/\/b\.example\/h\.zip: sha256/,
+    );
+    await expect(refusal).rejects.not.toThrow(/secret/);
     const dir = join(deps.cacheDir, `9.8.7-${SHA}`);
     expect(existsSync(join(dir, "handler.zip"))).toBe(false);
     expect(existsSync(join(dir, "handler.zip.download"))).toBe(false);

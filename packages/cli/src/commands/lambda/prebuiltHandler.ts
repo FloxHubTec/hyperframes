@@ -77,12 +77,14 @@ export async function stagePrebuiltHandler(deps: StageDeps = defaultDeps): Promi
     const actual = sha256File(partial);
     if (actual !== pinned.sha256) {
       unlinkSync(partial);
+      const urlWithoutCredentials = url.split("?")[0];
       throw new Error(
-        `[lambda deploy] Refusing the handler ZIP from ${url}: sha256 ${actual} does not match ` +
+        `[lambda deploy] Refusing the handler ZIP from ${urlWithoutCredentials}: sha256 ${actual} does not match ` +
           `the ${pinned.sha256} pinned by @hyperframes/aws-lambda@${pinned.version}.`,
       );
     }
     renameSync(partial, zip);
+    deps.log(`→ Verified sha256 ${pinned.sha256}`);
   }
   copyFileSync(pinned.templatePath, join(dir, "template.yaml"));
   return dir;
