@@ -388,8 +388,8 @@ async function findFromHyperframesCache(): Promise<CacheLookupResult> {
 }
 
 async function findFromCache(): Promise<CacheLookupResult> {
-  // Our pinned build first, as the engine's resolveHeadlessShellPath reads it. Another tool's Puppeteer cache counts only
-  // at that same build: an older shell there may not start on this host.
+  // Our pinned build first, as the engine's resolveHeadlessShellPath reads it. Another tool's Puppeteer
+  // cache counts only at that same build: an older shell there may not start on this host.
   const ours = await findFromHyperframesCache();
   if (ours.result) return ours;
   const fromPuppeteer = findFromPuppeteerCache();
