@@ -1,7 +1,4 @@
-/**
- * What a chunk worker's capture session is built from (capture options, video
- * frames and their injector), shared with the planner's frame-cost measurement.
- */
+// What a chunk capture session is built from, shared with the planner's frame-cost measurement.
 import { existsSync, readdirSync } from "node:fs";
 import { extname, join } from "node:path";
 import {
@@ -23,15 +20,7 @@ import type { LockedRenderConfig } from "../render/stages/freezePlan.js";
 import { resolveRenderFpsConfig } from "../fileServer.js";
 import { type DistributedFormat, INVALID_VIDEO_METADATA, type PlanVideosJson } from "./shared.js";
 
-/**
- * Non-retryable error codes raised when the planDir is structurally
- * malformed, semantically out of range, or fingerprints differently from
- * what the controller wrote. Each is distinct so adapter retry policies
- * can route them independently — e.g. `MISSING_PLAN_ARTIFACT` may point
- * to a partial S3 download that a retry could heal, while
- * `PLAN_HASH_MISMATCH` strictly indicates cross-version drift that
- * retries won't fix.
- */
+/** Distinct codes so adapters route retries per cause: a missing artifact may heal, a hash mismatch never. */
 export const FFMPEG_VERSION_MISMATCH = "FFMPEG_VERSION_MISMATCH";
 export const PLAN_HASH_MISMATCH = "PLAN_HASH_MISMATCH";
 export const MISSING_PLAN_ARTIFACT = "MISSING_PLAN_ARTIFACT";
@@ -48,12 +37,7 @@ export type RenderChunkValidationCode =
   | typeof INVALID_VIDEO_METADATA
   | typeof BROWSER_GPU_NOT_SOFTWARE;
 
-/**
- * Typed non-retryable error raised by `renderChunk` when the planDir is
- * malformed or the worker's runtime doesn't match the planDir's
- * controller-side fingerprint. Workflow adapters key retry policies off
- * `code` — most of these failures will not heal on retry.
- */
+/** A malformed planDir or a worker that does not match the plan's fingerprint; adapters key retries off `code`. */
 export class RenderChunkValidationError extends Error {
   readonly code: RenderChunkValidationCode;
   constructor(code: RenderChunkValidationCode, message: string) {
@@ -63,11 +47,7 @@ export class RenderChunkValidationError extends Error {
   }
 }
 
-/**
- * Build the immutable lookup table once, but keep injector state scoped to a
- * browser session. Reusing one hook across workers or a whole-chunk retry can
- * incorrectly suppress injection on a fresh page.
- */
+/** One injector per browser session: a hook reused on a fresh page can skip its first injection. */
 export function createChunkVideoFrameInjectorFactory(
   frameLookup: FrameLookupTable | null,
 ): () => BeforeCaptureHook | null {
@@ -82,20 +62,8 @@ function frameNumberFromFileName(name: string): number | null {
 }
 
 /**
- * Rebuild the engine's in-memory `ExtractedFrames[]` from the on-disk
- * planDir layout. `<planDir>/video-frames/<videoId>/` holds the numbered
- * frame files plan() extracted; this lists each dir and rebuilds the
- * 0-based `framePaths` Map that `FrameLookupTable` / `videoFrameInjector`
- * both index against — the consumer is
- * `videoFrameExtractor.ts:getFrameAtTime`, which floors `localTime * fps`
- * to a 0-based index and reads `framePaths.get(frameIndex)`. Any drift
- * from that key convention silently drops every `<video>`'s first-paint
- * frame; see HF#1731 / HF#1730.
- *
- * Exported so a unit test can pin the 0-based contract without spinning
- * up the heavyweight Docker fixture — the bug surfaces only under
- * distributed mode and only at video first-paint, so this primitive is
- * the right granularity to guard.
+ * Rebuilds `ExtractedFrames[]` from `<planDir>/video-frames/<videoId>/`. `framePaths` keys are 0-based
+ * frame indexes (what `getFrameAtTime` reads); any other key drops every video's first-paint frame.
  */
 export function rebuildExtractedFramesFromPlanDir(
   planDir: string,
@@ -111,10 +79,7 @@ export function rebuildExtractedFramesFromPlanDir(
           `${outputDir} not present. plan() should have written frames here; the planDir is malformed.`,
       );
     }
-    // framePattern looks like `frame_%05d.jpg`; sprintf isn't available at
-    // runtime so list the directory and order numeric names by their ordinal.
-    // Width changes once FFmpeg passes the padding minimum, so lexical order
-    // would interleave frame_100000 before frame_10001.
+    // Numeric order: past the padding width, lexical order puts frame_100000 before frame_10001.
     const ext = (extname(v.framePattern) || ".jpg").toLowerCase();
     const frames = readdirSync(outputDir)
       .filter((name) => name.toLowerCase().endsWith(ext))
@@ -128,9 +93,7 @@ export function rebuildExtractedFramesFromPlanDir(
     for (let i = 0; i < frames.length; i++) {
       const frameName = frames[i];
       if (!frameName) continue;
-      // V1 plans preserve the historical sorted-position behavior even for
-      // unusual zero-based filenames. V2 materialization is sparse, so only
-      // that mode derives the original index from ffmpeg's 1-based filename.
+      // v2 materialization is sparse, so only v2 reads the index from ffmpeg's 1-based name.
       const frameNumber = indexMode === "sparse-v2" ? frameNumberFromFileName(frameName) : null;
       const frameIndex = frameNumber === null ? i : frameNumber - 1;
       framePaths.set(frameIndex, join(outputDir, frameName));
@@ -144,11 +107,7 @@ export function rebuildExtractedFramesFromPlanDir(
       totalFrames: v.totalFrames,
       metadata: v.metadata,
       framePaths,
-      // The chunk worker doesn't own the planDir's video-frames/ directory
-      // (the controller does — adapters that fan out chunks across machines
-      // share the planDir as read-only). Mark ownership as false so the
-      // injector's eventual cleanup doesn't rm bytes another worker may
-      // still be reading.
+      // The planDir is shared read-only across workers; cleanup must not delete its frames.
       ownedByLookup: false,
     });
   }
@@ -187,29 +146,19 @@ export function buildChunkCaptureOptions(input: {
     format: dimensions.format === "mp4" ? "jpeg" : "png",
     quality: dimensions.format === "mp4" ? resolveCaptureJpegQuality(encoder.quality) : undefined,
     deviceScaleFactor: encoder.deviceScaleFactor,
-    // Re-inject the controller's snapshotted variables so the chunk's
-    // first capture sees the same `window.__hfVariables` the in-process
-    // renderer would have seen. Optional — compositions that don't
-    // declare `data-composition-variables` leave this undefined and the
-    // engine skips the `evaluateOnNewDocument` injection.
+    // The controller's snapshot, so the first capture sees the in-process renderer's `__hfVariables`.
     variables: encoder.variables,
     subTimelineWaitMemo: {},
     ...(videoCaptureBeyondViewport !== undefined
       ? { captureBeyondViewport: videoCaptureBeyondViewport }
       : {}),
-    // lock the BeginFrame warmup loop to a fixed iteration count so
-    // `beginFrameTimeTicks` is host-independent. Only chunks ever set this.
+    // A fixed warmup count keeps `beginFrameTimeTicks` host-independent.
     lockWarmupTicks: true,
     requiresWebGpu: compositionRequiresWebGpu(input.html),
   };
 }
 
-/**
- * Extract the given composition frames from videos the planner left
- * unextracted. Frames land in `outputRoot/<videoId>/` under the names a full
- * extraction gives them, so the lookup indexes them exactly as it would
- * frames the planner wrote.
- */
+/** Extracts the given frames of deferred videos under the names a full extraction gives them. */
 export async function extractDeferredVideoFramesForChunk(input: {
   planDir: string;
   planVideos: PlanVideosJson;
