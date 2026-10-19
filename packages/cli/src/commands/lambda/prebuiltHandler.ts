@@ -1,8 +1,5 @@
-/**
- * Out-of-checkout `lambda deploy`: fetch the handler ZIP the installed
- * `@hyperframes/aws-lambda` pins, verify its sha256, and stage it beside the
- * packaged SAM template so `sam deploy` can run from that directory.
- */
+// `lambda deploy` without a repo checkout: fetch the pinned handler ZIP, verify its sha256 and
+// stage it beside the packaged SAM template.
 
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";

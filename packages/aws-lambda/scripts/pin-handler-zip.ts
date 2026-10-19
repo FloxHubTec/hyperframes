@@ -1,9 +1,6 @@
 #!/usr/bin/env bun
-/**
- * Release step: move the built handler ZIP to the release asset path, then write the
- * pinned manifest (asset URL + sha256) and SAM template into the package for npm.
- * A retried release run passes the asset it downloaded instead of a fresh build.
- */
+// Release step: writes the handler ZIP's pin (asset URL + sha256) and the SAM template into the
+// package. A retried release run reuses the ZIP already on the release.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";

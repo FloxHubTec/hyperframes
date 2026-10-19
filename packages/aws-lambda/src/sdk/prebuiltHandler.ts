@@ -1,8 +1,4 @@
-/**
- * The prebuilt handler ZIP pinned to this package version. The release workflow
- * attaches the ZIP to the GitHub release and writes `prebuilt/` (manifest +
- * SAM template) into the package before publishing it.
- */
+// The handler ZIP pinned to this package version; the release workflow writes `prebuilt/`.
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
