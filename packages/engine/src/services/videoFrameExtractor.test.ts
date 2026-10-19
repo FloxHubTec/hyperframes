@@ -2082,6 +2082,38 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling at the output frame rate", () => {
     60_000,
   );
 
+  it("keeps a run that outlasts the timeout while it still writes frames", async () => {
+    const { runFfmpeg: real } =
+      await vi.importActual<typeof import("../utils/runFfmpeg.js")>("../utils/runFfmpeg.js");
+    // Real-time pacing makes 1.5 s of source take 1.5 s, over twice the timeout.
+    vi.mocked(runFfmpeg).mockImplementation((args, opts) =>
+      real(["-stats_period", "0.1", "-re", ...args], opts),
+    );
+    try {
+      const extracted = await extractVideoFramesRange(
+        sourcePath("mkv-30"),
+        "paced-past-timeout",
+        0,
+        1.5,
+        { fps: 10, outputDir: FIXTURE_DIR, format: "png" },
+        undefined,
+        { ffmpegProcessTimeout: 700 },
+      );
+      expect(extracted.totalFrames).toBe(15);
+    } finally {
+      vi.mocked(runFfmpeg).mockImplementation(real);
+    }
+  }, 30_000);
+
+  it("stops a run that writes no new frame for the stall timeout", async () => {
+    // stdin stays open and empty, so ffmpeg waits for its first frame forever.
+    const stalled = await runFfmpeg(
+      ["-f", "rawvideo", "-pix_fmt", "gray", "-s", "2x2", "-i", "pipe:0", "-f", "null", "-"],
+      { stallTimeout: 500 },
+    );
+    expect(stalled.terminationReason).toBe("inactivity");
+  }, 30_000);
+
   // A distributed chunk extracts only the frames it renders; they must be the full extraction's.
   describe("partial extraction", () => {
     const gopSource = join(FIXTURE_DIR, "gop-30fps.mp4");

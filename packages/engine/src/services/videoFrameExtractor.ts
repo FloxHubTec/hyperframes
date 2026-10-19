@@ -834,10 +834,9 @@ function chromeGuessForUntaggedMatrix(metadata: VideoMetadata): string[] {
 }
 
 /**
- * Longest stretch of output one ffmpeg process extracts. `ffmpegProcessTimeout` bounds a
- * single process, so one process over a long clip timed out however much time the render
- * had left. Longer ranges split into segments that run side by side. Segments sample the
- * same absolute times as a single pass, so their frames are byte-identical to it.
+ * Longest stretch of output one ffmpeg process extracts; longer ranges split into segments
+ * that run side by side. Segments sample the same absolute times as a single pass, so their
+ * frames are byte-identical to it.
  */
 const EXTRACTION_SEGMENT_SECONDS = 120;
 /** Frame times since file start are `PTS*TB + seek`; snapping them to `lead + k/FR` gives every process one grid. */
@@ -860,7 +859,7 @@ interface SegmentedExtraction {
   startTime: number;
   fps: number;
   segments: readonly FrameRange[];
-  runOptions: { signal?: AbortSignal; timeout: number };
+  runOptions: { signal?: AbortSignal; stallTimeout: number };
 }
 
 /** Split runs so no single ffmpeg process extracts more than `segmentFrames` frames. */
@@ -1082,7 +1081,8 @@ async function extractVideoFramesRangeUnredacted(
   if (format === "png") encodeArgs.push("-compression_level", "1");
   encodeArgs.push("-y", outputPattern);
 
-  const runOptions = { signal, timeout: ffmpegProcessTimeout };
+  // A long 4K run can take far longer than the timeout and still be healthy; only a stall is a hang.
+  const runOptions = { signal, stallTimeout: ffmpegProcessTimeout };
   const filterArgsFor = (seek: number): string[] => {
     const filters = [...vfFilters];
     filters.splice(samplingAt, 0, ...samplingFilters(seek));
@@ -1134,8 +1134,8 @@ async function extractVideoFramesRangeUnredacted(
     const hdrPrefix = options.sdrToHdrTransfer
       ? `SDR→HDR conversion failed (colorspace filter in extract pass, target ${options.sdrToHdrTransfer}): `
       : "";
-    const timedOut = processResult.terminationReason === "deadline";
-    const timeoutSuffix = timedOut ? ` (timed out after ${ffmpegProcessTimeout} ms)` : "";
+    const timedOut = processResult.terminationReason === "inactivity";
+    const timeoutSuffix = timedOut ? ` (no new frame for ${ffmpegProcessTimeout} ms)` : "";
     const diagnostic =
       `${hdrPrefix}FFmpeg exited with code ${processResult.exitCode}${timeoutSuffix}: ` +
       processResult.stderr.slice(-500);
@@ -2349,7 +2349,7 @@ export async function extractAllVideoFrames(
 
     try {
       rmSync(tempDir, { recursive: true, force: true });
-      // A long union can hit the fixed FFmpeg deadline even when each shorter
+      // A long union can fail even when each shorter
       // member range succeeds. Do not retry the optimization itself; preserve
       // the established grouped→direct fallback and apply bounded retries only
       // to the individual source ranges below.
