@@ -9,6 +9,73 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.8.177"
+  description="Released - 2026-10-19"
+  tags={["Release", "CLI"]}
+>
+Transcribing French, Spanish and other non-English audio now works, and a failed transcription says why. Check finishes sooner, and catalog search answers without waiting for an install.
+
+## Fixes
+
+- **CLI:** Transcribing French, Spanish or any other non-English audio works, and a failed transcription says why instead of failing silently ([9ad12da18](https://github.com/heygen-com/hyperframes/commit/9ad12da18a15a3a980163fb0fd05e37a9a42f1db), [#5892](https://github.com/heygen-com/hyperframes/pull/5892)).
+
+## Performance
+
+- **CLI:** Check finishes sooner: it skips contrast screenshots when the colours can be read from the styles ([7917f7fe0](https://github.com/heygen-com/hyperframes/commit/7917f7fe058b05f78ffb6d944a315f99afadac1f), [#5871](https://github.com/heygen-com/hyperframes/pull/5871)).
+
+## Catalog
+
+- **CLI:** Catalog search answers right away instead of waiting for the on-device runtime to install ([7e3908f21](https://github.com/heygen-com/hyperframes/commit/7e3908f21b66e4fbc56e3565f323e6d003543a8a), [#5731](https://github.com/heygen-com/hyperframes/pull/5731)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.176...v0.8.177).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.176"
+  description="Released - 2026-10-19"
+  tags={["Release", "CLI", "Producer", "AWS Lambda"]}
+>
+A snapshot of a project with iPhone footage now finishes instead of hanging on preview copies. Colour-graded cloud renders finish with default settings, and HDR exports show regular footage at normal white.
+
+## Fixes
+
+- **CLI:** A snapshot no longer waits for a preview copy of every iPhone clip, so it finishes instead of hanging. Pass `--proxy` to get the copies anyway ([2927bf030](https://github.com/heygen-com/hyperframes/commit/2927bf03039c2a80bd93102d18d8bbc4ed96f776), [#5755](https://github.com/heygen-com/hyperframes/pull/5755)).
+- **Producer:** Colour-graded cloud renders split into smaller chunks, so they finish with default settings instead of running past the worker time limit ([6c3cc7cbe](https://github.com/heygen-com/hyperframes/commit/6c3cc7cbe91bd194832f6613172b7123db9e5577), [#5883](https://github.com/heygen-com/hyperframes/pull/5883)).
+- **Engine:** In HDR (HLG) exports, regular footage sits at normal white instead of full peak brightness ([d796846d8](https://github.com/heygen-com/hyperframes/commit/d796846d83fe6e65efef0e8bc179d2726d506417), [#5749](https://github.com/heygen-com/hyperframes/pull/5749)).
+
+## Internal
+
+- **AWS Lambda:** Handler tests never call real AWS ([c7ad19be1](https://github.com/heygen-com/hyperframes/commit/c7ad19be17b031b46729e106b1a1558933a2e5e6), [#5884](https://github.com/heygen-com/hyperframes/pull/5884)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.175...v0.8.176).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.175"
+  description="Released - 2026-10-19"
+  tags={["Release", "Core", "CLI", "Producer"]}
+>
+Long films now play smoothly deep into the timeline, because the preview only does work for what is on screen. Cloud downloads resume after a dropped connection, and check, inspect and renders get going faster.
+
+## Fixes
+
+- **Core:** The preview keeps playing in time when its tab is hidden ([b168d0b41](https://github.com/heygen-com/hyperframes/commit/b168d0b4138cb578c07f21e12441c8302a217308), [#5872](https://github.com/heygen-com/hyperframes/pull/5872)).
+- **CLI:** A cloud render download that loses its connection picks up where it stopped ([cea0bad79](https://github.com/heygen-com/hyperframes/commit/cea0bad7931122bd93680006978c0d9007daa3d4), [#5873](https://github.com/heygen-com/hyperframes/pull/5873)).
+
+## Performance
+
+- **Core:** Long films keep their frame rate deep into the timeline: playback and jumps do only the work for what is on screen ([959dd3e58](https://github.com/heygen-com/hyperframes/commit/959dd3e584cc22ab9004926735ab9c3effc6d0cc), [#5754](https://github.com/heygen-com/hyperframes/pull/5754)).
+- **CLI:** Check and inspect finish faster: they skip paint waits and screenshots nothing reads ([843494578](https://github.com/heygen-com/hyperframes/commit/8434945784b5378358a1c661aa080e1894533578), [#5868](https://github.com/heygen-com/hyperframes/pull/5868)).
+- **Producer:** Renders embed a project's local fonts as they are, so setup is faster ([2b57809d7](https://github.com/heygen-com/hyperframes/commit/2b57809d79176b34ce60f4206361e99fac618ccf), [#5865](https://github.com/heygen-com/hyperframes/pull/5865)).
+
+## Internal
+
+- Stop the fallow audit hook from piling up base snapshots ([aa63a8c70](https://github.com/heygen-com/hyperframes/commit/aa63a8c70d8549d55533efdc7ed6d6559331b38c), [#5882](https://github.com/heygen-com/hyperframes/pull/5882)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.174...v0.8.175).
+</Update>
+
+<Update
   label="HyperFrames v0.8.174"
   description="Released - 2026-10-19"
   tags={["Release", "CLI", "AWS Lambda", "Core"]}
