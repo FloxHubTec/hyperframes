@@ -543,14 +543,9 @@ export async function waitForCompositionFonts(
     .evaluate(
       ({ ms, frames: count }: FontWaitOptions) => {
         const fonts = Reflect.get(document, "fonts");
-        // A seek can reveal glyphs whose font faces were never requested —
-        // CJK @font-face splits into unicode-range subsets that only load when
-        // first laid out. `fonts.ready` is already-resolved at that moment, so
-        // awaiting it immediately races the load request and screenshots blank
-        // glyphs (wild reports: Traditional Chinese / Microsoft YaHei check
-        // snapshots). Force a synchronous layout so pending subsets actually
-        // start loading, give the loader one frame to flip `fonts.status`,
-        // THEN await readiness.
+        // A seek can reveal glyphs whose unicode-range font subsets never loaded, and `fonts.ready`
+        // resolves before their load starts (blank CJK glyphs in snapshots). Force layout so they start,
+        // let the loader flip `fonts.status` over the given frames, then await readiness.
         void document.body?.offsetHeight;
         const afterFrames = (left: number, then: () => void): void => {
           requestAnimationFrame(() => (left > 1 ? afterFrames(left - 1, then) : then()));
