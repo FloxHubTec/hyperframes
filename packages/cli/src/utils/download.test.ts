@@ -278,7 +278,12 @@ describe("redirect handling", () => {
     const error = await downloadFile(
       "https://example.test/handler.zip?X-Amz-Signature=secret",
       join(dir, "handler.zip"),
-    ).catch((caught: unknown) => caught as Error);
+    ).then(
+      () => {
+        throw new Error("expected the download to fail");
+      },
+      (caught: unknown) => caught as Error,
+    );
     expect(error.message).toContain("https://example.test/handler.zip");
     expect(error.message).not.toContain("secret");
   });
