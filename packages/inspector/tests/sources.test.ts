@@ -27,6 +27,23 @@ describe("source records", () => {
     }
   });
 
+  it("does not change when only data-hf-id stamps are added to the html", () => {
+    const dir = mkdtempSync(join(tmpdir(), "inspect-source-"));
+    try {
+      writeFileSync(join(dir, "index.html"), '<div class="a"><p>Hi</p></div>');
+      const before = fingerprint(dir);
+      writeFileSync(
+        join(dir, "index.html"),
+        '<div class="a" data-hf-id="hf-1a2b"><p data-hf-id=\'hf-3c4d\'>Hi</p></div>',
+      );
+      expect(fingerprint(dir)).toBe(before);
+      writeFileSync(join(dir, "index.html"), '<div class="b" data-hf-id="hf-1a2b"><p>Hi</p></div>');
+      expect(fingerprint(dir)).not.toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps original multiline blocks and deduplicates targets without reformatting", () => {
     const dir = mkdtempSync(join(tmpdir(), "inspect-source-"));
     try {
