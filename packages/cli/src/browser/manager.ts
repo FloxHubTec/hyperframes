@@ -15,7 +15,7 @@ import {
 import { homedir } from "node:os";
 import { debuglog } from "node:util";
 import { basename, dirname, join, relative } from "node:path";
-import { chromeMajorCeiling } from "@hyperframes/engine/chrome-host-ceiling";
+import { isManagedChromeDir, managedChromeVersion } from "@hyperframes/engine/chrome-host-ceiling";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
 
@@ -33,30 +33,6 @@ async function loadPuppeteerBrowsers(): Promise<PuppeteerBrowsers> {
   }
 }
 
-// Bumped from 152.0.7928.2 on 2026-08-10 to pick up crbug 522872457's fix
-// (CL 8032671, "Force-merge PendingLayer for canvas child descendant", merged
-// 2026-07-07 — after the 152.0.7935.0 canary cut, so the old pin predated it).
-//
-// Measured on the shipping headless-shell binary, drawElementImage vs a CDP
-// screenshot of the identical state:
-//   sibling content dropped from 3D captures  — FIXED
-//   background lost from 3D captures          — FIXED
-//   backface-visibility:hidden ignored        — STILL BROKEN (1.4 dB -> 14.8 dB;
-//                                               better, still far under the
-//                                               32 dB floor)
-// So the 3D compile gate must stay. See PRINFRA-486.
-//
-// Deliberately Beta, not Canary. 153.0.8000.0 measured identical to this build
-// on every probe variant, so crossing a major buys nothing measurable.
-const CHROME_VERSION = "152.0.7977.30";
-// Last headless-shell milestone that launches on macOS 12 (Darwin < 22); Chrome 151 dropped it.
-// Measured: this build exposes canvas.drawElementImage under --enable-features=CanvasDrawElement.
-const MACOS_12_CHROME_VERSION = "150.0.7871.124";
-
-/** The one place that decides which build HyperFrames installs and matches in its own cache. */
-function managedChromeVersion(): string {
-  return chromeMajorCeiling() === undefined ? CHROME_VERSION : MACOS_12_CHROME_VERSION;
-}
 const CACHE_ROOT_DIR = join(homedir(), ".cache", "hyperframes");
 const CACHE_DIR = join(homedir(), ".cache", "hyperframes", "chrome");
 // Puppeteer's managed cache — where `@puppeteer/browsers install
@@ -429,9 +405,7 @@ function findFromPuppeteerCache(): BrowserResult | undefined {
   } catch {
     return undefined;
   }
-  // Version dirs are `<platform>-<build>` (`mac_arm-152.0.7977.30`).
-  const pinned = managedChromeVersion();
-  const version = versions.find((dir) => dir.slice(dir.indexOf("-") + 1) === pinned);
+  const version = versions.find(isManagedChromeDir);
   if (!version) return undefined;
   const binary = join(PUPPETEER_CACHE_DIR, version, ...executable);
   return isUsableExecutable(binary) ? { executablePath: binary, source: "cache" } : undefined;

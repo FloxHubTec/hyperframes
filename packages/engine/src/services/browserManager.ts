@@ -12,7 +12,11 @@ import { execSync } from "child_process";
 import { existsSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { chromeMajorCeiling, exceedsChromeCeiling } from "./chromeHostCeiling.js";
+import {
+  chromeMajorCeiling,
+  exceedsChromeCeiling,
+  isManagedChromeDir,
+} from "./chromeHostCeiling.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { getSystemTotalMb, LOW_MEMORY_TOTAL_MB_THRESHOLD } from "./systemMemory.js";
 import { describeWslGpuAccess, detectWsl, type WslHostFacts } from "./wslHost.js";
@@ -230,6 +234,19 @@ function findCachedHeadlessShell(baseDir: string): string | undefined {
   return undefined;
 }
 
+/** The managed build in a cache, if it holds a usable one. */
+function findManagedHeadlessShell(baseDir: string): string | undefined {
+  const executable = cachedHeadlessShellExecutable();
+  if (!executable || !existsSync(baseDir)) return undefined;
+  try {
+    const version = readdirSync(baseDir).find(isManagedChromeDir);
+    const binary = version && join(baseDir, version, ...executable);
+    return binary && isNonEmptyFile(binary) ? binary : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Resolve chrome-headless-shell binary for deterministic BeginFrame rendering.
  * Checks config.chromePath, then PRODUCER_HEADLESS_SHELL_PATH env var,
@@ -261,11 +278,14 @@ export function resolveHeadlessShellPath(
     }
     return envPath;
   }
-  const home = homedir();
+  const ours = join(homedir(), ".cache", "hyperframes", "chrome", "chrome-headless-shell");
+  const shared = join(homedir(), ".cache", "puppeteer", "chrome-headless-shell");
+  // The CLI's rule (findFromCache): the managed build, ours then the shared cache, never another tool's other builds.
+  // Without one, an older build of ours, since the engine cannot download.
   return (
-    findCachedHeadlessShell(
-      join(home, ".cache", "hyperframes", "chrome", "chrome-headless-shell"),
-    ) ?? findCachedHeadlessShell(join(home, ".cache", "puppeteer", "chrome-headless-shell"))
+    findManagedHeadlessShell(ours) ??
+    findManagedHeadlessShell(shared) ??
+    findCachedHeadlessShell(ours)
   );
 }
 
