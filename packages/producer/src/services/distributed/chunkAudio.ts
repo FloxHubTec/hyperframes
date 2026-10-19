@@ -99,13 +99,11 @@ export function chunkAudioSlicePath(index: number): string {
   return `audio-chunks/${String(index).padStart(4, "0")}.m4a`;
 }
 
-/** The chunk a plan-relative path is the audio slice of, or `null`. */
 export function chunkAudioSliceIndex(path: string): number | null {
   const match = /^audio-chunks\/(\d{4,})\.m4a$/.exec(path);
   return match ? Number(match[1]) : null;
 }
 
-/** The audio a chunk muxes: its own slice when the plan cut one, else the whole plan audio. */
 export function chunkAudioSource(
   planDir: string,
   chunkIndex: number,
@@ -139,8 +137,7 @@ export async function writeChunkAudioSlices(input: {
     return cut ? [{ cut, path: join(input.planDir, chunkAudioSlicePath(index)) }] : [];
   });
   mkdirSync(dirname(join(input.planDir, chunkAudioSlicePath(0))), { recursive: true });
-  // A process per slice costs ~20 ms, so each ffmpeg cuts a batch: one per core, at most 64
-  // slices each to stay far below the 1024 open files a Lambda allows.
+  // A process per slice costs ~20 ms; at most 64 slices each keeps far below Lambda's 1024 open files.
   const processes = Math.min(
     slices.length,
     Math.max(availableParallelism(), Math.ceil(slices.length / 64)),
@@ -166,7 +163,6 @@ export async function writeChunkAudioSlices(input: {
 interface MuxInput {
   videoPath: string;
   audioPath: string | null;
-  /** `audioPath` is this chunk's slice (see `writeChunkAudioSlices`), not the whole plan audio. */
   sliced?: boolean;
   outputPath: string;
   chunks: readonly ChunkSliceJson[];
