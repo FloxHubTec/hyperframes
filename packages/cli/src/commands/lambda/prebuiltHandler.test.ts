@@ -100,7 +100,7 @@ describe("stagePrebuiltHandler with nothing to deploy", () => {
     const message = noHandlerMessage(false);
     expect(message).toMatch(/npm install -g @hyperframes\/aws-lambda@/);
     expect(message).toMatch(/HYPERFRAMES_REPO_ROOT/);
-    expect(message).toMatch(/https:\/\/hyperframes\.heygen\.com\/deploy\/aws-lambda/);
+    expect(message).toMatch(/^Docs: https:\/\/hyperframes\.heygen\.com\/deploy\/aws-lambda$/m);
     expect(downloads).toEqual([]);
   });
 
