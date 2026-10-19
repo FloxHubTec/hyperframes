@@ -474,13 +474,26 @@ function writeConsumerFixture(packDir, packedWorkspaces) {
   return fixtureDir;
 }
 
+// npm lists a new version before every mirror serves its tarball, so resolving one published minutes ago
+// can 404 and fail the install. The consumer gets the third-party versions that were on npm a day ago.
+export const CONSUMER_MIN_RELEASE_AGE_SECONDS = 24 * 60 * 60;
+
+export function installConsumer(dir, { args = [], env = process.env } = {}) {
+  execFileSync(
+    "bun",
+    [
+      "install",
+      "--ignore-scripts",
+      `--minimum-release-age=${CONSUMER_MIN_RELEASE_AGE_SECONDS}`,
+      ...args,
+    ],
+    { cwd: dir, encoding: "utf8", stdio: "pipe", env },
+  );
+}
+
 function verifyPackedConsumer(packDir, packedWorkspaces) {
   const fixtureDir = writeConsumerFixture(packDir, packedWorkspaces);
-  execFileSync("bun", ["install", "--ignore-scripts"], {
-    cwd: fixtureDir,
-    encoding: "utf8",
-    stdio: "pipe",
-  });
+  installConsumer(fixtureDir);
   typecheckPackedConsumer(fixtureDir);
   const smokeOutput = execFileSync("node", ["consumer-smoke.mjs"], {
     cwd: fixtureDir,
