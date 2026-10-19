@@ -1,13 +1,14 @@
 // Distributed mp4 chunks can carry their own slice of the plan audio: the AAC packets of the one
 // plan-wide encode that start inside the chunk's frame range, so the chunks' audio has no seams.
 
-import { existsSync, mkdirSync } from "node:fs";
-import { availableParallelism } from "node:os";
-import { dirname, join } from "node:path";
+import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { writeFileSync, writeSync } from "node:fs";
+import { join } from "node:path";
 import type { Fps } from "@hyperframes/core";
 import { appendRenderProvenanceArgs, describeFfmpegFailure, runFfmpeg } from "@hyperframes/engine";
 import { runFfprobeJson } from "../render/audioPadTrim.js";
 import type { ChunkSliceJson } from "../render/stages/freezePlan.js";
+import { fileRange, readMp4Layout, readTracks } from "./mp4Stitch.js";
 import { resolvePlanAudioPath } from "./shared.js";
 
 /** Where AAC packet `j` of the plan audio starts: `firstStart + j * packetSamples`, in samples. */
@@ -94,76 +95,99 @@ async function probeAacPacketGrid(audioPath: string): Promise<AacPacketGrid> {
   return grid;
 }
 
-/** Plan-relative file holding exactly the plan audio packets chunk `index` carries. */
-export function chunkAudioSlicePath(index: number): string {
-  return `audio-chunks/${String(index).padStart(4, "0")}.m4a`;
+// A sliced plan keeps the audio's moov once, in `frame.m4a` (the file minus its mdat payload),
+// and each chunk's packet bytes in their own file. A chunk rebuilds a sparse copy of the whole
+// file from them, so it runs the same cut on the same moov and bytes in any ffmpeg version.
+const SLICE_DIR = "audio-chunks";
+const SLICE_FRAME = `${SLICE_DIR}/frame.m4a`;
+const SLICE_LAYOUT = `${SLICE_DIR}/layout.json`;
+
+interface SliceLayout {
+  sizeBytes: number;
+  payloadStart: number;
+  payloadEnd: number;
+  partStarts: Record<string, number>;
 }
 
-export function chunkAudioSliceIndex(path: string): number | null {
-  const match = /^audio-chunks\/(\d{4,})\.m4a$/.exec(path);
+export function chunkAudioSlicePath(index: number): string {
+  return `${SLICE_DIR}/${String(index).padStart(4, "0")}.bin`;
+}
+
+/** Which chunks need a sliced-audio file: `"all"`, one index, or `null` if it is not one. */
+export function chunkAudioSliceTarget(path: string): "all" | number | null {
+  if (path === SLICE_FRAME || path === SLICE_LAYOUT) return "all";
+  const match = /^audio-chunks\/(\d{4,})\.bin$/.exec(path);
   return match ? Number(match[1]) : null;
 }
 
-export function chunkAudioSource(
-  planDir: string,
-  chunkIndex: number,
-): { audioPath: string | null; sliced: boolean } {
-  const slicePath = join(planDir, chunkAudioSlicePath(chunkIndex));
-  return existsSync(slicePath)
-    ? { audioPath: slicePath, sliced: true }
-    : { audioPath: resolvePlanAudioPath(planDir), sliced: false };
-}
-
-function cutArgs(cut: AudioCut): { input: string[]; output: string[] } {
-  const seek = cut.seekSeconds === null ? [] : ["-ss", cut.seekSeconds.toFixed(6)];
-  const length = cut.durationSeconds === null ? [] : ["-t", cut.durationSeconds.toFixed(6)];
-  // A seek keeps the packet before the cut unless told not to; chunk 0 never
-  // seeks, so its priming packet (and the edit list that hides it) survive.
-  return { input: [...seek, ...length], output: seek.length ? ["-copypriorss", "0"] : [] };
-}
-
-/** Cut the plan audio into one file per chunk, so each chunk downloads only its own packets. */
 export async function writeChunkAudioSlices(input: {
   audioPath: string;
   planDir: string;
   chunks: readonly ChunkSliceJson[];
   fps: Fps;
-  signal?: AbortSignal;
-  timeoutMs: number;
 }): Promise<void> {
   const grid = await probeAacPacketGrid(input.audioPath);
-  const slices = input.chunks.flatMap((_, index) => {
-    const cut = audioCutForChunk(grid, input.chunks, index, input.fps);
-    return cut ? [{ cut, path: join(input.planDir, chunkAudioSlicePath(index)) }] : [];
+  const { payloadStart, payloadEnd, moov } = await readMp4Layout(fileRange(input.audioPath));
+  const [track] = readTracks(moov);
+  const offsets: number[] = [];
+  track!.chunkOffsets.forEach((offset, chunk) => {
+    for (let i = 0; i < track!.samplesPerChunk[chunk]!; i++) {
+      offsets.push(offset);
+      offset += track!.sizes[offsets.length - 1]!;
+    }
   });
-  mkdirSync(dirname(join(input.planDir, chunkAudioSlicePath(0))), { recursive: true });
-  // A process per slice costs ~20 ms; at most 64 slices each keeps far below Lambda's 1024 open files.
-  const processes = Math.min(
-    slices.length,
-    Math.max(availableParallelism(), Math.ceil(slices.length / 64)),
-  );
-  await Promise.all(
-    Array.from({ length: processes }, async (_, p) => {
-      const batch = slices.filter((_, i) => i % processes === p);
-      const args = ["-y"];
-      for (const { cut } of batch) args.push(...cutArgs(cut).input, "-i", input.audioPath);
-      batch.forEach(({ cut, path }, i) =>
-        args.push("-map", `${i}:a:0`, ...cutArgs(cut).output, "-c", "copy", path),
-      );
-      const result = await runFfmpeg(args, { signal: input.signal, timeout: input.timeoutMs });
-      if (!result.success) {
-        throw new Error(
-          `[chunkAudio] audio slice failed: ${describeFfmpegFailure(result, input.timeoutMs)}`,
-        );
-      }
-    }),
-  );
+  const bytes = readFileSync(input.audioPath);
+  const layout: SliceLayout = { sizeBytes: bytes.length, payloadStart, payloadEnd, partStarts: {} };
+  mkdirSync(join(input.planDir, SLICE_DIR), { recursive: true });
+  input.chunks.forEach((_, index) => {
+    const cut = audioCutForChunk(grid, input.chunks, index, input.fps);
+    if (!cut) return;
+    const last = cut.firstPacket + cut.packetCount - 1;
+    const start = offsets[cut.firstPacket]!;
+    layout.partStarts[index] = start;
+    const end = offsets[last]! + track!.sizes[last]!;
+    writeFileSync(join(input.planDir, chunkAudioSlicePath(index)), bytes.subarray(start, end));
+  });
+  const frame = [bytes.subarray(0, payloadStart), bytes.subarray(payloadEnd)];
+  writeFileSync(join(input.planDir, SLICE_FRAME), Buffer.concat(frame));
+  writeFileSync(join(input.planDir, SLICE_LAYOUT), JSON.stringify(layout));
+}
+
+/** The plan audio for a chunk: the whole file, or one rebuilt at `scratchPath` from its slice. */
+export function chunkAudioSource(
+  planDir: string,
+  chunkIndex: number,
+  scratchPath: string,
+): string | null {
+  const layoutPath = join(planDir, SLICE_LAYOUT);
+  if (!existsSync(layoutPath)) return resolvePlanAudioPath(planDir);
+  const layout = JSON.parse(readFileSync(layoutPath, "utf-8")) as SliceLayout;
+  const frame = readFileSync(join(planDir, SLICE_FRAME));
+  const fd = openSync(scratchPath, "w");
+  try {
+    writeSync(fd, frame, 0, layout.payloadStart, 0);
+    writeSync(
+      fd,
+      frame,
+      layout.payloadStart,
+      frame.length - layout.payloadStart,
+      layout.payloadEnd,
+    );
+    const start = layout.partStarts[chunkIndex];
+    if (start !== undefined) {
+      const part = readFileSync(join(planDir, chunkAudioSlicePath(chunkIndex)));
+      writeSync(fd, part, 0, part.length, start);
+    }
+    ftruncateSync(fd, layout.sizeBytes);
+  } finally {
+    closeSync(fd);
+  }
+  return scratchPath;
 }
 
 interface MuxInput {
   videoPath: string;
   audioPath: string | null;
-  sliced?: boolean;
   outputPath: string;
   chunks: readonly ChunkSliceJson[];
   chunkIndex: number;
@@ -174,23 +198,21 @@ interface MuxInput {
 
 function chunkMuxArgs(input: MuxInput, cut: AudioCut | null): string[] {
   if (!cut) return ["-i", input.videoPath, "-map", "0:v:0"];
-  const { input: cutInput, output: cutOutput } = cutArgs(cut);
-  // A slice keeps the timestamps its cut gave it, so the chunk matches a cut made here.
-  const keepTimestamps = input.sliced ? ["-copyts"] : [];
+  const seek = cut.seekSeconds === null ? [] : ["-ss", cut.seekSeconds.toFixed(6)];
+  const length = cut.durationSeconds === null ? [] : ["-t", cut.durationSeconds.toFixed(6)];
+  // A seek keeps the packet before the cut unless told not to; chunk 0 never
+  // seeks, so its priming packet (and the edit list that hides it) survive.
+  const exact = seek.length ? ["-copypriorss", "0"] : [];
   return [
-    ...[...keepTimestamps, "-i", input.videoPath, ...cutInput, "-i", input.audioPath!],
-    ...["-map", "0:v:0", "-map", "1:a:0", ...cutOutput],
+    ...["-i", input.videoPath, ...seek, ...length, "-i", input.audioPath!],
+    ...["-map", "0:v:0", "-map", "1:a:0", ...exact],
   ];
 }
 
 /** Mux one encoded chunk with the plan audio packets it owns into a regular mp4 at `outputPath`. */
 export async function muxChunkWithAudio(input: MuxInput): Promise<void> {
   const grid = input.audioPath ? await probeAacPacketGrid(input.audioPath) : null;
-  const cut = !grid
-    ? null
-    : input.sliced
-      ? { seekSeconds: null, durationSeconds: null, firstPacket: 0, packetCount: grid.packetCount }
-      : audioCutForChunk(grid, input.chunks, input.chunkIndex, input.fps);
+  const cut = grid ? audioCutForChunk(grid, input.chunks, input.chunkIndex, input.fps) : null;
   const args = [...chunkMuxArgs(input, cut), "-c", "copy"];
   appendRenderProvenanceArgs(args, input.outputPath);
   args.push("-y", input.outputPath);

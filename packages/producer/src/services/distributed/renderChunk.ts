@@ -1108,9 +1108,10 @@ export async function renderChunk(
         gopSize: framesInChunk,
       });
       if (encoder.chunksCarryAudio) {
+        const audioScratchPath = `${outputChunkPath}.audio.m4a`;
         await muxChunkWithAudio({
           videoPath: videoOnlyPath,
-          ...chunkAudioSource(planDir, chunkIndex),
+          audioPath: chunkAudioSource(planDir, chunkIndex, audioScratchPath),
           outputPath: outputChunkPath,
           chunks,
           chunkIndex,
@@ -1118,6 +1119,7 @@ export async function renderChunk(
           timeoutMs: cfg.ffmpegProcessTimeout,
         });
         rmSync(videoOnlyPath, { force: true });
+        rmSync(audioScratchPath, { force: true });
       }
       encodeStageMs = Date.now() - encodeStarted;
     } finally {

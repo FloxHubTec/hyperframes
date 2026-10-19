@@ -1408,8 +1408,6 @@ export async function buildLocalExecutionPlan(
         planDir,
         chunks,
         fps: { num: config.fps, den: 1 },
-        signal: abortSignal,
-        timeoutMs: cfg.ffmpegProcessTimeout,
       });
       logPlanStage(log, "audio-slices", stageStarted);
     }

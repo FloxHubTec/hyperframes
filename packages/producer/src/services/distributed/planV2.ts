@@ -49,7 +49,7 @@ import {
 } from "./planV2Publisher.js";
 import { PLAN_V2_INTEGRITY_UNRECOVERABLE, PlanV2IntegrityError } from "./planV2Errors.js";
 import { planV2BlobPath } from "./planV2Layout.js";
-import { chunkAudioSliceIndex } from "./chunkAudio.js";
+import { chunkAudioSliceTarget } from "./chunkAudio.js";
 import { resolveRenderFpsConfig } from "../fileServer.js";
 import {
   isPlanAudioArtifactPath,
@@ -275,8 +275,8 @@ function artifactTargets(
     if (chunkAudio === "none") return { chunks: [], assembler: true };
     return { chunks: chunkAudio === "whole" ? "all" : [], assembler: false };
   }
-  const slice = chunkAudioSliceIndex(path);
-  if (slice !== null) return { chunks: [slice], assembler: false };
+  const slice = chunkAudioSliceTarget(path);
+  if (slice !== null) return { chunks: slice === "all" ? "all" : [slice], assembler: false };
   if (path === "plan.json" || path === "meta/chunks.json" || path === "meta/encoder.json") {
     return { chunks: "all", assembler: true };
   }
@@ -561,7 +561,7 @@ function buildPlanV2Publication(
   const chunkAudio =
     !isRecord(encoder) || encoder.chunksCarryAudio !== true
       ? "none"
-      : files.some((file) => chunkAudioSliceIndex(file.path) !== null)
+      : files.some((file) => chunkAudioSliceTarget(file.path) !== null)
         ? "sliced"
         : "whole";
   for (const file of files) {

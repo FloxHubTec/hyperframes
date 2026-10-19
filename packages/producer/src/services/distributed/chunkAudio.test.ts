@@ -81,7 +81,12 @@ describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
   const packets = (path: string) =>
     run("ffprobe", [
       ...["-v", "error", "-show_entries", "stream=index,start_pts,duration_ts:packet=stream_index"],
-      ...["-show_entries", "packet=pts,dts,duration,size,flags", "-show_data_hash", "sha256"],
+      ...[
+        "-show_entries",
+        "packet=pts,dts,duration,size,flags,data_hash",
+        "-show_data_hash",
+        "sha256",
+      ],
       ...["-of", "compact", "--", path],
     ])
       .split("\n")
@@ -150,20 +155,14 @@ describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
           timeoutMs: 60_000,
         });
       }
-      // The plan's per-chunk slices give every chunk the same packets at the same times.
+      // A chunk muxing from its slice of a sliced plan writes the same packets as from the whole file.
       const slicedPlanDir = join(dir, "sliced-plan");
-      await writeChunkAudioSlices({
-        audioPath,
-        planDir: slicedPlanDir,
-        chunks: CHUNKS,
-        fps,
-        timeoutMs: 60_000,
-      });
+      await writeChunkAudioSlices({ audioPath, planDir: slicedPlanDir, chunks: CHUNKS, fps });
       for (const slice of CHUNKS) {
         const slicedChunk = join(dir, `sliced-chunk-${slice.index}.mp4`);
         await muxChunkWithAudio({
           videoPath: videoPaths[slice.index]!,
-          ...chunkAudioSource(slicedPlanDir, slice.index),
+          audioPath: chunkAudioSource(slicedPlanDir, slice.index, join(dir, "rebuilt.m4a")),
           outputPath: slicedChunk,
           chunks: CHUNKS,
           chunkIndex: slice.index,

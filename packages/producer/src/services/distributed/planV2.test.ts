@@ -196,10 +196,17 @@ function createV1Plan(
   return planDir;
 }
 
+const slicedAudioPaths = (chunkIndex: number) => [
+  chunkAudioSlicePath(chunkIndex),
+  "audio-chunks/frame.m4a",
+  "audio-chunks/layout.json",
+];
+
 function chunkAudioPaths(manifest: Readonly<PlanV2Manifest>, chunkIndex: number): string[] {
   return listPlanV2ArtifactsForTarget(manifest, { role: "chunk", chunkIndex })
     .map((artifact) => artifact.path)
-    .filter((path) => path.includes("audio"));
+    .filter((path) => path.includes("audio"))
+    .sort();
 }
 
 describe("Plan v2 manifest", () => {
@@ -445,13 +452,15 @@ describe("Plan v2 manifest", () => {
     const root = tempPath("hf-plan-v2-chunk-audio-slices-");
     const v1 = createV1Plan(root, { audio: true, chunksCarryAudio: true });
     mkdirSync(join(v1, "audio-chunks"));
+    writeFileSync(join(v1, "audio-chunks", "frame.m4a"), "moov");
+    writeFileSync(join(v1, "audio-chunks", "layout.json"), "{}");
     for (const chunkIndex of [0, 1]) {
       writeFileSync(join(v1, chunkAudioSlicePath(chunkIndex)), `slice ${chunkIndex}`);
     }
     refreshV1PlanHash(v1);
     const manifest = readPlanV2Manifest(createPlanV2FromV1(v1, join(root, "v2")).planDir);
     for (const chunkIndex of [0, 1]) {
-      expect(chunkAudioPaths(manifest, chunkIndex)).toEqual([chunkAudioSlicePath(chunkIndex)]);
+      expect(chunkAudioPaths(manifest, chunkIndex)).toEqual(slicedAudioPaths(chunkIndex));
     }
     const assembler = listPlanV2ArtifactsForTarget(manifest, { role: "assembler" });
     expect(assembler.some((artifact) => artifact.path.includes("audio"))).toBe(false);
@@ -1181,7 +1190,7 @@ describe("Plan v2 planning", () => {
       );
       expect(manifest.chunkCount).toBe(3);
       for (const chunkIndex of [0, 1, 2]) {
-        expect(chunkAudioPaths(manifest, chunkIndex)).toEqual([chunkAudioSlicePath(chunkIndex)]);
+        expect(chunkAudioPaths(manifest, chunkIndex)).toEqual(slicedAudioPaths(chunkIndex));
       }
     },
     60_000,
