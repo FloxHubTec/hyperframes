@@ -55,15 +55,13 @@ function sourceFiles(project: string) {
   visit(project);
   return files.sort();
 }
-// Stamping data-hf-id on disk changes no element the preview shows: it already served the same ids, so a preview
-// loaded before the stamp is still current and nothing reloads it.
 const HF_ID_ATTRIBUTE = /\sdata-hf-id\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/g;
-export function fingerprint(project: string) {
+export function fingerprint(project: string, { ignoreHfIds = false } = {}) {
   const hash = createHash("sha256");
   for (const path of sourceFiles(project)) {
     hash.update(relative(project, path));
     hash.update(
-      extname(path) === ".html"
+      ignoreHfIds && extname(path) === ".html"
         ? readFileSync(path, "utf8").replace(HF_ID_ATTRIBUTE, "")
         : readFileSync(path),
     );
