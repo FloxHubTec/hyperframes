@@ -788,11 +788,8 @@ async function captureSnapshots(
             active,
             VIDEO_FRAME_EXTRACT_CONCURRENCY,
             async (v) => {
-              // Resolve the <video> src to an FFmpeg input. Prefer a project-local
-              // file (fast, sandboxed); fall back to the absolute http(s) URL for
-              // remote assets (e.g. an S3-hosted clip embedded by an upstream agent)
-              // — FFmpeg reads http(s) input directly, and Chrome-headless can't seek
-              // it either, so without this those videos render blank in snapshots.
+              // Prefer the project-local file; remote http(s) clips go to FFmpeg directly,
+              // since headless Chrome can't seek them and they would render blank.
               let ffmpegInput: string | null = null;
               let inputIsLocal = false;
               try {
@@ -810,12 +807,8 @@ async function captureSnapshots(
                 /* unresolvable src (e.g. blob:, data:) — skip */
               }
               if (!ffmpegInput) return null;
-              // VP9-alpha detection shells out to ffprobe, which has no timeout.
-              // Only probe local files (filesystem-bounded); for remote URLs skip it
-              // (pass false) so a stalled host can't wedge snapshot in ffprobe before
-              // the bounded extractVideoFrameToBuffer below ever runs. Remote
-              // VP9-alpha overlays aren't a current path — revisit with a bounded
-              // ffprobe if one appears.
+              // The VP9-alpha probe has no timeout, so only local files get it;
+              // a stalled remote host must not wedge snapshot before the bounded extract.
               const useVp9AlphaDecoder = inputIsLocal
                 ? await shouldUseVp9AlphaDecoder(ffmpegInput)
                 : false;
