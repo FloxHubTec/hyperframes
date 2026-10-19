@@ -750,23 +750,23 @@ describe("extractVideoFrameToBuffer", () => {
       try {
         const size = async (clip: string, displayedPixels: number) => {
           const png = await extractVideoFrameToBuffer(clip, 0.5, false, false, displayedPixels);
-          return [png!.readUInt32BE(16), png!.readUInt32BE(20)];
+          if (!png) throw new Error(`no frame from ${clip}`);
+          return [png.readUInt32BE(16), png.readUInt32BE(20)];
         };
-        for (const [name, source] of [
-          ["landscape", "160x90"],
-          ["portrait", "90x160"],
+        for (const { name, width, height } of [
+          { name: "landscape", width: 160, height: 90 },
+          { name: "portrait", width: 90, height: 160 },
         ]) {
           const clip = join(dir, `${name}.mp4`);
           const input = [
             "-f",
             "lavfi",
             "-i",
-            `testsrc=d=1:r=24:s=${source}`,
+            `testsrc=d=1:r=24:s=${width}x${height}`,
             "-pix_fmt",
             "yuv420p",
           ];
           execFileSync(ffmpeg!, ["-hide_banner", "-loglevel", "error", ...input, clip]);
-          const [width, height] = source.split("x").map(Number);
           expect(await size(clip, 0)).toEqual([width, height]);
           expect(await size(clip, 1000)).toEqual([width, height]);
           expect(Math.min(...(await size(clip, 32)))).toBe(32);
