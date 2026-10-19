@@ -24,7 +24,6 @@ export function exceedsChromeCeiling(versionName: string, ceiling: number | unde
 const CHROME_VERSION = "152.0.7977.30";
 const MACOS_12_CHROME_VERSION = "150.0.7871.124";
 
-/** The one place that decides which chrome-headless-shell build HyperFrames installs, matches and launches. */
 export function managedChromeVersion(
   hostPlatform: string = process.platform,
   hostRelease: string = release(),
@@ -34,6 +33,5 @@ export function managedChromeVersion(
     : MACOS_12_CHROME_VERSION;
 }
 
-/** True when a cache dir name (`mac_arm-152.0.7977.30`) is the managed build. */
 export const isManagedChromeDir = (versionName: string): boolean =>
   versionName.slice(versionName.indexOf("-") + 1) === managedChromeVersion();

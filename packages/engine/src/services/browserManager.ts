@@ -234,7 +234,6 @@ function findCachedHeadlessShell(baseDir: string): string | undefined {
   return undefined;
 }
 
-/** The managed build in a cache, if it holds a usable one. */
 function findManagedHeadlessShell(baseDir: string): string | undefined {
   const executable = cachedHeadlessShellExecutable();
   if (!executable || !existsSync(baseDir)) return undefined;
@@ -280,8 +279,6 @@ export function resolveHeadlessShellPath(
   }
   const ours = join(homedir(), ".cache", "hyperframes", "chrome", "chrome-headless-shell");
   const shared = join(homedir(), ".cache", "puppeteer", "chrome-headless-shell");
-  // The CLI's rule (findFromCache): the managed build, ours then the shared cache, never another tool's other builds.
-  // Without one, an older build of ours, since the engine cannot download.
   return (
     findManagedHeadlessShell(ours) ??
     findManagedHeadlessShell(shared) ??
