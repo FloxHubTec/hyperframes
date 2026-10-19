@@ -75,6 +75,8 @@ CLI versions reserved 8 by default, so they stay at 8 until you pass
 `--concurrency=N`. Pass `--concurrency=none` to remove the reservation so each
 render sizes itself to the account.
 
+`deploy` records the stack's bucket and state machine in `.hyperframes/lambda-stack-<stack-name>.json` under the current directory. Every other `lambda` command reads that file, so run them from the same directory with the same `--stack-name`, or they stop with "no stack state". Redeploying to upgrade rewrites the same file.
+
 After `deploy`, render anything with:
 
 ```bash
