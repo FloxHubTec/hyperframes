@@ -478,17 +478,35 @@ function writeConsumerFixture(packDir, packedWorkspaces) {
 // can 404 and fail the install. The consumer gets the third-party versions that were on npm a day ago.
 export const CONSUMER_MIN_RELEASE_AGE_SECONDS = 24 * 60 * 60;
 
+const BLOCKED_BY_AGE =
+  /No version matching "([^"]+)" found for specifier "[^"]*" \(blocked by minimum-release-age/g;
+
 export function installConsumer(dir, { args = [], env = process.env } = {}) {
-  execFileSync(
-    "bun",
-    [
-      "install",
-      "--ignore-scripts",
-      `--minimum-release-age=${CONSUMER_MIN_RELEASE_AGE_SECONDS}`,
-      ...args,
-    ],
-    { cwd: dir, encoding: "utf8", stdio: "pipe", env },
-  );
+  const install = () =>
+    execFileSync(
+      "bun",
+      [
+        "install",
+        "--ignore-scripts",
+        `--minimum-release-age=${CONSUMER_MIN_RELEASE_AGE_SECONDS}`,
+        ...args,
+      ],
+      { cwd: dir, encoding: "utf8", stdio: "pipe", env },
+    );
+  try {
+    install();
+  } catch (error) {
+    // A same-day dependency bump: every version its range allows is younger than the age, and the repo
+    // installed it already, so its tarball is served. Only those packages skip the age.
+    const blocked = [...`${error.stderr ?? ""}`.matchAll(BLOCKED_BY_AGE)].map((m) => m[1]);
+    if (!blocked.length) throw error;
+    console.log(`Consumer install: newer than the release age, allowed: ${blocked.join(", ")}`);
+    writeFileSync(
+      join(dir, "bunfig.toml"),
+      `[install]\nminimumReleaseAgeExcludes = ${JSON.stringify(blocked)}\n`,
+    );
+    install();
+  }
 }
 
 function verifyPackedConsumer(packDir, packedWorkspaces) {

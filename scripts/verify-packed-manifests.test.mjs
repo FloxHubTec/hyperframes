@@ -379,6 +379,19 @@ describe("packed consumer install", () => {
     assert.equal(version, "1.0.0");
   });
 
+  it("installs a same-day dependency bump whose only matching version is an hour old", async () => {
+    const fresh = { daysOld: 1 / 24, served: true };
+    for (const versions of [
+      { "1.1.0": fresh },
+      { "1.0.0": { daysOld: 10, served: true }, "1.1.0": fresh },
+    ]) {
+      const version = await withRegistry("fake-dep", versions, (registry, dir) =>
+        install(registry, dir, { "fake-dep": "^1.1.0" }),
+      );
+      assert.equal(version, "1.1.0");
+    }
+  });
+
   it("still fails on a package the registry does not have", async () => {
     const versions = { "1.0.0": { daysOld: 10, served: true } };
     await withRegistry("fake-dep", versions, (registry, dir) =>
