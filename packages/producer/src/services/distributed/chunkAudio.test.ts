@@ -4,7 +4,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assemble } from "./assemble.js";
-import { audioCutForChunk, muxChunkWithAudio } from "./chunkAudio.js";
+import {
+  audioCutForChunk,
+  chunkAudioSource,
+  muxChunkWithAudio,
+  writeChunkAudioSlices,
+} from "./chunkAudio.js";
 
 const FPS = { num: 30, den: 1 };
 
@@ -38,7 +43,6 @@ describe("audioCutForChunk", () => {
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"]).status === 0;
 
 describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
-  const TOTAL_FRAMES = 91;
   let root: string;
 
   beforeAll(() => {
@@ -73,14 +77,36 @@ describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
         path,
       ]),
     ).streams as { codec_type: string; nb_read_packets: string; duration: string }[];
+  // Each stream's packets (timing, size, payload hash), independent of how the muxer interleaved them.
+  const packets = (path: string) =>
+    run("ffprobe", [
+      ...["-v", "error", "-show_entries", "stream=index,start_pts,duration_ts:packet=stream_index"],
+      ...[
+        "-show_entries",
+        "packet=pts,dts,duration,size,flags,data_hash",
+        "-show_data_hash",
+        "sha256",
+      ],
+      ...["-of", "compact", "--", path],
+    ])
+      .split("\n")
+      .sort(
+        (a, b) =>
+          Number(/stream_index=(\d)/.exec(a)?.[1]) - Number(/stream_index=(\d)/.exec(b)?.[1]),
+      );
 
-  // Uneven chunks with a 1-frame tail, and a single chunk (read without a concat list today).
+  // Uneven chunks with a 1-frame tail, and a single chunk (read without a concat list today). At
+  // 60 fps a 1-frame tail is shorter than an AAC packet: 51 frames are 40800 samples, 41 packets
+  // after the priming, and packet 41 would be the tail's first, so the tail owns none.
   it.each([
-    ["three", [0, 47, 90, 91]],
-    ["one", [0, 91]],
+    ["three", 30, [0, 47, 90, 91], true],
+    ["one", 30, [0, 91], true],
+    ["60fps-silent-tail", 60, [0, 50, 51], false],
   ] as const)(
-    "%s chunk(s) join through today's assemble like video-only chunks",
-    async (name, edges) => {
+    "%s chunk(s) at %i fps assemble into the frames and audio of today's video-only join",
+    async (name, rate, edges, tailHasAudio) => {
+      const fps = { num: rate, den: 1 };
+      const totalFrames = edges.at(-1)!;
       const CHUNKS = edges.slice(1).map((end, index) => ({
         index,
         startFrame: edges[index]!,
@@ -90,7 +116,7 @@ describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
       mkdirSync(dir, { recursive: true });
       const audioPath = join(dir, "audio.m4a");
       ffmpeg(
-        `-f lavfi -i aevalsrc=0.4*sin(2*PI*(220+40*t)*t):s=48000:d=${TOTAL_FRAMES / 30} -c:a aac -b:a 192k -y`
+        `-f lavfi -i aevalsrc=0.4*sin(2*PI*(220+40*t)*t):s=48000:d=${totalFrames / rate} -c:a aac -b:a 192k -y`
           .split(" ")
           .concat(audioPath),
       );
@@ -100,9 +126,9 @@ describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
         join(planDir, "plan.json"),
         JSON.stringify({
           planHash: "fake",
-          totalFrames: TOTAL_FRAMES,
+          totalFrames,
           hasAudio: true,
-          dimensions: { fpsNum: 30, fpsDen: 1, width: 160, height: 120, format: "mp4" },
+          dimensions: { fpsNum: rate, fpsDen: 1, width: 160, height: 120, format: "mp4" },
         }),
       );
       writeFileSync(join(planDir, "meta", "chunks.json"), JSON.stringify(CHUNKS));
@@ -115,7 +141,7 @@ describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
         chunkPaths.push(join(dir, `chunk-${slice.index}.mp4`));
         // Closed GOP, no B-frames, headers repeated: shaped like renderChunk's encode.
         ffmpeg(
-          `-f lavfi -i testsrc2=size=160x120:rate=30,trim=start_frame=${slice.startFrame}:end_frame=${slice.endFrame} -c:v libx264 -preset veryfast -g ${n} -keyint_min ${n} -sc_threshold 0 -bf 0 -x264-params scenecut=0:open-gop=0:repeat-headers=1 -pix_fmt yuv420p -avoid_negative_ts make_zero -y`
+          `-f lavfi -i testsrc2=size=160x120:rate=${rate},trim=start_frame=${slice.startFrame}:end_frame=${slice.endFrame} -c:v libx264 -preset veryfast -g ${n} -keyint_min ${n} -sc_threshold 0 -bf 0 -x264-params scenecut=0:open-gop=0:repeat-headers=1 -pix_fmt yuv420p -avoid_negative_ts make_zero -y`
             .split(" ")
             .concat(videoPaths[slice.index]!),
         );
@@ -125,14 +151,33 @@ describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
           outputPath: chunkPaths[slice.index]!,
           chunks: CHUNKS,
           chunkIndex: slice.index,
-          fps: FPS,
+          fps,
           timeoutMs: 60_000,
         });
       }
-      // Every plan audio packet lands in exactly one chunk.
-      const audioPackets = Number(streams(audioPath)[0]!.nb_read_packets);
-      const chunkPackets = chunkPaths.map((path) => Number(streams(path)[1]!.nb_read_packets));
+      // A chunk muxing from its slice of a sliced plan writes the same packets as from the whole file.
+      const slicedPlanDir = join(dir, "sliced-plan");
+      await writeChunkAudioSlices({ audioPath, planDir: slicedPlanDir, chunks: CHUNKS, fps });
+      for (const slice of CHUNKS) {
+        const slicedChunk = join(dir, `sliced-chunk-${slice.index}.mp4`);
+        await muxChunkWithAudio({
+          videoPath: videoPaths[slice.index]!,
+          audioPath: chunkAudioSource(slicedPlanDir, slice.index, join(dir, "rebuilt.m4a")),
+          outputPath: slicedChunk,
+          chunks: CHUNKS,
+          chunkIndex: slice.index,
+          fps,
+          timeoutMs: 60_000,
+        });
+        expect(packets(slicedChunk)).toEqual(packets(chunkPaths[slice.index]!));
+      }
+
+      // Every plan audio packet lands in exactly one chunk; a tail that owns none has no audio track.
+      const audioOf = (path: string) => streams(path).find((s) => s.codec_type === "audio");
+      const audioPackets = Number(audioOf(audioPath)!.nb_read_packets);
+      const chunkPackets = chunkPaths.map((path) => Number(audioOf(path)?.nb_read_packets ?? 0));
       expect(chunkPackets.reduce((a, b) => a + b, 0)).toBe(audioPackets);
+      expect(audioOf(chunkPaths.at(-1)!) !== undefined).toBe(tailHasAudio);
 
       const withAudio = join(dir, "with-audio.mp4");
       const videoOnly = join(dir, "video-only.mp4");

@@ -45,6 +45,7 @@ import {
   type VideoMetadata,
 } from "../utils/ffprobe.js";
 import { inputAlphaOpaqueWarning, probeInputAlphaPlane } from "../utils/alphaPlaneProbe.js";
+import { redactUrlQueriesInError, urlInputArgs } from "../utils/urlInput.js";
 import {
   analyzeCompositionHdr,
   isHdrColorSpace as isHdrColorSpaceUtil,
@@ -247,6 +248,7 @@ export interface ExtractionOptions {
   deferRangeExtraction?: boolean;
   /** Directories the caller rewrites on every render (downloaded media); their sources are cached by content. */
   contentKeyedDirs?: readonly string[];
+  urlByAbsentLocalPath?: ReadonlyMap<string, string>;
 }
 
 const DOWNLOAD_SUBDIR = "_downloads";
@@ -815,7 +817,9 @@ export function parseImageElements(html: string): ImageElement[] {
 
 /** The first shown frame's colour tags; see {@link firstFrameColourArgs}. */
 async function readFirstFrameColour(videoPath: string, signal?: AbortSignal) {
-  const result = await runFfmpeg(firstFrameColourArgs(videoPath), { signal });
+  const result = await runFfmpeg([...urlInputArgs(videoPath), ...firstFrameColourArgs(videoPath)], {
+    signal,
+  });
   return parseFirstFrameColour(result.stderr);
 }
 
@@ -836,6 +840,14 @@ function chromeGuessForUntaggedMatrix(metadata: VideoMetadata): string[] {
  * same absolute times as a single pass, so their frames are byte-identical to it.
  */
 const EXTRACTION_SEGMENT_SECONDS = 120;
+/** Frame times since file start are `PTS*TB + seek`; snapping them to `lead + k/FR` gives every process one grid. */
+function undoTickRoundingOnTheSourceFrameGrid(seek: number, lead: number): string[] {
+  const sinceFileStart = `(PTS*TB+${seek}-${lead})`;
+  return [
+    "settb=AVTB",
+    `setpts=if(isnan(FR)\\,PTS\\,(${lead}+round(${sinceFileStart}*FR)/FR-${seek})/TB)`,
+  ];
+}
 
 // Caps extraction ffmpeg runs across all clips; uncapped, dozens of clips starved each other into timeouts.
 const EXTRACTION_SLOTS = Math.max(1, Math.floor(cpus().length / 2));
@@ -843,7 +855,7 @@ const inExtractionSlot = createConcurrencyLimit(EXTRACTION_SLOTS);
 
 interface SegmentedExtraction {
   decodeArgs: string[];
-  filterAndEncodeArgs: string[];
+  filterAndEncodeArgs: (seek: number) => string[];
   videoPath: string;
   startTime: number;
   fps: number;
@@ -879,6 +891,7 @@ async function runSegmentedExtraction(job: SegmentedExtraction): Promise<RunFfmp
     while (next < segmentCount && !signal.aborted) {
       const index = next++;
       const { firstFrame, frames } = segments[index]!;
+      const seek = startTime + firstFrame / fps;
       const result = await inExtractionSlot(
         () =>
           runFfmpeg(
@@ -886,7 +899,7 @@ async function runSegmentedExtraction(job: SegmentedExtraction): Promise<RunFfmp
               ...decodeArgs,
               "-noaccurate_seek",
               "-ss",
-              String(startTime + firstFrame / fps),
+              String(seek),
               "-i",
               videoPath,
               // Read one frame past the segment and keep exactly its own frames.
@@ -896,7 +909,7 @@ async function runSegmentedExtraction(job: SegmentedExtraction): Promise<RunFfmp
               String(frames),
               "-start_number",
               String(firstFrame + 1),
-              ...filterAndEncodeArgs,
+              ...filterAndEncodeArgs(seek),
             ],
             { ...job.runOptions, signal },
           ),
@@ -927,6 +940,16 @@ async function runSegmentedExtraction(job: SegmentedExtraction): Promise<RunFfmp
 }
 
 export async function extractVideoFramesRange(
+  ...args: Parameters<typeof extractVideoFramesRangeUnredacted>
+): Promise<ExtractedFrames> {
+  try {
+    return await extractVideoFramesRangeUnredacted(...args);
+  } catch (error) {
+    throw redactUrlQueriesInError(error);
+  }
+}
+
+async function extractVideoFramesRangeUnredacted(
   videoPath: string,
   videoId: string,
   startTime: number,
@@ -986,7 +1009,7 @@ export async function extractVideoFramesRange(
     throw new Error("frameRanges extraction needs a constant-frame-rate source");
   }
 
-  const args: string[] = [];
+  const args: string[] = urlInputArgs(videoPath);
   if (decodeWithVideoToolbox) {
     args.push("-hwaccel", "videotoolbox");
   }
@@ -1019,15 +1042,20 @@ export async function extractVideoFramesRange(
   if (decodeWithVideoToolbox) {
     vfFilters.push("format=nv12");
   }
-  if (sampleAtOutputFps) {
-    // Each slot takes the last frame starting at or before its time. Ticks of 2 ms or finer
-    // first shift half a tick, absorbing container rounding (WebM/MKV use whole ms).
-    vfFilters.push(
-      "settb=intb/2",
-      "setpts=PTS-lte(TB\\,0.001)",
-      `fps=${ffmpegFps}:start_time=0:round=up`,
-    );
-  }
+  const samplingAt = vfFilters.length;
+  // Each slot takes the last frame starting at or before its time. Ticks of 2 ms or finer
+  // first shift half a tick, absorbing container rounding (WebM/MKV use whole ms).
+  const samplingFilters = (seek: number): string[] =>
+    sampleAtOutputFps
+      ? [
+          ...(metadata.isVFR
+            ? []
+            : undoTickRoundingOnTheSourceFrameGrid(seek, metadata.videoStreamLeadSeconds ?? 0)),
+          "settb=intb/2",
+          "setpts=PTS-lte(TB\\,0.001)",
+          `fps=${ffmpegFps}:start_time=0:round=up`,
+        ]
+      : [];
   if (options.sdrToHdrTransfer) {
     // Ordering intent: fps sampling runs BEFORE the colorspace remap so only
     // kept frames are converted. The remap is pointwise per-frame, so the
@@ -1055,7 +1083,11 @@ export async function extractVideoFramesRange(
   encodeArgs.push("-y", outputPattern);
 
   const runOptions = { signal, timeout: ffmpegProcessTimeout };
-  const filterArgs = vfFilters.length > 0 ? ["-vf", vfFilters.join(",")] : [];
+  const filterArgsFor = (seek: number): string[] => {
+    const filters = [...vfFilters];
+    filters.splice(samplingAt, 0, ...samplingFilters(seek));
+    return filters.length > 0 ? ["-vf", filters.join(",")] : [];
+  };
   const segmentFrames = Math.round(EXTRACTION_SEGMENT_SECONDS * fps);
   const totalFrames = extractionFrameCountForDuration(duration, normalizedFps, metadata.isVFR);
   // A VFR window rounds its frame count up, and only the segments' `-frames:v` bound
@@ -1066,7 +1098,7 @@ export async function extractVideoFramesRange(
     sampleAtOutputFps && (options.frameRanges || boundVfrFrameCount || totalFrames > segmentFrames)
       ? await runSegmentedExtraction({
           decodeArgs,
-          filterAndEncodeArgs: [...filterArgs, ...encodeArgs],
+          filterAndEncodeArgs: (seek) => [...filterArgsFor(seek), ...encodeArgs],
           videoPath,
           startTime,
           fps,
@@ -1077,7 +1109,7 @@ export async function extractVideoFramesRange(
           runOptions,
         })
       : await inExtractionSlot(
-          () => runFfmpeg([...args, ...filterArgs, ...encodeArgs], runOptions),
+          () => runFfmpeg([...args, ...filterArgsFor(startTime), ...encodeArgs], runOptions),
           signal,
         );
   if (processResult.failureReason === "external_interruption") {
@@ -1797,6 +1829,11 @@ export async function extractAllVideoFrames(
       let videoPath = video.src;
       if (!isHttpUrl(videoPath)) {
         videoPath = resolveProjectRelativeSrc(video.src, baseDir, compiledDir);
+      }
+      const remoteUrl = options.urlByAbsentLocalPath?.get(videoPath);
+      if (remoteUrl) {
+        resolvedVideos.push({ video, videoPath: remoteUrl });
+        continue;
       }
 
       if (isHttpUrl(videoPath)) {
