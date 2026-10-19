@@ -4,7 +4,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assemble } from "./assemble.js";
-import { audioCutForChunk, muxChunkWithAudio } from "./chunkAudio.js";
+import {
+  audioCutForChunk,
+  chunkAudioSource,
+  muxChunkWithAudio,
+  writeChunkAudioSlices,
+} from "./chunkAudio.js";
 
 const FPS = { num: 30, den: 1 };
 
@@ -72,6 +77,18 @@ describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
         path,
       ]),
     ).streams as { codec_type: string; nb_read_packets: string; duration: string }[];
+  // Each stream's packets (timing, size, payload hash), independent of how the muxer interleaved them.
+  const packets = (path: string) =>
+    run("ffprobe", [
+      ...["-v", "error", "-show_entries", "stream=index,start_pts,duration_ts:packet=stream_index"],
+      ...["-show_entries", "packet=pts,dts,duration,size,flags", "-show_data_hash", "sha256"],
+      ...["-of", "compact", "--", path],
+    ])
+      .split("\n")
+      .sort(
+        (a, b) =>
+          Number(/stream_index=(\d)/.exec(a)?.[1]) - Number(/stream_index=(\d)/.exec(b)?.[1]),
+      );
 
   // Uneven chunks with a 1-frame tail, and a single chunk (read without a concat list today). At
   // 60 fps a 1-frame tail is shorter than an AAC packet: 51 frames are 40800 samples, 41 packets
@@ -133,6 +150,29 @@ describe.skipIf(!hasFfmpeg)("chunks that carry their audio", () => {
           timeoutMs: 60_000,
         });
       }
+      // The plan's per-chunk slices give every chunk the same packets at the same times.
+      const slicedPlanDir = join(dir, "sliced-plan");
+      await writeChunkAudioSlices({
+        audioPath,
+        planDir: slicedPlanDir,
+        chunks: CHUNKS,
+        fps,
+        timeoutMs: 60_000,
+      });
+      for (const slice of CHUNKS) {
+        const slicedChunk = join(dir, `sliced-chunk-${slice.index}.mp4`);
+        await muxChunkWithAudio({
+          videoPath: videoPaths[slice.index]!,
+          ...chunkAudioSource(slicedPlanDir, slice.index),
+          outputPath: slicedChunk,
+          chunks: CHUNKS,
+          chunkIndex: slice.index,
+          fps,
+          timeoutMs: 60_000,
+        });
+        expect(packets(slicedChunk)).toEqual(packets(chunkPaths[slice.index]!));
+      }
+
       // Every plan audio packet lands in exactly one chunk; a tail that owns none has no audio track.
       const audioOf = (path: string) => streams(path).find((s) => s.codec_type === "audio");
       const audioPackets = Number(audioOf(audioPath)!.nb_read_packets);

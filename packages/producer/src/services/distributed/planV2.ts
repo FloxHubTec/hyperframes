@@ -49,6 +49,7 @@ import {
 } from "./planV2Publisher.js";
 import { PLAN_V2_INTEGRITY_UNRECOVERABLE, PlanV2IntegrityError } from "./planV2Errors.js";
 import { planV2BlobPath } from "./planV2Layout.js";
+import { chunkAudioSliceIndex } from "./chunkAudio.js";
 import { resolveRenderFpsConfig } from "../fileServer.js";
 import {
   isPlanAudioArtifactPath,
@@ -268,11 +269,14 @@ function resolveExtractedVideoOutputDir(planDir: string, videoId: string): strin
 function artifactTargets(
   path: string,
   videoDependencies: ReadonlyMap<string, readonly number[]> | null,
-  chunksCarryAudio: boolean,
+  chunkAudio: "none" | "whole" | "sliced",
 ): Pick<PlanV2Artifact, "chunks" | "assembler"> {
   if (isPlanAudioArtifactPath(path)) {
-    return chunksCarryAudio ? { chunks: "all", assembler: false } : { chunks: [], assembler: true };
+    if (chunkAudio === "none") return { chunks: [], assembler: true };
+    return { chunks: chunkAudio === "whole" ? "all" : [], assembler: false };
   }
+  const slice = chunkAudioSliceIndex(path);
+  if (slice !== null) return { chunks: [slice], assembler: false };
   if (path === "plan.json" || path === "meta/chunks.json" || path === "meta/encoder.json") {
     return { chunks: "all", assembler: true };
   }
@@ -553,10 +557,16 @@ function buildPlanV2Publication(
   validateExtractionCacheCompleteSentinels(executionPlanDir);
   const videoDependencyPlan = buildVideoChunkDependencies(executionPlanDir, dimensions);
   const encoder = readJsonFile(join(executionPlanDir, "meta", "encoder.json"), "meta/encoder.json");
-  const chunksCarryAudio = isRecord(encoder) && encoder.chunksCarryAudio === true;
-  for (const file of listFiles(executionPlanDir)) {
+  const files = listFiles(executionPlanDir);
+  const chunkAudio =
+    !isRecord(encoder) || encoder.chunksCarryAudio !== true
+      ? "none"
+      : files.some((file) => chunkAudioSliceIndex(file.path) !== null)
+        ? "sliced"
+        : "whole";
+  for (const file of files) {
     if (isExtractionCacheCompleteSentinelPath(file.path)) continue;
-    const targets = artifactTargets(file.path, videoDependencyPlan.dependencies, chunksCarryAudio);
+    const targets = artifactTargets(file.path, videoDependencyPlan.dependencies, chunkAudio);
     if (
       (file.path.startsWith("video-frames/") || file.path.startsWith("video-sources/")) &&
       targets.chunks !== "all" &&
@@ -711,6 +721,7 @@ export async function planV2WithPublisher(
           ),
         ),
       chunksCarryAudio: options.chunksCarryAudio,
+      sliceChunkAudio: true,
     });
     return await publishExecutionPlan(stagingRoot, publisher, { digests, log: config.logger });
   } catch (error) {

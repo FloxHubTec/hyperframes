@@ -93,9 +93,8 @@ import {
   PLAN_VIDEOS_META_RELATIVE_PATH,
   type PlanVideosJson,
   readFfmpegVersion,
-  resolvePlanAudioPath,
 } from "./shared.js";
-import { muxChunkWithAudio } from "./chunkAudio.js";
+import { chunkAudioSource, muxChunkWithAudio } from "./chunkAudio.js";
 import { DISTRIBUTED_RENDER_CAPABILITIES, readPlanProtocolV1 } from "./planProtocol.js";
 import { validatePlanV2MaterializedTarget } from "./planV2.js";
 
@@ -1111,7 +1110,7 @@ export async function renderChunk(
       if (encoder.chunksCarryAudio) {
         await muxChunkWithAudio({
           videoPath: videoOnlyPath,
-          audioPath: resolvePlanAudioPath(planDir),
+          ...chunkAudioSource(planDir, chunkIndex),
           outputPath: outputChunkPath,
           chunks,
           chunkIndex,

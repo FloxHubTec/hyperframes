@@ -1,10 +1,14 @@
 // Distributed mp4 chunks can carry their own slice of the plan audio: the AAC packets of the one
 // plan-wide encode that start inside the chunk's frame range, so the chunks' audio has no seams.
 
+import { existsSync, mkdirSync } from "node:fs";
+import { availableParallelism } from "node:os";
+import { dirname, join } from "node:path";
 import type { Fps } from "@hyperframes/core";
 import { appendRenderProvenanceArgs, describeFfmpegFailure, runFfmpeg } from "@hyperframes/engine";
 import { runFfprobeJson } from "../render/audioPadTrim.js";
 import type { ChunkSliceJson } from "../render/stages/freezePlan.js";
+import { resolvePlanAudioPath } from "./shared.js";
 
 /** Where AAC packet `j` of the plan audio starts: `firstStart + j * packetSamples`, in samples. */
 interface AacPacketGrid {
@@ -90,9 +94,80 @@ async function probeAacPacketGrid(audioPath: string): Promise<AacPacketGrid> {
   return grid;
 }
 
+/** Plan-relative file holding exactly the plan audio packets chunk `index` carries. */
+export function chunkAudioSlicePath(index: number): string {
+  return `audio-chunks/${String(index).padStart(4, "0")}.m4a`;
+}
+
+/** The chunk a plan-relative path is the audio slice of, or `null`. */
+export function chunkAudioSliceIndex(path: string): number | null {
+  const match = /^audio-chunks\/(\d{4,})\.m4a$/.exec(path);
+  return match ? Number(match[1]) : null;
+}
+
+/** The audio a chunk muxes: its own slice when the plan cut one, else the whole plan audio. */
+export function chunkAudioSource(
+  planDir: string,
+  chunkIndex: number,
+): { audioPath: string | null; sliced: boolean } {
+  const slicePath = join(planDir, chunkAudioSlicePath(chunkIndex));
+  return existsSync(slicePath)
+    ? { audioPath: slicePath, sliced: true }
+    : { audioPath: resolvePlanAudioPath(planDir), sliced: false };
+}
+
+function cutArgs(cut: AudioCut): { input: string[]; output: string[] } {
+  const seek = cut.seekSeconds === null ? [] : ["-ss", cut.seekSeconds.toFixed(6)];
+  const length = cut.durationSeconds === null ? [] : ["-t", cut.durationSeconds.toFixed(6)];
+  // A seek keeps the packet before the cut unless told not to; chunk 0 never
+  // seeks, so its priming packet (and the edit list that hides it) survive.
+  return { input: [...seek, ...length], output: seek.length ? ["-copypriorss", "0"] : [] };
+}
+
+/** Cut the plan audio into one file per chunk, so each chunk downloads only its own packets. */
+export async function writeChunkAudioSlices(input: {
+  audioPath: string;
+  planDir: string;
+  chunks: readonly ChunkSliceJson[];
+  fps: Fps;
+  signal?: AbortSignal;
+  timeoutMs: number;
+}): Promise<void> {
+  const grid = await probeAacPacketGrid(input.audioPath);
+  const slices = input.chunks.flatMap((_, index) => {
+    const cut = audioCutForChunk(grid, input.chunks, index, input.fps);
+    return cut ? [{ cut, path: join(input.planDir, chunkAudioSlicePath(index)) }] : [];
+  });
+  mkdirSync(dirname(join(input.planDir, chunkAudioSlicePath(0))), { recursive: true });
+  // A process per slice costs ~20 ms, so each ffmpeg cuts a batch: one per core, at most 64
+  // slices each to stay far below the 1024 open files a Lambda allows.
+  const processes = Math.min(
+    slices.length,
+    Math.max(availableParallelism(), Math.ceil(slices.length / 64)),
+  );
+  await Promise.all(
+    Array.from({ length: processes }, async (_, p) => {
+      const batch = slices.filter((_, i) => i % processes === p);
+      const args = ["-y"];
+      for (const { cut } of batch) args.push(...cutArgs(cut).input, "-i", input.audioPath);
+      batch.forEach(({ cut, path }, i) =>
+        args.push("-map", `${i}:a:0`, ...cutArgs(cut).output, "-c", "copy", path),
+      );
+      const result = await runFfmpeg(args, { signal: input.signal, timeout: input.timeoutMs });
+      if (!result.success) {
+        throw new Error(
+          `[chunkAudio] audio slice failed: ${describeFfmpegFailure(result, input.timeoutMs)}`,
+        );
+      }
+    }),
+  );
+}
+
 interface MuxInput {
   videoPath: string;
   audioPath: string | null;
+  /** `audioPath` is this chunk's slice (see `writeChunkAudioSlices`), not the whole plan audio. */
+  sliced?: boolean;
   outputPath: string;
   chunks: readonly ChunkSliceJson[];
   chunkIndex: number;
@@ -103,21 +178,23 @@ interface MuxInput {
 
 function chunkMuxArgs(input: MuxInput, cut: AudioCut | null): string[] {
   if (!cut) return ["-i", input.videoPath, "-map", "0:v:0"];
-  const seek = cut.seekSeconds === null ? [] : ["-ss", cut.seekSeconds.toFixed(6)];
-  const length = cut.durationSeconds === null ? [] : ["-t", cut.durationSeconds.toFixed(6)];
-  // A seek keeps the packet before the cut unless told not to; chunk 0 never
-  // seeks, so its priming packet (and the edit list that hides it) survive.
-  const exact = seek.length ? ["-copypriorss", "0"] : [];
+  const { input: cutInput, output: cutOutput } = cutArgs(cut);
+  // A slice keeps the timestamps its cut gave it, so the chunk matches a cut made here.
+  const keepTimestamps = input.sliced ? ["-copyts"] : [];
   return [
-    ...["-i", input.videoPath, ...seek, ...length, "-i", input.audioPath!],
-    ...["-map", "0:v:0", "-map", "1:a:0", ...exact],
+    ...[...keepTimestamps, "-i", input.videoPath, ...cutInput, "-i", input.audioPath!],
+    ...["-map", "0:v:0", "-map", "1:a:0", ...cutOutput],
   ];
 }
 
 /** Mux one encoded chunk with the plan audio packets it owns into a regular mp4 at `outputPath`. */
 export async function muxChunkWithAudio(input: MuxInput): Promise<void> {
   const grid = input.audioPath ? await probeAacPacketGrid(input.audioPath) : null;
-  const cut = grid ? audioCutForChunk(grid, input.chunks, input.chunkIndex, input.fps) : null;
+  const cut = !grid
+    ? null
+    : input.sliced
+      ? { seekSeconds: null, durationSeconds: null, firstPacket: 0, packetCount: grid.packetCount }
+      : audioCutForChunk(grid, input.chunks, input.chunkIndex, input.fps);
   const args = [...chunkMuxArgs(input, cut), "-c", "copy"];
   appendRenderProvenanceArgs(args, input.outputPath);
   args.push("-y", input.outputPath);
