@@ -12,6 +12,8 @@ import { resolveFloatingPanelPosition, type FloatingPosition } from "../editor/f
 import type { RenderJob, ResolutionPreset } from "./useRenderQueue";
 import {
   FORMAT_INFO,
+  resolveRenderFps,
+  getRenderFpsOptions,
   getPersistedRenderSettings,
   persistRenderSettings,
   resolveRenderFormat,
@@ -270,12 +272,6 @@ const QUALITY_OPTIONS: SelectOption[] = [
   { value: "high", label: "High Quality" },
 ];
 
-const FPS_OPTIONS: SelectOption[] = [
-  { value: "24", label: "24 fps" },
-  { value: "30", label: "30 fps" },
-  { value: "60", label: "60 fps" },
-];
-
 function formatEta(ms: number): string {
   const s = Math.round(ms / 1000);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
@@ -302,7 +298,8 @@ function FormatExportButton({
   const [format, setFormat] = useState<"mp4" | "webm" | "mov" | "gif">(persisted.format);
   const [quality, setQuality] = useState<"draft" | "standard" | "high">(persisted.quality);
   const [resolution, setResolution] = useState<RenderScale>("auto");
-  const [fps, setFps] = useState<24 | 30 | 60>(persisted.fps);
+  const [requestedFps, setFps] = useState<24 | 30 | 60>(persisted.fps);
+  const fps = resolveRenderFps(format, requestedFps);
   const [gpu, setGpu] = useState(persisted.gpu);
   const [gifLoop, setGifLoop] = useState("0");
   const loopCount = Number(gifLoop);
@@ -341,7 +338,7 @@ function FormatExportButton({
             onCommit={(next) => {
               const v = resolveRenderFormat(next);
               setFormat(v);
-              persistRenderSettings(v, quality, fps);
+              persistRenderSettings(v, quality, resolveRenderFps(v, requestedFps));
             }}
           />
         </div>
@@ -364,7 +361,7 @@ function FormatExportButton({
           <Select
             label="Frame rate"
             value={String(fps)}
-            options={FPS_OPTIONS}
+            options={getRenderFpsOptions(format)}
             disabled={isRendering}
             onCommit={(next) => {
               const v = Number(next) as 24 | 30 | 60;

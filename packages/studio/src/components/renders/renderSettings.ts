@@ -1,3 +1,4 @@
+import type { SelectOption } from "../ui/Select";
 import type { StartRenderHandler } from "./RenderQueue";
 import type { ResolutionPreset } from "./useRenderQueue";
 
@@ -77,3 +78,23 @@ export const FORMAT_INFO: Record<"mp4" | "webm" | "mov" | "gif", { label: string
       desc: "Transparent video for web. Smaller than MOV but limited editor support.",
     },
   };
+
+const FPS_OPTIONS: SelectOption[] = [
+  { value: "24", label: "24 fps" },
+  { value: "30", label: "30 fps" },
+  { value: "60", label: "60 fps" },
+];
+
+export function resolveRenderFps(
+  format: PersistedRenderSettings["format"],
+  fps: PersistedRenderSettings["fps"],
+): PersistedRenderSettings["fps"] {
+  return format === "gif" && fps === 60 ? 30 : fps;
+}
+
+export function getRenderFpsOptions(format: PersistedRenderSettings["format"]): SelectOption[] {
+  return FPS_OPTIONS.map((option) => ({
+    ...option,
+    disabled: format === "gif" && option.value === "60",
+  }));
+}

@@ -4,7 +4,7 @@ import { existsSync, lstatSync, readFileSync, unlinkSync, readdirSync, statSync 
 import { dirname, join } from "node:path";
 import type { StudioApiAdapter, RenderJobState } from "../types.js";
 import { VALID_CANVAS_RESOLUTIONS, type CanvasResolution } from "@hyperframes/parsers";
-import { formatRenderOutputTimestamp, parseFps } from "@hyperframes/core";
+import { formatRenderOutputTimestamp, parseFps, fpsToNumber } from "@hyperframes/core";
 import {
   folderGone,
   isPrivateProjectFile,
@@ -126,7 +126,9 @@ export function registerRenderRoutes(api: Hono, adapter: StudioApiAdapter): void
     // `quality` already in this file) — the producer surfaces a clearer error
     // message if the caller really did mean to fail loudly.
     const fpsParse = body.fps === undefined ? null : parseFps(body.fps);
-    const fps = fpsParse && fpsParse.ok ? fpsParse.value : { num: 30, den: 1 };
+    const requestedFps = fpsParse && fpsParse.ok ? fpsParse.value : { num: 30, den: 1 };
+    const fps =
+      format === "gif" && fpsToNumber(requestedFps) > 30 ? { num: 30, den: 1 } : requestedFps;
     const quality = ["draft", "standard", "high"].includes(body.quality ?? "")
       ? (body.quality as string)
       : "standard";

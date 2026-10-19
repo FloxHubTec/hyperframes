@@ -321,3 +321,34 @@ describe("GIF export controls", () => {
     expect(onStartRender).not.toHaveBeenCalled();
   });
 });
+
+describe("GIF frame-rate controls", () => {
+  it("caps a saved GIF frame rate of 60 and disables that option", async () => {
+    localStorage.setItem("hf-studio-render-settings", JSON.stringify({ format: "gif", fps: 60 }));
+    const onStartRender: Mock<StartRenderHandler> = vi.fn();
+    const host = mountRenderQueue(onStartRender);
+    const fps = triggerFor(host, "Frame rate");
+    expect(fps.textContent).toContain("30 fps");
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenCalledWith("gif", "standard", "auto", 30, false, 0);
+    act(() => fps.click());
+    await settle();
+    const sixty = Array.from(document.querySelectorAll('[role="option"]')).find((option) =>
+      option.textContent?.includes("60 fps"),
+    );
+    expect(sixty?.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("switches a 60 fps video to a 30 fps GIF and preserves 60 fps for video", async () => {
+    localStorage.setItem("hf-studio-render-settings", JSON.stringify({ format: "mp4", fps: 60 }));
+    const onStartRender: Mock<StartRenderHandler> = vi.fn();
+    const host = mountRenderQueue(onStartRender);
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenLastCalledWith("mp4", "standard", "auto", 60, false);
+    await chooseByArrowing(triggerFor(host, "Format"), 3);
+    expect(triggerFor(host, "Frame rate").textContent).toContain("30 fps");
+    expect(getPersistedRenderSettings()).toMatchObject({ format: "gif", fps: 30 });
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenLastCalledWith("gif", "standard", "auto", 30, false, 0);
+  });
+});
