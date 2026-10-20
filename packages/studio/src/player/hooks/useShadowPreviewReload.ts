@@ -25,7 +25,7 @@ import { usePlayerStore } from "../store/playerStore";
 
 // One wait budget for a shadow: the player's 8s asset cap plus its 0.42s loader fade
 // leaves about 6.5s for the document load and runtime boot. Nothing shorter may fail the swap.
-// It only runs while the page draws frames: readiness is frame-driven, and a hidden tab draws none.
+// Spent only while frames are drawn (readiness needs them); a hidden tab or a covered Linux window draws none.
 export const SHADOW_READY_TIMEOUT_MS = 15_000;
 // A busy machine can need more than one budget; the shadow keeps loading for this many before it is dropped.
 export const SHADOW_READY_BUDGETS = 3;
@@ -276,8 +276,6 @@ export function useShadowPreviewReload({
     (gen: number) => {
       clearTimeout(readyTimerRef.current);
       if (isDocumentHidden()) return;
-      // A window can draw no frames yet report visible (behind others on some Linux desktops): a budget with no
-      // frame is not spent, and the next frame restarts it, as showing a hidden tab does.
       let drew = false;
       let starved = false;
       requestAnimationFrame(() => {
