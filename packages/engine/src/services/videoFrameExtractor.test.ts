@@ -3666,6 +3666,25 @@ describe.skipIf(!HAS_ZSCALE)("forced-SDR HDR extraction", () => {
     60_000,
   );
 
+  it("probes each source's first frame once, however many cuts of it extract together", async () => {
+    const sources = ["a", "b"].map((name) => join(fixtureDir, `cuts-${name}.mp4`));
+    for (const source of sources) await synthesizeHlgClip(source);
+    const probes = () =>
+      vi.mocked(runFfmpeg).mock.calls.filter(([args]) => args.includes("showinfo")).length;
+    const before = probes();
+    await Promise.all(
+      Array.from({ length: 12 }, (_, cut) =>
+        extractVideoFramesRange(sources[cut % 2]!, `cut-${cut}`, 0, 1, {
+          fps: 1,
+          outputDir: join(fixtureDir, "cuts"),
+          format: "png",
+          toneMapHdrToSdr: true,
+        }),
+      ),
+    );
+    expect(probes() - before).toBe(2);
+  }, 60_000);
+
   // One stream with HLG frames, then PQ frames: each is tone-mapped with its own transfer.
   it("tone-maps each frame of a mixed HLG and PQ stream with its own transfer", async () => {
     const segment = async (name: string, transfer: number) => {

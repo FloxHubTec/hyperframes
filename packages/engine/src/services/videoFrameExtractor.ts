@@ -42,6 +42,10 @@ import { isKnownInactiveTimelineWindow } from "./mediaTimelineWindow.js";
 import {
   extractFinalVideoFrameTimestamp,
   extractMediaMetadata,
+  mediaFileIdentity,
+  readMetadataCache,
+  writeMetadataCache,
+  type MediaProbeCacheEntry,
   type VideoMetadata,
 } from "../utils/ffprobe.js";
 import { inputAlphaOpaqueWarning, probeInputAlphaPlane } from "../utils/alphaPlaneProbe.js";
@@ -815,12 +819,22 @@ export function parseImageElements(html: string): ImageElement[] {
   return images;
 }
 
-/** The first shown frame's colour tags; see {@link firstFrameColourArgs}. */
-async function readFirstFrameColour(videoPath: string, signal?: AbortSignal) {
-  const result = await runFfmpeg([...urlInputArgs(videoPath), ...firstFrameColourArgs(videoPath)], {
-    signal,
-  });
-  return parseFirstFrameColour(result.stderr);
+const firstFrameColourCache = new Map<
+  string,
+  MediaProbeCacheEntry<ReturnType<typeof parseFirstFrameColour>>
+>();
+
+/** The first shown frame's colour tags (see {@link firstFrameColourArgs}), probed once per source file. */
+function readFirstFrameColour(videoPath: string) {
+  const identity = mediaFileIdentity(videoPath);
+  const cached = readMetadataCache(firstFrameColourCache, videoPath, identity);
+  if (cached) return cached;
+  // In an extraction slot, so it never adds a decoder; unsignalled, so one cancel cannot cut it short for others.
+  const probe = inExtractionSlot(() =>
+    runFfmpeg([...urlInputArgs(videoPath), ...firstFrameColourArgs(videoPath)]),
+  ).then((result) => parseFirstFrameColour(result.stderr));
+  writeMetadataCache(firstFrameColourCache, videoPath, identity, probe);
+  return probe;
 }
 
 /** Chrome plays untagged VP9 and AV1 as BT.601, H.264 and VP8 as BT.709 from 720 coded lines (assumed for the rest). */
@@ -1066,7 +1080,7 @@ async function extractVideoFramesRangeUnredacted(
     vfFilters.push(SDR_TO_HDR_COLORSPACE_FILTER);
   }
   if (toneMappedToSdr) {
-    const frameColour = await readFirstFrameColour(videoPath, signal);
+    const frameColour = await readFirstFrameColour(videoPath);
     vfFilters.push(hdrToSdrToneMapFilter(metadata.colorSpace ?? {}, frameColour));
   }
   if (toneMappedToSdr || (!isHdr && !options.sdrToHdrTransfer)) {
