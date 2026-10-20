@@ -312,7 +312,7 @@ function createRuntimeClock(): RuntimeClock {
 
 const SAMPLING_BROWSER_BYTES = 250 * 1024 * 1024;
 
-/** Chromes the sample grid splits over: one per spare core and 250 MB free (a container's limit counts), at most two. */
+/** Chromes the sample grid splits over: one per spare core and 250 MB free (a container's limit counts), at most 2. */
 export function samplingBrowserCount(
   options: CheckOptions,
   cores = os.availableParallelism(),
