@@ -13,10 +13,12 @@ const MIN_SEGMENT_SECONDS = 60;
 // Fixed rather than the core count, so the bytes (and the planHash) do not depend on the machine.
 const MAX_SEGMENTS = 8;
 // Encoded on each side of a segment and dropped. The encoder's rate control takes about
-// 10 s to settle (its error is higher until then), so a segment starts 10 s before its cut.
+// 10 s to settle (its error is higher until then), so a segment starts 10 s before its cut,
+// the first in digital silence: opening cold on quiet sound, the encoder codes the first loud
+// frame a coarse step hot (up to 4.5 dB), and again on every re-encode of the result.
 const PRE_ROLL_FRAMES = 469;
 const POST_ROLL_FRAMES = 8;
-export const AAC_ARGS = ["-acodec", "aac", "-b:a", "192k"];
+const AAC_ARGS = ["-acodec", "aac", "-b:a", "192k"];
 
 export function aacSegmentCount(totalDuration: number): number {
   return Math.max(1, Math.min(MAX_SEGMENTS, Math.floor(totalDuration / MIN_SEGMENT_SECONDS)));
@@ -45,26 +47,28 @@ function planSegments(totalDuration: number, count: number) {
   const cuts = Array.from({ length: count + 1 }, (_, k) => Math.round((k * packets) / count));
   return cuts.slice(0, -1).map((cut, k) => {
     const next = cuts[k + 1]!;
-    const firstFrame = Math.max(0, cut - PRE_ROLL_FRAMES);
-    const end = k === count - 1 ? "" : `:end_sample=${(next + POST_ROLL_FRAMES) * FRAME_SAMPLES}`;
-    const trim = `atrim=start_sample=${firstFrame * FRAME_SAMPLES}${end}`;
+    const firstFrame = cut - PRE_ROLL_FRAMES;
+    const end = k === count - 1 ? "" : `end_sample=${(next + POST_ROLL_FRAMES) * FRAME_SAMPLES}`;
+    const trim =
+      firstFrame < 0
+        ? `${end && `atrim=${end},`}adelay=delays=${-firstFrame * FRAME_SAMPLES}S:all=1`
+        : `atrim=start_sample=${firstFrame * FRAME_SAMPLES}${end && `:${end}`}`;
     return { trim, keepFrom: cut - firstFrame, keepTo: next - firstFrame };
   });
 }
 
-/** `input` is a 48 kHz WAV of exactly `totalDuration`. */
+/** `input`, after `filter`, is 48 kHz audio of exactly `totalDuration`. */
 export async function encodeAac(
   input: string,
   outputPath: string,
   totalDuration: number,
-  { signal, timeout }: { signal?: AbortSignal; timeout: number },
+  {
+    signal,
+    timeout,
+    filter,
+    segments: count = aacSegmentCount(totalDuration),
+  }: { signal?: AbortSignal; timeout: number; filter?: string; segments?: number },
 ): Promise<RunFfmpegResult> {
-  const count = aacSegmentCount(totalDuration);
-  if (count === 1) {
-    const args = ["-i", input, "-t", String(totalDuration), ...AAC_ARGS, "-y", outputPath];
-    return runFfmpeg(args, { signal, timeout });
-  }
-
   const dir = mkdtempSync(join(dirname(outputPath), ".aac-segments-"));
   try {
     const segments = planSegments(totalDuration, count).map((segment, k) => ({
@@ -73,10 +77,25 @@ export async function encodeAac(
     }));
     const results = await Promise.all(
       segments.map(({ trim, path }) =>
-        runFfmpeg(["-i", input, "-af", trim, ...AAC_ARGS, "-f", "adts", "-y", path], {
-          signal,
-          timeout,
-        }),
+        runFfmpeg(
+          [
+            "-i",
+            input,
+            "-af",
+            filter ? `${filter},${trim}` : trim,
+            ...AAC_ARGS,
+            "-ar",
+            String(SAMPLE_RATE),
+            "-f",
+            "adts",
+            "-y",
+            path,
+          ],
+          {
+            signal,
+            timeout,
+          },
+        ),
       ),
     );
     const failed = results.find((result) => !result.success);

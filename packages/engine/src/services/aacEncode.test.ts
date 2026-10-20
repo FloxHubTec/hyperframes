@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -54,6 +54,38 @@ function errorStats(source: Float32Array, coded: Float32Array, cutFrames: number
   }
   return { rms: Math.sqrt(sum / source.length), peakNearCut, peakElsewhere };
 }
+
+/**
+ * Half a second of stereo: a quiet noise floor from the first sample, then a sharp two-tone
+ * onset. Shaped like a film whose sound opens softly; `seed` varies only the floor.
+ */
+function quietThenOnset(seed: number, f0: number): Float32Array {
+  const n = 24_000;
+  const onset = 2738;
+  const channel = (phase: [number, number], peak: number) => {
+    const tone = Array.from({ length: n }, (_, i) => {
+      const t = Math.max(0, (i - onset) / 48_000);
+      const envelope = Math.min(1, Math.max(0, (i - onset) / 27)) * Math.exp(-1.25 * t);
+      const f = 2 * Math.PI * f0 * t;
+      return envelope * (Math.sin(f + phase[0]) + 0.6 * Math.sin(2 * f + phase[1]));
+    });
+    const max = Math.max(...tone.map(Math.abs));
+    return tone.map((v) => (peak * v) / max);
+  };
+  const left = channel([1, 0], 0.35 * 0.25);
+  const right = channel([0.5, 2], 0.25);
+  const out = new Float32Array(n * 2);
+  let state = seed >>> 0;
+  for (let i = 0; i < 2 * n; i++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    const floor = (state / 2 ** 31 - 1) * 10 ** (-70 / 20) * Math.min(1, (i >> 1) / 1500);
+    out[i] = (i % 2 ? right : left)[i >> 1]! + floor;
+  }
+  return out;
+}
+
+const peakOfFirst = (signal: Float32Array, frames: number) =>
+  signal.subarray(0, frames * 2).reduce((peak, v) => Math.max(peak, Math.abs(v)), 0);
 
 describe("aacSegmentCount", () => {
   it("keeps audio under two minutes in one encoder", () => {
@@ -113,6 +145,30 @@ describe.skipIf(!HAS_FFMPEG)("encodeAac", () => {
     ffmpeg(["-i", source, "-t", "147.52", "-acodec", "aac", "-b:a", "192k", "-y", single]);
     expect((await encodeAac(source, split, 147.52, { timeout: 120_000 })).success).toBe(true);
     expect(streamEnd(split)).toBe(streamEnd(single));
+  }, 120_000);
+
+  it("keeps a sharp onset at its level when the audio opens quietly, encode after encode", async () => {
+    const growthDb: number[] = [];
+    for (const f0 of [250, 306, 360]) {
+      for (let seed = 1; seed <= 12; seed++) {
+        const raw = join(dir, "onset.f32");
+        writeFileSync(raw, quietThenOnset(seed, f0));
+        const source = join(dir, "onset.wav");
+        ffmpeg(["-f", "f32le", "-ar", "48000", "-ac", "2", "-i", raw, "-y", source]);
+        let input = source;
+        for (const generation of [1, 2]) {
+          const coded = join(dir, `onset-${generation}.m4a`);
+          expect((await encodeAac(input, coded, 0.5, { timeout: 60_000 })).success).toBe(true);
+          input = join(dir, `onset-${generation}.wav`);
+          ffmpeg(["-i", coded, "-c:a", "pcm_f32le", "-y", input]);
+        }
+        const before = peakOfFirst(decode(source), 4800);
+        growthDb.push(20 * Math.log10(peakOfFirst(decode(input), 4800) / before));
+      }
+    }
+    // Measured on ffmpeg 7.0.2 and 8.0.1: at most +0.1 dB. Opening cold, 3 of these grew 2.7-3.3 dB.
+    const report = growthDb.map((db) => db.toFixed(2)).join(" ");
+    expect(Math.max(...growthDb), `peak growth per signal, dB: ${report}`).toBeLessThan(1);
   }, 120_000);
 
   it("leaves no click at the joins of a pure tone", async () => {
