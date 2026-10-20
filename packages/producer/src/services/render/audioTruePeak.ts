@@ -55,9 +55,8 @@ async function scanTruePeak(
 }
 
 /**
- * The true peak one `ebur128=peak=true` pass over the whole file reports, measured as parallel
- * segments when the length is known and the rate is 48 kHz. Same value to the printed digit,
- * not an estimate.
+ * The true peak one `ebur128=peak=true` pass over the whole file reports, measured in parallel
+ * segments when the length is known and the rate is 48 kHz: the same digit, not an estimate.
  */
 export async function measureTruePeakDbfs(
   audioPath: string,
