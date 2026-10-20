@@ -1,7 +1,9 @@
-import { lookup } from "node:dns/promises";
+import { promises as dns } from "node:dns";
 import { isIP } from "node:net";
 import { request as httpRequest, type IncomingMessage, type ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+
+const DNS_TIMEOUT_MS = 10_000;
 
 function ipv4Number(address: string): number {
   return address.split(".").reduce((value, octet) => value * 256 + Number(octet), 0);
@@ -50,24 +52,20 @@ export async function resolvePublicAddress(hostname: string): Promise<string> {
   ) {
     throw new Error("Capture requires a public hostname");
   }
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cancellableResolver = new dns.Resolver();
+  const timer = setTimeout(() => cancellableResolver.cancel(), DNS_TIMEOUT_MS);
   try {
-    const answers = await Promise.race([
-      lookup(host, { all: true, family: 4, verbatim: true }),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("Capture DNS timed out")), 10_000);
-        timer.unref();
-      }),
-    ]);
-    if (
-      !answers[0] ||
-      answers.some((answer) => answer.family !== 4 || !isPublicIPv4(answer.address))
-    ) {
+    const answers = await cancellableResolver.resolve4(host);
+    const first = answers[0];
+    if (!first || !answers.every(isPublicIPv4)) {
       throw new Error("Capture DNS returned a non-public address");
     }
-    const first = answers[0];
-    if (!first) throw new Error("Capture DNS returned no address");
-    return first.address;
+    return first;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ECANCELLED") {
+      throw new Error("Capture DNS timed out", { cause: error });
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }

@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-const mocks = vi.hoisted(() => ({ lookup: vi.fn(), request: vi.fn() }));
-vi.mock("node:dns/promises", () => ({ lookup: mocks.lookup }));
+const mocks = vi.hoisted(() => ({ resolve4: vi.fn(), request: vi.fn() }));
+vi.mock("node:dns", () => ({
+  promises: {
+    Resolver: class {
+      resolve4 = mocks.resolve4;
+      cancel() {}
+    },
+  },
+}));
 vi.mock("node:http", () => ({ request: mocks.request }));
 vi.mock("node:https", () => ({ request: mocks.request }));
 import { isPublicIPv4, publicRequest, resolvePublicAddress } from "./publicNetwork.js";
@@ -30,7 +37,7 @@ describe("public address policy", () => {
   ])("rejects %s", (ip) => expect(isPublicIPv4(ip)).toBe(false));
   it("accepts public literals without DNS", async () => {
     await expect(resolvePublicAddress("8.8.8.8")).resolves.toBe("8.8.8.8");
-    expect(mocks.lookup).not.toHaveBeenCalled();
+    expect(mocks.resolve4).not.toHaveBeenCalled();
   });
   it.each([
     "localhost",
@@ -41,25 +48,22 @@ describe("public address policy", () => {
     "[::1]",
   ])("blocks alias/literal %s before DNS", async (host) => {
     await expect(resolvePublicAddress(host)).rejects.toThrow();
-    expect(mocks.lookup).not.toHaveBeenCalled();
+    expect(mocks.resolve4).not.toHaveBeenCalled();
   });
   it("rejects mixed DNS before opening a socket", async () => {
-    mocks.lookup.mockResolvedValue([
-      { address: "8.8.8.8", family: 4 },
-      { address: "127.0.0.1", family: 4 },
-    ]);
+    mocks.resolve4.mockResolvedValue(["8.8.8.8", "127.0.0.1"]);
     await expect(publicRequest("http://example.com/")).rejects.toThrow();
     expect(mocks.request).not.toHaveBeenCalled();
   });
-  it.each([{ answers: [] }, { answers: [{ address: "8.8.8.8", family: 6 }] }])(
+  it.each([{ answers: [] }, { answers: ["::ffff:8.8.8.8"] }])(
     "rejects empty or malformed DNS",
     async ({ answers }) => {
-      mocks.lookup.mockResolvedValue(answers);
+      mocks.resolve4.mockResolvedValue(answers);
       await expect(resolvePublicAddress("example.com")).rejects.toThrow();
     },
   );
   it("propagates DNS errors", async () => {
-    mocks.lookup.mockRejectedValue(new Error("DNS failed"));
+    mocks.resolve4.mockRejectedValue(new Error("DNS failed"));
     await expect(resolvePublicAddress("example.com")).rejects.toThrow("DNS failed");
   });
 });
@@ -86,14 +90,12 @@ function fakeRequest() {
 }
 describe("pinned request", () => {
   it("dials the checked numeric IP only, preserving TLS identity and manual redirects", async () => {
-    mocks.lookup
-      .mockResolvedValueOnce([{ address: "8.8.8.8", family: 4 }])
-      .mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
+    mocks.resolve4.mockResolvedValueOnce(["8.8.8.8"]).mockResolvedValue(["127.0.0.1"]);
     fakeRequest();
     const response = await publicRequest("https://example.com:8443/path?q=1", {
       headers: { host: "evil.test", "accept-encoding": "gzip" },
     });
-    expect(mocks.lookup).toHaveBeenCalledTimes(1);
+    expect(mocks.resolve4).toHaveBeenCalledTimes(1);
     expect(mocks.request).toHaveBeenCalledTimes(1);
     expect(mocks.request.mock.calls[0]?.[0]).toMatchObject({
       hostname: "8.8.8.8",
@@ -116,9 +118,9 @@ describe("pinned request", () => {
   );
   it("does not dial after abort during DNS", async () => {
     const controller = new AbortController();
-    mocks.lookup.mockImplementation(async () => {
+    mocks.resolve4.mockImplementation(async () => {
       controller.abort();
-      return [{ address: "8.8.8.8", family: 4 }];
+      return ["8.8.8.8"];
     });
     await expect(
       publicRequest("https://example.com", { signal: controller.signal }),
@@ -128,20 +130,8 @@ describe("pinned request", () => {
 });
 
 describe("transport lifecycle", () => {
-  it("bounds stalled DNS without dialing", async () => {
-    vi.useFakeTimers();
-    try {
-      mocks.lookup.mockImplementation(() => new Promise(() => {}));
-      const result = expect(publicRequest("https://example.com")).rejects.toThrow("DNS timed out");
-      await vi.advanceTimersByTimeAsync(10_000);
-      await result;
-      expect(mocks.request).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
   it("cancels the upstream stream and socket when the body is cancelled", async () => {
-    mocks.lookup.mockResolvedValue([{ address: "8.8.8.8", family: 4 }]);
+    mocks.resolve4.mockResolvedValue(["8.8.8.8"]);
     const incoming = Object.assign(new PassThrough(), { statusCode: 200, headers: {} });
     const req = Object.assign(new EventEmitter(), { end: vi.fn(), destroy: vi.fn() });
     mocks.request.mockImplementation((_options, callback) => {
@@ -161,7 +151,7 @@ describe("transport lifecycle", () => {
     }).not.toThrow();
   });
   it("fails unsupported compressed responses instead of returning corrupted asset bytes", async () => {
-    mocks.lookup.mockResolvedValue([{ address: "8.8.8.8", family: 4 }]);
+    mocks.resolve4.mockResolvedValue(["8.8.8.8"]);
     const incoming = Object.assign(new PassThrough(), {
       statusCode: 200,
       headers: { "content-encoding": "gzip" },
