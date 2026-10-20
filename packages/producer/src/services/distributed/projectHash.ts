@@ -16,7 +16,7 @@ import { PLAN_PROJECT_DIR_SKIP_SEGMENTS } from "./plan.js";
 
 // Bump when the hashed set changes so uploads cached under an older scheme are never reused.
 const SITE_ID_SCHEME = "site-v2\0";
-const READ_CHUNK_BYTES = 8 * 1024 * 1024;
+const READ_CHUNK_BYTES = 256 * 1024;
 
 /**
  * The files a site upload ships, as `/`-separated paths under `projectDir`. Symlinks are followed

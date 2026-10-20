@@ -241,8 +241,7 @@ async function putImmutableFile(
     const raced = await inspectContentAddressedObject(client, bucket, key, size, expectedSha256);
     if (raced.state === "matching") return { outcome: "reused" };
     if (raced.state === "conflict") throwImmutableObjectConflict(uri);
-    // The winning object was deleted between the conditional failure and
-    // verification. Preserve the service error so the orchestrator may retry.
+    // No winner left to verify: rethrow the service error so the orchestrator may retry.
     throw error;
   }
 }
