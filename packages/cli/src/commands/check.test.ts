@@ -171,6 +171,7 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
     collectLayout: vi.fn(async (_time: number, _tolerance: number) => []),
     collectOverlap: vi.fn(async (_time: number) => []),
     collectLayoutGeometry: vi.fn(async () => `geometry-${geometryCallCount++}`),
+    collectFrameFingerprint: vi.fn(async () => "frame"),
     collectSeekClock: vi.fn(async () => [{ id: 1, time: 0, done: false }]),
     collectRotationSample: vi.fn(async (_time: number) => []),
     collectOffPivotRotationSample: vi.fn(async (time: number) => ({ time, samples: [] })),
@@ -1727,7 +1728,7 @@ describe("check pipeline", () => {
       DEFAULT_CHECK_OPTIONS,
       noMotion(),
     );
-    const samples = vi.mocked(serialPage.seek).mock.calls.length;
+    const samples = vi.mocked(serialPage.collectLayout).mock.calls.length;
     let firstPageSeeks = 0;
     let othersTaken!: () => void;
     const allOthersTaken = new Promise<void>((resolve) => (othersTaken = resolve));
@@ -1876,6 +1877,32 @@ describe("check pipeline", () => {
       const { report } = await runScenario(driver);
 
       expect(report.layout.findings.some((finding) => finding.code === "sweep_static")).toBe(false);
+    });
+
+    it.each([
+      ["a timeline that looks stuck", (_sample: number) => "frozen", true],
+      ["a still card", (_sample: number) => "frozen", false],
+      ["an audio-only sweep", (sample: number) => `still\u001f${sample}`, false],
+    ])("does not flag %s when the rendered frames differ", async (_case, geometry, stuck) => {
+      let sample = 0;
+      let frame = 0;
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectLayoutGeometry: vi.fn(async () => geometry(sample++)),
+        ...(stuck ? {} : { collectSeekClock: vi.fn(async () => []) }),
+        collectFrameFingerprint: vi.fn(async () => `frame${frame++}`),
+      });
+      const { report } = await runScenario(driver);
+
+      expect(report.layout.findings.some((finding) => finding.code === "sweep_static")).toBe(false);
+      expect(report.ok).toBe(true);
+    });
+
+    it("never captures frames when the signature already moved", async () => {
+      const driver = fakeDriver({ getDuration: vi.fn(async () => 6) });
+      await runScenario(driver);
+
+      expect(driver.collectFrameFingerprint).not.toHaveBeenCalled();
     });
 
     it("does not flag --at times the user picked on a still end card", async () => {

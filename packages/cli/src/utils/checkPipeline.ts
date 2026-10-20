@@ -712,6 +712,19 @@ function detectSweepStatic(
   return [];
 }
 
+// The signature reads DOM channels, which miss paint such as SVG mask and clip contents, stroke dashes and
+// canvas or WebGL pixels. Before calling a sweep still, the rendered frames get the last word.
+async function framesMoved(driver: CheckAuditDriver, times: number[]): Promise<boolean> {
+  let first: string | undefined;
+  for (const time of times) {
+    await driver.seek(time, true);
+    const frame = await driver.collectFrameFingerprint();
+    if (first === undefined) first = frame;
+    else if (frame !== first) return true;
+  }
+  return false;
+}
+
 function anAnimationIsStuck(samples: { clock: SeekClock[] }[]): boolean {
   const seenById = new Map<number, SeekClock[]>();
   for (const sample of samples) {
@@ -1322,14 +1335,25 @@ export async function runAuditGrid(
     motionIssues = [...motionIssues, ...(await driver.anchorMotionIssues(evaluated))];
   }
   const userPicked = new Set(grid.userPickedSamples);
-  const sweepFindings = options.range
+  const sweepSamples = collected.layoutStateSignatures.filter(
+    (sample) => !userPicked.has(sample.time),
+  );
+  const sweepVerdict = options.range
     ? []
     : detectSweepStatic(
         grid.duration,
-        collected.layoutStateSignatures.filter((sample) => !userPicked.has(sample.time)),
+        sweepSamples,
         motionIssues,
         await driver.hasNoTimelineDeclaration(),
       );
+  const sweepFindings =
+    sweepVerdict.length > 0 &&
+    (await framesMoved(
+      driver,
+      sweepSamples.map((sample) => sample.time),
+    ))
+      ? []
+      : sweepVerdict;
   const rotationFindings = detectRotationPivotDrift(
     collected.rotationSamples,
     await driver.getCanvas(),

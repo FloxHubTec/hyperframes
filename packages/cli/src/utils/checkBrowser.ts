@@ -1,6 +1,7 @@
 import type { CheckDeadline } from "./checkDeadline.js";
 import { BrowserCleanupError, closeManagedBrowser } from "../browser/launch.js";
 import { checkSnapshotDirectory } from "./checkSnapshotDirectory.js";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
@@ -729,9 +730,9 @@ function wireNetworkListeners(page: Page, drafts: RuntimeDraft[], clock: Runtime
   });
 }
 
-function createPageDriver(
+export function createPageDriver(
   page: Page,
-  clock: RuntimeClock,
+  clock: RuntimeClock = createRuntimeClock(),
   sampleLog?: SampleWindow,
 ): CheckAuditDriver {
   return {
@@ -771,6 +772,10 @@ function createPageDriver(
       return issues;
     },
     collectLayoutGeometry: () => collectLayoutGeometry(page),
+    collectFrameFingerprint: async () =>
+      createHash("sha1")
+        .update(await page.screenshot({ type: "png" }))
+        .digest("hex"),
     collectSeekClock: () => collectSeekClock(page),
     collectRotationSample: (time) => collectRotationSample(page, time),
     collectOffPivotRotationSample: (time) => collectOffPivotRotationSample(page, time),
