@@ -5,8 +5,10 @@ import { findSystemChrome } from "../vite.browser";
 
 const require = createRequire(import.meta.url);
 
+const LAUNCH_TIMEOUT_MS = 20_000;
+
 /** Headless Chrome with the e2e launcher's flags. A launch stuck past 20 s (seen on Windows runners)
- * is killed and tried once more. */
+ * is killed and tried once more. On Windows Puppeteer reports it as "already running", not a timeout. */
 export async function launchTestChrome(
   launch: typeof puppeteer.launch = (options) => puppeteer.launch(options),
 ): Promise<Browser> {
@@ -16,12 +18,14 @@ export async function launchTestChrome(
     executablePath,
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-    timeout: 20_000,
+    timeout: LAUNCH_TIMEOUT_MS,
   };
+  const startedAt = Date.now();
   try {
     return await launch(options);
   } catch (error) {
-    if (!(error instanceof TimeoutError)) throw error;
+    const stuck = error instanceof TimeoutError || Date.now() - startedAt >= LAUNCH_TIMEOUT_MS;
+    if (!stuck) throw error;
     return launch(options);
   }
 }

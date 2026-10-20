@@ -38,6 +38,24 @@ describe("launchTestChrome", () => {
     expect(launch.mock.calls[0]![0]).toMatchObject({ timeout: 20_000 });
   });
 
+  it("tries once more after a stuck launch that Windows reports as already running", async () => {
+    vi.useFakeTimers();
+    try {
+      const { browser } = fakeBrowser(async () => undefined);
+      const launch = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          vi.advanceTimersByTime(20_000);
+          throw new Error("The browser is already running for C:\\tmp\\x");
+        })
+        .mockResolvedValueOnce(browser);
+      await expect(launchTestChrome(launch)).resolves.toBe(browser);
+      expect(launch).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not retry a launch that failed for another reason", async () => {
     const launch = vi.fn().mockRejectedValue(new Error("no such file"));
     await expect(launchTestChrome(launch)).rejects.toThrow("no such file");
