@@ -34,6 +34,8 @@ it("gives up on a DNS server that never answers, and nothing it started keeps th
   expect(run.livedOnMs).toBeLessThan(2_000);
 }, 30_000);
 
-it("answers with the server's public address", async () => {
-  expect((await resolveInChild("answer", "93.184.216.34")).printed).toBe("93.184.216.34");
+it("answers with the server's public address and exits right after", async () => {
+  const run = await resolveInChild("answer", "93.184.216.34");
+  expect(run.printed).toBe("93.184.216.34");
+  expect(run.livedOnMs).toBeLessThan(2_000);
 }, 30_000);
