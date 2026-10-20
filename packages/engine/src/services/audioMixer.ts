@@ -657,8 +657,13 @@ async function extractAudioSegment(
   if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
   const normalizedPlaybackRate = normalizeRateSpec(playbackRate);
   const sourceDuration = sourceTimeAt(normalizedPlaybackRate, duration);
-  // A failed probe keeps FFmpeg's default channel conversion and the input seek.
-  const metadata = await extractAudioMetadata(srcPath).catch(() => null);
+  // A failed local probe keeps FFmpeg's default channel conversion and the input seek; a URL probe
+  // is retried once, then fails: a blip must not change how the next, successful read is mixed.
+  const metadata = isHttpUrl(srcPath)
+    ? await extractAudioMetadata(srcPath, { signal }).catch(() =>
+        extractAudioMetadata(srcPath, { signal }),
+      )
+    : await extractAudioMetadata(srcPath).catch(() => null);
   const inputSeek = mediaStart >= (metadata?.latestStreamLeadSeconds ?? 0);
   const start = formatFilterNumber(mediaStart);
   const timestampTrim = inputSeek
@@ -1217,7 +1222,7 @@ export async function processCompositionAudio(
         // authored duration or `loop`. It then fails inside ffmpeg as
         // `prepare/ffmpeg_failed` with owner "system" — an authoring bug paged
         // as a platform fault, after every frame has already been captured.
-        if (!readInPlace && (await isNotMediaPayload(srcPath))) {
+        if (await isNotMediaPayload(srcPath)) {
           failures.push({
             stage: "source",
             reason: "invalid_media",

@@ -66,6 +66,16 @@ vi.mock("./audioFxRender.js", async (importOriginal) => {
   return { ...actual, applyAudioFxChain: applyAudioFxChainMock };
 });
 
+// The real default CA bundle paths do not exist on Windows runners.
+vi.mock("../utils/urlInput.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../utils/urlInput.js")>();
+  return {
+    ...actual,
+    urlInputArgs: (input: string, options?: Parameters<typeof actual.urlInputArgs>[1]) =>
+      actual.urlInputArgs(input, { ...options, caBundles: [process.execPath] }),
+  };
+});
+
 vi.mock("../utils/ffprobe.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../utils/ffprobe.js")>();
   return { ...actual, extractAudioMetadata: extractAudioMetadataMock };
@@ -1539,7 +1549,8 @@ describe("processCompositionAudio", () => {
     expect(result.success).toBe(true);
     expect(fetchMock).not.toHaveBeenCalled();
     const extractArgs = runFfmpegMock.mock.calls[0]?.[0] ?? [];
-    expect(extractArgs).toContain("-tls_verify");
+    expect(extractArgs.indexOf("-tls_verify")).toBeGreaterThanOrEqual(0);
+    expect(extractArgs.indexOf("-tls_verify")).toBeLessThan(extractArgs.indexOf("-i"));
     expect(extractArgs.slice(extractArgs.indexOf("-ss"), extractArgs.indexOf(url) + 1)).toEqual([
       "-ss",
       "600",
@@ -1548,6 +1559,39 @@ describe("processCompositionAudio", () => {
       "-i",
       url,
     ]);
+  });
+
+  it("fails a cloud-held file's audio when its URL probe fails twice instead of mixing it unprobed", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    extractAudioMetadataMock.mockRejectedValue(new Error("Server returned 503"));
+    const url = "https://bucket.s3.amazonaws.com/cas/take.mov?X-Amz-Signature=s";
+
+    const result = await processCompositionAudio(
+      [
+        {
+          id: "take-audio",
+          src: "takes/take.mov",
+          start: 0,
+          end: 2,
+          mediaStart: 600,
+          layer: 0,
+          volume: 1,
+          type: "video",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+      undefined,
+      { urlByAbsentLocalPath: new Map([[join(baseDir, "takes", "take.mov"), url]]) },
+    );
+
+    expect(extractAudioMetadataMock).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(false);
+    expect(runFfmpegMock.mock.calls.some(([args]) => args.includes(url))).toBe(false);
   });
 
   it("preserves authored clip gain above unity for quiet-source boosting", async () => {
