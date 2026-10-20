@@ -1170,8 +1170,6 @@ export async function processCompositionAudio(
       }
       try {
         let srcPath = element.src;
-        // A project file held in cloud storage is read in place, as videos are: ffmpeg fetches
-        // only the trimmed range instead of downloading the whole file first.
         let readInPlace = false;
         if (!isHttpUrl(srcPath)) {
           // Same browser-URL path semantics as videos.
