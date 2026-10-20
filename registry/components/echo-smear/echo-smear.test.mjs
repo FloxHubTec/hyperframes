@@ -40,11 +40,28 @@ test("the edge raise never turns a smear on by itself", () => {
   assert.equal(count(10, 300, defaults), 0);
 });
 
-test("measurePoint offsets a box fraction by the element's rotation", () => {
-  const { measurePoint } = load();
-  const [x, y] = measurePoint([100, 100], [0, 0, 90, 1, 1, 1], [40, 20], [0, 0.5]);
-  assert.ok(Math.abs(x - 100) < 1e-9, `x ${x}`);
-  assert.ok(Math.abs(y - 80) < 1e-9, `y ${y}`);
+test("parseMatrix reads a 2D matrix, treats none as identity, and refuses matrix3d", () => {
+  const { parseMatrix } = load();
+  assert.deepEqual(Array.from(parseMatrix("matrix(1, 0, 0, 1, 10, 20)")), [1, 0, 0, 1, 10, 20]); // Array.from: the vm context has its own Array
+  assert.deepEqual(Array.from(parseMatrix("none")), [1, 0, 0, 1, 0, 0]);
+  assert.equal(parseMatrix("matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, 5,6,0,1)"), null);
+});
+
+test("boxPoint maps a box fraction through the matrix about the transform origin", () => {
+  const { boxPoint } = load();
+  // rotate(90deg) is matrix(0, 1, -1, 0, 0, 0). Box 40x20, origin at its centre, point (0, 0.5) = (0, 10).
+  const [x, y] = boxPoint([0, 1, -1, 0, 0, 0], [40, 20], [20, 10], 0, 0.5);
+  assert.ok(Math.abs(x - 20) < 1e-9, `x ${x}`);
+  assert.ok(Math.abs(y + 10) < 1e-9, `y ${y}`);
+  // The matrix's own translation is added after the turn.
+  const [tx, ty] = boxPoint([1, 0, 0, 1, 30, 5], [40, 20], [20, 10], 0.5, 0.5);
+  assert.ok(Math.abs(tx - 50) < 1e-9 && Math.abs(ty - 15) < 1e-9, `${tx},${ty}`);
+});
+
+test("boxPoint scales about the origin, so a scaled element's corner moves", () => {
+  const { boxPoint } = load();
+  const [x, y] = boxPoint([2, 0, 0, 2, 0, 0], [40, 20], [0, 0], 1, 1);
+  assert.ok(Math.abs(x - 80) < 1e-9 && Math.abs(y - 40) < 1e-9, `${x},${y}`);
 });
 
 test("lerpTrack interpolates opacity and clamps before the start", () => {
@@ -70,13 +87,6 @@ test("count needs travel strictly above half the threshold", () => {
   assert.equal(count(20, 0, exact), 0);
 });
 
-test("measurePoint scales the box fraction by the element's scale", () => {
-  const { measurePoint } = load();
-  const [x, y] = measurePoint([100, 100], [0, 0, 90, 2, 1, 1], [40, 20], [0, 0.5]);
-  assert.ok(Math.abs(x - 100) < 1e-9, `x ${x}`);
-  assert.ok(Math.abs(y - 60) < 1e-9, `y ${y}`);
-});
-
 test("lerpTrack clamps after the end of the record", () => {
   const { lerpTrack } = load();
   const track = [
@@ -86,47 +96,45 @@ test("lerpTrack clamps after the end of the record", () => {
   assert.equal(lerpTrack(track, 1, 5, [])[5], 1);
 });
 
-// A page: happy-dom for the tree, a fake gsap and timeline so the snippet's own logic (the recording
-// sweep, the copy poses, visibility, selection) runs without a browser. The fake timeline drives
-// `pose(t)` for each target on every seek, then fires the proxy tween's onUpdate, as the runtime does.
+// A page: happy-dom for the tree and a fake timeline, so the snippet's own logic (the recording sweep, the
+// copy poses, visibility, selection) runs without a browser. The fake timeline writes each driven element's
+// transform and opacity as inline style on every time change, as GSAP would, then fires the proxy tween's
+// onUpdate and any user callbacks unless events are suppressed.
+function matrixCss(p) {
+  if (p.css) return p.css;
+  const sx = p.scaleX ?? 1;
+  const sy = p.scaleY ?? 1;
+  const r = ((p.rotation ?? 0) * Math.PI) / 180;
+  return `matrix(${sx * Math.cos(r)}, ${sx * Math.sin(r)}, ${-sy * Math.sin(r)}, ${sy * Math.cos(r)}, ${p.x ?? 0}, ${p.y ?? 0})`;
+}
+
 function page(poseOf) {
   const win = new Window({ url: "http://localhost/" });
-  const props = new WeakMap();
-  const calls = { set: 0 };
   const warnings = [];
-  const read = (el) => {
-    if (!props.has(el))
-      props.set(el, { x: 0, y: 0, rotation: 0, scaleX: 1, scaleY: 1, opacity: 1 });
-    return props.get(el);
-  };
-  const gsap = {
-    getProperty: (el, p) => read(el)[p],
-    set: (el, vars) => {
-      calls.set++;
-      const { visibility, ...rest } = vars;
-      Object.assign(read(el), rest);
-      if (visibility !== undefined) el.style.visibility = visibility;
-    },
-  };
-  win.HTMLElement.prototype.getBoundingClientRect = function () {
-    if (this.hasAttribute("data-composition-id"))
-      return { left: 0, top: 0, width: 800, height: 450 };
-    const p = read(this);
-    return { left: p.x, top: p.y, width: 20, height: 20 };
-  };
+  const counts = { user: 0 };
   const updates = [];
   const tl = {
     t: 0,
-    time() {
-      return this.t;
+    userCallback: null,
+    time(v, suppress) {
+      if (v === undefined) return this.t;
+      this.t = v;
+      for (const [el, fn] of poseOf) {
+        const p = fn(v);
+        el.style.transform = matrixCss(p);
+        if (p.opacity !== undefined) el.style.opacity = String(p.opacity);
+      }
+      if (!suppress) {
+        updates.forEach((u) => u());
+        if (this.userCallback) this.userCallback();
+      }
+      return this;
+    },
+    seek(v, suppress) {
+      return this.time(v, suppress);
     },
     duration() {
       return 1;
-    },
-    seek(t) {
-      this.t = t;
-      for (const [el, fn] of poseOf) Object.assign(read(el), fn(t));
-      updates.forEach((u) => u());
     },
     to(_t, vars) {
       updates.push(vars.onUpdate);
@@ -136,28 +144,32 @@ function page(poseOf) {
   vm.runInNewContext(library, {
     window: win,
     document: win.document,
-    gsap,
     Element: win.Element,
     getComputedStyle: (e) => win.getComputedStyle(e),
     console: con,
   });
-  return { win, gsap, tl, read, calls, warnings, attach: win.attachEchoSmear };
+  return { win, tl, counts, warnings, attach: win.attachEchoSmear };
 }
 
-const MOVER =
-  '<div id="root" data-composition-id="c" data-fps="30"><div class="card" id="a" style="position:absolute" data-start="0" data-duration="1"></div></div>';
-
-test("copies use visibility inherit, so a hidden scene hides them too", () => {
+const ROOT = (inner) => `<div id="root" data-composition-id="c" data-fps="30">${inner}</div>`;
+const ABS = 'style="position:absolute;width:40px;height:20px"';
+function setup(html, drives) {
   const poseOf = new Map();
   const pg = page(poseOf);
-  pg.win.document.body.innerHTML = MOVER;
-  const a = pg.win.document.getElementById("a");
-  poseOf.set(a, (t) => ({ x: 600 * t }));
+  pg.win.document.body.innerHTML = html;
+  for (const [id, fn] of Object.entries(drives)) poseOf.set(pg.win.document.getElementById(id), fn);
+  return { pg, doc: pg.win.document };
+}
+const shownCopies = (doc) =>
+  [...doc.querySelectorAll(".es-clone")].filter((c) => c.style.visibility !== "hidden");
+const translateX = (c) => Number(/matrix\(([^)]+)\)/.exec(c.style.transform)[1].split(",")[4]);
+const RUN = { x: 600 }; // 600 px/s: a fast mover at 30 fps
+
+test("copies use visibility inherit, so a hidden scene hides them too", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
   pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
   pg.tl.seek(0.5);
-  const shown = [...pg.win.document.querySelectorAll(".es-clone")].filter(
-    (c) => c.style.visibility !== "hidden",
-  );
+  const shown = shownCopies(doc);
   assert.ok(shown.length > 0, "a fast mover has copies");
   assert.ok(
     shown.every((c) => c.style.visibility === "inherit"),
@@ -166,78 +178,68 @@ test("copies use visibility inherit, so a hidden scene hides them too", () => {
 });
 
 test("copy i shows the pose from i copy-intervals earlier", () => {
-  const poseOf = new Map();
-  const pg = page(poseOf);
-  pg.win.document.body.innerHTML = MOVER;
-  const a = pg.win.document.getElementById("a");
-  poseOf.set(a, (t) => ({ x: 600 * t }));
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
   pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
   pg.tl.seek(0.5);
-  const shown = [...pg.win.document.querySelectorAll(".es-clone")].filter(
-    (c) => c.style.visibility !== "hidden",
-  );
+  const shown = shownCopies(doc);
   // 600 px/s over a half frame (1/60 s) = 10 px, so n = 10 copies spaced fd/10 apart.
   assert.equal(shown.length, 10);
-  const xs = shown.map((c) => pg.read(c).x).sort((p, q) => q - p);
+  const xs = shown.map(translateX).sort((p, q) => q - p);
   assert.ok(Math.abs(xs[0] - 600 * (0.5 - 1 / 300)) < 0.5, `nearest copy ${xs[0]}`);
   assert.ok(Math.abs(xs[9] - 600 * (0.5 - 10 / 300)) < 0.5, `farthest copy ${xs[9]}`);
 });
 
 test("an element already attached is not attached again, and copies lose timing attributes", () => {
-  const poseOf = new Map();
-  const pg = page(poseOf);
-  pg.win.document.body.innerHTML = MOVER;
-  const a = pg.win.document.getElementById("a");
-  poseOf.set(a, (t) => ({ x: 600 * t }));
-  pg.attach(".card", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 20 });
-  pg.attach(".card", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 20 });
-  assert.equal(
-    pg.win.document.querySelectorAll(".card").length,
-    1 + 20,
-    "one original plus one set of 20 copies: the second call attaches nothing",
+  const { pg, doc } = setup(
+    ROOT(`<div class="card" id="a" ${ABS} data-start="0" data-duration="1"></div>`),
+    { a: (t) => ({ x: RUN.x * t }) },
   );
-  assert.equal(pg.win.document.querySelectorAll(".es-clone[data-start]").length, 0);
-  assert.equal(pg.win.document.querySelectorAll(".es-clone[data-duration]").length, 0);
+  pg.attach(".card", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 20 });
+  pg.attach(".card", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 20 });
+  // The peak count over the timeline is 10 (600 px/s, threshold 10), so 10 copies are built, not maxEchoes.
+  assert.equal(
+    doc.querySelectorAll(".es-clone").length,
+    10,
+    "one set of copies, sized to the peak",
+  );
+  assert.equal(
+    doc.querySelectorAll(".card").length,
+    1,
+    "copies do not keep the original's classes",
+  );
+  assert.equal(doc.querySelectorAll(".es-clone[data-start]").length, 0);
+  assert.equal(doc.querySelectorAll(".es-clone[data-duration]").length, 0);
 });
 
 test("a later attach does not redraw earlier copies while it records", () => {
-  const poseOf = new Map();
-  const pg = page(poseOf);
-  pg.win.document.body.innerHTML = MOVER.replace(
-    "</div></div>",
-    '</div><div class="other" id="b" style="position:absolute"></div></div>',
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div><div id="b" ${ABS}></div>`), {
+    a: (t) => ({ x: RUN.x * t }),
+  });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0, callbacks: true });
+  const groupA = doc.getElementById("a").previousElementSibling;
+  const watch = new pg.win.MutationObserver(() => {});
+  watch.observe(groupA, { attributes: true, subtree: true });
+  watch.takeRecords();
+  pg.attach("#b", pg.tl, { callbacks: true });
+  assert.ok(
+    watch.takeRecords().length <= 1,
+    "attach A's copies are redrawn once to restore the frame, not once per recording sample",
   );
-  poseOf.set(pg.win.document.getElementById("a"), (t) => ({ x: 600 * t }));
-  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
-  pg.calls.set = 0;
-  pg.attach("#b", pg.tl, {});
-  assert.ok(pg.calls.set <= 5, `later attach made ${pg.calls.set} writes`);
 });
 
-test("the group takes the target's z-index, so the wrapped target keeps its place in the stack", () => {
-  const poseOf = new Map();
-  const pg = page(poseOf);
-  pg.win.document.body.innerHTML =
-    '<div id="root" data-composition-id="c" data-fps="30"><div id="a" style="position:absolute;z-index:7"></div></div>';
-  poseOf.set(pg.win.document.getElementById("a"), (t) => ({ x: 600 * t }));
+test("the group takes the target's z-index, so the target keeps its place in the stack", () => {
+  const { pg, doc } = setup(
+    ROOT('<div id="a" style="position:absolute;z-index:7;width:40px;height:20px"></div>'),
+    { a: (t) => ({ x: RUN.x * t }) },
+  );
   pg.attach("#a", pg.tl, { threshold: 10 });
-  assert.equal(pg.win.document.querySelector("[data-hf-echo-group]").style.zIndex, "7");
+  assert.equal(doc.querySelector("[data-hf-echo-group]").style.zIndex, "7");
 });
-
-// Task 1 of the review-fix plan: the copy layer is a sibling group, like registry motion-blur.
-function fastMover(html) {
-  const poseOf = new Map();
-  const pg = page(poseOf);
-  pg.win.document.body.innerHTML = html;
-  return { pg, poseOf, doc: pg.win.document };
-}
-const ROOT = (inner) => `<div id="root" data-composition-id="c" data-fps="30">${inner}</div>`;
 
 test("the target is not re-parented or restyled", () => {
-  const { pg, poseOf, doc } = fastMover(ROOT('<div id="a" style="position:absolute"></div>'));
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
   const a = doc.getElementById("a");
   const parent = a.parentNode;
-  poseOf.set(a, (t) => ({ x: 600 * t }));
   pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
   assert.ok(a.parentNode === parent, "same parent"); // not assert.equal: a failing diff of DOM nodes never finishes
   assert.equal(a.style.mixBlendMode, "");
@@ -249,14 +251,16 @@ test("the target is not re-parented or restyled", () => {
 });
 
 test("a statically positioned target smears in place", () => {
-  const { pg, poseOf, doc } = fastMover(ROOT('<div id="a"></div><div id="after"></div>'));
+  const { pg, doc } = setup(
+    ROOT('<div id="a" style="width:40px;height:20px"></div><div id="after"></div>'),
+    {
+      a: (t) => ({ x: RUN.x * t }),
+    },
+  );
   const a = doc.getElementById("a");
-  poseOf.set(a, (t) => ({ x: 600 * t }));
   pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
   pg.tl.seek(0.5);
-  const shown = [...doc.querySelectorAll(".es-clone")].filter(
-    (c) => c.style.visibility !== "hidden",
-  );
+  const shown = shownCopies(doc);
   assert.ok(shown.length > 0, "copies show");
   assert.ok(
     shown.every((c) => c.style.position === "absolute"),
@@ -266,9 +270,8 @@ test("a statically positioned target smears in place", () => {
 });
 
 test("the group mirrors the target's own visibility", () => {
-  const { pg, poseOf, doc } = fastMover(ROOT('<div id="a" style="position:absolute"></div>'));
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
   const a = doc.getElementById("a");
-  poseOf.set(a, (t) => ({ x: 600 * t }));
   pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
   const group = a.previousElementSibling;
   pg.tl.seek(0.5);
@@ -279,13 +282,12 @@ test("the group mirrors the target's own visibility", () => {
 });
 
 test("copies of copies are never targets, and an element is attached once", () => {
-  const { pg, poseOf, doc } = fastMover(
+  const { pg, doc } = setup(
     ROOT(
       '<div class="word" id="w" style="position:absolute"><span class="char" id="c1"></span></div>',
     ),
+    { w: (t) => ({ x: RUN.x * t }), c1: (t) => ({ x: 400 * t }) },
   );
-  poseOf.set(doc.getElementById("w"), (t) => ({ x: 600 * t }));
-  poseOf.set(doc.getElementById("c1"), (t) => ({ x: 300 * t }));
   pg.attach(".word", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 5 });
   pg.attach(".word .char", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 5 });
   assert.equal(
@@ -302,16 +304,137 @@ test("copies of copies are never targets, and an element is attached once", () =
 });
 
 test("media inside a target is not cloned live", () => {
-  const { pg, poseOf, doc } = fastMover(
-    ROOT(
-      '<div id="a" style="position:absolute"><video poster="p.png"></video><audio></audio></div>',
-    ),
+  const { pg, doc } = setup(
+    ROOT(`<div id="a" ${ABS}><video poster="p.png"></video><audio></audio></div>`),
+    { a: (t) => ({ x: RUN.x * t }) },
   );
-  poseOf.set(doc.getElementById("a"), (t) => ({ x: 600 * t }));
   pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 4 });
   assert.equal(
     doc.querySelectorAll(".es-clone video, .es-clone audio, .es-clone iframe").length,
     0,
   );
   assert.equal(doc.querySelectorAll("#a video").length, 1, "the original keeps its video");
+});
+
+// Task 2 of the review-fix plan: poses come from the resolved transform, not from GSAP properties.
+test("a target outside any composition still smears", () => {
+  const { pg, doc } = setup(`<div id="a" ${ABS}></div>`, { a: (t) => ({ x: RUN.x * t }) });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  assert.ok(shownCopies(doc).length > 0);
+});
+
+test("an attach that throws mid-sweep leaves the other smears working", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div><div id="b" ${ABS}></div>`), {
+    a: (t) => ({ x: RUN.x * t }),
+  });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  const realTime = pg.tl.time.bind(pg.tl);
+  let calls = 0;
+  pg.tl.time = (v, quiet) => {
+    if (v !== undefined && ++calls === 5) throw new Error("boom");
+    return realTime(v, quiet);
+  };
+  assert.throws(() => pg.attach("#b", pg.tl, {}), /boom/);
+  pg.tl.time = realTime;
+  pg.tl.seek(0.5);
+  assert.ok(shownCopies(doc).length > 0, "attach A still renders");
+});
+
+test("the recording sweep fires no timeline callbacks unless asked", () => {
+  const quiet = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
+  let fired = 0;
+  quiet.pg.tl.userCallback = () => fired++;
+  quiet.pg.attach("#a", quiet.pg.tl, {});
+  assert.equal(fired, 0, "default: quiet");
+  const loud = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
+  let heard = 0;
+  loud.pg.tl.userCallback = () => heard++;
+  loud.pg.attach("#a", loud.pg.tl, { callbacks: true });
+  assert.ok(heard > 0, "callbacks: true lets motion written from onUpdate be recorded");
+});
+
+test("copies keep the target's whole transform, so a percent shift survives", () => {
+  // The drive writes translate(-50%, -50%) first, then a 600 px/s move, as xPercent -50 with x does.
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), {
+    a: (t) => ({ css: `matrix(1, 0, 0, 1, ${-20 + 600 * t}, -10)` }),
+  });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  const nearest = shownCopies(doc)
+    .map(translateX)
+    .sort((p, q) => q - p)[0];
+  assert.ok(Math.abs(nearest - (-20 + 600 * (0.5 - 1 / 300))) < 0.5, `nearest copy ${nearest}`);
+  const f = Number(/matrix\(([^)]+)\)/.exec(shownCopies(doc)[0].style.transform)[1].split(",")[5]);
+  assert.equal(f, -10, "the vertical shift is kept");
+});
+
+test("motion that comes only from an ancestor draws no copies", () => {
+  const { pg, doc } = setup(
+    ROOT(`<div id="p" style="position:absolute"><div id="a" ${ABS}></div></div>`),
+    { p: (t) => ({ x: RUN.x * t }) },
+  );
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  assert.equal(shownCopies(doc).length, 0);
+});
+
+test("a matrix3d target gets copies taken from the nearest recorded sample, never NaN", () => {
+  const css = (t) => `matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, ${600 * t},0,0,1)`;
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ css: css(t) }) });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  const shown = shownCopies(doc);
+  assert.ok(shown.length > 0, "a 3D mover has copies");
+  assert.ok(
+    shown.every((c) => /^matrix3d\(/.test(c.style.transform) && !/NaN/.test(c.style.transform)),
+  );
+});
+
+test("a transform-origin at the corner measures from the corner", () => {
+  const spin = (t) => ({ rotation: 720 * t });
+  const corner = setup(
+    ROOT(
+      '<div id="a" style="position:absolute;width:100px;height:100px;transform-origin:0px 0px"></div>',
+    ),
+    { a: spin },
+  );
+  corner.pg.attach("#a", corner.pg.tl, { threshold: 10, edgeSpacing: 0, measurePoint: [1, 1] });
+  corner.pg.tl.seek(0.5);
+  assert.ok(shownCopies(corner.doc).length > 0, "the far corner of a spinning box travels");
+  const origin = setup(
+    ROOT(
+      '<div id="a" style="position:absolute;width:100px;height:100px;transform-origin:0px 0px"></div>',
+    ),
+    { a: spin },
+  );
+  origin.pg.attach("#a", origin.pg.tl, { threshold: 10, edgeSpacing: 0, measurePoint: [0, 0] });
+  origin.pg.tl.seek(0.5);
+  assert.equal(shownCopies(origin.doc).length, 0, "the pivot itself does not move");
+});
+
+test("a target that never smears gets no group and no copies", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: 10 * t }) });
+  pg.attach("#a", pg.tl, { threshold: 40 });
+  assert.equal(doc.querySelectorAll("[data-hf-echo-group], .es-clone").length, 0);
+});
+
+test("copies are built to the peak count, capped by maxEchoes", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 4 });
+  assert.equal(doc.querySelectorAll(".es-clone").length, 4, "capped");
+  const more = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
+  more.pg.attach("#a", more.pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 60 });
+  assert.equal(more.doc.querySelectorAll(".es-clone").length, 10, "the peak, not 60");
+});
+
+// Task 3: the demo inlines the snippet, and nothing else keeps the two in step.
+test("demo.html carries the component's snippet verbatim", async () => {
+  const demo = await readFile(new URL("./demo.html", import.meta.url), "utf8");
+  // Whitespace and trailing commas: oxfmt formats the same code differently at another depth.
+  const squash = (text) => text.replace(/\s+/g, "").replace(/,(?=[\])}])/g, "");
+  assert.ok(
+    squash(demo).includes(squash(library)),
+    "the demo's inlined snippet differs from echo-smear.html",
+  );
 });
