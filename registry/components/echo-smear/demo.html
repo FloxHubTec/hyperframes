@@ -124,14 +124,24 @@
           ];
         }
 
+        // A computed length or percentage as CSS px: a percentage is a share of `reference` (the element's own
+        // box: its width for x, its height for y), a bare number or px is itself, anything else is 0.
+        function lengthPx(value, reference) {
+          var n = parseFloat(value);
+          if (!isFinite(n)) return 0;
+          return /%$/.test(value) ? (n * reference) / 100 : n;
+        }
+
         // The individual CSS properties `translate`, `rotate` and `scale` apply before `transform`, about the same
         // origin, as translate · rotate · scale. GSAP can drive them, and the browser leaves `transform` as
-        // `none` when it does. 2D only: a rotation about an axis, or a third component, is left out.
-        function individualMatrix(translate, rotate, scale) {
+        // `none` when it does. 2D only: a rotation about an axis, or a third component, is left out. `box` is
+        // [width, height] in CSS px, which a percentage translate is a share of.
+        function individualMatrix(translate, rotate, scale, box) {
+          box = box || [0, 0];
           var m = IDENTITY.slice();
           if (translate && translate !== "none") {
-            var t = translate.split(" ").map(parseFloat);
-            m = multiply(m, [1, 0, 0, 1, isFinite(t[0]) ? t[0] : 0, isFinite(t[1]) ? t[1] : 0]);
+            var t = translate.split(" ");
+            m = multiply(m, [1, 0, 0, 1, lengthPx(t[0], box[0]), lengthPx(t[1], box[1])]);
           }
           var r = rotate && /^(-?[\d.e+-]+)(deg|rad|turn|grad)$/.exec(rotate);
           if (r) {
@@ -140,7 +150,10 @@
             m = multiply(m, [Math.cos(q), Math.sin(q), -Math.sin(q), Math.cos(q), 0, 0]);
           }
           if (scale && scale !== "none") {
-            var k = scale.split(" ").map(parseFloat);
+            var k = scale.split(" ").map(function (part) {
+              var n = parseFloat(part);
+              return /%$/.test(part) ? n / 100 : n;
+            });
             var kx = isFinite(k[0]) ? k[0] : 1;
             m = multiply(m, [kx, 0, 0, isFinite(k[1]) ? k[1] : kx, 0, 0]);
           }
@@ -294,7 +307,7 @@
                 var resolved = matrixOf(cs.transform);
                 if (resolved.flat) {
                   resolved.m = multiply(
-                    individualMatrix(cs.translate, cs.rotate, cs.scale),
+                    individualMatrix(cs.translate, cs.rotate, cs.scale, boxes[ti]),
                     resolved.m,
                   );
                 }

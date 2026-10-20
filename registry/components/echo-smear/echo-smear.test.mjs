@@ -67,6 +67,19 @@ test("individualMatrix composes translate, rotate and scale in that order", () =
   assert.ok(
     Math.abs(a) < 1e-9 && Math.abs(b - 1) < 1e-9 && Math.abs(c + 1) < 1e-9 && Math.abs(d) < 1e-9,
   );
+  // Percentages resolve against the element's own box: x against its width, y against its height.
+  assert.deepEqual(
+    Array.from(individualMatrix("150% 50%", "none", "none", [200, 80])),
+    [1, 0, 0, 1, 300, 40],
+  );
+  assert.deepEqual(
+    Array.from(individualMatrix("50%", "none", "none", [200, 80])),
+    [1, 0, 0, 1, 100, 0],
+  );
+  assert.deepEqual(
+    Array.from(individualMatrix("none", "none", "150%", [200, 80])),
+    [1.5, 0, 0, 1.5, 0, 0],
+  );
   // translate applies outermost: a scaled element still moves its full translate.
   assert.deepEqual(Array.from(individualMatrix("10px 0px", "none", "2")), [2, 0, 0, 2, 10, 0]);
 });
@@ -721,4 +734,20 @@ test("overlapping inputs in one call attach an element once", () => {
   const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
   pg.attach(["#a", doc.getElementById("a"), "#a"], pg.tl, { threshold: 10, edgeSpacing: 0 });
   assert.equal(doc.querySelectorAll("[data-hf-echo-group]").length, 1);
+});
+
+test("a percentage translate moves by that share of the element's own width", () => {
+  // 0% -> 300% over one second on a 200 px wide box: 300% = 600 px, 150% = 300 px at 0.5 s.
+  const { pg, doc } = setup(
+    ROOT('<div id="a" style="position:absolute;width:200px;height:80px"></div>'),
+    { a: (t) => ({ css: "none", translate: `${300 * t}%` }) },
+  );
+  doc.getElementById("a").__off = { l: 0, t: 0, w: 200, h: 80 }; // the box a percentage is a share of
+  pg.attach("#a", pg.tl, { threshold: 2, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  const shown = shownCopies(doc);
+  assert.ok(shown.length > 0);
+  const nearest = shown.map(translateX).sort((p, q) => q - p)[0];
+  // The nearest copy is one copy-interval back from 300 px: about 298 px, not 140.
+  assert.ok(nearest > 280 && nearest < 300, `nearest copy ${nearest}`);
 });
