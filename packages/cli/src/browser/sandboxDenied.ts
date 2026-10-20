@@ -1,4 +1,4 @@
-import { ProtocolError, type LaunchOptions } from "puppeteer-core";
+import type { LaunchOptions } from "puppeteer-core";
 
 const MACH_SERVICE_DENIED = /bootstrap_check_in\b[^\n]*Permission denied/;
 const SINGLE_PROCESS = "--single-process";
@@ -9,7 +9,7 @@ export function machServiceDenied(errorMessage: string): boolean {
 }
 
 export function pipeLaunchClosedOnMac(error: unknown, platform = process.platform): boolean {
-  return platform === "darwin" && error instanceof ProtocolError;
+  return platform === "darwin" && error instanceof Error && error.name === "TargetCloseError";
 }
 
 /** Codex runs agent commands in a macOS seatbelt, which names itself in the environment. */

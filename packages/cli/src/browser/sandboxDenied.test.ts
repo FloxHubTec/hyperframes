@@ -5,6 +5,7 @@ import {
   type LaunchOptions,
   type PuppeteerNode,
 } from "puppeteer-core";
+import { TargetCloseError } from "puppeteer-core/internal/common/Errors.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { launchManagedBrowser } from "./launch.js";
 
@@ -85,7 +86,7 @@ describe("a browser inside an agent's macOS seatbelt", () => {
     vi.stubEnv("CODEX_SANDBOX", "");
     Object.defineProperty(process, "platform", { value: "darwin" });
     const { puppeteer, launches } = recordingPuppeteer([
-      new ProtocolError("Protocol error (Target.setDiscoverTargets): Target closed"),
+      new TargetCloseError("Protocol error (Target.setDiscoverTargets): Target closed"),
     ]);
     await expect(launchManagedBrowser(puppeteer, { args: ["--headless"] })).resolves.toBeDefined();
     expect(launches.map((options) => options.args)).toEqual([
@@ -94,10 +95,21 @@ describe("a browser inside an agent's macOS seatbelt", () => {
     ]);
   });
 
+  it("leaves any other protocol error failed on macOS", async () => {
+    vi.stubEnv("CODEX_SANDBOX", "");
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const other = new ProtocolError("Protocol error (Target.setDiscoverTargets): Not allowed");
+    const { puppeteer, launches } = recordingPuppeteer([other]);
+    await expect(launchManagedBrowser(puppeteer, { args: ["--headless"] })).rejects.toBe(other);
+    expect(launches).toHaveLength(1);
+  });
+
   it("leaves a closed pipe launch failed off macOS, where no seatbelt exists", async () => {
     vi.stubEnv("CODEX_SANDBOX", "");
     Object.defineProperty(process, "platform", { value: "linux" });
-    const closed = new ProtocolError("Protocol error (Target.setDiscoverTargets): Target closed");
+    const closed = new TargetCloseError(
+      "Protocol error (Target.setDiscoverTargets): Target closed",
+    );
     const { puppeteer, launches } = recordingPuppeteer([closed]);
     await expect(launchManagedBrowser(puppeteer, { args: ["--headless"] })).rejects.toBe(closed);
     expect(launches).toHaveLength(1);
