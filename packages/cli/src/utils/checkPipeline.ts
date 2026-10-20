@@ -715,16 +715,22 @@ function detectSweepStatic(
 }
 
 // The signature reads DOM channels, which miss paint such as SVG mask and clip contents, stroke dashes and
-// canvas or WebGL pixels. Before calling a sweep still, the rendered frames get the last word.
+// canvas or WebGL pixels. Before calling a sweep still, the rendered frames get the last word. A change counts
+// only if the first time still renders its first frame: wall-clock paint (an unregistered rAF loop) is no seek.
 async function framesMoved(driver: CheckAuditDriver, times: number[]): Promise<boolean> {
-  let first: string | undefined;
-  for (const time of times) {
-    await driver.seek(time, true);
-    const frame = await driver.captureFrame();
-    if (first === undefined) first = frame;
-    else if (await driver.framesDiffer(first, frame)) return true;
+  const [firstTime, ...rest] = times;
+  if (firstTime === undefined) return false;
+  const first = await frameAt(driver, firstTime);
+  for (const time of rest) {
+    if (!(await driver.framesDiffer(first, await frameAt(driver, time)))) continue;
+    return !(await driver.framesDiffer(first, await frameAt(driver, firstTime)));
   }
   return false;
+}
+
+async function frameAt(driver: CheckAuditDriver, time: number, scope?: string): Promise<string> {
+  await driver.seek(time, true);
+  return driver.captureFrame(scope);
 }
 
 // keepsMoving reads the same liveness channels, so a span it calls frozen gets the frames' word too: one capture
@@ -738,9 +744,18 @@ async function withFrameMotion(
   for (const assertion of assertions) {
     if (assertion.kind !== "keepsMoving") continue;
     const scope = assertion.withinSelector ?? "*";
+    // A scope that matched nothing stays motion_selector_missing.
+    if (frames.every((frame) => !frame.liveness[scope])) continue;
     const maxStaticSec = assertion.maxStaticSec ?? DEFAULT_MAX_STATIC_SEC;
     for (const span of frozenSpans(frames, scope, maxStaticSec)) {
-      const inSpan = marked.filter((frame) => frame.time >= span.start && frame.time <= span.end);
+      const held = frames.find((frame) => frame.time === span.start)?.liveness[scope];
+      // The frame that ends a span opens the next run, so only frames still holding the span's signature belong.
+      const inSpan = marked.filter(
+        (frame, index) =>
+          frame.time >= span.start &&
+          frame.time <= span.end &&
+          frames[index]?.liveness[scope] === held,
+      );
       await markFrameChanges(driver, inSpan, assertion.withinSelector, maxStaticSec / 2);
     }
   }
@@ -760,8 +775,7 @@ async function markFrameChanges(
   for (const frame of frames) {
     if (frame.time >= nextCapture) {
       nextCapture = frame.time + captureEverySec;
-      await driver.seek(frame.time, true);
-      const capture = await driver.captureFrame(within);
+      const capture = await frameAt(driver, frame.time, within);
       if (reference === undefined) reference = capture;
       else if (await driver.framesDiffer(reference, capture)) {
         reference = capture;

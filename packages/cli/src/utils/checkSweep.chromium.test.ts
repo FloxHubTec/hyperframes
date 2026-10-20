@@ -139,6 +139,34 @@ describe.skipIf(!RUNS_CHROMIUM)("frozen-sweep guard in Chromium", () => {
     expect((await findings(STILL_FILM)).sweep).toEqual(["Nothing on screen moved under seek."]);
   });
 
+  it("keeps a still title frozen under keepsMoving while the background behind it moves", async () => {
+    const html = film(
+      `<div id="bg" style="position: absolute; inset: 0; background: linear-gradient(90deg, #f40, #04f)"></div>
+       <h1 id="title" style="position: absolute; left: 120px; top: 120px; margin: 0; padding: 40px;
+         color: #fff; font: 600 48px sans-serif">Still</h1>`,
+      `document.getElementById("bg").style.backgroundPosition = (t * 100) + "px 0";`,
+    );
+    const result = await findings(html, [{ kind: "keepsMoving", withinSelector: "#title" }]);
+    expect(result.frozen).toEqual([expect.stringContaining("nothing moves within #title")]);
+  });
+
+  it("still warns on a canvas that animates by the wall clock, not by the seek", async () => {
+    const html = film(
+      `<canvas id="c" width="640" height="360"></canvas>
+       <script>
+         const loop = () => {
+           const ctx = document.getElementById("c").getContext("2d");
+           ctx.fillStyle = "#000"; ctx.fillRect(0, 0, 640, 360);
+           ctx.fillStyle = "#fff"; ctx.fillRect((performance.now() / 4) % 600, 160, 40, 40);
+           requestAnimationFrame(loop);
+         };
+         loop();
+       </script>`,
+      "",
+    );
+    expect((await findings(html)).sweep).toEqual(["Nothing on screen moved under seek."]);
+  });
+
   it("reads a still film's frames as unchanged across 10 seeks", async () => {
     const verdicts = await onPage(STILL_FILM, async (page) => {
       const driver = createPageDriver(page);

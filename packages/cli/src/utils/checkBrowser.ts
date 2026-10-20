@@ -1010,9 +1010,41 @@ async function collectOverlapGrid(page: Page, times: number[]): Promise<Anchored
 
 async function captureFrame(page: Page, scope?: string): Promise<string> {
   if (!scope) return page.screenshot({ encoding: "base64", type: "png" });
-  const box = await page.$(scope).then((element) => element?.boundingBox());
-  if (!box || box.width < 1 || box.height < 1) return "";
-  return page.screenshot({ encoding: "base64", type: "png", clip: box });
+  try {
+    const box = await page.evaluate(isolateScopePaint, scope);
+    if (!box || box.width < 1 || box.height < 1) return "";
+    return await page.screenshot({ encoding: "base64", type: "png", clip: box });
+  } finally {
+    await page.evaluate(restoreScopePaint);
+  }
+}
+
+// Liveness signs only the scope's subtree, so its frame must show only that paint: anything else behind or
+// over the box (a moving background, grain) would read as the scope moving. Hidden like the contrast pass's glyphs.
+function isolateScopePaint(
+  scope: string,
+): { x: number; y: number; width: number; height: number } | null {
+  let target: Element | null = null;
+  try {
+    target = document.querySelector(scope);
+  } catch {
+    return null;
+  }
+  if (!target) return null;
+  const visibility = getComputedStyle(target).visibility;
+  target.setAttribute("data-hf-capture-scope", "");
+  const style = document.createElement("style");
+  style.id = "__hf_capture_scope_style";
+  style.textContent = `:not([data-hf-capture-scope], [data-hf-capture-scope] *) { visibility: hidden !important; }
+    [data-hf-capture-scope] { visibility: ${visibility} !important; }`;
+  document.head.append(style);
+  const rect = target.getBoundingClientRect();
+  return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+}
+
+function restoreScopePaint(): void {
+  document.getElementById("__hf_capture_scope_style")?.remove();
+  document.querySelector("[data-hf-capture-scope]")?.removeAttribute("data-hf-capture-scope");
 }
 
 async function collectLayoutGeometry(page: Page): Promise<string> {

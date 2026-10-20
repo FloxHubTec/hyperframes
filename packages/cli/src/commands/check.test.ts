@@ -153,6 +153,17 @@ function contrastEntry(overrides: Partial<ContrastAuditEntry> = {}): ContrastAud
   };
 }
 
+// A rendered frame that is a function of the last seek, as a seek-driven film's is.
+function framesOfSeekedTime(): Pick<CheckAuditDriver, "seek" | "captureFrame"> {
+  let seeked = 0;
+  return {
+    seek: vi.fn(async (time: number) => {
+      seeked = time;
+    }),
+    captureFrame: vi.fn(async () => `frame@${seeked}`),
+  };
+}
+
 function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver {
   // A distinct string per call so the frozen-sweep guard (#U10) never fires
   // by accident in unrelated scenarios — tests that want it force a constant
@@ -1886,17 +1897,29 @@ describe("check pipeline", () => {
       ["an audio-only sweep", (sample: number) => `still\u001f${sample}`, false],
     ])("does not flag %s when the rendered frames differ", async (_case, geometry, stuck) => {
       let sample = 0;
-      let frame = 0;
       const driver = fakeDriver({
         getDuration: vi.fn(async () => 6),
         collectLayoutGeometry: vi.fn(async () => geometry(sample++)),
         ...(stuck ? {} : { collectSeekClock: vi.fn(async () => []) }),
-        captureFrame: vi.fn(async () => `frame${frame++}`),
+        ...framesOfSeekedTime(),
       });
       const { report } = await runScenario(driver);
 
       expect(report.layout.findings.some((finding) => finding.code === "sweep_static")).toBe(false);
       expect(report.ok).toBe(true);
+    });
+
+    it("still warns when the frames change with the wall clock rather than the seek", async () => {
+      let frame = 0;
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectLayoutGeometry: vi.fn(async () => "frozen"),
+        collectSeekClock: vi.fn(async () => []),
+        captureFrame: vi.fn(async () => `frame${frame++}`),
+      });
+      const { report } = await runScenario(driver);
+
+      expect(sweepOf(report)).toEqual([["warning", "Nothing on screen moved under seek."]]);
     });
 
     it("never captures frames when the signature already moved", async () => {
@@ -2016,17 +2039,70 @@ describe("check pipeline", () => {
       },
     );
 
-    it("keeps a frozen span whose frames change only once, mid-way", async () => {
+    async function frozenIssues(driver: CheckAuditDriver, motion: MotionSpecResolution) {
+      const result = await runAuditGrid(driver, DEFAULT_CHECK_OPTIONS, motion);
+      return result.motionIssues.map((issue) => `${issue.code} ${issue.message}`);
+    }
+
+    it("splits a frozen span where its frames change once, keeping both halves", async () => {
       const { motion, overrides } = frozenLiveness();
-      let capture = 0;
+      let seeked = 0;
       const driver = fakeDriver({
         ...overrides,
-        captureFrame: vi.fn(async () => (capture++ < 3 ? "before" : "after")),
+        seek: vi.fn(async (time: number) => {
+          seeked = time;
+        }),
+        captureFrame: vi.fn(async () => (seeked < 3 ? "before" : "after")),
       });
-      const { report } = await runScenario(driver, {}, { motion });
 
-      // Split at the change, where DOM liveness alone saw one 0-6 s span.
-      expect(frozenFindings(report)).toEqual([expect.stringContaining("between 0s and 3s")]);
+      expect(await frozenIssues(driver, motion)).toEqual([
+        expect.stringContaining("between 0s and 3s"),
+        expect.stringContaining("between 3s and 6s"),
+      ]);
+    });
+
+    it("keeps the second of two frozen spans that touch at a cut", async () => {
+      const motion: MotionSpecResolution = {
+        kind: "valid",
+        path: "/project/index.motion.json",
+        spec: { assertions: [{ kind: "keepsMoving" }] },
+      };
+      // A hold, a hard cut at 3 s into a second hold, then motion from 5.05 s.
+      const shot = (index: number) => (index < 60 ? "a" : index < 101 ? "b" : String(index));
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectMotionFrame: vi.fn(async (time: number) => ({
+          time,
+          data: {},
+          liveness: { "*": shot(Math.round(time * 20)) },
+        })),
+      });
+
+      expect(await frozenIssues(driver, motion)).toEqual([
+        expect.stringContaining("between 0s and 3s"),
+        expect.stringContaining("between 3s and 5.05s"),
+      ]);
+    });
+
+    it("leaves a scope that matched nothing as missing while another scope is frozen", async () => {
+      const motion: MotionSpecResolution = {
+        kind: "valid",
+        path: "/project/index.motion.json",
+        spec: {
+          assertions: [{ kind: "keepsMoving" }, { kind: "keepsMoving", withinSelector: "#typo" }],
+        },
+      };
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectMotionFrame: vi.fn(async (time: number) => ({
+          time,
+          data: {},
+          liveness: { "*": "unchanging", "#typo": "" },
+        })),
+      });
+
+      const codes = (await frozenIssues(driver, motion)).map((line) => line.split(" ")[0]);
+      expect(codes).toEqual(["motion_frozen", "motion_selector_missing"]);
     });
 
     it("never captures frames when the liveness already moved", async () => {
