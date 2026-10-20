@@ -1507,6 +1507,49 @@ describe("processCompositionAudio", () => {
     expect(runFfmpegMock.mock.calls[0]?.[0]).toContain(join(baseDir, ".media", "tone.wav"));
   });
 
+  it("cuts a cloud-held project file's audio from its URL without downloading the file", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    const fetchMock = vi.fn().mockRejectedValue(new Error("downloaded"));
+    vi.stubGlobal("fetch", fetchMock);
+    const url = "https://bucket.s3.amazonaws.com/cas/take.mov?X-Amz-Signature=s";
+
+    const result = await processCompositionAudio(
+      [
+        {
+          id: "take-audio",
+          src: "takes/take.mov",
+          start: 0,
+          end: 2,
+          mediaStart: 600,
+          layer: 0,
+          volume: 1,
+          type: "video",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+      undefined,
+      { urlByAbsentLocalPath: new Map([[join(baseDir, "takes", "take.mov"), url]]) },
+    );
+
+    expect(result.success).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const extractArgs = runFfmpegMock.mock.calls[0]?.[0] ?? [];
+    expect(extractArgs).toContain("-tls_verify");
+    expect(extractArgs.slice(extractArgs.indexOf("-ss"), extractArgs.indexOf(url) + 1)).toEqual([
+      "-ss",
+      "600",
+      "-t",
+      "2",
+      "-i",
+      url,
+    ]);
+  });
+
   it("preserves authored clip gain above unity for quiet-source boosting", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
     const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));

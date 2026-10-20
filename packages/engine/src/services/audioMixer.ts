@@ -5,6 +5,7 @@ import { join, dirname, isAbsolute, relative } from "path";
 import { parseHTML } from "linkedom";
 import { extractAudioMetadata, type AudioMetadata } from "../utils/ffprobe.js";
 import { isNotMediaPayload } from "../utils/notMediaPayload.js";
+import { urlInputArgs } from "../utils/urlInput.js";
 import { clampAudioGain } from "@hyperframes/core/audio-gain";
 import { clampFadesToDuration, readElementFades } from "@hyperframes/core/audio-fade";
 import {
@@ -670,9 +671,12 @@ async function extractAudioSegment(
     timestampTrim,
   );
 
-  const args = inputSeek
-    ? ["-ss", String(mediaStart), "-t", String(sourceDuration), "-i", srcPath]
-    : ["-i", srcPath];
+  const args = [
+    ...urlInputArgs(srcPath),
+    ...(inputSeek ? ["-ss", String(mediaStart), "-t", String(sourceDuration)] : []),
+    "-i",
+    srcPath,
+  ];
   args.push("-vn", "-acodec", "pcm_s16le", "-ar", "48000", ...outputArgs);
   if (normalizedPlaybackRate !== 1) args.push("-t", String(duration));
   args.push("-y", outputPath);
@@ -1166,13 +1170,20 @@ export async function processCompositionAudio(
       }
       try {
         let srcPath = element.src;
+        // A project file held in cloud storage is read in place, as videos are: ffmpeg fetches
+        // only the trimmed range instead of downloading the whole file first.
+        let readInPlace = false;
         if (!isHttpUrl(srcPath)) {
           // Same browser-URL path semantics as videos.
           srcPath = resolveProjectRelativeSrc(element.src, baseDir, compiledDir);
-          srcPath = config?.urlByAbsentLocalPath?.get(srcPath) ?? srcPath;
+          const remoteUrl = config?.urlByAbsentLocalPath?.get(srcPath);
+          if (remoteUrl) {
+            srcPath = remoteUrl;
+            readInPlace = true;
+          }
         }
 
-        if (isHttpUrl(srcPath)) {
+        if (isHttpUrl(srcPath) && !readInPlace) {
           try {
             srcPath = await downloadToTemp(
               srcPath,
@@ -1190,7 +1201,7 @@ export async function processCompositionAudio(
           }
         }
 
-        if (!existsSync(srcPath)) {
+        if (!readInPlace && !existsSync(srcPath)) {
           failures.push({
             stage: "source",
             reason: "source_not_found",
@@ -1208,7 +1219,7 @@ export async function processCompositionAudio(
         // authored duration or `loop`. It then fails inside ffmpeg as
         // `prepare/ffmpeg_failed` with owner "system" — an authoring bug paged
         // as a platform fault, after every frame has already been captured.
-        if (await isNotMediaPayload(srcPath)) {
+        if (!readInPlace && (await isNotMediaPayload(srcPath))) {
           failures.push({
             stage: "source",
             reason: "invalid_media",
