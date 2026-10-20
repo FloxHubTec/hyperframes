@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>control: the box a player takes from its embed</title>
+    <style>
+      body {
+        margin: 0;
+      }
+      .wrap {
+        width: 800px;
+      }
+      .wrap hyperframes-player {
+        margin-bottom: 4px;
+      }
+      .column {
+        display: flex;
+        flex-direction: column;
+        width: 800px;
+        height: 600px;
+      }
+      .ratio {
+        aspect-ratio: 16 / 9;
+        height: 300px;
+        background: #333;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <hyperframes-player id="plain" src="../gsap-heavy/index.html"></hyperframes-player>
+      <hyperframes-player
+        id="heightOnly"
+        style="height: 300px"
+        src="../gsap-heavy/index.html"
+      ></hyperframes-player>
+      <hyperframes-player
+        id="widthOnly"
+        style="width: 400px"
+        src="../gsap-heavy/index.html"
+      ></hyperframes-player>
+      <hyperframes-player
+        id="both"
+        style="width: 200px; height: 100px"
+        src="../gsap-heavy/index.html"
+      ></hyperframes-player>
+      <!-- How the browser sizes a plain block given aspect-ratio and only a height. -->
+      <div id="ratioHeightOnly" class="ratio"></div>
+    </div>
+    <div class="column">
+      <hyperframes-player
+        id="flexFill"
+        style="flex: 1"
+        src="../gsap-heavy/index.html"
+      ></hyperframes-player>
+    </div>
+    <script src="/player/hyperframes-player.global.js"></script>
+    <script>
+      // Each player's box once every film is ready, against the box its embed asks for.
+      (async function () {
+        var EXPECTED = {
+          plain: [800, 450],
+          heightOnly: [800, 300],
+          widthOnly: [400, 225],
+          both: [200, 100],
+          flexFill: [800, 600],
+        };
+        var players = Object.keys(EXPECTED).map((id) => document.getElementById(id));
+        await Promise.all(
+          players.map(
+            (p) =>
+              new Promise((resolve) => {
+                p.addEventListener("ready", resolve, { once: true });
+                setTimeout(resolve, 15000);
+              }),
+          ),
+        );
+        var cases = players.map((p) => {
+          var w = Math.round(p.getBoundingClientRect().width);
+          var h = Math.round(p.getBoundingClientRect().height);
+          var want = EXPECTED[p.id];
+          return {
+            name: p.id,
+            width: w,
+            height: h,
+            ok: Math.abs(w - want[0]) <= 1 && Math.abs(h - want[1]) <= 1,
+          };
+        });
+        window.__box = {
+          cases: cases,
+          ratioHeightOnlyWidth: Math.round(
+            document.getElementById("ratioHeightOnly").getBoundingClientRect().width,
+          ),
+        };
+      })();
+    </script>
+  </body>
+</html>

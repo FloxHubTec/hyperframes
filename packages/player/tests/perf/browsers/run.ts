@@ -217,31 +217,30 @@ const CONTROLS = [
   { name: "alpha-webm", media: "alpha-vp9", n: 6, rate: 1 },
 ];
 
-async function runControl(
+// Opens a page and returns the value it publishes on window[global] once it has one.
+async function readPage<T>(
   base: string,
   browser: Browser,
-  origin: string,
-  c: (typeof CONTROLS)[number],
-) {
+  url: string,
+  global: string,
+): Promise<T> {
   const session = await wd(base, "POST", "/session", {
     capabilities: { alwaysMatch: DRIVERS[browser].caps },
   });
   const s = `/session/${session.sessionId}`;
   try {
-    await wd(base, "POST", `${s}/url`, {
-      url: `${origin}/fixtures/_control/index.html?media=${c.media}&n=${c.n}&rate=${c.rate}${c.extra ?? ""}`,
-    });
+    await wd(base, "POST", `${s}/url`, { url });
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       const r = await wd(base, "POST", `${s}/execute/sync`, {
-        script: "return window.__control",
+        script: `return window.${global}`,
         args: [],
       });
       if (r?.error) throw new Error(r.error);
-      if (r) return r as { dropped: number; total: number; presentedFps: number };
+      if (r) return r as T;
       await Bun.sleep(500);
     }
-    throw new Error("control did not finish within 60 s");
+    throw new Error(`${url} did not publish ${global} within 60 s`);
   } finally {
     await wd(base, "DELETE", s).catch(() => {});
   }
@@ -301,6 +300,29 @@ try {
     const port = 4444 + browsers.indexOf(browser);
     const driver = await startDriver(browser, port);
     try {
+      try {
+        const box = await readPage<{
+          cases: Array<{ name: string; width: number; height: number; ok: boolean }>;
+          ratioHeightOnlyWidth: number;
+        }>(
+          `http://127.0.0.1:${port}`,
+          browser,
+          `${server.origin}/fixtures/_control/player-box.html`,
+          "__box",
+        );
+        const wrong = box.cases.filter((c) => !c.ok);
+        console.log(
+          `[browsers] ${browser} aspect-ratio block with only a height: ${box.ratioHeightOnlyWidth}px wide`,
+        );
+        for (const c of box.cases)
+          console.log(`[browsers] ${browser} player box ${c.name}: ${c.width}x${c.height}`);
+        if (wrong.length) throw new Error(`${wrong.length} embeds got the wrong box`);
+        rows.push({ browser, fixture: "player-box", run: 1 });
+      } catch (e) {
+        failed = true;
+        rows.push({ browser, fixture: "player-box", run: 1, error: "failed, see the job log" });
+        console.error(`[browsers] ${browser} player box failed: ${e}`);
+      }
       for (const fixture of fixtures) {
         for (let run = 1; run <= runs; run++) {
           try {
@@ -332,7 +354,12 @@ try {
       }
       for (const c of CONTROLS) {
         try {
-          const r = await runControl(`http://127.0.0.1:${port}`, browser, server.origin, c);
+          const r = await readPage<{ dropped: number; total: number; presentedFps: number }>(
+            `http://127.0.0.1:${port}`,
+            browser,
+            `${server.origin}/fixtures/_control/index.html?media=${c.media}&n=${c.n}&rate=${c.rate}${c.extra ?? ""}`,
+            "__control",
+          );
           rows.push({
             browser,
             fixture: `control:${c.name}`,

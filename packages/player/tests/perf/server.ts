@@ -89,7 +89,7 @@ function buildHostHtml(fixtureName: string, width: number, height: number): stri
     <title>player perf host: ${fixtureName}</title>
     <style>
       html, body { margin: 0; padding: 0; background: #000; }
-      hyperframes-player { display: block; width: ${width}px; height: ${height}px; }
+      hyperframes-player { width: ${width}px; }
     </style>
   </head>
   <body>
@@ -113,7 +113,7 @@ function buildHostHtml(fixtureName: string, width: number, height: number): stri
       });
       const player = document.getElementById("player");
       player.addEventListener("ready", function (event) {
-        // width/height only set the composition size; an unsized player is 0px tall and shows nothing.
+        // A player with an empty box shows nothing, and Safari counts frames it never shows as dropped.
         if (!player.offsetWidth || !player.offsetHeight) {
           window.__playerError = "player box is empty, so the composition is not on screen";
         }
