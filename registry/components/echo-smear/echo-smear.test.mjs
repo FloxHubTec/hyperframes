@@ -59,6 +59,18 @@ test("boxPoint maps a box fraction through the matrix about the transform origin
   assert.ok(Math.abs(tx - 50) < 1e-9 && Math.abs(ty - 15) < 1e-9, `${tx},${ty}`);
 });
 
+test("individualMatrix composes translate, rotate and scale in that order", () => {
+  const { individualMatrix } = load();
+  assert.deepEqual(Array.from(individualMatrix("600px 0px", "none", "none")), [1, 0, 0, 1, 600, 0]);
+  assert.deepEqual(Array.from(individualMatrix("none", "none", "2")), [2, 0, 0, 2, 0, 0]);
+  const [a, b, c, d] = individualMatrix("none", "90deg", "none");
+  assert.ok(
+    Math.abs(a) < 1e-9 && Math.abs(b - 1) < 1e-9 && Math.abs(c + 1) < 1e-9 && Math.abs(d) < 1e-9,
+  );
+  // translate applies outermost: a scaled element still moves its full translate.
+  assert.deepEqual(Array.from(individualMatrix("10px 0px", "none", "2")), [2, 0, 0, 2, 10, 0]);
+});
+
 test("boxPoint scales about the origin, so a scaled element's corner moves", () => {
   const { boxPoint } = load();
   const [x, y] = boxPoint([2, 0, 0, 2, 0, 0], [40, 20], [0, 0], 1, 1);
@@ -109,6 +121,16 @@ function matrixCss(p) {
   return `matrix(${sx * Math.cos(r)}, ${sx * Math.sin(r)}, ${-sy * Math.sin(r)}, ${sy * Math.cos(r)}, ${p.x ?? 0}, ${p.y ?? 0})`;
 }
 
+// happy-dom does not implement the individual `translate` property: serve what the drive set.
+const withTranslate = (cs, el) =>
+  new Proxy(cs, {
+    get(target, key) {
+      if (key === "translate") return el.__translate ?? "none";
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
 function page(poseOf) {
   const win = new Window({ url: "http://localhost/" });
   const warnings = [];
@@ -119,17 +141,32 @@ function page(poseOf) {
     userCallback: null,
     time(v, suppress) {
       if (v === undefined) return this.t;
+      // GSAP renders its children in reverse order on a backward seek, and the snippet's own update tween
+      // was added last: it runs BEFORE the target has rendered the destination time. Simulated here, so a
+      // callback that reads the target's live state sees what it was at the time we came from.
+      const backward = v < this.t;
       this.t = v;
-      for (const [el, fn] of poseOf) {
-        const p = fn(v);
-        el.style.transform = matrixCss(p);
-        if (p.opacity !== undefined) el.style.opacity = String(p.opacity);
-        if (p.filter !== undefined) el.style.filter = p.filter;
-        if (p.off) el.__off = p.off;
-      }
-      if (!suppress) {
+      const drive = () => {
+        for (const [el, fn] of poseOf) {
+          const p = fn(v);
+          el.style.transform = matrixCss(p);
+          if (p.opacity !== undefined) el.style.opacity = String(p.opacity);
+          if (p.filter !== undefined) el.style.filter = p.filter;
+          if (p.visibility !== undefined) el.style.visibility = p.visibility;
+          if (p.translate !== undefined) el.__translate = p.translate; // happy-dom has no `translate` property
+          if (p.off) el.__off = p.off;
+        }
+      };
+      const fire = () => {
         updates.forEach((u) => u());
         if (this.userCallback) this.userCallback();
+      };
+      if (backward && !suppress) {
+        fire();
+        drive();
+      } else {
+        drive();
+        if (!suppress) fire();
       }
       return this;
     },
@@ -148,7 +185,7 @@ function page(poseOf) {
     window: win,
     document: win.document,
     Element: win.Element,
-    getComputedStyle: (e) => win.getComputedStyle(e),
+    getComputedStyle: (e) => withTranslate(win.getComputedStyle(e), e),
     // The snippet must not observe resizes: a callback's first run depends on the first frame drawn.
     ResizeObserver: class {
       constructor() {
@@ -292,14 +329,15 @@ test("a statically positioned target smears in place", () => {
   assert.ok(doc.getElementById("after").previousElementSibling === a, "the layout is untouched");
 });
 
-test("the group mirrors the target's own visibility", () => {
-  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
+test("the group mirrors the target's own visibility, as the timeline wrote it", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), {
+    a: (t) => ({ x: RUN.x * t, visibility: t >= 0.4 ? "hidden" : "" }),
+  });
   const a = doc.getElementById("a");
   pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
   const group = a.previousElementSibling;
-  pg.tl.seek(0.5);
+  pg.tl.seek(0.2);
   assert.equal(group.style.visibility, "", "visible target: the group follows its parent");
-  a.style.visibility = "hidden";
   pg.tl.seek(0.5);
   assert.equal(group.style.visibility, "hidden");
 });
@@ -621,4 +659,66 @@ test("attaching leaves real GSAP callbacks unfired, and a removal callback canno
   assert.deepEqual({ ...fired }, { call: 0, complete: 0, reverse: 0 });
   assert.ok(a.parentNode, "the target is still in the document");
   assert.equal(tl.time(), 0, "the playhead is back where it was");
+});
+
+// Round 3: findings from the re-review at 161796db4.
+test("the group's visibility does not depend on the path taken to a time", () => {
+  // autoAlpha 0 arrives at t = 1: visible at 0.5 however it is reached.
+  const drive = (t) => ({ x: RUN.x * t, visibility: t >= 1 ? "hidden" : "" });
+  const cold = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: drive });
+  cold.pg.attach("#a", cold.pg.tl, { threshold: 10, edgeSpacing: 0 });
+  cold.pg.tl.seek(0.5);
+  const viaEnd = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: drive });
+  viaEnd.pg.attach("#a", viaEnd.pg.tl, { threshold: 10, edgeSpacing: 0 });
+  viaEnd.pg.tl.seek(1);
+  viaEnd.pg.tl.seek(0.5);
+  assert.ok(shownCopies(cold.doc).length > 0, "cold: copies show");
+  assert.equal(
+    shownCopies(viaEnd.doc).length,
+    shownCopies(cold.doc).length,
+    "after 1 -> 0.5: the same copies",
+  );
+  assert.equal(
+    viaEnd.doc.getElementById("a").previousElementSibling.style.visibility,
+    cold.doc.getElementById("a").previousElementSibling.style.visibility,
+  );
+});
+
+test("the copies' box does not depend on the path taken to a time", () => {
+  const drive = (t) => ({
+    x: RUN.x * t,
+    off: t >= 0.7 ? { l: 200, t: 30, w: 40, h: 20 } : { l: 350, t: 150, w: 40, h: 20 },
+  });
+  const cold = setup(ROOT('<div id="a" style="width:40px;height:20px"></div>'), { a: drive });
+  cold.pg.attach("#a", cold.pg.tl, { threshold: 10, edgeSpacing: 0 });
+  cold.pg.tl.seek(0.5);
+  const viaEnd = setup(ROOT('<div id="a" style="width:40px;height:20px"></div>'), { a: drive });
+  viaEnd.pg.attach("#a", viaEnd.pg.tl, { threshold: 10, edgeSpacing: 0 });
+  viaEnd.pg.tl.seek(1);
+  viaEnd.pg.tl.seek(0.5);
+  const lefts = (doc) => shownCopies(doc).map((c) => c.style.left);
+  assert.ok(lefts(cold.doc).length > 0 && lefts(cold.doc).every((l) => l === "350px"));
+  assert.deepEqual(lefts(viaEnd.doc), lefts(cold.doc));
+});
+
+test("motion written only through the CSS translate property counts, and copies carry it in transform", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), {
+    a: (t) => ({ css: "none", translate: `${RUN.x * t}px 0px` }),
+  });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  const shown = shownCopies(doc);
+  assert.ok(shown.length > 0, "a translate-only mover has copies");
+  const nearest = shown.map(translateX).sort((p, q) => q - p)[0];
+  assert.ok(Math.abs(nearest - 600 * (0.5 - 1 / 300)) < 0.5, `nearest copy ${nearest}`);
+  assert.ok(
+    shown.every((c) => c.style.translate === "none"),
+    "the copy's own translate is cleared so it is not applied twice",
+  );
+});
+
+test("overlapping inputs in one call attach an element once", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
+  pg.attach(["#a", doc.getElementById("a"), "#a"], pg.tl, { threshold: 10, edgeSpacing: 0 });
+  assert.equal(doc.querySelectorAll("[data-hf-echo-group]").length, 1);
 });

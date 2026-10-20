@@ -13,9 +13,11 @@
             <svg> is skipped with a console warning: attach to the <svg> itself.
             Copies carry the element's resolved style (one shared class rule per element), so id-based CSS
             reaches them, but they drop the original's classes and its pseudo-elements. A copy shows the
-            target's transform, opacity, filter, clip-path, rotate, scale, translate and transform-origin as
-            they were at its time; every other style, and anything on a child, is frozen at attach. Media
-            inside (video, audio, iframe) is replaced by an empty box of the same size.
+            target's transform (with the individual translate, rotate and scale properties folded in),
+            opacity, filter, clip-path and transform-origin as they were at its time; every other style, and
+            anything on a child, is frozen at attach. The group's visibility and the box the copies sit on are
+            also recorded from the timeline, not read live, so a frame never depends on the path taken to it.
+            Media inside (video, audio, iframe) is replaced by an empty box of the same size.
   options   length        % of the last frame's travel the streak spans (default 100)
             threshold     px of travel per frame before any smear shows (default 40)
             countMult     multiplies the number of copies (default 1); raise it if you see stepping
@@ -119,6 +121,40 @@
       return { m: [v[0], v[1], v[4], v[5], v[12], v[13]], flat: false };
     }
 
+    function multiply(a, b) {
+      return [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4],
+        a[1] * b[4] + a[3] * b[5] + a[5],
+      ];
+    }
+
+    // The individual CSS properties `translate`, `rotate` and `scale` apply before `transform`, about the same
+    // origin, as translate · rotate · scale. GSAP can drive them, and the browser leaves `transform` as
+    // `none` when it does. 2D only: a rotation about an axis, or a third component, is left out.
+    function individualMatrix(translate, rotate, scale) {
+      var m = IDENTITY.slice();
+      if (translate && translate !== "none") {
+        var t = translate.split(" ").map(parseFloat);
+        m = multiply(m, [1, 0, 0, 1, isFinite(t[0]) ? t[0] : 0, isFinite(t[1]) ? t[1] : 0]);
+      }
+      var r = rotate && /^(-?[\d.e+-]+)(deg|rad|turn|grad)$/.exec(rotate);
+      if (r) {
+        var unit = { deg: Math.PI / 180, rad: 1, turn: 2 * Math.PI, grad: Math.PI / 200 }[r[2]];
+        var q = parseFloat(r[1]) * unit;
+        m = multiply(m, [Math.cos(q), Math.sin(q), -Math.sin(q), Math.cos(q), 0, 0]);
+      }
+      if (scale && scale !== "none") {
+        var k = scale.split(" ").map(parseFloat);
+        var kx = isFinite(k[0]) ? k[0] : 1;
+        m = multiply(m, [kx, 0, 0, isFinite(k[1]) ? k[1] : kx, 0, 0]);
+      }
+      return m;
+    }
+
     // A point of the element's box, given as fractions of it, after its transform: the transform turns and
     // scales about `origin` (CSS px from the box's top-left), then translates. AE measures a layer's origin,
     // so a spinning layer registers travel; a box fraction lets a spin or squash count as motion.
@@ -166,6 +202,7 @@
       count: count,
       lerpTrack: lerpTrack,
       parseMatrix: parseMatrix,
+      individualMatrix: individualMatrix,
       boxPoint: boxPoint,
     };
 
@@ -184,8 +221,12 @@
       // One group per element, and never one around a copy: a selector that also matches an earlier call's
       // copies (they keep the target's classes) must not turn them into targets.
       if (!window._hfEsAttached) window._hfEsAttached = new WeakSet();
-      targets = targets.filter(function (el) {
-        return !window._hfEsAttached.has(el) && !el.closest("[data-hf-echo-group]");
+      targets = targets.filter(function (el, i) {
+        return (
+          targets.indexOf(el) === i && // named twice in this call
+          !window._hfEsAttached.has(el) &&
+          !el.closest("[data-hf-echo-group]")
+        );
       });
       // The copies' group is an HTML element: inside an <svg> it would render nothing.
       targets = targets.filter(function (el) {
@@ -232,9 +273,21 @@
       });
       // What else the timeline can write that a copy must show as it was: not interpolated, so each copy
       // takes the nearest sample.
-      var LOOKS = ["filter", "clipPath", "rotate", "scale", "translate", "transformOrigin"];
+      var LOOKS = ["filter", "clipPath", "transformOrigin"];
       var looks = targets.map(function () {
         return [];
+      });
+      // Everything a copy needs besides its pose is recorded in the sweep too, so a frame never depends
+      // on reading the target while it may not have rendered that time yet (a backward seek renders the
+      // snippet's own update tween before the target's): the group's visibility and the target's box.
+      var showing = targets.map(function () {
+        return [];
+      });
+      var boxAt = targets.map(function () {
+        return [];
+      });
+      var hosts = targets.map(function (el) {
+        return el.parentElement || (el.getRootNode && el.getRootNode().host) || null;
       });
       var api = window.__echoSmear;
       api.baking = (api.baking || 0) + 1; // other attached smears skip their update while this one records
@@ -244,6 +297,12 @@
           for (var ti = 0; ti < targets.length; ti++) {
             var cs = getComputedStyle(targets[ti]);
             var resolved = matrixOf(cs.transform);
+            if (resolved.flat) {
+              resolved.m = multiply(
+                individualMatrix(cs.translate, cs.rotate, cs.scale),
+                resolved.m,
+              );
+            }
             var opacity = parseFloat(cs.opacity);
             poses[ti].push(resolved.m.concat([isFinite(opacity) ? opacity : 1]));
             matrix3d[ti].push(resolved.flat ? null : cs.transform);
@@ -253,6 +312,22 @@
               }),
             );
             centres[ti].push(boxPoint(resolved.m, boxes[ti], origins[ti], mp[0], mp[1]));
+            // Set only where the target differs from its parent: an explicit value would outlive an
+            // ancestor that hides later, like a clip that has ended.
+            var parentSees = hosts[ti] ? getComputedStyle(hosts[ti]).visibility : "visible";
+            showing[ti].push(cs.visibility === parentSees ? "" : cs.visibility);
+            // An <svg> root has no offset box: its copies keep the left/top/size they were cloned with.
+            var el0 = targets[ti];
+            boxAt[ti].push(
+              el0.offsetLeft === undefined
+                ? null
+                : [
+                    el0.offsetLeft + "px",
+                    el0.offsetTop + "px",
+                    el0.offsetWidth + "px",
+                    el0.offsetHeight + "px",
+                  ],
+            );
           }
         }
       } finally {
@@ -363,6 +438,8 @@
           centres: centres[ti],
           matrix3d: matrix3d[ti],
           looks: looks[ti],
+          showing: showing[ti],
+          boxAt: boxAt[ti],
           box: boxes[ti],
           origin: origins[ti],
         };
@@ -432,6 +509,10 @@
           c.style.margin = "0";
           // The copy is sized to the target's offset box, which includes padding and border.
           c.style.boxSizing = "border-box";
+          // translate, rotate and scale are folded into the copy's transform: left on, they would apply twice.
+          c.style.translate = "none";
+          c.style.rotate = "none";
+          c.style.scale = "none";
           c.style.mixBlendMode = maximum ? "lighten" : "normal";
           c.style.visibility = "hidden";
           clones.push(c);
@@ -449,30 +530,14 @@
       function render() {
         if (window.__echoSmear.baking) return;
         var t = tl.time();
-        // Read everything first, then write: one layout for the frame instead of one per target.
-        var views = state.map(function (st) {
-          return {
-            current: getComputedStyle(st.el).visibility,
-            shared: st.host ? getComputedStyle(st.host).visibility : "visible",
-            // An <svg> root has no offset box: its copies keep the left/top/size they were cloned with.
-            box:
-              st.el.offsetLeft === undefined
-                ? null
-                : [
-                    st.el.offsetLeft + "px",
-                    st.el.offsetTop + "px",
-                    st.el.offsetWidth + "px",
-                    st.el.offsetHeight + "px",
-                  ],
-          };
-        });
-        state.forEach(function (st, si) {
-          var view = views[si];
+        state.forEach(function (st) {
           var n = countAt(st, t);
-          // The group follows the target's own visibility, set only where it differs from its parent's:
-          // an explicit value would outlive an ancestor that hides later, like a clip that has ended.
-          var want = view.current === view.shared ? "" : view.current;
-          if (st.group.style.visibility !== want) st.group.style.visibility = want;
+          // The target's visibility and box at this time, from the recording.
+          var now = Math.max(0, Math.min(st.poses.length - 1, Math.round(t / step)));
+          var view = { box: st.boxAt[now] };
+          // The group follows the target's own visibility.
+          if (st.group.style.visibility !== st.showing[now])
+            st.group.style.visibility = st.showing[now];
           var boxKey = view.box ? view.box.join() : "";
           for (var i = 0; i < st.clones.length; i++) {
             var c = st.clones[i];
