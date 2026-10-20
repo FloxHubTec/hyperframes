@@ -215,8 +215,8 @@ export interface CheckAuditDriver {
   /** Frozen-sweep guard (#U10): an opaque fingerprint of the seeked visual state, from
    * motion-signature.browser.js (shared with motion-sample's liveness). Legacy name kept. */
   collectLayoutGeometry(): Promise<string>;
-  /** A fingerprint of the rendered frame's pixels, equal across seeks iff nothing on screen changed. */
-  collectFrameFingerprint(): Promise<string>;
+  captureFrame(scope?: string): Promise<string>;
+  framesDiffer(first: string, second: string): Promise<boolean>;
   collectSeekClock(): Promise<SeekClock[]>;
   /** rotation_pivot_drift: every rotatable element's bbox center/size/angle at
    * the current seeked state. Accumulated across the grid — see checkPipeline. */

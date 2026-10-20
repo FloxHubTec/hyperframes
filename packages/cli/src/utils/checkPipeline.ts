@@ -30,7 +30,9 @@ import {
 import {
   assertionTargets,
   collectSamplingTargets,
+  DEFAULT_MAX_STATIC_SEC,
   evaluateMotion,
+  frozenSpans,
   type Canvas,
   type MotionFrame,
 } from "./motionAudit.js";
@@ -718,11 +720,56 @@ async function framesMoved(driver: CheckAuditDriver, times: number[]): Promise<b
   let first: string | undefined;
   for (const time of times) {
     await driver.seek(time, true);
-    const frame = await driver.collectFrameFingerprint();
+    const frame = await driver.captureFrame();
     if (first === undefined) first = frame;
-    else if (frame !== first) return true;
+    else if (await driver.framesDiffer(first, frame)) return true;
   }
   return false;
+}
+
+// keepsMoving reads the same liveness channels, so a span it calls frozen gets the frames' word too: one capture
+// every half maxStaticSec, compared with the last capture that differed; frames up to the next capture share its mark.
+async function withFrameMotion(
+  driver: CheckAuditDriver,
+  frames: MotionFrame[],
+  assertions: MotionAssertion[],
+): Promise<MotionFrame[]> {
+  const marked = frames.map((frame) => ({ ...frame, liveness: { ...frame.liveness } }));
+  for (const assertion of assertions) {
+    if (assertion.kind !== "keepsMoving") continue;
+    const scope = assertion.withinSelector ?? "*";
+    const maxStaticSec = assertion.maxStaticSec ?? DEFAULT_MAX_STATIC_SEC;
+    for (const span of frozenSpans(frames, scope, maxStaticSec)) {
+      const inSpan = marked.filter((frame) => frame.time >= span.start && frame.time <= span.end);
+      await markFrameChanges(driver, inSpan, assertion.withinSelector, maxStaticSec / 2);
+    }
+  }
+  return marked;
+}
+
+async function markFrameChanges(
+  driver: CheckAuditDriver,
+  frames: MotionFrame[],
+  within: string | undefined,
+  captureEverySec: number,
+): Promise<void> {
+  const scope = within ?? "*";
+  let reference: string | undefined;
+  let mark = 0;
+  let nextCapture = Number.NEGATIVE_INFINITY;
+  for (const frame of frames) {
+    if (frame.time >= nextCapture) {
+      nextCapture = frame.time + captureEverySec;
+      await driver.seek(frame.time, true);
+      const capture = await driver.captureFrame(within);
+      if (reference === undefined) reference = capture;
+      else if (await driver.framesDiffer(reference, capture)) {
+        reference = capture;
+        mark++;
+      }
+    }
+    frame.liveness[scope] = `${frame.liveness[scope] ?? ""}|frame${mark}`;
+  }
 }
 
 function anAnimationIsStuck(samples: { clock: SeekClock[] }[]): boolean {
@@ -1327,11 +1374,12 @@ export async function runAuditGrid(
 
   let motionIssues = plan.preflightIssues;
   if (motion.kind === "valid" && plan.assertions.length > 0 && collected.motionFrames.length > 0) {
-    const evaluated = evaluateMotion(
-      collected.motionFrames,
-      plan.assertions,
-      await driver.getCanvas(),
-    );
+    const canvas = await driver.getCanvas();
+    let evaluated = evaluateMotion(collected.motionFrames, plan.assertions, canvas);
+    if (evaluated.some((issue) => issue.code === "motion_frozen")) {
+      const frames = await withFrameMotion(driver, collected.motionFrames, plan.assertions);
+      evaluated = evaluateMotion(frames, plan.assertions, canvas);
+    }
     motionIssues = [...motionIssues, ...(await driver.anchorMotionIssues(evaluated))];
   }
   const userPicked = new Set(grid.userPickedSamples);

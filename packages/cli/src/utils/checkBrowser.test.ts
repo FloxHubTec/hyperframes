@@ -1337,7 +1337,7 @@ function fakePage() {
   return Object.assign(Object.create(null), {
     on: vi.fn(),
     viewport: () => ({ width: 640, height: 360 }),
-    screenshot: vi.fn(async () => new Uint8Array([0])),
+    screenshot: vi.fn(async () => "c3R1Yg=="),
     addScriptTag: vi.fn(async ({ content }: { content: string }) => {
       window.eval(content);
     }),

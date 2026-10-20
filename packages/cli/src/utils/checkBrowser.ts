@@ -1,7 +1,6 @@
 import type { CheckDeadline } from "./checkDeadline.js";
 import { BrowserCleanupError, closeManagedBrowser } from "../browser/launch.js";
 import { checkSnapshotDirectory } from "./checkSnapshotDirectory.js";
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
@@ -772,10 +771,15 @@ export function createPageDriver(
       return issues;
     },
     collectLayoutGeometry: () => collectLayoutGeometry(page),
-    collectFrameFingerprint: async () =>
-      createHash("sha1")
-        .update(await page.screenshot({ type: "png" }))
-        .digest("hex"),
+    captureFrame: (scope) => captureFrame(page, scope),
+    framesDiffer: (first, second) =>
+      page
+        .evaluate(
+          (a, b) => Reflect.apply(Reflect.get(window, "__hyperframesFramesDiffer"), window, [a, b]),
+          first,
+          second,
+        )
+        .then((differ) => differ === true),
     collectSeekClock: () => collectSeekClock(page),
     collectRotationSample: (time) => collectRotationSample(page, time),
     collectOffPivotRotationSample: (time) => collectOffPivotRotationSample(page, time),
@@ -1002,6 +1006,13 @@ async function collectOverlapGrid(page: Page, times: number[]): Promise<Anchored
       })),
     ),
   );
+}
+
+async function captureFrame(page: Page, scope?: string): Promise<string> {
+  if (!scope) return page.screenshot({ encoding: "base64", type: "png" });
+  const box = await page.$(scope).then((element) => element?.boundingBox());
+  if (!box || box.width < 1 || box.height < 1) return "";
+  return page.screenshot({ encoding: "base64", type: "png", clip: box });
 }
 
 async function collectLayoutGeometry(page: Page): Promise<string> {

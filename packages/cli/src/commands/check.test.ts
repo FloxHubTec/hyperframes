@@ -171,7 +171,8 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
     collectLayout: vi.fn(async (_time: number, _tolerance: number) => []),
     collectOverlap: vi.fn(async (_time: number) => []),
     collectLayoutGeometry: vi.fn(async () => `geometry-${geometryCallCount++}`),
-    collectFrameFingerprint: vi.fn(async () => "frame"),
+    captureFrame: vi.fn(async (_scope?: string) => "frame"),
+    framesDiffer: vi.fn(async (first: string, second: string) => first !== second),
     collectSeekClock: vi.fn(async () => [{ id: 1, time: 0, done: false }]),
     collectRotationSample: vi.fn(async (_time: number) => []),
     collectOffPivotRotationSample: vi.fn(async (time: number) => ({ time, samples: [] })),
@@ -1890,7 +1891,7 @@ describe("check pipeline", () => {
         getDuration: vi.fn(async () => 6),
         collectLayoutGeometry: vi.fn(async () => geometry(sample++)),
         ...(stuck ? {} : { collectSeekClock: vi.fn(async () => []) }),
-        collectFrameFingerprint: vi.fn(async () => `frame${frame++}`),
+        captureFrame: vi.fn(async () => `frame${frame++}`),
       });
       const { report } = await runScenario(driver);
 
@@ -1902,7 +1903,7 @@ describe("check pipeline", () => {
       const driver = fakeDriver({ getDuration: vi.fn(async () => 6) });
       await runScenario(driver);
 
-      expect(driver.collectFrameFingerprint).not.toHaveBeenCalled();
+      expect(driver.captureFrame).not.toHaveBeenCalled();
     });
 
     it("does not flag --at times the user picked on a still end card", async () => {
@@ -1969,6 +1970,83 @@ describe("check pipeline", () => {
 
       expect(report.motion.findings.some((finding) => finding.code === "motion_frozen")).toBe(true);
       expect(report.layout.findings.some((finding) => finding.code === "sweep_static")).toBe(false);
+    });
+  });
+
+  describe("keepsMoving frame check", () => {
+    function frozenLiveness(withinSelector?: string) {
+      const motion: MotionSpecResolution = {
+        kind: "valid",
+        path: "/project/index.motion.json",
+        spec: { assertions: [{ kind: "keepsMoving", ...(withinSelector && { withinSelector }) }] },
+      };
+      const scope = withinSelector ?? "*";
+      const overrides = {
+        getDuration: vi.fn(async () => 6),
+        collectMotionFrame: vi.fn(async (time: number) => ({
+          time,
+          data: {},
+          liveness: { [scope]: "unchanging" },
+        })),
+      };
+      return { motion, overrides };
+    }
+
+    function frozenFindings(report: CheckReport): string[] {
+      return report.motion.findings
+        .filter((finding) => finding.code === "motion_frozen")
+        .map((finding) => finding.message);
+    }
+
+    it.each([undefined, "#scene"])(
+      "does not call a scope (%s) frozen when its rendered frames keep changing",
+      async (withinSelector) => {
+        const { motion, overrides } = frozenLiveness(withinSelector);
+        let frame = 0;
+        const driver = fakeDriver({
+          ...overrides,
+          captureFrame: vi.fn(async () => `frame${frame++}`),
+        });
+        const { report } = await runScenario(driver, {}, { motion });
+
+        expect(frozenFindings(report)).toEqual([]);
+        expect(driver.captureFrame).toHaveBeenCalledWith(withinSelector);
+        // One capture per half maxStaticSec, not one per motion frame.
+        expect(vi.mocked(driver.captureFrame).mock.calls.length).toBeLessThanOrEqual(7);
+      },
+    );
+
+    it("keeps a frozen span whose frames change only once, mid-way", async () => {
+      const { motion, overrides } = frozenLiveness();
+      let capture = 0;
+      const driver = fakeDriver({
+        ...overrides,
+        captureFrame: vi.fn(async () => (capture++ < 3 ? "before" : "after")),
+      });
+      const { report } = await runScenario(driver, {}, { motion });
+
+      // Split at the change, where DOM liveness alone saw one 0-6 s span.
+      expect(frozenFindings(report)).toEqual([expect.stringContaining("between 0s and 3s")]);
+    });
+
+    it("never captures frames when the liveness already moved", async () => {
+      const motion: MotionSpecResolution = {
+        kind: "valid",
+        path: "/project/index.motion.json",
+        spec: { assertions: [{ kind: "keepsMoving" }] },
+      };
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectMotionFrame: vi.fn(async (time: number) => ({
+          time,
+          data: {},
+          liveness: { "*": String(time) },
+        })),
+      });
+      const { report } = await runScenario(driver, {}, { motion });
+
+      expect(frozenFindings(report)).toEqual([]);
+      expect(driver.captureFrame).not.toHaveBeenCalled();
     });
   });
 });

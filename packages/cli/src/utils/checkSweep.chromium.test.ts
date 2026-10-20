@@ -1,11 +1,13 @@
-// Real-Chromium pins for the frozen-sweep guard: paint the DOM signature cannot read must still count as motion.
+// Real-Chromium pins for sweep_static and keepsMoving: paint the DOM signature cannot read must still count as motion.
 // Skipped without a local Chrome; opt-in on Windows (HYPERFRAMES_BROWSER_TESTS=1), like the other Chromium suites.
 import { existsSync } from "node:fs";
-import type { Browser } from "puppeteer-core";
+import type { Browser, Page } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { findSystemBrowser } from "../browser/manager.js";
 import { createPageDriver } from "./checkBrowser.js";
 import { DEFAULT_CHECK_OPTIONS, runAuditGrid } from "./checkPipeline.js";
+import type { MotionSpecResolution } from "./checkTypes.js";
+import type { MotionAssertion } from "./motionSpec.js";
 
 function resolveExecutable(): string | undefined {
   for (const name of ["HYPERFRAMES_BROWSER_PATH", "PUPPETEER_EXECUTABLE_PATH"]) {
@@ -72,6 +74,11 @@ const MOVING_FILMS: [string, string][] = [
   ],
 ];
 
+const STILL_FILM = film(
+  `<h1 style="margin: 0; padding: 140px 0 0 200px; color: #fff; font: 600 48px sans-serif">Still</h1>`,
+  "",
+);
+
 describe.skipIf(!RUNS_CHROMIUM)("frozen-sweep guard in Chromium", () => {
   let browser: Browser;
 
@@ -89,29 +96,80 @@ describe.skipIf(!RUNS_CHROMIUM)("frozen-sweep guard in Chromium", () => {
   });
 
   // A page per film: setContent keeps the window, so one film's globals would leak into the next.
-  async function sweepFindings(html: string): Promise<string[]> {
+  async function onPage<T>(html: string, run: (page: Page) => Promise<T>): Promise<T> {
     const page = await browser.newPage();
     await page.setViewport({ width: 640, height: 360 });
     await page.setContent(html);
-    const result = await runAuditGrid(
-      createPageDriver(page),
-      { ...DEFAULT_CHECK_OPTIONS, contrast: false },
-      { kind: "none" },
-    ).finally(() => page.close());
-    return result.layoutIssues
-      .filter((issue) => issue.code === "sweep_static")
-      .map((issue) => issue.message);
+    return run(page).finally(() => page.close());
+  }
+
+  async function findings(html: string, assertions: MotionAssertion[] = []) {
+    const motion: MotionSpecResolution =
+      assertions.length > 0
+        ? { kind: "valid", path: "index.motion.json", spec: { assertions } }
+        : { kind: "none" };
+    const result = await onPage(html, (page) =>
+      runAuditGrid(createPageDriver(page), { ...DEFAULT_CHECK_OPTIONS, contrast: false }, motion),
+    );
+    const messages = (issues: { code: string; message: string }[], code: string) =>
+      issues.filter((issue) => issue.code === code).map((issue) => issue.message);
+    return {
+      sweep: messages(result.layoutIssues, "sweep_static"),
+      frozen: messages(result.motionIssues, "motion_frozen"),
+    };
   }
 
   it.each(MOVING_FILMS)("does not call %s static", async (_, html) => {
-    expect(await sweepFindings(html)).toEqual([]);
+    expect((await findings(html)).sweep).toEqual([]);
   });
 
-  it("still warns on a film where nothing on screen moves", async () => {
-    const still = film(
-      `<h1 style="margin: 0; padding: 140px 0 0 200px; color: #fff; font: 600 48px sans-serif">Still</h1>`,
-      "",
+  it.each(MOVING_FILMS)("does not call %s frozen under keepsMoving", async (_, html) => {
+    const result = await findings(html, [
+      { kind: "keepsMoving" },
+      { kind: "keepsMoving", withinSelector: "#root > :first-child" },
+    ]);
+    expect(result.frozen).toEqual([]);
+  });
+
+  it("still warns on, and keepsMoving still fails, a film where nothing on screen moves", async () => {
+    const result = await findings(STILL_FILM, [{ kind: "keepsMoving" }]);
+    expect(result.frozen).toEqual([expect.stringContaining("nothing moves between 0s and 6s")]);
+    // A motion_frozen finding already names the symptom, so the sweep guard stays quiet.
+    expect(result.sweep).toEqual([]);
+    expect((await findings(STILL_FILM)).sweep).toEqual(["Nothing on screen moved under seek."]);
+  });
+
+  it("reads a still film's frames as unchanged across 10 seeks", async () => {
+    const verdicts = await onPage(STILL_FILM, async (page) => {
+      const driver = createPageDriver(page);
+      await driver.initialize(false);
+      const frames: string[] = [];
+      for (let seek = 0; seek < 10; seek++) {
+        await driver.seek(seek * 0.6, true);
+        frames.push(await driver.captureFrame());
+      }
+      return Promise.all(frames.map((frame) => driver.framesDiffer(frames[0] ?? "", frame)));
+    });
+    expect(verdicts).toEqual(Array(10).fill(false));
+  });
+
+  it.each([
+    ["one changed pixel as render noise", 1, false],
+    ["a 5x5 square as motion", 5, true],
+  ])("reads %s", async (_, size, moved) => {
+    const html = film(
+      `<canvas id="c" width="640" height="360"></canvas>`,
+      `const ctx = document.getElementById("c").getContext("2d");
+       ctx.clearRect(0, 0, 640, 360); if (t > 0) { ctx.fillStyle = "#fff"; ctx.fillRect(100, 100, ${size}, ${size}); }`,
     );
-    expect(await sweepFindings(still)).toEqual(["Nothing on screen moved under seek."]);
+    const differ = await onPage(html, async (page) => {
+      const driver = createPageDriver(page);
+      await driver.initialize(false);
+      await driver.seek(0, true);
+      const before = await driver.captureFrame();
+      await driver.seek(3, true);
+      return driver.framesDiffer(before, await driver.captureFrame());
+    });
+    expect(differ).toBe(moved);
   });
 });
