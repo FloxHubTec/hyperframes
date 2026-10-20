@@ -93,6 +93,7 @@ function page(poseOf) {
   const win = new Window({ url: "http://localhost/" });
   const props = new WeakMap();
   const calls = { set: 0 };
+  const warnings = [];
   const read = (el) => {
     if (!props.has(el))
       props.set(el, { x: 0, y: 0, rotation: 0, scaleX: 1, scaleY: 1, opacity: 1 });
@@ -131,18 +132,20 @@ function page(poseOf) {
       updates.push(vars.onUpdate);
     },
   };
+  const con = { warn: (m) => warnings.push(String(m)), log() {}, error() {} };
   vm.runInNewContext(library, {
     window: win,
     document: win.document,
     gsap,
     Element: win.Element,
-    console,
+    getComputedStyle: (e) => win.getComputedStyle(e),
+    console: con,
   });
-  return { win, gsap, tl, read, calls, attach: win.attachEchoSmear };
+  return { win, gsap, tl, read, calls, warnings, attach: win.attachEchoSmear };
 }
 
 const MOVER =
-  '<div id="root" data-composition-id="c" data-fps="30"><div class="card" id="a" data-start="0" data-duration="1"></div></div>';
+  '<div id="root" data-composition-id="c" data-fps="30"><div class="card" id="a" style="position:absolute" data-start="0" data-duration="1"></div></div>';
 
 test("copies use visibility inherit, so a hidden scene hides them too", () => {
   const poseOf = new Map();
@@ -202,11 +205,27 @@ test("a later attach does not redraw earlier copies while it records", () => {
   const pg = page(poseOf);
   pg.win.document.body.innerHTML = MOVER.replace(
     "</div></div>",
-    '</div><div class="other" id="b"></div></div>',
+    '</div><div class="other" id="b" style="position:absolute"></div></div>',
   );
   poseOf.set(pg.win.document.getElementById("a"), (t) => ({ x: 600 * t }));
   pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
   pg.calls.set = 0;
   pg.attach("#b", pg.tl, {});
   assert.ok(pg.calls.set <= 5, `later attach made ${pg.calls.set} writes`);
+});
+
+test("a statically positioned target is skipped with a warning, because its copies would shift the layout", () => {
+  const poseOf = new Map();
+  const pg = page(poseOf);
+  pg.win.document.body.innerHTML =
+    '<div id="root" data-composition-id="c" data-fps="30"><div id="a"></div><div id="after"></div></div>';
+  poseOf.set(pg.win.document.getElementById("a"), (t) => ({ x: 600 * t }));
+  pg.attach("#a", pg.tl, { threshold: 10 });
+  assert.equal(
+    pg.win.document.querySelectorAll(".es-clone, .es-group").length,
+    0,
+    "the DOM is untouched",
+  );
+  assert.equal(pg.warnings.length, 1);
+  assert.match(pg.warnings[0], /position:absolute/);
 });

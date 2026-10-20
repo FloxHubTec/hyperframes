@@ -132,6 +132,19 @@
           targets = targets.filter(function (el) {
             return !el.classList.contains("es-clone");
           });
+          // Copies are siblings of the target; unless it is out of flow they would stack up and push the layout.
+          targets = targets.filter(function (el) {
+            var position = getComputedStyle(el).position;
+            if (position === "absolute" || position === "fixed") return true;
+            console.warn(
+              "echo-smear: " +
+                (el.id || el.className || el.tagName) +
+                " is position:" +
+                position +
+                "; its copies would shift the layout. Make it position:absolute. Skipped.",
+            );
+            return false;
+          });
           if (!targets.length) return;
           var root = targets[0].closest("[data-composition-id]");
           var fd = 1 / resolveFps(root, opts);

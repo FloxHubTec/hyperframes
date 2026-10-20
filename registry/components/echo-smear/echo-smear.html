@@ -11,6 +11,8 @@
   targets   a selector, an Element, or an array of either. Each must be absolutely positioned, animated by
             GSAP (x, y, rotation, scaleX, scaleY, opacity), and styled by CLASS: the copies are clones and
             drop ids, so id-based CSS rules do not reach them.
+            An element that is not position:absolute or fixed is skipped with a console warning, because its
+            copies would stack in the layout and push everything after it.
   options   length        % of the last frame's travel the streak spans (default 100)
             threshold     px of travel per frame before any smear shows (default 40)
             countMult     multiplies the number of copies (default 1); raise it if you see stepping
@@ -120,6 +122,19 @@
       // A selector that also matches an earlier call's copies must not turn them into targets.
       targets = targets.filter(function (el) {
         return !el.classList.contains("es-clone");
+      });
+      // Copies are siblings of the target; unless it is out of flow they would stack up and push the layout.
+      targets = targets.filter(function (el) {
+        var position = getComputedStyle(el).position;
+        if (position === "absolute" || position === "fixed") return true;
+        console.warn(
+          "echo-smear: " +
+            (el.id || el.className || el.tagName) +
+            " is position:" +
+            position +
+            "; its copies would shift the layout. Make it position:absolute. Skipped.",
+        );
+        return false;
       });
       if (!targets.length) return;
       var root = targets[0].closest("[data-composition-id]");
