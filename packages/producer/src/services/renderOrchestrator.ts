@@ -3560,6 +3560,7 @@ async function executeRenderPipeline(input: {
     // comps that route to the layered/HDR paths.)
     const nativeHdrIds = new Set([...nativeHdrVideoIds, ...nativeHdrImageIds]);
     const hasHdrContent = Boolean(effectiveHdr && nativeHdrIds.size > 0);
+    if (hasHdrContent) assertOutputScaleSupported(deviceScaleFactor, "hdr_layered");
     // DE priority inversion eligibility — evaluated BEFORE capture calibration
     // because when every multi-worker resolution would be inverted to 1 anyway,
     // the calibration stage (a throwaway Chrome launch + timeline-spread sample
@@ -5084,6 +5085,8 @@ async function executeRenderPipeline(input: {
         durationSeconds: job.duration,
         fps: fpsToNumber(job.config.fps),
         expectedFrames: captureTotalFrames,
+        width: outputWidth,
+        height: outputHeight,
       }),
     );
 
