@@ -7,11 +7,11 @@ import { startTestDnsServer } from "../utils/dnsTestServer.js";
 const fixture = join(dirname(fileURLToPath(import.meta.url)), "publicNetwork.fixture.ts");
 
 /** What the fixture printed, and how long its process lived after printing it. */
-async function resolveInChild(mode: "silent" | "answer", ipv4?: string) {
+async function resolveInChild(mode: "silent" | "answer", system: string, ipv4?: string) {
   const server = await startTestDnsServer(mode, ipv4);
   onTestFinished(() => server.close());
   const child = spawn(process.execPath, ["--import", "tsx", fixture], {
-    env: { ...process.env, HF_TEST_DNS: server.address },
+    env: { ...process.env, HF_TEST_DNS: server.address, HF_TEST_SYSTEM: system },
     stdio: ["ignore", "pipe", "inherit"],
   });
   onTestFinished(() => void child.kill("SIGKILL"));
@@ -28,14 +28,20 @@ async function resolveInChild(mode: "silent" | "answer", ipv4?: string) {
   return { printed: printed.trim(), livedOnMs: Date.now() - printedAt };
 }
 
-it("gives up on a DNS server that never answers, and nothing it started keeps the process alive", async () => {
-  const run = await resolveInChild("silent");
+it("gives up when neither DNS nor the system lookup answers, and the process is gone right after", async () => {
+  const run = await resolveInChild("silent", "stall");
   expect(run.printed).toBe("Capture DNS timed out");
-  expect(run.livedOnMs).toBeLessThan(2_000);
+  expect(run.livedOnMs).toBeLessThan(1_000);
 }, 30_000);
 
-it("answers with the server's public address and exits right after", async () => {
-  const run = await resolveInChild("answer", "93.184.216.34");
+it("falls back to the system answer when DNS gives none", async () => {
+  const run = await resolveInChild("silent", "8.8.4.4");
+  expect(run.printed).toBe("8.8.4.4");
+  expect(run.livedOnMs).toBeLessThan(1_000);
+}, 30_000);
+
+it("uses the DNS answer without asking the system", async () => {
+  const run = await resolveInChild("answer", "8.8.4.4", "93.184.216.34");
   expect(run.printed).toBe("93.184.216.34");
-  expect(run.livedOnMs).toBeLessThan(2_000);
+  expect(run.livedOnMs).toBeLessThan(1_000);
 }, 30_000);

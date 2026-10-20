@@ -29,6 +29,17 @@ vi.mock("node:dns", async (importOriginal) => {
     },
   };
 });
+vi.mock("node:child_process", async (importOriginal) => {
+  const real = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...real,
+    execFile: (...args: Parameters<typeof real.execFile>) => {
+      if (!(args[1] as string[] | undefined)?.includes("-e")) return real.execFile(...args);
+      const callback = args.at(-1) as (error: Error, stdout: string, stderr: string) => void;
+      callback(new Error("Fixture has no system DNS"), "", "ENOTFOUND");
+    },
+  };
+});
 vi.mock("node:http", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:http")>();
   return {

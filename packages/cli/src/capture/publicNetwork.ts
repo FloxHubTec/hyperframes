@@ -1,9 +1,11 @@
+import { execFile } from "node:child_process";
 import { promises as dns } from "node:dns";
 import { isIP } from "node:net";
 import { request as httpRequest, type IncomingMessage, type ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 
 const DNS_TIMEOUT_MS = 10_000;
+const CARES_TIMEOUT_MS = 5_000;
 
 function ipv4Number(address: string): number {
   return address.split(".").reduce((value, octet) => value * 256 + Number(octet), 0);
@@ -52,23 +54,60 @@ export async function resolvePublicAddress(hostname: string): Promise<string> {
   ) {
     throw new Error("Capture requires a public hostname");
   }
+  const deadline = Date.now() + DNS_TIMEOUT_MS;
+  const answers = await resolveWithCares(host).catch(() =>
+    resolveWithSystemInKillableChild(host, deadline - Date.now()),
+  );
+  const first = answers[0];
+  if (!first || !answers.every(isPublicIPv4)) {
+    throw new Error("Capture DNS returned a non-public address");
+  }
+  return first;
+}
+
+async function resolveWithCares(host: string): Promise<string[]> {
   const cancellableResolver = new dns.Resolver();
-  const timer = setTimeout(() => cancellableResolver.cancel(), DNS_TIMEOUT_MS);
+  const timer = setTimeout(() => cancellableResolver.cancel(), CARES_TIMEOUT_MS);
   try {
-    const answers = await cancellableResolver.resolve4(host);
-    const first = answers[0];
-    if (!first || !answers.every(isPublicIPv4)) {
-      throw new Error("Capture DNS returned a non-public address");
-    }
-    return first;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ECANCELLED") {
-      throw new Error("Capture DNS timed out", { cause: error });
-    }
-    throw error;
+    return await cancellableResolver.resolve4(host);
   } finally {
     clearTimeout(timer);
   }
+}
+
+const systemAnswers = new Map<string, Promise<string[]>>();
+const SYSTEM_LOOKUP = `require("node:dns").lookup(process.argv[1], { all: true, family: 4 }, (error, answers) =>
+  error ? process.stderr.write(String(error.code)) : process.stdout.write(JSON.stringify(answers.map((a) => a.address))))`;
+
+function resolveWithSystemInKillableChild(host: string, timeoutMs: number): Promise<string[]> {
+  const cached = systemAnswers.get(host);
+  if (cached) return cached;
+  const answers = new Promise<string[]>((resolve, reject) => {
+    execFile(
+      process.execPath,
+      ["-e", SYSTEM_LOOKUP, host],
+      {
+        timeout: Math.max(1, timeoutMs),
+        killSignal: "SIGKILL",
+        windowsHide: true,
+        env: { ...process.env, NODE_OPTIONS: "" },
+      },
+      (error, stdout, stderr) => {
+        if (error?.killed) reject(new Error("Capture DNS timed out"));
+        else if (!stdout) reject(new Error(`Capture DNS failed: ${stderr || error?.message}`));
+        else {
+          try {
+            resolve(JSON.parse(stdout) as string[]);
+          } catch (parseError) {
+            reject(parseError);
+          }
+        }
+      },
+    );
+  });
+  systemAnswers.set(host, answers);
+  answers.catch(() => systemAnswers.delete(host));
+  return answers;
 }
 
 /** Pinned asset transport; redirects are returned for caller validation. */

@@ -120,3 +120,24 @@ export function requestCliExit(exitCode = 0): void {
   }
   rootExitRequester(exitCode);
 }
+
+type UnrefableTimer = {
+  unref: () => void;
+};
+
+function isUnrefableTimer(
+  timer: ReturnType<typeof setTimeout>,
+): timer is ReturnType<typeof setTimeout> & UnrefableTimer {
+  return (
+    typeof timer === "object" &&
+    timer !== null &&
+    "unref" in timer &&
+    typeof timer.unref === "function"
+  );
+}
+
+/** For a command whose result is out: ends the process if anything it started is still holding it. */
+export function scheduleCliExit(exitCode = 0): void {
+  const timer = setTimeout(() => requestCliExit(exitCode), 100);
+  if (isUnrefableTimer(timer)) timer.unref();
+}

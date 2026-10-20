@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-const mocks = vi.hoisted(() => ({ resolve4: vi.fn(), request: vi.fn() }));
+const mocks = vi.hoisted(() => ({ resolve4: vi.fn(), request: vi.fn(), execFile: vi.fn() }));
+vi.mock("node:child_process", () => ({ execFile: mocks.execFile }));
 vi.mock("node:dns", () => ({
   promises: {
     Resolver: class {
@@ -14,7 +15,17 @@ vi.mock("node:http", () => ({ request: mocks.request }));
 vi.mock("node:https", () => ({ request: mocks.request }));
 import { isPublicIPv4, publicRequest, resolvePublicAddress } from "./publicNetwork.js";
 
-beforeEach(() => vi.resetAllMocks());
+/** The system lookup child prints `stdout`, or fails with `stderr`. */
+function systemLookupPrints(stdout: string, stderr = "") {
+  mocks.execFile.mockImplementation((_file, _args, _options, callback) =>
+    callback(stdout ? null : new Error("Command failed"), stdout, stderr),
+  );
+}
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  systemLookupPrints("", "ENOTFOUND");
+});
 describe("public address policy", () => {
   it.each([
     "127.0.0.1",
@@ -62,9 +73,25 @@ describe("public address policy", () => {
       await expect(resolvePublicAddress("example.com")).rejects.toThrow();
     },
   );
-  it("propagates DNS errors", async () => {
-    mocks.resolve4.mockRejectedValue(new Error("DNS failed"));
-    await expect(resolvePublicAddress("example.com")).rejects.toThrow("DNS failed");
+  it("fails when neither DNS nor the system lookup answers", async () => {
+    mocks.resolve4.mockRejectedValue(new Error("queryA ENOTFOUND"));
+    await expect(resolvePublicAddress("example.com")).rejects.toThrow(
+      "Capture DNS failed: ENOTFOUND",
+    );
+  });
+  it("checks a system answer like a DNS one, and asks the system once per host", async () => {
+    mocks.resolve4.mockRejectedValue(new Error("queryA ENOTFOUND"));
+    systemLookupPrints('["127.0.0.1"]');
+    await expect(resolvePublicAddress("hosts-file.example.org")).rejects.toThrow(/non-public/);
+    systemLookupPrints('["8.8.8.8"]');
+    await expect(resolvePublicAddress("cached.example.org")).resolves.toBe("8.8.8.8");
+    await expect(resolvePublicAddress("cached.example.org")).resolves.toBe("8.8.8.8");
+    expect(mocks.execFile).toHaveBeenCalledTimes(2);
+  });
+  it("never starts the system lookup when DNS answers", async () => {
+    mocks.resolve4.mockResolvedValue(["8.8.8.8"]);
+    await expect(resolvePublicAddress("example.org")).resolves.toBe("8.8.8.8");
+    expect(mocks.execFile).not.toHaveBeenCalled();
   });
 });
 
