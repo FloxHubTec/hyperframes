@@ -128,6 +128,10 @@
             if (typeof s === "string") targets.push.apply(targets, document.querySelectorAll(s));
             else if (s instanceof Element) targets.push(s);
           });
+          // A selector that also matches an earlier call's copies must not turn them into targets.
+          targets = targets.filter(function (el) {
+            return !el.classList.contains("es-clone");
+          });
           if (!targets.length) return;
           var root = targets[0].closest("[data-composition-id]");
           var fd = 1 / resolveFps(root, opts);
@@ -149,6 +153,8 @@
           var centres = targets.map(function () {
             return [];
           });
+          var api = window.__echoSmear;
+          api.baking = (api.baking || 0) + 1; // other attached smears skip their update while this one records
           for (var s = 0; s < samples; s++) {
             tl.seek(Math.min(s * step, dur), false);
             var rr = root.getBoundingClientRect();
@@ -176,6 +182,7 @@
               centres[ti].push([mx, my]);
             }
           }
+          api.baking--;
           tl.seek(saved, false);
 
           // Clones: built after the bake so no tween is bound to them.
@@ -196,6 +203,17 @@
             for (var i = 0; i < maxEchoes; i++) {
               var c = el.cloneNode(true);
               c.removeAttribute("id");
+              [c]
+                .concat(
+                  Array.prototype.slice.call(
+                    c.querySelectorAll("[data-start],[data-duration],[data-track-index]"),
+                  ),
+                )
+                .forEach(function (n) {
+                  n.removeAttribute("data-start");
+                  n.removeAttribute("data-duration");
+                  n.removeAttribute("data-track-index");
+                });
               c.querySelectorAll("[id]").forEach(function (n) {
                 n.removeAttribute("id");
               });
@@ -232,6 +250,7 @@
             p0 = [0, 0],
             p1 = [0, 0];
           function render() {
+            if (window.__echoSmear.baking) return;
             var t = tl.time();
             state.forEach(function (st) {
               lerpTrack(st.centres, step, t, p0);
@@ -261,7 +280,7 @@
                   scaleX: pose[3],
                   scaleY: pose[4],
                   opacity: pose[5],
-                  visibility: "visible",
+                  visibility: "inherit",
                 });
               }
             });
