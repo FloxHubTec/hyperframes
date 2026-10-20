@@ -139,18 +139,10 @@ function planOps(
 /**
  * Hand the plan to the AudioParam, degrading a curve the browser will not take.
  *
- * A value curve may not overlap another, and this has been seen refused in the
- * field while rescheduling mid-playback — two passes landing a render quantum
- * apart, which is what applying a carve while the transport runs does. Every
- * caller here cancels the parameter first, and measured against Chrome that is
- * enough to free even a curve already under way, so the mechanism behind those
- * reports is not understood and does not reproduce. This catch is the backstop
- * for it: unhandled, the exception reached the console and abandoned every
- * remaining segment of the envelope.
- *
- * A ramp to the same destination is always accepted, since it books no span. The
- * segment loses its bend until the next full reschedule, which is a far better
- * failure than the rest of the envelope never being scheduled at all.
+ * The advancing audio clock can clamp a curve's start forward without shortening
+ * its duration. The next segment then overlaps it, including a fallback ramp.
+ * Clear the conflicting schedule before degrading the segment so the remaining
+ * envelope can still be booked.
  */
 function emit(param: AudioParam, ops: readonly Op[]): void {
   for (const op of ops) {
@@ -160,6 +152,7 @@ function emit(param: AudioParam, ops: readonly Op[]): void {
       try {
         param.setValueCurveAtTime(op.values, op.time, op.duration);
       } catch {
+        param.cancelScheduledValues(0);
         const end = op.values[op.values.length - 1] ?? 0;
         param.linearRampToValueAtTime(end, op.time + op.duration);
       }
