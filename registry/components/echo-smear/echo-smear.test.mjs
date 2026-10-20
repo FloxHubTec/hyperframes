@@ -229,3 +229,13 @@ test("a statically positioned target is skipped with a warning, because its copi
   assert.equal(pg.warnings.length, 1);
   assert.match(pg.warnings[0], /position:absolute/);
 });
+
+test("the group takes the target's z-index, so the wrapped target keeps its place in the stack", () => {
+  const poseOf = new Map();
+  const pg = page(poseOf);
+  pg.win.document.body.innerHTML =
+    '<div id="root" data-composition-id="c" data-fps="30"><div id="a" style="position:absolute;z-index:7"></div></div>';
+  poseOf.set(pg.win.document.getElementById("a"), (t) => ({ x: 600 * t }));
+  pg.attach("#a", pg.tl, { threshold: 10 });
+  assert.equal(pg.win.document.querySelector(".es-group").style.zIndex, "7");
+});

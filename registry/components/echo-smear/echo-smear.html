@@ -43,7 +43,7 @@
     - Copies are the element's past pose, not a re-render: rotation, scale and opacity smear, but a change in
       the element's contents (a counter, a morph) does not.
     - The element is wrapped in a new absolutely positioned container (class es-group), which can break CSS
-      that depends on its parent and changes its stacking relative to siblings.
+      that depends on its parent. The group takes the target's z-index, so it keeps its place in the stack.
     - Copies use mix-blend-mode, so a composition using this takes the screenshot capture path (not the
       drawElement fast path).
     - Cost grows with maxEchoes times the number of targets; keep both modest on long films.
@@ -194,6 +194,10 @@
           var wrap = document.createElement("div");
           wrap.className = "es-group";
           wrap.style.cssText = "position:absolute;inset:0;isolation:isolate;pointer-events:none;";
+          // The group is now what the siblings stack against, so it takes the target's z-index
+          // (without it a target that sat above a sibling would drop below it).
+          var z = getComputedStyle(el).zIndex;
+          if (z && z !== "auto") wrap.style.zIndex = z;
           el.parentNode.insertBefore(wrap, el);
           wrap.appendChild(el);
           el.style.mixBlendMode = "lighten";
