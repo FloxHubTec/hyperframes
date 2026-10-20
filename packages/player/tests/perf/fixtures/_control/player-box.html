@@ -10,8 +10,11 @@
       .wrap {
         width: 800px;
       }
-      .wrap hyperframes-player {
-        margin-bottom: 4px;
+      p {
+        margin: 12px 0 4px;
+        font:
+          14px/1.2 system-ui,
+          sans-serif;
       }
       .column {
         display: flex;
@@ -28,25 +31,30 @@
   </head>
   <body>
     <div class="wrap">
+      <p>no height or width set: expect 800x450</p>
       <hyperframes-player id="plain" src="../gsap-heavy/index.html"></hyperframes-player>
+      <p>height: 300px only: expect 800x300</p>
       <hyperframes-player
         id="heightOnly"
         style="height: 300px"
         src="../gsap-heavy/index.html"
       ></hyperframes-player>
+      <p>width: 400px only: expect 400x225</p>
       <hyperframes-player
         id="widthOnly"
         style="width: 400px"
         src="../gsap-heavy/index.html"
       ></hyperframes-player>
+      <p>width: 200px and height: 100px: expect 200x100</p>
       <hyperframes-player
         id="both"
         style="width: 200px; height: 100px"
         src="../gsap-heavy/index.html"
       ></hyperframes-player>
-      <!-- How the browser sizes a plain block given aspect-ratio and only a height. -->
+      <p>not a player: a plain div with aspect-ratio 16/9 and only height: 300px</p>
       <div id="ratioHeightOnly" class="ratio"></div>
     </div>
+    <p>flex: 1 in an 800x600 column: expect 800x600</p>
     <div class="column">
       <hyperframes-player
         id="flexFill"
