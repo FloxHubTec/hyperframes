@@ -79,7 +79,8 @@ it("finishes the lane when clamping a curve also blocks its fallback ramp", () =
   expect(() =>
     scheduleParamLane([{ param }], lane, "linear", { scheduledAt: 0, elapsed: 0, rate: 1 }),
   ).not.toThrow();
-  expect(param.ramps).toBeGreaterThan(0);
+  expect(param.ramps).toBe(3);
+  expect(param.curves).toHaveLength(0);
   expect(param.value).toBeCloseTo(0.7);
 });
 

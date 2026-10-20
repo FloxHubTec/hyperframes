@@ -136,13 +136,23 @@ function planOps(
   return ops;
 }
 
+/** Rebuild a refused plan with ramps so clamped curves cannot replay past audio. */
+function emitRamps(param: AudioParam, ops: readonly Op[]): void {
+  param.cancelScheduledValues(0);
+  for (const op of ops) {
+    if (op.kind === "set") param.setValueAtTime(op.value, op.time);
+    else if (op.kind === "ramp") param.linearRampToValueAtTime(op.value, op.time);
+    else {
+      param.setValueAtTime(op.values[0] ?? 0, op.time);
+      param.linearRampToValueAtTime(op.values[op.values.length - 1] ?? 0, op.time + op.duration);
+    }
+  }
+}
+
 /**
- * Hand the plan to the AudioParam, degrading a curve the browser will not take.
- *
- * The advancing audio clock can clamp a curve's start forward without shortening
- * its duration. The next segment then overlaps it, including a fallback ramp.
- * Clear the conflicting schedule before degrading the segment so the remaining
- * envelope can still be booked.
+ * Hand the plan to the AudioParam. A clamped curve can overlap the next segment.
+ * On refusal, rebuild the whole lane as ramps: retrying later curves would clamp
+ * them forward too, replaying values that should already have elapsed.
  */
 function emit(param: AudioParam, ops: readonly Op[]): void {
   for (const op of ops) {
@@ -152,9 +162,8 @@ function emit(param: AudioParam, ops: readonly Op[]): void {
       try {
         param.setValueCurveAtTime(op.values, op.time, op.duration);
       } catch {
-        param.cancelScheduledValues(0);
-        const end = op.values[op.values.length - 1] ?? 0;
-        param.linearRampToValueAtTime(end, op.time + op.duration);
+        emitRamps(param, ops);
+        return;
       }
     }
   }
