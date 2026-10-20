@@ -191,14 +191,24 @@ function probeVideo(filePath: string): VideoMeta | undefined {
   }
 }
 
-// Only from-file's stage is the clip; other templates keep their own design.
-function clipResolution(
-  templateId: string,
-  clip: { width: number; height: number } | undefined,
-): CanvasResolution | undefined {
+type CanvasSize = { width: number; height: number };
+
+// A from-file stage (the clip itself) snaps to the nearest of 9:16, 4:5, 1:1; 16:9 is the template's own.
+const CLIP_FRAMES: CanvasSize[] = [
+  { width: 1080, height: 1920 },
+  { width: 1080, height: 1350 },
+  { width: 1080, height: 1080 },
+  { width: 1920, height: 1080 },
+];
+
+function clipFrame(templateId: string, clip: CanvasSize | undefined): CanvasSize | undefined {
   if (templateId !== "from-file" || !clip) return undefined;
-  if (clip.height > clip.width) return "portrait";
-  return clip.height === clip.width ? "square" : undefined;
+  const distance = (frame: CanvasSize) =>
+    Math.abs(Math.log(frame.width / frame.height) - Math.log(clip.width / clip.height));
+  const nearest = CLIP_FRAMES.reduce((best, frame) =>
+    distance(frame) < distance(best) ? frame : best,
+  );
+  return nearest.width > nearest.height ? undefined : nearest;
 }
 
 function isWebCompatible(codec: string): boolean {
@@ -529,7 +539,14 @@ async function handleVideoFile(
  * by hand or move the dimensions inline.
  */
 export function applyResolutionPreset(destDir: string, resolution: CanvasResolution): void {
-  const { width, height } = CANVAS_DIMENSIONS[resolution];
+  applyCanvasSize(destDir, CANVAS_DIMENSIONS[resolution], resolution);
+}
+
+function applyCanvasSize(
+  destDir: string,
+  { width, height }: CanvasSize,
+  resolution?: CanvasResolution,
+): void {
   for (const file of listHtmlFiles(destDir)) {
     let html = readFileSync(file, "utf-8");
     let changed = false;
@@ -547,7 +564,7 @@ export function applyResolutionPreset(destDir: string, resolution: CanvasResolut
 
     const htmlOpenRe = /<html\b([^>]*)>/i;
     const htmlOpen = html.match(htmlOpenRe);
-    if (htmlOpen) {
+    if (htmlOpen && resolution) {
       const attrs = htmlOpen[1] ?? "";
       let next: string;
       if (/data-resolution=/.test(attrs)) {
@@ -592,7 +609,7 @@ async function scaffoldProject(
   templateId: string,
   media: InitMediaOptions,
   tailwind = false,
-  resolution?: CanvasResolution,
+  canvas?: CanvasResolution | CanvasSize,
   authoringSkill?: string,
 ): Promise<void> {
   mkdirSync(destDir, { recursive: true });
@@ -608,7 +625,8 @@ async function scaffoldProject(
   }
   patchVideoSrc(destDir, media);
   if (tailwind) writeTailwindSupport(destDir);
-  if (resolution) applyResolutionPreset(destDir, resolution);
+  if (typeof canvas === "string") applyResolutionPreset(destDir, canvas);
+  else if (canvas) applyCanvasSize(destDir, canvas);
 
   writeFileSync(
     resolve(destDir, "meta.json"),
@@ -780,7 +798,7 @@ export default defineCommand({
     resolution: {
       type: "string",
       description:
-        "Canvas resolution preset: landscape (1920x1080), portrait (1080x1920), landscape-4k (3840x2160), portrait-4k (2160x3840), square (1080x1080), square-4k (2160x2160). Aliases: 1080p, 4k, uhd, 1080p-square, square-1080p, 4k-square. Default: a --video clip's own shape (portrait or square, as it plays), else the template's dimensions (typically 1920x1080).",
+        "Canvas resolution preset: landscape (1920x1080), portrait (1080x1920), landscape-4k (3840x2160), portrait-4k (2160x3840), square (1080x1080), square-4k (2160x2160). Aliases: 1080p, 4k, uhd, 1080p-square, square-1080p, 4k-square. Default: a --video clip's shape as it plays, snapped to 9:16, 4:5 or 1:1 (1080 wide), else the template's dimensions (typically 1920x1080).",
     },
     skill: {
       type: "string",
@@ -961,7 +979,7 @@ export default defineCommand({
           templateId,
           media,
           tailwind,
-          resolutionPreset ?? clipResolution(templateId, videoSize),
+          resolutionPreset ?? clipFrame(templateId, videoSize),
           args.skill,
         );
       } catch (err) {
@@ -1191,7 +1209,7 @@ export default defineCommand({
         templateId,
         media,
         tailwind,
-        resolutionPreset ?? clipResolution(templateId, videoSize),
+        resolutionPreset ?? clipFrame(templateId, videoSize),
         args.skill,
       );
       if (!isBundled) {
