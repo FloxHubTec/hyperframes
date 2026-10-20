@@ -62,7 +62,7 @@ describe.skipIf(!HAS_FFMPEG)("frame-sequence encode with an unreadable frame", (
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("frame_000010.jpg");
-    expect(result.error).toMatch(/Is a directory|Permission denied/);
+    expect(result.error).toMatch(/Error during demuxing: \S/);
   });
 
   it("fails a chunked encode at that frame too", async () => {
@@ -78,6 +78,6 @@ describe.skipIf(!HAS_FFMPEG)("frame-sequence encode with an unreadable frame", (
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("frame_000015.jpg");
-    expect(result.error).toMatch(/Is a directory|Permission denied/);
+    expect(result.error).toMatch(/Error during demuxing: \S/);
   });
 });

@@ -520,7 +520,8 @@ function frameReadFailure(
   framesRead: number,
   frameCount: number,
 ): string {
-  const readError = /^.*(?:Error during demuxing|Could not open file).*$/m.exec(stderr)?.[0].trim();
+  const lines = stderr.match(/^.*(?:Error during demuxing|Could not open file).*$/gm) ?? [];
+  const readError = [...new Set(lines.map((line) => line.trim()))].join("; ");
   if (!readError) return "";
   const name = framePattern.replace(/%0(\d+)d/, (_, width: string) =>
     String(startNumber + framesRead).padStart(Number(width), "0"),
