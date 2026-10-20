@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { warmCheckEligible, warmCheckOutcome } from "./warmCheckClient.js";
+import { runWarmCheck, warmCheckEligible, warmCheckOutcome } from "./warmCheckClient.js";
 
 describe("warmCheckEligible", () => {
   const argv = ["node", "hyperframes", "check", "."];
@@ -36,5 +36,11 @@ describe("warmCheckOutcome", () => {
 
   it("exits like a signalled process when the user interrupted the check", () => {
     expect(warmCheckOutcome(undefined, false, "SIGINT")).toEqual({ served: true, exitCode: 130 });
+  });
+});
+
+describe("runWarmCheck", () => {
+  it("runs cold without connecting anywhere when there is no private endpoint", async () => {
+    await expect(runWarmCheck(undefined)).resolves.toBe(false);
   });
 });

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { connect, createServer, type Socket } from "node:net";
 import { prelaunchBrowserForCheck } from "./commands/check.js";
@@ -6,18 +7,25 @@ import { registerRootExitRequester } from "./utils/commandResult.js";
 import {
   Frame,
   encodeFrame,
+  envDigest,
   frameForwarder,
   frameReader,
-  sameEnv,
+  keyed,
+  sameProof,
+  warmCheckEndpoint,
   type WarmRequest,
 } from "./warmCheckProtocol.js";
 
-const [address = "", idleMs = "0", ...checkArgs] = process.argv.slice(2);
-const startEnv = { ...process.env };
+const [idleMs = "0", ...checkArgs] = process.argv.slice(2);
+const endpoint = warmCheckEndpoint();
+if (!endpoint) process.exit(0);
+const { address, token } = endpoint;
+const startDigest = envDigest(token, process.env);
 const exit = process.exit.bind(process);
 const idle = setTimeout(() => exit(0), Number(idleMs));
 registerRootExitRequester(exit);
 let listening = false;
+let served: Socket | undefined;
 
 process.on("exit", () => {
   if (listening && process.platform !== "win32") {
@@ -27,11 +35,9 @@ process.on("exit", () => {
   }
 });
 
+const RELAYED_SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGHUP"]);
+
 async function serve(socket: Socket, request: WarmRequest): Promise<void> {
-  if (!sameEnv(request.env, startEnv)) {
-    socket.end(encodeFrame(Frame.Declined, "environment"), () => exit(0));
-    return;
-  }
   let finished = false;
   const finish = (code: number) => {
     if (finished) return;
@@ -51,25 +57,58 @@ async function serve(socket: Socket, request: WarmRequest): Promise<void> {
   setImmediate(() => finish(Number(process.exitCode ?? 0)));
 }
 
-const server = createServer((socket) => {
+function decline(socket: Socket, yieldToNewEnvironment: boolean): void {
+  socket.end(encodeFrame(Frame.Declined, "declined"), () => {
+    if (yieldToNewEnvironment) exit(0);
+  });
+}
+
+function accept(socket: Socket, request: WarmRequest, nonce: string): void {
+  const fresh = !served && sameProof(keyed(token, "client", nonce), request.proof);
+  if (!fresh || !sameProof(startDigest, request.envDigest)) return decline(socket, fresh);
+  served = socket;
   server.close();
   listening = false;
   clearTimeout(idle);
-  let requested = false;
+  void serve(socket, request);
+}
+
+function parsedRequest(body: Buffer): WarmRequest | undefined {
+  try {
+    return JSON.parse(body.toString()) as WarmRequest;
+  } catch {
+    return undefined;
+  }
+}
+
+function relaySignal(socket: Socket, signal: string): void {
+  if (socket === served && RELAYED_SIGNALS.has(signal)) {
+    process.kill(process.pid, signal as NodeJS.Signals);
+  }
+}
+
+function handshake(socket: Socket, nonce: string, type: Frame, body: Buffer): boolean {
+  if (type === Frame.Hello) {
+    const proof = keyed(token, "server", body.toString());
+    socket.write(encodeFrame(Frame.Proof, JSON.stringify({ proof, nonce })));
+    return false;
+  }
+  const request = type === Frame.Request ? parsedRequest(body) : undefined;
+  if (request) accept(socket, request, nonce);
+  return request !== undefined;
+}
+
+const server = createServer((socket) => {
+  const nonce = randomBytes(16).toString("hex");
+  let accepted = false;
   socket.on("error", () => {});
-  socket.on("close", () => {
-    if (!requested) exit(0);
+  const read = frameReader((type, body) => {
+    if (type === Frame.Signal) relaySignal(socket, body.toString());
+    else if (!accepted) accepted = handshake(socket, nonce, type, body);
   });
-  socket.on(
-    "data",
-    frameReader((type, body) => {
-      if (type === Frame.Request && !requested) {
-        requested = true;
-        void serve(socket, JSON.parse(body.toString()) as WarmRequest);
-      }
-      if (type === Frame.Signal) process.kill(process.pid, body.toString() as NodeJS.Signals);
-    }),
-  );
+  socket.on("data", (chunk: Buffer) => {
+    if (!read(chunk)) socket.destroy();
+  });
 });
 
 function listen(): void {
@@ -80,7 +119,10 @@ function listen(): void {
 
 server.on("error", (error: NodeJS.ErrnoException) => {
   if (error.code !== "EADDRINUSE" || process.platform === "win32") exit(0);
-  const probe = connect(address, () => exit(0));
+  const probe = connect(address, () => {
+    probe.destroy();
+    exit(0);
+  });
   probe.on("error", () => {
     try {
       unlinkSync(address);
