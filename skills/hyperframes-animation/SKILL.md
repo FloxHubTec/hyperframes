@@ -178,9 +178,11 @@ Read the matching file directly when its topic applies; the indexes remain avail
 - [Depth Scatter ↔ Assemble](rules/depth-scatter-assemble.md) — Read when applying this atomic motion recipe.
 - [Discrete Text Sequence](rules/discrete-text-sequence.md) — Read when applying this atomic motion recipe.
 - [Dynamic Content Sequencing](rules/dynamic-content-sequencing.md) — Read when applying this atomic motion recipe.
+- [Follow-Through](rules/follow-through.md) — Read when applying this atomic motion recipe.
 - [Gradient Text Sweep](rules/gradient-text-sweep.md) — Read when applying this atomic motion recipe.
 - [GSAP Effects for HyperFrames](rules/gsap-effects.md) — Read when applying this atomic motion recipe.
 - [Hacker Flip 3D Reveal](rules/hacker-flip-3d.md) — Read when applying this atomic motion recipe.
+- [Inertia Chain](rules/inertia-chain.md) — Read when applying this atomic motion recipe.
 - [Kinetic Beat Slam](rules/kinetic-beat-slam.md) — Read when applying this atomic motion recipe.
 - [Motion-Blur Streak](rules/motion-blur-streak.md) — Read when applying this atomic motion recipe.
 - [Multi-Cursor Choreography](rules/multi-cursor-choreography.md) — Read when applying this atomic motion recipe.
