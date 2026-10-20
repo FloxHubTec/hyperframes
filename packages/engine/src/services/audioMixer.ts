@@ -660,9 +660,10 @@ async function extractAudioSegment(
   // A failed local probe keeps FFmpeg's default channel conversion and the input seek; a URL probe
   // is retried once, then fails: a blip must not change how the next, successful read is mixed.
   const metadata = isHttpUrl(srcPath)
-    ? await extractAudioMetadata(srcPath, { signal }).catch(() =>
-        extractAudioMetadata(srcPath, { signal }),
-      )
+    ? await extractAudioMetadata(srcPath, { signal }).catch((error: unknown) => {
+        if (signal?.aborted) throw error;
+        return extractAudioMetadata(srcPath, { signal });
+      })
     : await extractAudioMetadata(srcPath).catch(() => null);
   const inputSeek = mediaStart >= (metadata?.latestStreamLeadSeconds ?? 0);
   const start = formatFilterNumber(mediaStart);
@@ -1240,7 +1241,10 @@ export async function processCompositionAudio(
         if (element.end - element.start <= 0) {
           let metadata;
           try {
-            metadata = await extractAudioMetadata(srcPath);
+            metadata = await extractAudioMetadata(
+              srcPath,
+              readInPlace ? { signal: effectiveSignal } : undefined,
+            );
           } catch (err: unknown) {
             failures.push(
               probeFailure(err instanceof Error ? err.message : String(err), element.id),

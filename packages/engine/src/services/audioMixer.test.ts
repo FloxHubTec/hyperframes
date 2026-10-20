@@ -1590,6 +1590,9 @@ describe("processCompositionAudio", () => {
     );
 
     expect(extractAudioMetadataMock).toHaveBeenCalledTimes(2);
+    expect(extractAudioMetadataMock).toHaveBeenCalledWith(url, {
+      signal: expect.any(AbortSignal),
+    });
     expect(result.success).toBe(false);
     expect(runFfmpegMock.mock.calls.some(([args]) => args.includes(url))).toBe(false);
   });

@@ -20,7 +20,7 @@ const MAX_LISTED_FINGERPRINTS = 8;
  * Only a 2xx response reaches this classifier. `downloadToTemp` rejects a
  * 404/410 as `http_not_found` before writing a byte (urlDownloader.ts
  * `classifyHttpFailure`), and an authored http src is downloaded first (a cloud-held
- * project file is read by URL and never sniffed). So the shapes that land here are a soft-404 or
+ * project file is read by URL, which the sniff cannot open). So the shapes that land here are a soft-404 or
  * interstitial HTML body, an S3/CloudFront error document, or a JSON API error
  * body, each served with a success status.
  *
