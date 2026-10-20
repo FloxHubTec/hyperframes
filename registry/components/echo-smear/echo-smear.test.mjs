@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import test from "node:test";
 import vm from "node:vm";
 import { Window } from "happy-dom";
@@ -579,4 +580,45 @@ test("copies carry the recorded opacity", () => {
   pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
   pg.tl.seek(0.5);
   assert.ok(shownCopies(doc).every((c) => c.style.opacity === "0.5"));
+});
+
+// Real GSAP, not the fake timeline: the callbacks a composition puts on its timeline must not fire at attach.
+test("attaching leaves real GSAP callbacks unfired, and a removal callback cannot remove the target", () => {
+  const win = new Window({ url: "http://localhost/" });
+  globalThis.window = win;
+  globalThis.document = win.document;
+  globalThis.getComputedStyle = (e) => win.getComputedStyle(e);
+  const { gsap } = createRequire(new URL("../../../packages/core/package.json", import.meta.url))(
+    "gsap",
+  );
+  win.document.body.innerHTML = ROOT(`<div id="a" ${ABS}></div>`);
+  const a = win.document.getElementById("a");
+  const tl = gsap.timeline({ paused: true });
+  const fired = { call: 0, complete: 0, reverse: 0 };
+  tl.to(
+    a,
+    {
+      x: 600,
+      duration: 1,
+      ease: "none",
+      onComplete: () => {
+        fired.complete++;
+        a.remove();
+      },
+      onReverseComplete: () => fired.reverse++,
+    },
+    0,
+  );
+  tl.call(() => fired.call++, [], 0.5);
+  vm.runInNewContext(library, {
+    window: win,
+    document: win.document,
+    Element: win.Element,
+    getComputedStyle: (e) => win.getComputedStyle(e),
+    console,
+  });
+  assert.doesNotThrow(() => win.attachEchoSmear(a, tl, { threshold: 10, edgeSpacing: 0 }));
+  assert.deepEqual({ ...fired }, { call: 0, complete: 0, reverse: 0 });
+  assert.ok(a.parentNode, "the target is still in the document");
+  assert.equal(tl.time(), 0, "the playhead is back where it was");
 });
