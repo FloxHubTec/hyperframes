@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,7 +12,8 @@ import {
   waitForTestCondition,
 } from "../utils/processTestUtils.js";
 
-const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "cli.ts");
+const here = dirname(fileURLToPath(import.meta.url));
+const cli = join(here, "..", "cli.ts");
 
 function project(busy: boolean): string {
   const dir = mkdtempSync(join(tmpdir(), "hf-chrome-orphans-"));
@@ -34,12 +35,12 @@ function project(busy: boolean): string {
   return dir;
 }
 
-function check(dir: string) {
+function check(dir: string, entry = cli, env: Record<string, string> = {}) {
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", cli, "check", dir, "--json", "--no-browser-gpu", "--samples=1"],
+    ["--import", "tsx", entry, "check", dir, "--json", "--no-browser-gpu", "--samples=1"],
     {
-      env: { ...process.env, CI: "1", HYPERFRAMES_NO_TELEMETRY: "1" },
+      env: { ...process.env, CI: "1", HYPERFRAMES_NO_TELEMETRY: "1", ...env },
       stdio: ["ignore", "ignore", "ignore"],
     },
   );
@@ -70,13 +71,22 @@ it("leaves no Chrome process behind when the CLI is killed mid busy-loop", async
 }, 90_000);
 
 it("leaves no Chrome process or watchdog behind after a check that finishes", async () => {
-  const run = check(project(false));
-  const poll = setInterval(run.record, 50);
+  const dir = project(false);
+  const processFile = join(dir, "processes.json");
+  const run = check(dir, join(here, "chromeOrphans.fixture.ts"), {
+    HF_TEST_PROCESS_FILE: processFile,
+  });
   await run.done;
-  clearInterval(poll);
-  expect(run.seen.chrome.size).toBeGreaterThan(0);
+  const seen = JSON.parse(readFileSync(processFile, "utf8")) as {
+    chrome: number[];
+    watchdog: number[];
+  };
+  seen.chrome.forEach((pid) => run.seen.chrome.add(pid));
+  seen.watchdog.forEach((pid) => run.seen.watchdog.add(pid));
+  expect(seen.chrome.length).toBeGreaterThan(0);
+  if (process.platform === "win32") expect(seen.watchdog.length).toBeGreaterThan(0);
   await waitForTestCondition(
-    () => alive(run.seen.chrome).length + alive(run.seen.watchdog).length === 0,
+    () => alive(seen.chrome).length + alive(seen.watchdog).length === 0,
     10_000,
   );
 }, 90_000);

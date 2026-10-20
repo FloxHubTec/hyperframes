@@ -61,6 +61,7 @@
     "packages/cli/src/whisper/sherpaWorker.ts",
     // Warm-check client, spawned by path from warmCheck.process.test.ts.
     "packages/cli/src/warmCheckClient.fixture.ts",
+    "packages/cli/src/browser/chromeOrphans.fixture.ts",
     // Test fixture worker, spawned by path via the pools' workerEntryPath
     // option from the crash-recovery tests; has no import-graph referrer.
     "packages/producer/src/services/__fixtures__/crashOnMessageWorker.mjs",
