@@ -48,7 +48,7 @@ async function scanTruePeak(
   }
   const summary = [...result.stderr.matchAll(/^\s*Peak:\s*([+-]?(?:[\d.]+|inf)) dBFS$/gim)];
   return {
-    peak: checkedDbfs(toDbfs(summary.at(-1)?.[1] ?? "")),
+    peak: checkedDbfs(toDbfs(summary.at(-1)?.[1] ?? "nan")),
     firstBlock: checkedDbfs(firstBlock ?? Number.NEGATIVE_INFINITY),
     laterBlocks: checkedDbfs(laterBlocks),
   };
@@ -56,7 +56,8 @@ async function scanTruePeak(
 
 /**
  * The true peak one `ebur128=peak=true` pass over the whole file reports, measured as parallel
- * segments when the length and rate are known. Same value to the printed digit, not an estimate.
+ * segments when the length is known and the rate is 48 kHz. Same value to the printed digit,
+ * not an estimate.
  */
 export async function measureTruePeakDbfs(
   audioPath: string,
@@ -68,21 +69,32 @@ export async function measureTruePeakDbfs(
 ): Promise<number> {
   const { timeoutMs, signal, segments } = options;
   const wholeFile = async () => (await scanTruePeak(audioPath, "", timeoutMs, signal)).peak;
-  // ebur128 logs one peak per 100 ms block; its 4x oversampler reads 15 samples back, 16 ahead.
-  const block = (segments?.sampleRate ?? 0) / 10;
-  const count = segments && Number.isInteger(block) ? aacSegmentCount(segments.durationSeconds) : 1;
+  // ebur128 resamples any other rate to 48 kHz, which would move samples near each cut.
+  // It logs one peak per 100 ms block; its 4x oversampler reads 15 samples back, 16 ahead.
+  const block = 4800;
+  const count = segments?.sampleRate === 48_000 ? aacSegmentCount(segments.durationSeconds) : 1;
   if (!segments || count === 1) return wholeFile();
 
   const cut = (k: number) => k * Math.floor((segments.durationSeconds * 10) / count) * block;
+  const peers = new AbortController();
+  const segmentSignal = signal ? AbortSignal.any([signal, peers.signal]) : peers.signal;
   const scans = await Promise.all(
     Array.from({ length: count }, (_, k) => {
       // A later segment starts one block early and drops that block: its oversampler starts
       // from mirrored history there, and the previous segment stops 16 samples short.
       const start = k === 0 ? 0 : cut(k) - block;
       const end = k === count - 1 ? "" : `:end_sample=${cut(k + 1)}`;
-      return scanTruePeak(audioPath, `atrim=start_sample=${start}${end},`, timeoutMs, signal);
+      return scanTruePeak(
+        audioPath,
+        `atrim=start_sample=${start}${end},`,
+        timeoutMs,
+        segmentSignal,
+      );
     }),
-  );
+  ).catch((error: unknown) => {
+    peers.abort();
+    throw error;
+  });
   const last = scans[count - 1]!;
   const counted = Math.max(scans[0]!.peak, ...scans.slice(1).map((scan) => scan.laterBlocks));
   // The last segment's final partial block is logged only in its summary, which also holds its
