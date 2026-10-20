@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import puppeteer, { type Browser } from "puppeteer-core";
+import type { Browser } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { scheduleParamLane } from "../../../core/src/audio/audioFxAutomation.js";
 import { resolveHeadlessShellPath } from "./browserManager.js";
-import { closeTestChrome } from "./__fixtures__/loopback.js";
+import { closeTestChrome, launchTestChrome } from "./__fixtures__/loopback.js";
 
 declare global {
   interface Window {
@@ -34,7 +34,7 @@ describe.skipIf(!hasBrowser)("clamped audio automation in WebAudio", () => {
       write: false,
     });
     scheduler = bundled.outputFiles[0]!.text;
-    browser = await puppeteer.launch({ executablePath: chromePath, headless: true });
+    browser = await launchTestChrome(chromePath);
   });
   afterAll(() => closeTestChrome(browser));
 
