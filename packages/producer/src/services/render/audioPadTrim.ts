@@ -583,8 +583,7 @@ async function defaultRunFfmpeg(
 
 function defaultAacEncoder(timeoutMs: number, signal?: AbortSignal): AacEncoder {
   return async (inputPath, outputPath, durationSeconds, filter) => {
-    // One encoder, as before this went through encodeAac: splitting it is a separate change.
-    const options = { signal, timeout: timeoutMs, filter, segments: 1 };
+    const options = { signal, timeout: timeoutMs, filter };
     return toStepResult(
       await encodeAac(inputPath, outputPath, durationSeconds, options),
       timeoutMs,
