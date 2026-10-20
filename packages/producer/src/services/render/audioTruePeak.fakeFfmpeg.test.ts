@@ -111,7 +111,7 @@ describe("the plan's true-peak correction", () => {
   const dir = mkdtempSync(join(tmpdir(), "hf-peak-correct-"));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  it("re-encodes a long mix in the encoder's parallel segments, as the mix itself is encoded", async () => {
+  it("re-encodes the PCM mix, not the AAC, in the encoder's parallel segments", async () => {
     const scan = (dbfs: string) =>
       ran(true, `${FRAME.replaceAll("-3.0", dbfs)}\n${SUMMARY.replace("-3.0", dbfs)}`);
     vi.mocked(runFfmpeg).mockImplementation(async (args, opts) => {
@@ -126,14 +126,17 @@ describe("the plan's true-peak correction", () => {
     const audioPath = join(dir, "audio.m4a");
     writeFileSync(audioPath, "mixed");
 
+    const sourcePath = join(dir, "mix.wav");
     const result = await constrainAacTruePeak({
       audioPath,
+      sourcePath,
       targetDurationSeconds: 180,
       timeoutMs: 1000,
     });
 
     expect(result).toEqual({ success: true, loweredDb: 1.2 });
     expect(vi.mocked(encodeAac)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(encodeAac).mock.calls[0]![0]).toBe(sourcePath);
     expect(vi.mocked(encodeAac).mock.calls[0]![3]).toEqual({
       signal: undefined,
       timeout: 1000,

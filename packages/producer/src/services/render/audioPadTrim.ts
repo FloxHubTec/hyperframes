@@ -373,6 +373,8 @@ export async function padOrTrimAudioToVideoFrameCount(
  */
 export async function constrainAacTruePeak(input: {
   audioPath: string;
+  /** The PCM `audioPath` was encoded from: a correction re-encodes it instead of decoding the AAC. */
+  sourcePath?: string;
   targetDurationSeconds: number;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -383,12 +385,14 @@ export async function constrainAacTruePeak(input: {
   loweredDb?: number;
 }> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
+  const encode = defaultAacEncoder(timeoutMs, input.signal);
   return enforceAacTruePeak({
     audioPath: input.audioPath,
     targetDurationSeconds: input.targetDurationSeconds,
     signal: input.signal,
     probeTruePeak: (audioPath, signal) => measureTruePeakDbfs(audioPath, { timeoutMs, signal }),
-    encode: defaultAacEncoder(timeoutMs, input.signal),
+    encode: (inputPath, outputPath, durationSeconds, filter) =>
+      encode(input.sourcePath ?? inputPath, outputPath, durationSeconds, filter),
   });
 }
 
