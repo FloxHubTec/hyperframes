@@ -25,8 +25,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
-import { open, type FileHandle } from "node:fs/promises";
+import { createHash, type Hash } from "node:crypto";
 import { dirname } from "node:path";
 import { pipeline } from "node:stream/promises";
 import {
@@ -52,8 +51,8 @@ import { CONTENT_STORE_REFRESH_AFTER_DAYS, contentStoreUri } from "./contentStor
 export const MAX_SINGLE_PUT_BYTES = 5 * 1024 ** 3;
 const MAX_PARTS = 10_000;
 const MIN_FILE_PART_BYTES = 64 * 1024 * 1024;
-// ponytail: bounds a file upload's memory to this many part buffers; raise it if uploads are slow.
-const FILE_PARTS_IN_FLIGHT = 4;
+const FILE_PARTS_IN_FLIGHT = 8;
+const PART_ATTEMPTS = 3;
 
 /** Parsed `s3://bucket/key` URI. */
 export interface S3Location {
@@ -314,7 +313,8 @@ export async function multipartUpload(
   }
 }
 
-// Reads the file in order, a few parts in flight; S3 checks each part's SHA-256. With
+// Hashes each part from disk in order, then streams it from disk, so memory stays flat; S3 checks
+// each part's SHA-256. With
 // `expectedSha256`, the object exists only if the whole file matches it and the key is free.
 async function uploadFileInParts(
   client: S3Client,
@@ -329,14 +329,12 @@ async function uploadFileInParts(
     const parts: Promise<CompletedPart>[] = [];
     const inFlight = new Set<Promise<void>>();
     let failure: { error: unknown } | undefined;
-    const file = await open(localPath, "r");
     try {
-      for (let offset = 0; offset < size && !failure; offset += partBytes) {
+      for (let start = 0; start < size && !failure; start += partBytes) {
         if (inFlight.size >= FILE_PARTS_IN_FLIGHT) await Promise.race(inFlight);
-        const body = Buffer.allocUnsafe(Math.min(partBytes, size - offset));
-        await readExactly(file, body, offset, localPath);
-        whole.update(body);
-        const sent = sendFilePart(client, target, parts.length + 1, body);
+        const range = { start, end: Math.min(start + partBytes, size) };
+        const checksum = await hashRange(localPath, range, whole);
+        const sent = sendFilePart(client, target, parts.length + 1, localPath, range, checksum);
         parts.push(sent);
         const slot: Promise<void> = sent.then(
           () => void inFlight.delete(slot),
@@ -349,7 +347,6 @@ async function uploadFileInParts(
       }
     } finally {
       await Promise.all(inFlight);
-      await file.close();
     }
     if (failure) throw failure.error;
     const actual = whole.digest("hex");
@@ -374,35 +371,49 @@ async function uploadFileInParts(
   );
 }
 
+type ByteRange = { start: number; end: number };
+
+/** SHA-256 (base64) of `[start, end)` of the file, also fed to `whole`. */
+async function hashRange(path: string, { start, end }: ByteRange, whole: Hash): Promise<string> {
+  const part = createHash("sha256");
+  let read = 0;
+  for await (const chunk of createReadStream(path, { start, end: end - 1 })) {
+    whole.update(chunk as Buffer);
+    part.update(chunk as Buffer);
+    read += (chunk as Buffer).length;
+  }
+  if (read !== end - start) throw new Error(`[s3Transport] ${path} shrank while uploading`);
+  return part.digest("base64");
+}
+
+// A streamed body cannot be replayed by the SDK's own retry, so each attempt opens a fresh stream.
 async function sendFilePart(
   client: S3Client,
   target: MultipartTarget,
   partNumber: number,
-  body: Buffer,
-): Promise<CompletedPart> {
-  const checksum = createHash("sha256").update(body).digest("base64");
-  const result = await client.send(
-    new UploadPartCommand({
-      ...target,
-      PartNumber: partNumber,
-      Body: body,
-      ChecksumSHA256: checksum,
-    }),
-  );
-  if (!result.ETag) throw new Error(`[s3Transport] part ${partNumber} returned no ETag`);
-  return { ETag: result.ETag, PartNumber: partNumber, ChecksumSHA256: checksum };
-}
-
-async function readExactly(
-  file: FileHandle,
-  into: Buffer,
-  position: number,
   path: string,
-): Promise<void> {
-  for (let filled = 0; filled < into.length; ) {
-    const { bytesRead } = await file.read(into, filled, into.length - filled, position + filled);
-    if (bytesRead === 0) throw new Error(`[s3Transport] ${path} shrank while uploading`);
-    filled += bytesRead;
+  { start, end }: ByteRange,
+  checksum: string,
+): Promise<CompletedPart> {
+  for (let attempt = 1; ; attempt++) {
+    const body = createReadStream(path, { start, end: end - 1 });
+    try {
+      const result = await client.send(
+        new UploadPartCommand({
+          ...target,
+          PartNumber: partNumber,
+          Body: body,
+          ContentLength: end - start,
+          ChecksumSHA256: checksum,
+        }),
+      );
+      if (!result.ETag) throw new Error(`[s3Transport] part ${partNumber} returned no ETag`);
+      return { ETag: result.ETag, PartNumber: partNumber, ChecksumSHA256: checksum };
+    } catch (error) {
+      if (attempt >= PART_ATTEMPTS) throw error;
+    } finally {
+      body.destroy();
+    }
   }
 }
 

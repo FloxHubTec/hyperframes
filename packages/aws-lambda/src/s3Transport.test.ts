@@ -311,7 +311,23 @@ describe("objects over the single-PUT limit", () => {
     });
     expect(s3.partSizes.reduce((a, b) => a + b, 0)).toBe(bigSize);
     expect(s3.partSizes.length).toBeLessThanOrEqual(10_000);
-    expect(s3.maxPartsInFlight).toBeLessThanOrEqual(4);
+    expect(s3.maxPartsInFlight).toBeGreaterThan(1);
+    expect(s3.maxPartsInFlight).toBeLessThanOrEqual(8);
+  }, 120_000);
+
+  it("resends a part from a fresh read after a dropped connection", async () => {
+    const source = sparseFile("big-retry.bin");
+    const s3 = new MultipartFakeS3();
+    s3.failNextPart = true;
+    try {
+      expect(await putContentStoreFile(s3.asClient(), source, "bucket", bigDigest)).toBe(
+        "uploaded",
+      );
+    } finally {
+      rmSync(source);
+    }
+    expect(s3.partSizes.reduce((a, b) => a + b, 0)).toBe(bigSize);
+    expect(s3.calls.at(-1)).toMatchObject({ name: "CompleteMultipartUploadCommand" });
   }, 120_000);
 
   it("aborts instead of completing when the file no longer has the digest it was stored under", async () => {
@@ -372,6 +388,7 @@ class MultipartFakeS3 {
   readonly calls: { name: string; input: Record<string, unknown> }[] = [];
   readonly partSizes: number[] = [];
   head: Record<string, unknown> | undefined;
+  failNextPart = false;
   maxPartsInFlight = 0;
   #inFlight = 0;
 
@@ -408,15 +425,26 @@ class MultipartFakeS3 {
     }
     if (name === "CreateMultipartUploadCommand") return { UploadId: "upload-1" };
     if (name === "UploadPartCommand") {
-      const body = Body as Buffer;
-      if (createHash("sha256").update(body).digest("base64") !== input.ChecksumSHA256) {
-        throw Object.assign(new Error("part checksum mismatch"), { name: "BadDigest" });
-      }
-      this.partSizes.push(body.length);
       this.maxPartsInFlight = Math.max(this.maxPartsInFlight, ++this.#inFlight);
-      await new Promise((resolve) => setImmediate(resolve));
-      this.#inFlight -= 1;
-      return { ETag: `"part-${String(input.PartNumber)}"` };
+      try {
+        const hash = createHash("sha256");
+        let length = 0;
+        for await (const chunk of Body as AsyncIterable<Buffer>) {
+          hash.update(chunk);
+          length += chunk.length;
+        }
+        if (this.failNextPart) {
+          this.failNextPart = false;
+          throw Object.assign(new Error("connection reset"), { name: "ECONNRESET" });
+        }
+        if (length !== input.ContentLength || hash.digest("base64") !== input.ChecksumSHA256) {
+          throw Object.assign(new Error("part checksum mismatch"), { name: "BadDigest" });
+        }
+        this.partSizes.push(length);
+        return { ETag: `"part-${String(input.PartNumber)}"` };
+      } finally {
+        this.#inFlight -= 1;
+      }
     }
     if (name === "UploadPartCopyCommand") {
       return { CopyPartResult: { ETag: `"copy-${String(input.PartNumber)}"` } };
