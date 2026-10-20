@@ -832,7 +832,13 @@ function readFirstFrameColour(videoPath: string) {
   // In an extraction slot, so it never adds a decoder; unsignalled, so one cancel cannot cut it short for others.
   const probe = inExtractionSlot(() =>
     runFfmpeg([...urlInputArgs(videoPath), ...firstFrameColourArgs(videoPath)]),
-  ).then((result) => parseFirstFrameColour(result.stderr));
+  ).then((result) => {
+    // A failed probe answers this cut only; the next one probes again.
+    if (!result.success && firstFrameColourCache.get(videoPath)?.promise === probe) {
+      firstFrameColourCache.delete(videoPath);
+    }
+    return parseFirstFrameColour(result.stderr);
+  });
   writeMetadataCache(firstFrameColourCache, videoPath, identity, probe);
   return probe;
 }
