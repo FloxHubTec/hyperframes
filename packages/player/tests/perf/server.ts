@@ -89,7 +89,7 @@ function buildHostHtml(fixtureName: string, width: number, height: number): stri
     <title>player perf host: ${fixtureName}</title>
     <style>
       html, body { margin: 0; padding: 0; background: #000; }
-      hyperframes-player { display: block; }
+      hyperframes-player { display: block; width: ${width}px; height: ${height}px; }
     </style>
   </head>
   <body>
@@ -113,6 +113,10 @@ function buildHostHtml(fixtureName: string, width: number, height: number): stri
       });
       const player = document.getElementById("player");
       player.addEventListener("ready", function (event) {
+        // width/height only set the composition size; an unsized player is 0px tall and shows nothing.
+        if (!player.offsetWidth || !player.offsetHeight) {
+          window.__playerError = "player box is empty, so the composition is not on screen";
+        }
         window.__playerReady = true;
         window.__playerReadyAt = performance.timeOrigin + performance.now();
         window.__playerDuration = (event.detail && event.detail.duration) || 0;

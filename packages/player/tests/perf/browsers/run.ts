@@ -254,9 +254,9 @@ async function runFilm(base: string, browser: Browser, origin: string, fixture: 
   const s = `/session/${session.sessionId}`;
   let peakRssMb = 0;
   try {
-    await wd(base, "POST", `${s}/window/rect`, { x: 0, y: 0, width: 1400, height: 900 });
+    await wd(base, "POST", `${s}/window/rect`, { x: 0, y: 0, width: 1024, height: 768 });
     await wd(base, "POST", `${s}/url`, {
-      url: `${origin}/host.html?fixture=${fixture}&width=1280&height=720`,
+      url: `${origin}/host.html?fixture=${fixture}&width=960&height=540`,
     });
     await wd(base, "POST", `${s}/execute/sync`, {
       script: `window.__hfBench = ${bench.toString()};
