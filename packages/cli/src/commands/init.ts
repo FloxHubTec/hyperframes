@@ -136,6 +136,8 @@ function probeVideo(filePath: string): VideoMeta | undefined {
         avg_frame_rate?: string;
         duration?: string;
         nb_frames?: string;
+        tags?: { rotate?: string };
+        side_data_list?: { rotation?: number }[];
       }[];
       format?: { duration?: string };
     } = JSON.parse(raw);
@@ -167,10 +169,19 @@ function probeVideo(filePath: string): VideoMeta | undefined {
       formatDuration,
     });
 
+    const width = videoStream.width ?? 1920;
+    const height = videoStream.height ?? 1080;
+    // A phone clip is often stored landscape with a rotation; it plays (and decodes) turned upright.
+    const turn = Number(
+      videoStream.side_data_list?.find((d) => d.rotation !== undefined)?.rotation ??
+        videoStream.tags?.rotate ??
+        0,
+    );
+    const turned = Math.abs(turn) % 180 === 90;
     return {
       durationSeconds,
-      width: videoStream.width ?? 1920,
-      height: videoStream.height ?? 1080,
+      width: turned ? height : width,
+      height: turned ? width : height,
       fps,
       hasAudio,
       videoCodec: videoStream.codec_name ?? "unknown",
@@ -178,6 +189,17 @@ function probeVideo(filePath: string): VideoMeta | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The stage shape a clip scaffolded into `from-file` asks for; other templates keep their own.
+ * Landscape is the template's own 1920x1080, so it needs no preset. */
+function clipResolution(
+  templateId: string,
+  clip: { width: number; height: number } | undefined,
+): CanvasResolution | undefined {
+  if (templateId !== "from-file" || !clip) return undefined;
+  if (clip.height > clip.width) return "portrait";
+  return clip.height === clip.width ? "square" : undefined;
 }
 
 function isWebCompatible(codec: string): boolean {
@@ -377,6 +399,13 @@ function patchVideoSrc(dir: string, media: InitMediaOptions): void {
   for (const file of htmlFiles) {
     writeFileSync(file, patchMediaPlaceholders(readFileSync(file, "utf-8"), media), "utf-8");
   }
+}
+
+/** Records the template and patches captions from a transcript the media left. */
+async function finishScaffold(destDir: string, templateId: string, tailwind: boolean) {
+  trackInitTemplate(templateId, { tailwind });
+  const transcriptFile = resolve(destDir, TRANSCRIPT_FILE);
+  if (existsSync(transcriptFile)) await patchTranscript(destDir, transcriptFile);
 }
 
 async function patchTranscript(dir: string, transcriptPath: string): Promise<void> {
@@ -753,7 +782,7 @@ export default defineCommand({
     resolution: {
       type: "string",
       description:
-        "Canvas resolution preset: landscape (1920x1080), portrait (1080x1920), landscape-4k (3840x2160), portrait-4k (2160x3840), square (1080x1080), square-4k (2160x2160). Aliases: 1080p, 4k, uhd, 1080p-square, square-1080p, 4k-square. Default: keep template dimensions (typically 1920x1080).",
+        "Canvas resolution preset: landscape (1920x1080), portrait (1080x1920), landscape-4k (3840x2160), portrait-4k (2160x3840), square (1080x1080), square-4k (2160x2160). Aliases: 1080p, 4k, uhd, 1080p-square, square-1080p, 4k-square. Default: a --video clip's own shape (portrait or square, as it plays), else the template's dimensions (typically 1920x1080).",
     },
     skill: {
       type: "string",
@@ -875,6 +904,7 @@ export default defineCommand({
       let localVideoName: string | undefined;
       let videoHasAudio = true;
       let videoDuration: number | undefined;
+      let videoSize: VideoMeta | undefined;
       let sourceFilePath: string | undefined;
 
       // Handle video
@@ -884,6 +914,7 @@ export default defineCommand({
         localVideoName = result.localVideoName;
         videoHasAudio = result.meta.hasAudio;
         videoDuration = result.meta.durationSeconds;
+        videoSize = result.meta;
         console.log(
           `Video: ${result.meta.width}x${result.meta.height}, ${result.meta.durationSeconds.toFixed(1)}s`,
         );
@@ -932,7 +963,7 @@ export default defineCommand({
           templateId,
           media,
           tailwind,
-          resolutionPreset,
+          resolutionPreset ?? clipResolution(templateId, videoSize),
           args.skill,
         );
       } catch (err) {
@@ -944,11 +975,7 @@ export default defineCommand({
         console.error(c.dim("Use --example blank for offline use."));
         failCommand();
       }
-      trackInitTemplate(templateId, { tailwind });
-      const transcriptFile = resolve(destDir, TRANSCRIPT_FILE);
-      if (existsSync(transcriptFile)) {
-        await patchTranscript(destDir, transcriptFile);
-      }
+      await finishScaffold(destDir, templateId, tailwind);
 
       console.log(c.success(`Created ${c.accent(name + "/")}`));
       for (const f of readdirSync(destDir).filter((f) => !f.startsWith("."))) {
@@ -1046,6 +1073,7 @@ export default defineCommand({
     let videoHasAudio = true;
     let sourceFilePath: string | undefined;
     let videoDuration: number | undefined;
+    let videoSize: VideoMeta | undefined;
 
     if (videoFlag) {
       const videoPath = resolve(videoFlag);
@@ -1060,6 +1088,7 @@ export default defineCommand({
       localVideoName = result.localVideoName;
       videoHasAudio = result.meta.hasAudio;
       videoDuration = result.meta.durationSeconds;
+      videoSize = result.meta;
     } else if (audioFlag) {
       const audioPath = resolve(audioFlag);
       if (!existsSync(audioPath)) {
@@ -1164,7 +1193,7 @@ export default defineCommand({
         templateId,
         media,
         tailwind,
-        resolutionPreset,
+        resolutionPreset ?? clipResolution(templateId, videoSize),
         args.skill,
       );
       if (!isBundled) {
@@ -1179,13 +1208,8 @@ export default defineCommand({
       );
       failCommand();
     }
-    trackInitTemplate(templateId, { tailwind });
-
     // 4b. Patch captions with transcript if available
-    const transcriptFile = resolve(destDir, TRANSCRIPT_FILE);
-    if (existsSync(transcriptFile)) {
-      await patchTranscript(destDir, transcriptFile);
-    }
+    await finishScaffold(destDir, templateId, tailwind);
 
     const files = readdirSync(destDir);
     clack.note(files.map((f) => c.accent(f)).join("\n"), c.success(`Created ${name}/`));

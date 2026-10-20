@@ -235,6 +235,27 @@ describe("hyperframes init flag rename", () => {
     }
   });
 
+  it.each(["portrait.mp4", "rotated-portrait.mp4"])(
+    "sizes the project to a portrait --video as it plays (%s)",
+    (fixture) => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-init-portrait-"));
+      const target = join(dir, "proj");
+      const clip = join(dir, fixture);
+      copyFileSync(resolve(fileURLToPath(import.meta.url), `../__fixtures__/${fixture}`), clip);
+      try {
+        const res = runInit([target, "--non-interactive", "--skip-transcribe", "--video", clip]);
+        expect(res.status).toBe(0);
+        const root = readFileSync(join(target, "index.html"), "utf-8").match(
+          /<div\b[^>]*data-composition-id="main"[^>]*>/,
+        )?.[0];
+        expect(root).toContain('data-width="1080"');
+        expect(root).toContain('data-height="1920"');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("scaffolds a silent --video as a muted clip with no audio element", () => {
     const dir = mkdtempSync(join(tmpdir(), "hf-init-silent-"));
     const target = join(dir, "proj");
