@@ -1,0 +1,208 @@
+<script>
+  (function () {
+    var PROPS = ["x", "y", "rotation", "scaleX", "scaleY", "opacity"];
+
+    function resolveFps(root, opts) {
+      var cfg = window.__HF_EXPORT_RENDER_SEEK_CONFIG;
+      var fps =
+        Number(opts.fps) ||
+        (cfg && Number(cfg.fps)) ||
+        Number(root && root.getAttribute("data-fps")) ||
+        30;
+      return fps > 0 ? fps : 30;
+    }
+
+    function lerpTrack(track, step, t, out) {
+      var f = Math.max(0, Math.min(track.length - 1, t / step));
+      var i = Math.floor(f),
+        j = Math.min(track.length - 1, i + 1),
+        u = f - i;
+      var a = track[i],
+        b = track[j];
+      for (var k = 0; k < a.length; k++) out[k] = a[k] + (b[k] - a[k]) * u;
+      return out;
+    }
+
+    // Echo count for one frame: AE's formula (the half-frame travel of the measured point, gated by
+    // threshold/2), then raised so the element's farthest point moves at most edgeSpacing px between
+    // copies, then capped. The raise never turns a smear on; edgeSpacing 0 gives AE's exact count.
+    function count(move, extent, o) {
+      var n = move > o.threshold / 2 ? Math.round(move * (o.length / 100) * o.countMult) : 0;
+      if (n > 0 && o.edgeSpacing > 0) n = Math.max(n, Math.ceil(extent / o.edgeSpacing));
+      return Math.min(n, o.maxEchoes);
+    }
+
+    // The measured point: the element's centre moved to a box fraction (AE measures a layer's origin, so
+    // a spinning layer registers travel), turned and scaled by the element's own pose.
+    // Assumes transform-origin at the box centre.
+    function measurePoint(centre, pose, box, mp) {
+      var a = (pose[2] * Math.PI) / 180;
+      var lx = (mp[0] - 0.5) * box[0] * pose[3],
+        ly = (mp[1] - 0.5) * box[1] * pose[4];
+      return [
+        centre[0] + lx * Math.cos(a) - ly * Math.sin(a),
+        centre[1] + lx * Math.sin(a) + ly * Math.cos(a),
+      ];
+    }
+
+    // An element's box in CSS px. SVG elements have no offsetWidth: fall back to the width/height
+    // attributes, then the rect.
+    function boxOf(el, rect, scale) {
+      return [
+        el.offsetWidth || parseFloat(el.getAttribute("width")) || rect.width / scale,
+        el.offsetHeight || parseFloat(el.getAttribute("height")) || rect.height / scale,
+      ];
+    }
+
+    window.__echoSmear = { count: count, lerpTrack: lerpTrack, measurePoint: measurePoint };
+
+    window.attachEchoSmear = function (selector, tl, opts) {
+      opts = opts || {};
+      var length = opts.length != null ? opts.length : 100;
+      var threshold = opts.threshold != null ? opts.threshold : 40;
+      var countMult = opts.countMult != null ? opts.countMult : 1;
+      var maxEchoes = opts.maxEchoes != null ? opts.maxEchoes : 60;
+
+      var targets = [];
+      (Array.isArray(selector) ? selector : [selector]).forEach(function (s) {
+        if (typeof s === "string") targets.push.apply(targets, document.querySelectorAll(s));
+        else if (s instanceof Element) targets.push(s);
+      });
+      if (!targets.length) return;
+      var root = targets[0].closest("[data-composition-id]");
+      var fd = 1 / resolveFps(root, opts);
+      // Sample densely enough that sub-frame curves stay curves (AE evaluates each echo time exactly).
+      var step = fd / (opts.subframes || 8);
+      var mp = opts.measurePoint || null;
+      // AE's count only follows the origin's travel, so a spinning or scaling layer's outer edge leaves
+      // visible steps between copies. edgeSpacing (px) raises the count until the farthest point of the
+      // element moves at most that far between copies. Set 0 for AE's exact count.
+      var edgeSpacing = opts.edgeSpacing != null ? opts.edgeSpacing : 1.5;
+
+      // Bake: forward half-frame sweep, poses (local) + centres (comp px).
+      var saved = tl.time();
+      var dur = tl.duration();
+      var samples = Math.ceil(dur / step) + 2;
+      var poses = targets.map(function () {
+        return [];
+      });
+      var centres = targets.map(function () {
+        return [];
+      });
+      for (var s = 0; s < samples; s++) {
+        tl.seek(Math.min(s * step, dur), false);
+        var rr = root.getBoundingClientRect();
+        var sc = rr.width / (root.offsetWidth || rr.width || 1);
+        for (var ti = 0; ti < targets.length; ti++) {
+          var el = targets[ti];
+          poses[ti].push(
+            PROPS.map(function (p) {
+              return Number(gsap.getProperty(el, p)) || 0;
+            }),
+          );
+          var r = el.getBoundingClientRect();
+          var mx = (r.left + r.width / 2 - rr.left) / sc,
+            my = (r.top + r.height / 2 - rr.top) / sc;
+          if (mp) {
+            var m = measurePoint([mx, my], poses[ti][poses[ti].length - 1], boxOf(el, r, sc), mp);
+            mx = m[0];
+            my = m[1];
+          }
+          centres[ti].push([mx, my]);
+        }
+      }
+      tl.seek(saved, false);
+
+      // Clones: built after the bake so no tween is bound to them.
+      var maximum = opts.operator !== "normal";
+      var state = targets.map(function (el, ti) {
+        var clones = [];
+        if (maximum) {
+          // AE Echo "Maximum": per-channel max between copies of THIS layer only.
+          // Isolate the group so lighten never mixes with the background.
+          var wrap = document.createElement("div");
+          wrap.className = "es-group";
+          wrap.style.cssText = "position:absolute;inset:0;isolation:isolate;pointer-events:none;";
+          el.parentNode.insertBefore(wrap, el);
+          wrap.appendChild(el);
+          el.style.mixBlendMode = "lighten";
+        }
+        for (var i = 0; i < maxEchoes; i++) {
+          var c = el.cloneNode(true);
+          c.removeAttribute("id");
+          c.querySelectorAll("[id]").forEach(function (n) {
+            n.removeAttribute("id");
+          });
+          c.setAttribute("aria-hidden", "true");
+          c.classList.add("es-clone");
+          c.style.visibility = "hidden";
+          el.parentNode.insertBefore(c, el); // earlier in DOM = further below
+          clones.push(c);
+        }
+        clones.reverse(); // clones[0] sits just under the original
+        var rc = el.getBoundingClientRect(),
+          rr0 = root.getBoundingClientRect(),
+          sc0 = rr0.width / (root.offsetWidth || rr0.width || 1);
+        var box0 = boxOf(el, rc, sc0);
+        return {
+          el: el,
+          clones: clones,
+          poses: poses[ti],
+          centres: centres[ti],
+          radius: 0.5 * Math.hypot(box0[0], box0[1]),
+        };
+      });
+
+      var cfg = {
+        threshold: threshold,
+        length: length,
+        countMult: countMult,
+        maxEchoes: maxEchoes,
+        edgeSpacing: edgeSpacing,
+      };
+      var pose = [0, 0, 0, 0, 0, 1],
+        pa = [0, 0, 0, 0, 0, 1],
+        pb = [0, 0, 0, 0, 0, 1],
+        p0 = [0, 0],
+        p1 = [0, 0];
+      function render() {
+        var t = tl.time();
+        state.forEach(function (st) {
+          lerpTrack(st.centres, step, t, p0);
+          lerpTrack(st.centres, step, t - fd / 2, p1);
+          var move = Math.hypot(p0[0] - p1[0], p0[1] - p1[1]);
+          var extent = 0;
+          if (edgeSpacing > 0) {
+            lerpTrack(st.poses, step, t, pa);
+            lerpTrack(st.poses, step, t - fd * (length / 100), pb);
+            extent =
+              Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) +
+              (st.radius * Math.abs(pa[2] - pb[2]) * Math.PI) / 180 +
+              0.5 * st.radius * (Math.abs(pa[3] - pb[3]) + Math.abs(pa[4] - pb[4]));
+          }
+          var n = count(move, extent, cfg);
+          for (var i = 0; i < st.clones.length; i++) {
+            var c = st.clones[i];
+            if (i >= n) {
+              if (c.style.visibility !== "hidden") c.style.visibility = "hidden";
+              continue;
+            }
+            lerpTrack(st.poses, step, t - ((i + 1) * fd * (length / 100)) / n, pose);
+            gsap.set(c, {
+              x: pose[0],
+              y: pose[1],
+              rotation: pose[2],
+              scaleX: pose[3],
+              scaleY: pose[4],
+              opacity: pose[5],
+              visibility: "visible",
+            });
+          }
+        });
+      }
+      // Runtime proxies the timeline, so hook updates with a full-length tween (see registry motion-blur).
+      tl.to({ v: 0 }, { v: 1, duration: Math.max(dur, 0.1), ease: "none", onUpdate: render }, 0);
+      render();
+    };
+  })();
+</script>
