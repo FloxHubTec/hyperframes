@@ -11,17 +11,19 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 <Update
   label="HyperFrames v0.8.182"
   description="Released - 2026-10-20"
-  tags={["Release", "Producer", "CLI", "Core"]}
+  tags={["Release", "Producer", "CLI", "Core", "Player"]}
 >
-Website capture now handles pages that reload after a cookie banner, and CLI commands start faster. Renders inside a macOS sandbox no longer fail, and local renders check audio peaks faster.
+Website capture now handles pages that reload after a cookie banner, and CLI commands start faster. Renders inside a macOS sandbox no longer fail, accented text shows correctly in `check` and `snapshot`, and a player embed without a height shows its film.
 
 ## Fixes
 
 - **CLI:** Website capture waits for a page that reloads after its cookie banner closes, so assets and scroll screenshots are no longer empty ([0693839b5](https://github.com/heygen-com/hyperframes/commit/0693839b52306cbe35ee508f7b4c4b6f914a4fae), [#4949](https://github.com/heygen-com/hyperframes/pull/4949)).
 - **CLI:** `check` prints progress while it makes browser-playable copies of phone videos ([b7fa007bf](https://github.com/heygen-com/hyperframes/commit/b7fa007bf3cfb03a62bbb5460009c7e628e3bb2d), [#5953](https://github.com/heygen-com/hyperframes/pull/5953)).
+- **CLI:** `check`, `snapshot` and Studio show accented and non-Latin project text correctly instead of garbled ([6d357ff0d](https://github.com/heygen-com/hyperframes/commit/6d357ff0d8dbb88b8d19fe689c15f0808724e52a), [#5843](https://github.com/heygen-com/hyperframes/pull/5843)).
 - **Producer:** Renders inside an agent's macOS sandbox no longer fail when reading the system uptime ([26a5ab775](https://github.com/heygen-com/hyperframes/commit/26a5ab775b77fde3c2f08839ba34c93f86e7b9da), [#5842](https://github.com/heygen-com/hyperframes/pull/5842)).
 - **Producer:** The disk-space error suggests `--workers 1` only when one worker would stream ([f0ef4cb9d](https://github.com/heygen-com/hyperframes/commit/f0ef4cb9d47986d6cc00fcffc95763e6f19b4c15), [#5934](https://github.com/heygen-com/hyperframes/pull/5934)).
 - **Core:** Audio volume automation stays correct when the browser refuses an overlapping curve ([e44f456b7](https://github.com/heygen-com/hyperframes/commit/e44f456b7cbf8da6389797f4fb4a776d1ea8885c), [#5927](https://github.com/heygen-com/hyperframes/pull/5927)).
+- **Player:** An embed that sets no height shows its film at the film's shape instead of 0 px tall ([46cb5ca44](https://github.com/heygen-com/hyperframes/commit/46cb5ca446c18dbd02e4a618f488d8237bc4482c), [#5932](https://github.com/heygen-com/hyperframes/pull/5932)).
 
 ## Performance
 
@@ -29,6 +31,7 @@ Website capture now handles pages that reload after a cookie banner, and CLI com
 - **CLI:** Commands start sooner by compiling registry schemas on first use ([d898ad89e](https://github.com/heygen-com/hyperframes/commit/d898ad89eef52e12ebd4fd90f03c1cdb53ba143c), [#5935](https://github.com/heygen-com/hyperframes/pull/5935)).
 - **CLI:** `check` splits its samples over a second Chrome when a core and memory are spare ([952c6ba1c](https://github.com/heygen-com/hyperframes/commit/952c6ba1c5cdef9411a7daad2b550e63010661c2), [#5896](https://github.com/heygen-com/hyperframes/pull/5896)).
 - **Producer:** Local renders check the audio peak in parallel segments, as cloud plans do ([e319e6449](https://github.com/heygen-com/hyperframes/commit/e319e644920c64d9c5ba366d607ba89cd4bd2601), [#5942](https://github.com/heygen-com/hyperframes/pull/5942)).
+- **Producer:** Renders the fast capture refuses keep their parallel workers instead of being pinned to one or three ([30f514b13](https://github.com/heygen-com/hyperframes/commit/30f514b13a00953ef9e23c64de009a122236d12f), [#5945](https://github.com/heygen-com/hyperframes/pull/5945)).
 
 ## Internal
 
