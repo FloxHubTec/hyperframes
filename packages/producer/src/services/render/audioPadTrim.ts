@@ -385,14 +385,12 @@ export async function constrainAacTruePeak(input: {
   loweredDb?: number;
 }> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
-  const encode = defaultAacEncoder(timeoutMs, input.signal);
   return enforceAacTruePeak({
     audioPath: input.audioPath,
     targetDurationSeconds: input.targetDurationSeconds,
     signal: input.signal,
     probeTruePeak: (audioPath, signal) => measureTruePeakDbfs(audioPath, { timeoutMs, signal }),
-    encode: (inputPath, outputPath, durationSeconds, filter) =>
-      encode(input.sourcePath ?? inputPath, outputPath, durationSeconds, filter),
+    encode: defaultAacEncoder(timeoutMs, input.signal, input.sourcePath),
   });
 }
 
@@ -585,11 +583,18 @@ async function defaultRunFfmpeg(
   return toStepResult(await runFfmpeg(args, { signal, timeout: timeoutMs }), timeoutMs);
 }
 
-function defaultAacEncoder(timeoutMs: number, signal?: AbortSignal): AacEncoder {
+function defaultAacEncoder(
+  timeoutMs: number,
+  signal?: AbortSignal,
+  pcmSourcePath?: string,
+): AacEncoder {
   return async (inputPath, outputPath, durationSeconds, filter) => {
-    const options = { signal, timeout: timeoutMs, filter };
+    // Each segment decodes its input from the start: cheap from PCM, a second lossy pass from AAC.
+    const options = pcmSourcePath
+      ? { signal, timeout: timeoutMs, filter }
+      : { signal, timeout: timeoutMs, filter, segments: 1 };
     return toStepResult(
-      await encodeAac(inputPath, outputPath, durationSeconds, options),
+      await encodeAac(pcmSourcePath ?? inputPath, outputPath, durationSeconds, options),
       timeoutMs,
     );
   };

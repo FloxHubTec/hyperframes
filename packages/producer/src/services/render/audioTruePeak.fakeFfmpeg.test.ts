@@ -42,7 +42,10 @@ const scanFilters = () =>
     .filter(Boolean);
 
 beforeEach(() => probed(180, 48_000));
-afterEach(() => vi.mocked(runFfmpeg).mockReset());
+afterEach(() => {
+  vi.mocked(runFfmpeg).mockReset();
+  vi.mocked(encodeAac).mockReset();
+});
 
 describe("measureTruePeakDbfs against ffmpeg's stderr", () => {
   it("throws when ffmpeg prints no true-peak summary", async () => {
@@ -107,11 +110,11 @@ describe("a local render's audio pad/trim", () => {
   });
 });
 
-describe("the plan's true-peak correction", () => {
+describe("the true-peak correction", () => {
   const dir = mkdtempSync(join(tmpdir(), "hf-peak-correct-"));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  it("re-encodes the PCM mix, not the AAC, in the encoder's parallel segments", async () => {
+  async function correctHotAudio(sourcePath?: string) {
     const scan = (dbfs: string) =>
       ran(true, `${FRAME.replaceAll("-3.0", dbfs)}\n${SUMMARY.replace("-3.0", dbfs)}`);
     vi.mocked(runFfmpeg).mockImplementation(async (args, opts) => {
@@ -125,22 +128,31 @@ describe("the plan's true-peak correction", () => {
     });
     const audioPath = join(dir, "audio.m4a");
     writeFileSync(audioPath, "mixed");
-
-    const sourcePath = join(dir, "mix.wav");
     const result = await constrainAacTruePeak({
       audioPath,
-      sourcePath,
+      ...(sourcePath ? { sourcePath } : {}),
       targetDurationSeconds: 180,
       timeoutMs: 1000,
     });
-
     expect(result).toEqual({ success: true, loweredDb: 1.2 });
     expect(vi.mocked(encodeAac)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(encodeAac).mock.calls[0]![0]).toBe(sourcePath);
-    expect(vi.mocked(encodeAac).mock.calls[0]![3]).toEqual({
+    return { audioPath, call: vi.mocked(encodeAac).mock.calls[0]! };
+  }
+
+  it("re-encodes the plan's PCM mix, not the AAC, in the encoder's parallel segments", async () => {
+    const sourcePath = join(dir, "mix.wav");
+    const { call } = await correctHotAudio(sourcePath);
+    expect(call[0]).toBe(sourcePath);
+    expect(call[3]).toEqual({
       signal: undefined,
       timeout: 1000,
       filter: expect.stringMatching(/^volume=-1\.200dB,/),
     });
+  });
+
+  it("re-encodes an AAC without its PCM in one encoder, not decoded again per segment", async () => {
+    const { audioPath, call } = await correctHotAudio();
+    expect(call[0]).toBe(audioPath);
+    expect(call[3]).toMatchObject({ segments: 1 });
   });
 });
