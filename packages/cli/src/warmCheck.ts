@@ -1,10 +1,16 @@
 import { unlinkSync } from "node:fs";
 import { connect, createServer, type Socket } from "node:net";
-import { Writable } from "node:stream";
 import { prelaunchBrowserForCheck } from "./commands/check.js";
 import "./utils/checkBrowser.js";
 import { registerRootExitRequester } from "./utils/commandResult.js";
-import { Frame, encodeFrame, frameReader, sameEnv, type WarmRequest } from "./warmCheckProtocol.js";
+import {
+  Frame,
+  encodeFrame,
+  frameForwarder,
+  frameReader,
+  sameEnv,
+  type WarmRequest,
+} from "./warmCheckProtocol.js";
 
 const [address = "", idleMs = "0", ...checkArgs] = process.argv.slice(2);
 const startEnv = { ...process.env };
@@ -21,15 +27,6 @@ process.on("exit", () => {
   }
 });
 
-function forward(socket: Socket, type: Frame): typeof process.stdout.write {
-  const sink = new Writable({
-    write(chunk: Buffer, _encoding, next) {
-      socket.write(encodeFrame(type, chunk), next);
-    },
-  });
-  return sink.write.bind(sink) as typeof process.stdout.write;
-}
-
 async function serve(socket: Socket, request: WarmRequest): Promise<void> {
   if (!sameEnv(request.env, startEnv)) {
     socket.end(encodeFrame(Frame.Declined, "environment"), () => exit(0));
@@ -44,8 +41,8 @@ async function serve(socket: Socket, request: WarmRequest): Promise<void> {
   socket.on("close", () => {
     if (!finished) process.kill(process.pid, "SIGKILL");
   });
-  process.stdout.write = forward(socket, Frame.Stdout);
-  process.stderr.write = forward(socket, Frame.Stderr);
+  process.stdout.write = frameForwarder(socket, Frame.Stdout);
+  process.stderr.write = frameForwarder(socket, Frame.Stderr);
   process.exit = ((code?: number | string | null) =>
     finish(Number(code ?? process.exitCode ?? 0))) as typeof process.exit;
   process.chdir(request.cwd);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Frame, encodeFrame, frameReader, sameEnv } from "./warmCheckProtocol.js";
+import { Frame, encodeFrame, frameForwarder, frameReader, sameEnv } from "./warmCheckProtocol.js";
 
 describe("sameEnv", () => {
   it("ignores the shell's per-command variables and unset values", () => {
@@ -30,5 +30,18 @@ describe("frames", () => {
       [Frame.Exit, "0"],
       [Frame.Stderr, ""],
     ]);
+  });
+});
+
+describe("frameForwarder", () => {
+  it("hands every write to the socket before returning, so ending the socket loses none", () => {
+    const sent: Buffer[] = [];
+    const write = frameForwarder({ write: (chunk: Buffer) => sent.push(chunk) > 0 }, Frame.Stdout);
+    write("one ");
+    write(Buffer.from("two "));
+    write("thrée", "utf8");
+    const seen: string[] = [];
+    frameReader((_type, body) => seen.push(body.toString()))(Buffer.concat(sent));
+    expect(seen).toEqual(["one ", "two ", "thrée"]);
   });
 });

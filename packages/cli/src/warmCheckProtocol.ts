@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, statSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
+import { Writable } from "node:stream";
 import { join } from "node:path";
 
 export const WARM_IDLE_MS = 5 * 60_000;
@@ -64,4 +65,17 @@ export function frameReader(onFrame: (type: Frame, body: Buffer) => void): (chun
       pending = pending.subarray(5 + length);
     }
   };
+}
+
+export function frameForwarder(
+  socket: { write(frame: Buffer): unknown },
+  type: Frame,
+): typeof process.stdout.write {
+  const sink = new Writable({
+    write(chunk: Buffer, _encoding, next) {
+      socket.write(encodeFrame(type, chunk));
+      next();
+    },
+  });
+  return sink.write.bind(sink) as typeof process.stdout.write;
 }
