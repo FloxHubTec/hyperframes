@@ -9,7 +9,11 @@
   },
   "files": [
     "src",
-    "dist"
+    "dist",
+    "!dist/assets",
+    "!dist/icons",
+    "!dist/index.html",
+    "!dist/favicon.svg"
   ],
   "type": "module",
   "main": "./src/index.ts",
