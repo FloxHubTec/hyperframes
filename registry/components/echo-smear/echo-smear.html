@@ -1,3 +1,52 @@
+<!--
+  Echo Smear — a distance-adaptive streak. The faster an element moves, the more time-offset copies trail
+  behind it; below a speed threshold there are none. It is After Effects' Echo effect (Maximum operator)
+  with its copy count and spacing driven by the layer's own speed.
+
+  Usage: paste this snippet into your composition, then call attachEchoSmear() once, after every tween on
+  the timeline is defined and before window.__timelines is registered.
+
+    attachEchoSmear(targets, timeline, options?)
+
+  targets   a selector, an Element, or an array of either. Each must be absolutely positioned, animated by
+            GSAP (x, y, rotation, scaleX, scaleY, opacity), and styled by CLASS: the copies are clones and
+            drop ids, so id-based CSS rules do not reach them.
+  options   length        % of the last frame's travel the streak spans (default 100)
+            threshold     px of travel per frame before any smear shows (default 40)
+            countMult     multiplies the number of copies (default 1); raise it if you see stepping
+            maxEchoes     most copies per element per frame (default 60); also the DOM cost: copies are
+                          built once, maxEchoes per target
+            measurePoint  [x, y] as fractions of the element's box, the point whose travel is measured
+                          (default null = the box centre). Text uses [0, 0.85], near its baseline origin,
+                          so a spinning or squashing letter counts as moving
+            edgeSpacing   px (default 1.5). The count is raised until the element's farthest point moves at
+                          most this far between copies, so a spinning element's outer edge stays smooth.
+                          0 gives After Effects' exact count, with visible steps on a spin
+            subframes     samples per frame when the motion is recorded (default 8)
+            operator      "maximum" (default): copies combine by per-pixel brightest value inside an
+                          isolated group, never with the background. "normal" stacks them
+            fps           frame rate (default: the render's, then the root's data-fps, then 30)
+
+  How the count works, per frame:
+    travel = how far the measured point moved over the last half frame
+    n      = travel > threshold / 2 ? round(travel * length / 100 * countMult) : 0
+    then, if edgeSpacing > 0, n is raised to cover the element's edge travel, and capped at maxEchoes.
+    Copy i (1..n) shows the element as it was i * (frame * length / 100) / n seconds earlier.
+
+  The output depends only on the timeline's time, never on how you got there: the motion is recorded once in
+  attachEchoSmear (one forward sweep, then the timeline returns to where it was), so seeking, scrubbing and
+  parallel render workers all give the same frame.
+
+  Limits
+    - Copies are the element's past pose, not a re-render: rotation, scale and opacity smear, but a change in
+      the element's contents (a counter, a morph) does not.
+    - The element is wrapped in a new absolutely positioned container (class es-group), which can break CSS
+      that depends on its parent and changes its stacking relative to siblings.
+    - Copies use mix-blend-mode, so a composition using this takes the screenshot capture path (not the
+      drawElement fast path).
+    - Cost grows with maxEchoes times the number of targets; keep both modest on long films.
+-->
+
 <script>
   (function () {
     var PROPS = ["x", "y", "rotation", "scaleX", "scaleY", "opacity"];
@@ -206,3 +255,19 @@
     };
   })();
 </script>
+
+<!--
+  Timeline integration:
+
+  var tl = gsap.timeline({ paused: true });
+  tl.fromTo(".card", { x: 100 }, { x: 1700, duration: 0.6, ease: "power3.inOut" }, 0.5);
+
+  // Extend to data-duration so seeks past the last tween reach the smear's update.
+  tl.set(document.body, {}, DATA_DURATION);
+
+  // After all tweens, before registration.
+  attachEchoSmear(".card", tl, { length: 100, threshold: 40 });
+
+  window.__timelines = window.__timelines || {};
+  window.__timelines["my-composition"] = tl;
+-->
