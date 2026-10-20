@@ -191,8 +191,7 @@ function probeVideo(filePath: string): VideoMeta | undefined {
   }
 }
 
-/** The stage shape a clip scaffolded into `from-file` asks for; other templates keep their own.
- * Landscape is the template's own 1920x1080, so it needs no preset. */
+// Only from-file's stage is the clip; other templates keep their own design.
 function clipResolution(
   templateId: string,
   clip: { width: number; height: number } | undefined,
@@ -401,7 +400,6 @@ function patchVideoSrc(dir: string, media: InitMediaOptions): void {
   }
 }
 
-/** Records the template and patches captions from a transcript the media left. */
 async function finishScaffold(destDir: string, templateId: string, tailwind: boolean) {
   trackInitTemplate(templateId, { tailwind });
   const transcriptFile = resolve(destDir, TRANSCRIPT_FILE);
