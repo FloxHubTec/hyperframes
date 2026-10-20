@@ -12,7 +12,6 @@ export class HistoryBusyError extends Error {
   }
 }
 
-// Windows refuses to open or link a file another process is still deleting; the lock is busy, not broken.
 const WINDOWS_BUSY = new Set(["EPERM", "EBUSY", "EACCES"]);
 
 function busyOnWindows(error: unknown): boolean {
@@ -103,7 +102,6 @@ function servedBy(file: string, urlFile: string, pid: number): string | undefine
 
 type Attempt = "claimed" | "retry" | "wait";
 
-/** One try at `file`: claimed, retry at once (the lock just went), or wait for a live owner. */
 function attemptClaim(file: string, urlFile: string, deadline: number): Attempt {
   if (claim(file)) return "claimed";
   const pid = ownerOf(file);
