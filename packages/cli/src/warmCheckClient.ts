@@ -109,7 +109,10 @@ export async function runWarmCheck(endpoint = warmCheckEndpoint(launchEnv)): Pro
       const read = frameReader((type, body) => {
         if (!trusted) return trust(type, body);
         if (type === Frame.Exit) exitCode = Number(body.toString());
-        wrote ||= sinks.get(type)?.write(body) !== undefined;
+        const sink = sinks.get(type);
+        if (!sink) return;
+        sink.write(body);
+        wrote = true;
       });
       socket.on("data", (chunk: Buffer) => {
         if (!read(chunk)) socket.destroy();

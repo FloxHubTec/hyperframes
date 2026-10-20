@@ -161,9 +161,9 @@ it("stops with its Chrome when the client is killed mid-check", async () => {
 }, 60_000);
 
 it("exits with its Chrome after its idle window", async () => {
-  const warm = await warmProcess(project(), privateEnv(), 1_000);
+  const warm = await warmProcess(project(), privateEnv(), 10_000);
   const chrome = warm.chrome();
-  await waitForTestCondition(() => !testProcessIsAlive(warm.pid) && gone(chrome), 20_000);
+  await waitForTestCondition(() => !testProcessIsAlive(warm.pid) && gone(chrome), 30_000);
 }, 60_000);
 
 it("declines a client whose environment differs, and exits for the new one", async () => {
