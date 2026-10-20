@@ -113,7 +113,10 @@ describe.skipIf(process.platform === "win32")("extractAllVideoFrames ffmpeg conc
     "finishes tone-mapped cuts of shared sources in the one slot, probing each source once",
     async () => {
       const hlg = [
-        ...["-vf", "zscale=p=bt2020:t=arib-std-b67:m=bt2020nc:r=tv,format=yuv420p"],
+        ...[
+          "-vf",
+          "zscale=pin=bt709:tin=bt709:min=bt709:p=bt2020:t=arib-std-b67:m=bt2020nc:r=tv,format=yuv420p",
+        ],
         ...["-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc"],
       ];
       const sources = await Promise.all(
