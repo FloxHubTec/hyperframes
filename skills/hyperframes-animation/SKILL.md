@@ -162,6 +162,7 @@ Read the matching file directly when its topic applies; the indexes remain avail
 - [Anchored Layout Expand](rules/anchored-layout-expand.md) — Read when applying this atomic motion recipe.
 - [ASR Keyword Glow](rules/asr-keyword-glow.md) — Read when applying this atomic motion recipe.
 - [Avatar Cloud Network](rules/avatar-cloud-network.md) — Read when applying this atomic motion recipe.
+- [Baked Sim](rules/baked-sim.md) — Read when applying this atomic motion recipe.
 - [Two-Phase Camera Cursor Tracking](rules/camera-cursor-tracking.md) — Read when applying this atomic motion recipe.
 - [Card Morph Anchor](rules/card-morph-anchor.md) — Read when applying this atomic motion recipe.
 - [Center-Outward Expansion](rules/center-outward-expansion.md) — Read when applying this atomic motion recipe.

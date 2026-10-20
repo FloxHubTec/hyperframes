@@ -7,6 +7,15 @@ metadata:
 
 # Baked Sim
 
+## Contents
+
+- [How It Works](#how-it-works)
+- [Recipe](#recipe)
+- [Variations](#variations)
+- [Values](#values)
+- [Critical Constraints](#critical-constraints)
+- [See also](#see-also)
+
 A hanging pennant catching wind, a rope settling, a cloud of debris tumbling: motion that comes from a **simulation** — integration, constraints, forces — not from an ease. A simulation is stateful by nature (frame N depends on frame N−1), which is exactly what a seeked renderer cannot run. So the simulation runs **once, offline**, at build time, and the composition replays its output by frame index. The renderer sees a lookup, never an integrator.
 
 Boundaries: [particle-burst.md](particle-burst.md) needs no bake — each particle is a closed-form ballistic function of time and evaluates directly. Bake when the bodies **interact** (constraints, collisions, wind on a chain, flocking) or the step is iterative. A [sine-wave-loop.md](sine-wave-loop.md) idle is neither; keep it analytic.
