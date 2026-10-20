@@ -123,6 +123,8 @@ function page(poseOf) {
         const p = fn(v);
         el.style.transform = matrixCss(p);
         if (p.opacity !== undefined) el.style.opacity = String(p.opacity);
+        if (p.filter !== undefined) el.style.filter = p.filter;
+        if (p.off) el.__off = p.off;
       }
       if (!suppress) {
         updates.forEach((u) => u());
@@ -146,6 +148,12 @@ function page(poseOf) {
     document: win.document,
     Element: win.Element,
     getComputedStyle: (e) => win.getComputedStyle(e),
+    // The snippet must not observe resizes: a callback's first run depends on the first frame drawn.
+    ResizeObserver: class {
+      constructor() {
+        throw new Error("echo-smear must not construct a ResizeObserver");
+      }
+    },
     console: con,
   });
   return { win, tl, counts, warnings, attach: win.attachEchoSmear };
@@ -157,7 +165,21 @@ function setup(html, drives) {
   const poseOf = new Map();
   const pg = page(poseOf);
   pg.win.document.body.innerHTML = html;
-  for (const [id, fn] of Object.entries(drives)) poseOf.set(pg.win.document.getElementById(id), fn);
+  for (const [id, fn] of Object.entries(drives)) {
+    const el = pg.win.document.getElementById(id);
+    poseOf.set(el, fn);
+    // happy-dom has no layout: the offset box is whatever the drive last said (default 40x20 at 0,0).
+    for (const [prop, key] of [
+      ["offsetLeft", "l"],
+      ["offsetTop", "t"],
+      ["offsetWidth", "w"],
+      ["offsetHeight", "h"],
+    ]) {
+      Object.defineProperty(el, prop, {
+        get: () => (el.__off || { l: 0, t: 0, w: 40, h: 20 })[key],
+      });
+    }
+  }
   return { pg, doc: pg.win.document };
 }
 const shownCopies = (doc) =>
@@ -437,4 +459,124 @@ test("demo.html carries the component's snippet verbatim", async () => {
     squash(demo).includes(squash(library)),
     "the demo's inlined snippet differs from echo-smear.html",
   );
+});
+
+// Fix pass after the final review of the rewrite.
+test("copies are placed on the target's box even when they were hidden at the last box change", () => {
+  const drive = (t) => ({
+    x: 1500 * t * t,
+    off: t >= 0.5 ? { l: 200, t: 30, w: 40, h: 20 } : { l: 350, t: 150, w: 40, h: 20 },
+  });
+  const { pg, doc } = setup(ROOT('<div id="a" style="width:40px;height:20px"></div>'), {
+    a: drive,
+  });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.1); // few copies shown, the box is (350, 150)
+  pg.tl.seek(0.9); // many shown, the box is now (200, 30)
+  const shown = shownCopies(doc);
+  assert.ok(shown.length > 5, `copies ${shown.length}`);
+  assert.ok(
+    shown.every((c) => c.style.left === "200px" && c.style.top === "30px"),
+    "every shown copy is on the current box",
+  );
+});
+
+test("a static target's copies sit on its box from the first frame", () => {
+  const { pg, doc } = setup(ROOT('<div id="a" style="width:40px;height:20px"></div>'), {
+    a: (t) => ({ x: RUN.x * t, off: { l: 350, t: 150, w: 40, h: 20 } }),
+  });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  const shown = shownCopies(doc);
+  assert.ok(shown.length > 0);
+  assert.ok(shown.every((c) => c.style.left === "350px" && c.style.top === "150px"));
+});
+
+test("a target inside a shadow root attaches, and its rules live in that root", () => {
+  const poseOf = new Map();
+  const pg = page(poseOf);
+  const host = pg.win.document.createElement("div");
+  pg.win.document.body.appendChild(host);
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML = '<div id="a" style="position:absolute;width:40px;height:20px"></div>';
+  const a = shadow.getElementById("a");
+  poseOf.set(a, (t) => ({ x: RUN.x * t }));
+  assert.doesNotThrow(() => pg.attach(a, pg.tl, { threshold: 10, edgeSpacing: 0 }));
+  assert.doesNotThrow(() => pg.tl.seek(0.5));
+  assert.ok(shadow.querySelector("style"), "the copies' rules are in the shadow root");
+});
+
+test("filter and the other non-transform styles follow the recorded time", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), {
+    a: (t) => ({ x: RUN.x * t, filter: t < 0.2 ? "none" : "blur(2px)" }),
+  });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  const shown = shownCopies(doc);
+  assert.ok(shown.length > 0);
+  assert.ok(
+    shown.every((c) => c.style.filter === "blur(2px)"),
+    "a copy carries the filter the target had then",
+  );
+});
+
+test("the snippet never constructs a ResizeObserver", () => {
+  const { pg } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
+  assert.doesNotThrow(() => pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 }));
+});
+
+test("copies carry the parent's perspective, because they are grandchildren of it", () => {
+  const { pg, doc } = setup(
+    ROOT(`<div id="p" style="position:absolute;perspective:400px"><div id="a" ${ABS}></div></div>`),
+    { a: (t) => ({ x: RUN.x * t }) },
+  );
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  const shown = shownCopies(doc);
+  assert.ok(shown.length > 0);
+  assert.ok(
+    shown.every((c) => c.style.transform.startsWith("perspective(400px) ")),
+    shown[0].style.transform,
+  );
+});
+
+test("media with children does not shift the style rules of what follows it", () => {
+  const { pg, doc } = setup(
+    ROOT(`<div id="a" ${ABS}><video><source src="x.mp4"></video><p class="t">x</p></div>`),
+    { a: (t) => ({ x: RUN.x * t }) },
+  );
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 2 });
+  // root, the media's stand-in, the paragraph: three rules, not four.
+  assert.equal(doc.getElementById("hf-es-styles").childNodes.length, 3);
+});
+
+test("a copy is sized to the offset box with border-box, so padding is not added twice", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), { a: (t) => ({ x: RUN.x * t }) });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  assert.ok(shownCopies(doc).every((c) => c.style.boxSizing === "border-box"));
+});
+
+test("an SVG child target is skipped with a warning", () => {
+  const { pg, doc } = setup(
+    ROOT(`<svg id="s" ${ABS}><rect id="r" width="10" height="10"></rect></svg>`),
+    {
+      r: (t) => ({ x: RUN.x * t }),
+    },
+  );
+  pg.attach("#r", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  assert.equal(doc.querySelectorAll("[data-hf-echo-group]").length, 0);
+  assert.ok(
+    pg.warnings.some((w) => /svg/i.test(w)),
+    pg.warnings.join(" | "),
+  );
+});
+
+test("copies carry the recorded opacity", () => {
+  const { pg, doc } = setup(ROOT(`<div id="a" ${ABS}></div>`), {
+    a: (t) => ({ x: RUN.x * t, opacity: 0.5 }),
+  });
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  assert.ok(shownCopies(doc).every((c) => c.style.opacity === "0.5"));
 });

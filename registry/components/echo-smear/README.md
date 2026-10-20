@@ -18,8 +18,8 @@ timeline:
 attachEchoSmear(".card", tl, { length: 100, threshold: 40 });
 ```
 
-Targets must be absolutely positioned, animated by GSAP, and styled by class (the copies are clones
-and drop ids). The header comment in the snippet documents every option and the limits.
+Targets are anything GSAP moves with a transform (not an element inside an `<svg>`; attach to the
+`<svg>`). The header comment in the snippet documents every option and the limits.
 
 ## Demo
 
