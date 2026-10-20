@@ -42,6 +42,8 @@ async function serve(socket: Socket, request: WarmRequest): Promise<void> {
   const finish = (code: number) => {
     if (finished) return;
     finished = true;
+    server.close();
+    listening = false;
     socket.end(encodeFrame(Frame.Exit, String(code)), () => exit(code));
   };
   socket.on("close", () => {
@@ -67,8 +69,6 @@ function accept(socket: Socket, request: WarmRequest, nonce: string): void {
   const fresh = !served && sameProof(keyed(token, "client", nonce), request.proof);
   if (!fresh || !sameProof(startDigest, request.envDigest)) return decline(socket, fresh);
   served = socket;
-  server.close();
-  listening = false;
   clearTimeout(idle);
   void serve(socket, request);
 }

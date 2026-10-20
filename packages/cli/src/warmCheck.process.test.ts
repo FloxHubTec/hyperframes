@@ -96,6 +96,23 @@ function findings(json: string) {
   return report;
 }
 
+function forgedRequest(env: Record<string, string>, dir: string): Promise<Frame[]> {
+  return new Promise((resolve, reject) => {
+    const seen: Frame[] = [];
+    const socket = connect(warmCheckEndpoint(env)!.address, () => {
+      socket.write(encodeFrame(Frame.Hello, "nonce"));
+      const request = { argv: ["check", dir], script: "x", cwd: dir, envDigest: "x", proof: "x" };
+      socket.write(encodeFrame(Frame.Request, JSON.stringify(request)));
+    });
+    socket.on(
+      "data",
+      frameReader((type) => seen.push(type)),
+    );
+    socket.on("error", reject);
+    socket.on("close", () => resolve(seen));
+  });
+}
+
 function impostor(address: string, reply?: Buffer) {
   const frames: Frame[] = [];
   const server = createServer((socket) => {
@@ -182,6 +199,7 @@ it("leaves a second client to run cold while it serves the first", async () => {
   const warm = await warmProcess(dir, env);
   client(dir, env);
   await waitForTestCondition(warm.serving, 30_000);
+  expect(await forgedRequest(env, dir)).toEqual([Frame.Proof, Frame.Declined]);
   const second = client(dir, env);
   expect(await second.done).toBe(0);
   expect(second.stdout()).toBe("NOT SERVED\n");
@@ -191,20 +209,7 @@ it("declines a request whose proof is wrong, then still serves a genuine client"
   const env = privateEnv();
   const dir = project();
   const warm = await warmProcess(dir, env);
-  const declined = await new Promise<Frame[]>((resolve) => {
-    const seen: Frame[] = [];
-    const socket = connect(warmCheckEndpoint(env)!.address, () => {
-      socket.write(encodeFrame(Frame.Hello, "nonce"));
-      const request = { argv: ["check", dir], script: "x", cwd: dir, envDigest: "x", proof: "x" };
-      socket.write(encodeFrame(Frame.Request, JSON.stringify(request)));
-    });
-    socket.on(
-      "data",
-      frameReader((type) => seen.push(type)),
-    );
-    socket.on("close", () => resolve(seen));
-  });
-  expect(declined).toEqual([Frame.Proof, Frame.Declined]);
+  expect(await forgedRequest(env, dir)).toEqual([Frame.Proof, Frame.Declined]);
   expect(testProcessIsAlive(warm.pid)).toBe(true);
   const served = client(dir, env);
   expect(await served.done).toBe(0);
