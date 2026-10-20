@@ -14,7 +14,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
 });
 
-/** A home whose owner.pid a live process holds, refuses reads, and is removed after `ms`, as Windows does mid-delete. */
+/** A home whose owner.pid a live process holds, refuses reads, and vanishes after `ms`, as Windows does mid-delete. */
 function deletingOwner(ms: number): string {
   const home = mkdtempSync(join(tmpdir(), "hf-owner-lock-"));
   homes.push(home);
