@@ -62,10 +62,12 @@ export function NumberField({
       setInvalid(true);
       return;
     }
+    const bounded = Math.min(max ?? Infinity, Math.max(min ?? -Infinity, next));
+    setDraft(bounded);
     setInvalid(false);
-    if (next === committedRef.current) return;
-    committedRef.current = next;
-    onCommit(next);
+    if (bounded === committedRef.current) return;
+    committedRef.current = bounded;
+    onCommit(bounded);
     onTrack?.();
   };
 
