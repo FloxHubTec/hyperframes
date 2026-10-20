@@ -12,10 +12,8 @@ const FRAME_SAMPLES = 1024;
 const MIN_SEGMENT_SECONDS = 60;
 // Fixed rather than the core count, so the bytes (and the planHash) do not depend on the machine.
 const MAX_SEGMENTS = 8;
-// Encoded on each side of a segment and dropped. The encoder's rate control takes about
-// 10 s to settle (its error is higher until then), so a segment starts 10 s before its cut,
-// the first in digital silence: opening cold on quiet sound, the encoder codes the first loud
-// frame a coarse step hot (up to 4.5 dB), and again on every re-encode of the result.
+// Encoded around each segment and dropped: rate control settles over ~10 s, and opening cold on
+// quiet sound codes the first loud frame up to 4.5 dB hot, so the first segment opens in silence.
 const PRE_ROLL_FRAMES = 469;
 const POST_ROLL_FRAMES = 8;
 const AAC_ARGS = ["-acodec", "aac", "-b:a", "192k"];
@@ -57,7 +55,7 @@ function planSegments(totalDuration: number, count: number) {
   });
 }
 
-/** `input`, after `filter`, is 48 kHz audio of exactly `totalDuration`. */
+/** `input`, after `filter`, is audio of exactly `totalDuration`. */
 export async function encodeAac(
   input: string,
   outputPath: string,
@@ -82,10 +80,8 @@ export async function encodeAac(
             "-i",
             input,
             "-af",
-            filter ? `${filter},${trim}` : trim,
+            [filter, `aresample=${SAMPLE_RATE}`, trim].filter(Boolean).join(","),
             ...AAC_ARGS,
-            "-ar",
-            String(SAMPLE_RATE),
             "-f",
             "adts",
             "-y",

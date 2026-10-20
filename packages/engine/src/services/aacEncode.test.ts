@@ -171,6 +171,33 @@ describe.skipIf(!HAS_FFMPEG)("encodeAac", () => {
     expect(Math.max(...growthDb), `peak growth per signal, dB: ${report}`).toBeLessThan(1);
   }, 120_000);
 
+  it("keeps a tempo-changed 44.1 kHz track at lag 0 against the same filter uncoded", async () => {
+    const source = join(dir, "rate.wav");
+    ffmpeg(["-f", "lavfi", "-i", "anoisesrc=d=6:c=pink:r=44100:a=0.3", "-ac", "2", "-y", source]);
+    const output = join(dir, "rate.m4a");
+    const encoded = await encodeAac(source, output, 4, { timeout: 60_000, filter: "atempo=1.5" });
+    expect(encoded.success).toBe(true);
+
+    const mono = (stereo: Float32Array) =>
+      Float32Array.from(
+        { length: stereo.length / 2 },
+        (_, i) => stereo[2 * i]! + stereo[2 * i + 1]!,
+      );
+    const reference = mono(decode(source, "atempo=1.5,aresample=48000"));
+    const coded = mono(decode(output));
+    const correlationAt = (lag: number) => {
+      let [dot, rr, cc] = [0, 0, 0];
+      for (let i = 72_000; i < 96_000; i++) {
+        const [r, c] = [reference[i]!, coded[i + lag] ?? 0];
+        [dot, rr, cc] = [dot + r * c, rr + r * r, cc + c * c];
+      }
+      return dot / Math.sqrt(rr * cc);
+    };
+    const scores = Array.from({ length: 4097 }, (_, k) => correlationAt(k - 2048));
+    expect(scores.indexOf(Math.max(...scores)) - 2048).toBe(0);
+    expect(correlationAt(0)).toBeGreaterThan(0.95);
+  }, 60_000);
+
   it("leaves no click at the joins of a pure tone", async () => {
     const source = join(dir, "tone.wav");
     ffmpeg([
