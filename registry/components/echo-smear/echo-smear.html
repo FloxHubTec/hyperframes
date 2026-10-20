@@ -8,11 +8,10 @@
 
     attachEchoSmear(targets, timeline, options?)
 
-  targets   a selector, an Element, or an array of either. Each must be absolutely positioned, animated by
-            GSAP (x, y, rotation, scaleX, scaleY, opacity), and styled by CLASS: the copies are clones and
-            drop ids, so id-based CSS rules do not reach them.
-            An element that is not position:absolute or fixed is skipped with a console warning, because its
-            copies would stack in the layout and push everything after it.
+  targets   a selector, an Element, or an array of either, animated by GSAP (x, y, rotation, scaleX, scaleY,
+            opacity). Each is attached once: a later call that names it, or one of its copies, adds nothing.
+            Copies carry the element's resolved style inline, so id-based CSS still reaches them; they are
+            stills, so media inside (video, audio, iframe) is replaced by an empty box of the same size.
   options   length        % of the last frame's travel the streak spans (default 100)
             threshold     px of travel per frame before any smear shows (default 40)
             countMult     multiplies the number of copies (default 1); raise it if you see stepping
@@ -42,8 +41,9 @@
   Limits
     - Copies are the element's past pose, not a re-render: rotation, scale and opacity smear, but a change in
       the element's contents (a counter, a morph) does not.
-    - The element is wrapped in a new absolutely positioned container (class es-group), which can break CSS
-      that depends on its parent. The group takes the target's z-index, so it keeps its place in the stack.
+    - The copies live in a zero-size group inserted just before the element; the element itself is not moved or
+      restyled. The group is a new previous sibling, so sibling selectors (:first-child, +, ~) see it. It takes the
+      target's z-index and its visibility, so it keeps its place in the stack.
     - Copies use mix-blend-mode, so a composition using this takes the screenshot capture path (not the
       drawElement fast path).
     - Cost grows with maxEchoes times the number of targets; keep both modest on long films.
@@ -119,22 +119,11 @@
         if (typeof s === "string") targets.push.apply(targets, document.querySelectorAll(s));
         else if (s instanceof Element) targets.push(s);
       });
-      // A selector that also matches an earlier call's copies must not turn them into targets.
+      // One group per element, and never one around a copy: a selector that also matches an earlier call's
+      // copies (they keep the target's classes) must not turn them into targets.
+      if (!window._hfEsAttached) window._hfEsAttached = new WeakSet();
       targets = targets.filter(function (el) {
-        return !el.classList.contains("es-clone");
-      });
-      // Copies are siblings of the target; unless it is out of flow they would stack up and push the layout.
-      targets = targets.filter(function (el) {
-        var position = getComputedStyle(el).position;
-        if (position === "absolute" || position === "fixed") return true;
-        console.warn(
-          "echo-smear: " +
-            (el.id || el.className || el.tagName) +
-            " is position:" +
-            position +
-            "; its copies would shift the layout. Make it position:absolute. Skipped.",
-        );
-        return false;
+        return !window._hfEsAttached.has(el) && !el.closest("[data-hf-echo-group]");
       });
       if (!targets.length) return;
       var root = targets[0].closest("[data-composition-id]");
@@ -184,24 +173,66 @@
       api.baking--;
       tl.seek(saved, false);
 
-      // Clones: built after the bake so no tween is bound to them.
+      // A copy loses the `#id` rules that styled the original, so it carries its resolved style inline.
+      // Visibility is not frozen: the group follows the target, so a target hidden at attach still smears.
+      function resolvedStyles(source, out, parentVisibility) {
+        var cs = getComputedStyle(source);
+        var text = "";
+        for (var i = 0; i < cs.length; i++) {
+          var value = cs.getPropertyValue(cs[i]);
+          var inherited = parentVisibility === undefined || value === parentVisibility;
+          if (cs[i] === "visibility" && inherited) continue;
+          text += cs[i] + ":" + value + ";";
+        }
+        // A copy is a still of one instant: a live transition or animation would carry it somewhere
+        // the timeline never sampled.
+        out.push(text + "transition:none;animation:none;");
+        for (var c = 0; c < source.children.length; c++) {
+          resolvedStyles(source.children[c], out, cs.getPropertyValue("visibility"));
+        }
+        return out;
+      }
+
+      function paintResolvedStyles(copy, styles, cursor) {
+        copy.style.cssText = styles[cursor.i++];
+        for (var c = 0; c < copy.children.length; c++) {
+          paintResolvedStyles(copy.children[c], styles, cursor);
+        }
+      }
+
+      var MEDIA = "video,audio,iframe";
+      // Copies are stills, and the runtime does not manage media it did not mark: a live copy would show
+      // a frozen frame and fetch its source again. A box of the same size stands in for it.
+      function inertMedia(source, copy) {
+        var from = source.querySelectorAll(MEDIA);
+        var to = copy.querySelectorAll(MEDIA);
+        for (var m = 0; m < to.length; m++) {
+          var stand = document.createElement("div");
+          stand.style.cssText =
+            "display:inline-block;width:" +
+            (from[m].offsetWidth || 0) +
+            "px;height:" +
+            (from[m].offsetHeight || 0) +
+            "px;";
+          to[m].parentNode.replaceChild(stand, to[m]);
+        }
+      }
+
       var maximum = opts.operator !== "normal";
       var state = targets.map(function (el, ti) {
+        window._hfEsAttached.add(el);
+        // The copies sit in a zero-size group just before the target, so the target itself is untouched:
+        // it keeps its parent, its blend mode and its pointer events. Isolated, so the lighten between
+        // copies never mixes with the background.
+        var group = document.createElement("div");
+        group.setAttribute("data-hf-echo-group", "");
+        group.style.cssText =
+          "position:absolute;left:0;top:0;width:0;height:0;isolation:isolate;pointer-events:none;";
+        // The group is what the siblings stack against, so it takes the target's z-index.
+        var z = getComputedStyle(el).zIndex;
+        if (z && z !== "auto") group.style.zIndex = z;
+
         var clones = [];
-        if (maximum) {
-          // AE Echo "Maximum": per-channel max between copies of THIS layer only.
-          // Isolate the group so lighten never mixes with the background.
-          var wrap = document.createElement("div");
-          wrap.className = "es-group";
-          wrap.style.cssText = "position:absolute;inset:0;isolation:isolate;pointer-events:none;";
-          // The group is now what the siblings stack against, so it takes the target's z-index
-          // (without it a target that sat above a sibling would drop below it).
-          var z = getComputedStyle(el).zIndex;
-          if (z && z !== "auto") wrap.style.zIndex = z;
-          el.parentNode.insertBefore(wrap, el);
-          wrap.appendChild(el);
-          el.style.mixBlendMode = "lighten";
-        }
         for (var i = 0; i < maxEchoes; i++) {
           var c = el.cloneNode(true);
           c.removeAttribute("id");
@@ -220,18 +251,48 @@
             n.removeAttribute("id");
           });
           c.setAttribute("aria-hidden", "true");
-          c.classList.add("es-clone");
-          c.style.visibility = "hidden";
-          el.parentNode.insertBefore(c, el); // earlier in DOM = further below
+          inertMedia(el, c);
           clones.push(c);
         }
-        clones.reverse(); // clones[0] sits just under the original
+
+        function snapshot() {
+          // A target hidden right now (an autoAlpha entrance) is read as shown, so the copies' own
+          // resolved style is not a hidden one; the inline value goes back exactly.
+          var hidden = getComputedStyle(el).visibility !== "visible";
+          var inline = el.style.getPropertyValue("visibility");
+          var priority = el.style.getPropertyPriority("visibility");
+          if (hidden) el.style.setProperty("visibility", "visible", "important");
+          var styles;
+          try {
+            styles = resolvedStyles(el, []);
+          } finally {
+            if (hidden) el.style.setProperty("visibility", inline, priority);
+          }
+          for (var k = 0; k < clones.length; k++) {
+            paintResolvedStyles(clones[k], styles, { i: 0 });
+            clones[k].classList.add("es-clone");
+            clones[k].style.position = "absolute";
+            clones[k].style.margin = "0";
+            clones[k].style.mixBlendMode = maximum ? "lighten" : "normal";
+            clones[k].style.visibility = "hidden";
+          }
+        }
+        snapshot();
+        // Nearest copy on top: the first copy is the last child.
+        for (var k = clones.length - 1; k >= 0; k--) group.appendChild(clones[k]);
+        el.parentNode.insertBefore(group, el);
+        var watch = null;
+        if (typeof ResizeObserver === "function") {
+          watch = new ResizeObserver(snapshot);
+          watch.observe(el);
+        }
         var rc = el.getBoundingClientRect(),
           rr0 = root.getBoundingClientRect(),
           sc0 = rr0.width / (root.offsetWidth || rr0.width || 1);
         var box0 = boxOf(el, rc, sc0);
         return {
           el: el,
+          group: group,
           clones: clones,
           poses: poses[ti],
           centres: centres[ti],
@@ -268,6 +329,15 @@
               0.5 * st.radius * (Math.abs(pa[3] - pb[3]) + Math.abs(pa[4] - pb[4]));
           }
           var n = count(move, extent, cfg);
+          // The group follows the target's own visibility, set only where it differs from its parent's:
+          // an explicit value would outlive an ancestor that hides later, like a clip that has ended.
+          var current = getComputedStyle(st.el).visibility;
+          var shared = getComputedStyle(st.el.parentNode).visibility;
+          st.group.style.visibility = current === shared ? "" : current;
+          var left = st.el.offsetLeft + "px",
+            top = st.el.offsetTop + "px",
+            width = st.el.offsetWidth + "px",
+            height = st.el.offsetHeight + "px";
           for (var i = 0; i < st.clones.length; i++) {
             var c = st.clones[i];
             if (i >= n) {
@@ -275,6 +345,12 @@
               continue;
             }
             lerpTrack(st.poses, step, t - ((i + 1) * fd * (length / 100)) / n, pose);
+            // The copy sits on the target's own box, so the box is re-read every frame: a beat is free
+            // to move or resize it.
+            c.style.left = left;
+            c.style.top = top;
+            c.style.width = width;
+            c.style.height = height;
             gsap.set(c, {
               x: pose[0],
               y: pose[1],

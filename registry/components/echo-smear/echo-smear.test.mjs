@@ -183,7 +183,7 @@ test("copy i shows the pose from i copy-intervals earlier", () => {
   assert.ok(Math.abs(xs[9] - 600 * (0.5 - 10 / 300)) < 0.5, `farthest copy ${xs[9]}`);
 });
 
-test("a selector matching the copies does not re-target them, and copies lose timing attributes", () => {
+test("an element already attached is not attached again, and copies lose timing attributes", () => {
   const poseOf = new Map();
   const pg = page(poseOf);
   pg.win.document.body.innerHTML = MOVER;
@@ -193,8 +193,8 @@ test("a selector matching the copies does not re-target them, and copies lose ti
   pg.attach(".card", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 20 });
   assert.equal(
     pg.win.document.querySelectorAll(".card").length,
-    1 + 20 + 20,
-    "one original plus 20 copies per call",
+    1 + 20,
+    "one original plus one set of 20 copies: the second call attaches nothing",
   );
   assert.equal(pg.win.document.querySelectorAll(".es-clone[data-start]").length, 0);
   assert.equal(pg.win.document.querySelectorAll(".es-clone[data-duration]").length, 0);
@@ -214,22 +214,6 @@ test("a later attach does not redraw earlier copies while it records", () => {
   assert.ok(pg.calls.set <= 5, `later attach made ${pg.calls.set} writes`);
 });
 
-test("a statically positioned target is skipped with a warning, because its copies would shift the layout", () => {
-  const poseOf = new Map();
-  const pg = page(poseOf);
-  pg.win.document.body.innerHTML =
-    '<div id="root" data-composition-id="c" data-fps="30"><div id="a"></div><div id="after"></div></div>';
-  poseOf.set(pg.win.document.getElementById("a"), (t) => ({ x: 600 * t }));
-  pg.attach("#a", pg.tl, { threshold: 10 });
-  assert.equal(
-    pg.win.document.querySelectorAll(".es-clone, .es-group").length,
-    0,
-    "the DOM is untouched",
-  );
-  assert.equal(pg.warnings.length, 1);
-  assert.match(pg.warnings[0], /position:absolute/);
-});
-
 test("the group takes the target's z-index, so the wrapped target keeps its place in the stack", () => {
   const poseOf = new Map();
   const pg = page(poseOf);
@@ -237,5 +221,97 @@ test("the group takes the target's z-index, so the wrapped target keeps its plac
     '<div id="root" data-composition-id="c" data-fps="30"><div id="a" style="position:absolute;z-index:7"></div></div>';
   poseOf.set(pg.win.document.getElementById("a"), (t) => ({ x: 600 * t }));
   pg.attach("#a", pg.tl, { threshold: 10 });
-  assert.equal(pg.win.document.querySelector(".es-group").style.zIndex, "7");
+  assert.equal(pg.win.document.querySelector("[data-hf-echo-group]").style.zIndex, "7");
+});
+
+// Task 1 of the review-fix plan: the copy layer is a sibling group, like registry motion-blur.
+function fastMover(html) {
+  const poseOf = new Map();
+  const pg = page(poseOf);
+  pg.win.document.body.innerHTML = html;
+  return { pg, poseOf, doc: pg.win.document };
+}
+const ROOT = (inner) => `<div id="root" data-composition-id="c" data-fps="30">${inner}</div>`;
+
+test("the target is not re-parented or restyled", () => {
+  const { pg, poseOf, doc } = fastMover(ROOT('<div id="a" style="position:absolute"></div>'));
+  const a = doc.getElementById("a");
+  const parent = a.parentNode;
+  poseOf.set(a, (t) => ({ x: 600 * t }));
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  assert.ok(a.parentNode === parent, "same parent"); // not assert.equal: a failing diff of DOM nodes never finishes
+  assert.equal(a.style.mixBlendMode, "");
+  assert.equal(a.style.pointerEvents, "");
+  assert.ok(
+    a.previousElementSibling && a.previousElementSibling.hasAttribute("data-hf-echo-group"),
+    "the group sits just before it",
+  );
+});
+
+test("a statically positioned target smears in place", () => {
+  const { pg, poseOf, doc } = fastMover(ROOT('<div id="a"></div><div id="after"></div>'));
+  const a = doc.getElementById("a");
+  poseOf.set(a, (t) => ({ x: 600 * t }));
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  pg.tl.seek(0.5);
+  const shown = [...doc.querySelectorAll(".es-clone")].filter(
+    (c) => c.style.visibility !== "hidden",
+  );
+  assert.ok(shown.length > 0, "copies show");
+  assert.ok(
+    shown.every((c) => c.style.position === "absolute"),
+    "copies are out of flow",
+  );
+  assert.ok(doc.getElementById("after").previousElementSibling === a, "the layout is untouched");
+});
+
+test("the group mirrors the target's own visibility", () => {
+  const { pg, poseOf, doc } = fastMover(ROOT('<div id="a" style="position:absolute"></div>'));
+  const a = doc.getElementById("a");
+  poseOf.set(a, (t) => ({ x: 600 * t }));
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0 });
+  const group = a.previousElementSibling;
+  pg.tl.seek(0.5);
+  assert.equal(group.style.visibility, "", "visible target: the group follows its parent");
+  a.style.visibility = "hidden";
+  pg.tl.seek(0.5);
+  assert.equal(group.style.visibility, "hidden");
+});
+
+test("copies of copies are never targets, and an element is attached once", () => {
+  const { pg, poseOf, doc } = fastMover(
+    ROOT(
+      '<div class="word" id="w" style="position:absolute"><span class="char" id="c1"></span></div>',
+    ),
+  );
+  poseOf.set(doc.getElementById("w"), (t) => ({ x: 600 * t }));
+  poseOf.set(doc.getElementById("c1"), (t) => ({ x: 300 * t }));
+  pg.attach(".word", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 5 });
+  pg.attach(".word .char", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 5 });
+  assert.equal(
+    doc.querySelectorAll("[data-hf-echo-group]").length,
+    2,
+    "one group for .word, one for the original .char",
+  );
+  pg.attach(".word .char", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 5 });
+  assert.equal(
+    doc.querySelectorAll("[data-hf-echo-group]").length,
+    2,
+    "attaching it again adds nothing",
+  );
+});
+
+test("media inside a target is not cloned live", () => {
+  const { pg, poseOf, doc } = fastMover(
+    ROOT(
+      '<div id="a" style="position:absolute"><video poster="p.png"></video><audio></audio></div>',
+    ),
+  );
+  poseOf.set(doc.getElementById("a"), (t) => ({ x: 600 * t }));
+  pg.attach("#a", pg.tl, { threshold: 10, edgeSpacing: 0, maxEchoes: 4 });
+  assert.equal(
+    doc.querySelectorAll(".es-clone video, .es-clone audio, .es-clone iframe").length,
+    0,
+  );
+  assert.equal(doc.querySelectorAll("#a video").length, 1, "the original keeps its video");
 });
