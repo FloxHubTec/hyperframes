@@ -1218,6 +1218,10 @@ describe("core rules", () => {
       "function Ic(){var t=Date.now(),o=[];return o}});";
     const pastedGsap = `${banner}\n${gsapUmd}`;
     const producerInlinedGsap = `/* inlined: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js */\n${gsapUmd}`;
+    // Unminified builds carry the banner inside the factory.
+    const unminifiedGsap = gsapUmd.replace('"use strict";', `"use strict";${banner}`);
+    const umdBundle = (body: string) =>
+      `(function (root, factory) {\nif (typeof define === "function" && define.amd) define([], factory); else factory();\n})(this, function () {\n${body}\n});`;
     const comp = (library: string, author = "") => `
 <html><body>
   <div data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="5"></div>
@@ -1232,6 +1236,7 @@ describe("core rules", () => {
     it.each([
       ["pasted with its banner", pastedGsap],
       ["inlined by the producer", producerInlinedGsap],
+      ["unminified, banner inside its factory", unminifiedGsap],
     ])("does not flag GSAP's own internals when %s", async (_shape, library) => {
       expect(await labels(comp(library))).toEqual([]);
     });
@@ -1243,6 +1248,11 @@ describe("core rules", () => {
     it("still flags author calls before and after GSAP in the same script", async () => {
       const library = `const a = Math.random();\n${pastedGsap}\nconst b = performance.now();`;
       expect(await labels(comp(library))).toEqual(["Math.random()", "performance.now()"]);
+    });
+
+    it("checks an outer wrapper that only borrows define.amd from a nested library", async () => {
+      const library = `(function (root, factory) {\n${banner}\nwindow.seed = Math.random();\n${gsapUmd}\n})(this, function () {});`;
+      expect(await labels(comp(library))).toEqual(["Math.random()", "Date.now()"]);
     });
 
     it("checks a UMD wrapper whose GSAP banner is separated from it by other code", async () => {
@@ -1260,6 +1270,18 @@ describe("core rules", () => {
       [
         "beside it inside an outer wrapper",
         `(function () {\n${pastedGsap}\nwindow.seed = Math.random();\n})();`,
+      ],
+      [
+        "beside it inside an outer two-argument wrapper",
+        `(function (root, factory) {\n${pastedGsap}\nwindow.seed = Math.random();\n})(this, function () {});`,
+      ],
+      [
+        "beside it inside an outer UMD bundle",
+        umdBundle(`${pastedGsap}\nwindow.seed = Math.random();`),
+      ],
+      [
+        "beside unminified GSAP inside an outer UMD bundle",
+        umdBundle(`${unminifiedGsap}\nwindow.seed = Math.random();`),
       ],
     ])("still flags author code %s", async (_shape, library) => {
       expect(await labels(comp(library))).toEqual(["Math.random()"]);

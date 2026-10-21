@@ -3,7 +3,7 @@
 
 import { Parser } from "htmlparser2";
 import { parse, type CallExpression, type Comment, type Program } from "acorn";
-import { simple } from "acorn-walk";
+import { base, recursive, simple } from "acorn-walk";
 
 export type OpenTag = {
   raw: string;
@@ -568,7 +568,7 @@ function isGsapLibraryComment(comment: Comment): boolean {
   );
 }
 
-/** GSAP's UMD wrapper: `function (global, factory) { ...define.amd... }(this, function (exports) {...})`. */
+/** GSAP's UMD wrapper `function (g, f) { ...define.amd... }(this, function (e) {...})`, AMD in its own body. */
 function isUmdWrapperCall(call: CallExpression): boolean {
   const [scope, factory] = call.arguments;
   if (
@@ -579,8 +579,9 @@ function isUmdWrapperCall(call: CallExpression): boolean {
   )
     return false;
   let checksAmd = false;
-  simple(call.callee.body, {
-    MemberExpression(member) {
+  recursive(call.callee.body, null, {
+    Function() {},
+    MemberExpression(member, state, visit) {
       if (
         !member.computed &&
         member.object.type === "Identifier" &&
@@ -589,15 +590,35 @@ function isUmdWrapperCall(call: CallExpression): boolean {
         member.property.name === "amd"
       )
         checksAmd = true;
+      base.MemberExpression?.(member, state, visit);
     },
   });
   return checksAmd;
 }
 
-/**
- * Offsets of inlined GSAP library code: each UMD wrapper call with a GSAP banner (or the
- * producer's inlining comment) directly before it (minified) or inside it (unminified).
- */
+/** A GSAP banner belongs to the wrapper right after it (minified), else the innermost one around it. */
+function bannerOwner(
+  banner: Comment,
+  source: string,
+  commentAt: Map<number, Comment>,
+  wrappers: CallExpression[],
+): CallExpression | undefined {
+  let next = banner.end;
+  for (;;) {
+    while (/[\s!]/.test(source[next] ?? "")) next++;
+    const comment = commentAt.get(next);
+    if (!comment) break;
+    next = comment.end;
+  }
+  return (
+    wrappers.find((call) => call.start === next) ??
+    wrappers
+      .filter((call) => call.start <= banner.start && banner.end <= call.end)
+      .sort((a, b) => a.end - a.start - (b.end - b.start))[0]
+  );
+}
+
+/** Offsets of inlined GSAP library code: the UMD wrapper call each GSAP banner belongs to. */
 function findInlinedGsapLibrarySpans(source: string): Array<[number, number]> {
   if (!/GreenSock|inlined:/.test(source)) return [];
   const comments: Comment[] = [];
@@ -613,20 +634,19 @@ function findInlinedGsapLibrarySpans(source: string): Array<[number, number]> {
     return [];
   }
   const banners = comments.filter(isGsapLibraryComment);
-  const spans: Array<[number, number]> = [];
+  const wrappers: CallExpression[] = [];
   simple(program, {
     CallExpression(call) {
-      if (!isUmdWrapperCall(call)) return;
-      const hasBanner = banners.some(
-        (banner) =>
-          (banner.start >= call.start && banner.end <= call.end) ||
-          (banner.end <= call.start &&
-            /^[\s!]*$/.test(stripJsComments(source.slice(banner.end, call.start)))),
-      );
-      if (hasBanner) spans.push([call.start, call.end]);
+      if (isUmdWrapperCall(call)) wrappers.push(call);
     },
   });
-  return spans;
+  const commentAt = new Map(comments.map((comment) => [comment.start, comment]));
+  const owners = new Set<CallExpression>();
+  for (const banner of banners) {
+    const owner = bannerOwner(banner, source, commentAt, wrappers);
+    if (owner) owners.add(owner);
+  }
+  return [...owners].map((call): [number, number] => [call.start, call.end]);
 }
 
 export function blankInlinedGsapLibrary(source: string): string {
