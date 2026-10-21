@@ -1415,6 +1415,50 @@ describe("downloadBrowser — install failure surfaces HYPERFRAMES_BROWSER_PATH 
   );
 });
 
+describe("downloadBrowser — too little disk for the browser", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    delete process.env["HYPERFRAMES_BROWSER_PATH"];
+    delete process.env["PRODUCER_HEADLESS_SHELL_PATH"];
+    installChildProcessMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.doUnmock("node:fs");
+    vi.doUnmock("node:os");
+    vi.doUnmock("node:child_process");
+    vi.doUnmock("@puppeteer/browsers");
+    vi.doUnmock("../telemetry/system.js");
+  });
+
+  // On a disk that fills mid-unzip, unzip waits on a "Continue? (y/n)" nobody answers, holding the install lock.
+  it.each([
+    { freeMb: 400, downloads: false },
+    { freeMb: 4096, downloads: true },
+  ])("downloads only with room for it: $freeMb MB free", async ({ freeMb, downloads }) => {
+    installFsMocks({ existing: new Set([CACHE_ROOT]) });
+    const install = vi.fn(async () => ({ executablePath: HF_BINARY }));
+    installPuppeteerBrowsersMock({ installedInHfCache: [], installImpl: install });
+    const freeDiskMb = vi.fn(() => freeMb);
+    vi.doMock("../telemetry/system.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../telemetry/system.js")>()),
+      getFreeDiskMb: freeDiskMb,
+    }));
+
+    const { ensureBrowser } = await import("./manager.js");
+    const result = await ensureBrowser().catch((error: Error) => error);
+
+    expect(freeDiskMb).toHaveBeenCalledWith(CACHE_ROOT);
+    expect(install).toHaveBeenCalledTimes(downloads ? 1 : 0);
+    if (downloads) expect(result).toMatchObject({ source: "download" });
+    else
+      expect((result as Error).message).toMatch(
+        /^Low disk space: .*needs about 512 MB.*400 MB free/,
+      );
+  });
+});
+
 // Regression guard for HF#2103: `hyperframes render` hung forever on macOS
 // (Apple Silicon) under Node >= 24.16. Root cause was NOT in this file — it was
 // the extractor `@puppeteer/browsers` <3.0.2 shells out to. That chain

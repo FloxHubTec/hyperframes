@@ -20,6 +20,7 @@ import {
   managedChromeVersion,
   pickSharedShell,
 } from "@hyperframes/engine/chrome-host-ceiling";
+import { getFreeDiskMb } from "../telemetry/system.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
 
@@ -39,6 +40,8 @@ async function loadPuppeteerBrowsers(): Promise<PuppeteerBrowsers> {
 
 const CACHE_ROOT_DIR = join(homedir(), ".cache", "hyperframes");
 const CACHE_DIR = join(homedir(), ".cache", "hyperframes", "chrome");
+// Archive and unpacked shell sit side by side in staging: 285 MB on macOS, 381 MB on Windows (Chrome 152).
+const DOWNLOAD_MB = 512;
 // Puppeteer's managed cache — where `@puppeteer/browsers install
 // chrome-headless-shell` (and `puppeteer install`) drop binaries. The engine's
 // `resolveHeadlessShellPath` scans the same directory; the CLI must look here
@@ -696,6 +699,14 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
     return ensureLinuxArmBrowser(options);
   }
 
+  // A disk that fills mid-unzip makes unzip ask "Continue? (y/n)" on a stdin install() never closes: it waits forever.
+  const freeMb = getFreeDiskMb(CACHE_ROOT_DIR);
+  if (freeMb !== null && freeMb < DOWNLOAD_MB) {
+    throw new Error(
+      `Low disk space: Chrome Headless Shell needs about ${DOWNLOAD_MB} MB to download, ` +
+        `${freeMb} MB free at ${CACHE_ROOT_DIR}. Free disk space, then retry.`,
+    );
+  }
   const { Browser, detectBrowserPlatform, install } = await loadPuppeteerBrowsers();
 
   const platform = detectBrowserPlatform();

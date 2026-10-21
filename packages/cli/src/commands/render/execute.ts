@@ -1,5 +1,6 @@
 // fallow-ignore-file code-duplication
 import { mkdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import type { CanvasResolution, OutputResolutionIssueKind } from "@hyperframes/core";
 import { c } from "../../ui/colors.js";
 import { errorBox, formatBytes } from "../../ui/format.js";
@@ -89,6 +90,7 @@ export async function executeRenderPlan(
     }
   }
 
+  if (!plan.useDocker) await refuseLowDisk(plan);
   const browserPath = plan.useDocker
     ? undefined
     : await ensureRenderBrowser(plan, cancellation?.signal);
@@ -178,6 +180,16 @@ export function renderOptionsFromPlan(
 function assertRenderActive(cancellation?: RenderCancellationScope): void {
   cancellation?.checkAncestors();
   cancellation?.signal.throwIfAborted();
+}
+
+/** The disk before the browser: a render the disk refuses must not first spend its last space on a download. */
+async function refuseLowDisk(plan: RenderPlan): Promise<void> {
+  const { checkDisk } = await import("../../browser/preflight.js");
+  const paths = new Set([tmpdir(), renderOutputDirectory(plan)]);
+  const low = [...paths].map((path) => checkDisk(path)).filter((outcome) => !outcome.ok);
+  if (low.length === 0) return;
+  for (const check of low) errorBox(check.title ?? "Low disk space", check.detail, check.hint);
+  failCommand();
 }
 
 async function ensureRenderBrowser(plan: RenderPlan, signal?: AbortSignal): Promise<string> {
