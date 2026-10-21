@@ -2063,6 +2063,23 @@ describe("check pipeline", () => {
       expect(sampled.some((time) => Math.round(time * 1000) % 125 !== 0)).toBe(true);
     });
 
+    it("samples a long film at 8 fps, finer than the overlap pass's capped grid", async () => {
+      // A 60 s film whose seven-word line shows 10.1-10.3 s, between two of the overlap grid's samples.
+      const driver = craftDriver({
+        getDuration: vi.fn(async () => 60),
+        collectCraftFrame: vi.fn(async (time: number) => {
+          const frame = craftFrame(time);
+          const line = time >= 10.1 && time < 10.3;
+          const part = craftFrame(6.5).parts[0];
+          return { ...frame, parts: line && part ? [part] : [], signature: `moving-${time}` };
+        }),
+      });
+      const { report } = await runScenario(driver);
+      const line = report.craft.findings.find((finding) => finding.code === "line_unread");
+
+      expect(line?.time).toBeCloseTo(10.1, 1);
+    });
+
     it("skips the section for --range checks and for drivers without a craft sampler", async () => {
       const ranged = await runScenario(craftDriver(), { range: [2, 8] });
       expect(ranged.report.craft).toMatchObject({ enabled: false, findings: [] });

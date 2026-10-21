@@ -7,7 +7,6 @@ const APPEAR_OPACITY = 0.5;
 const FRAME_TOLERANCE = 1;
 /** Default longest allowed fully-static window for keepsMoving, in seconds. */
 export const DEFAULT_MAX_STATIC_SEC = 2;
-/** A film may end on a still card this long; stillness inside it never counts as frozen. */
 export const END_CARD_HOLD_SEC = 3;
 
 export interface FrameSample {
@@ -218,8 +217,7 @@ function keepsMoving(
 /**
  * Evaluate motion assertions against the dense `element × time` matrix.
  * Pure — no browser. Findings reuse the LayoutIssue shape and flow through
- * inspect's existing dedupe/collapse/limit/format pipeline. With the film's
- * duration, keepsMoving leaves its last END_CARD_HOLD_SEC out of every static run.
+ * inspect's existing dedupe/collapse/limit/format pipeline.
  */
 export function evaluateMotion(
   frames: MotionFrame[],

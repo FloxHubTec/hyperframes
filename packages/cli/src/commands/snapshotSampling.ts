@@ -37,7 +37,6 @@ export function sampleSnapshotRange(
     exclusiveEnd || end === duration ? end - Math.min(0.001, (end - start) / (frames * 2)) : end;
   return Array.from({ length: frames }, (_, i) => start + ((last - start) * i) / (frames - 1));
 }
-/** The runtime's own start resolver over parsed page markup, with registered timeline lengths. */
 export function snapshotStartResolver(document: Document, durations: Record<string, number>) {
   return createRuntimeStartTimeResolver({
     documentRef: document,

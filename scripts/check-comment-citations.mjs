@@ -136,6 +136,8 @@ const PROJECT_FILES = new Set([
   "cinematic.json",
   "safe-zones.json",
   "BLOCKED.md",
+  "REVIEW.md",
+  "STORYLINES.md",
   "assets/transcript.json",
   "asset-descriptions.md",
   "extracted/page.html",

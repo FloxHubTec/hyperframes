@@ -286,7 +286,6 @@ interface GridSamples {
    * material-point geometry + dial hub per layout sample; flattened by selector
    * to detect off_pivot_rotation. */
   indicatorFrames: OffPivotFrame[];
-  /** The craft section's samples, one per dense-grid seek before the film's end. */
   craftFrames: CraftFrame[];
 }
 
@@ -570,7 +569,6 @@ async function collectGridSamples(
   return collected;
 }
 
-/** Craft judges a whole film, so a --range check skips it, as it skips the frozen-sweep guard. */
 function craftEnabled(driver: CheckAuditDriver, options: CheckOptions): boolean {
   return !options.range && typeof driver.collectCraftFrame === "function";
 }
@@ -684,10 +682,9 @@ async function collectMotionOverlapSamples(
 ): Promise<void> {
   const baseTimes = new Set(grid.layoutSamples);
   const shiftedTimes = await denseOverlapTimes(driver, grid, range);
-  // Craft seeks run first: what the grid's samples queue lands after it and is stamped with the grid's span,
-  // which a seek right after the grid would overwrite.
+  // Before the grid: a seek after it would overwrite the span the grid stamps on what its samples queue.
   if (craft) {
-    for (const time of shiftedTimes) {
+    for (const time of buildCraftSampleTimes(grid.duration)) {
       // The render's last frame lands before the duration, where the runtime has already unmounted clips.
       if (time >= grid.duration) continue;
       await driver.seekGeometry(time);
@@ -703,6 +700,22 @@ async function collectMotionOverlapSamples(
     collected.layoutIssues.push(...issues);
     await probeHold(time, shiftedTimes[index + 1] ?? Number.POSITIVE_INFINITY, issues);
   }
+}
+
+// Craft times how long a line shows, so it keeps 8 fps past the overlap pass's ceiling, up to ~75 s.
+const CRAFT_SAMPLE_FPS = 8;
+const CRAFT_MAX_SAMPLES = 600;
+
+function buildCraftSampleTimes(duration: number): number[] {
+  if (!Number.isFinite(duration) || duration <= 0) return [];
+  const count = Math.min(
+    CRAFT_MAX_SAMPLES,
+    Math.max(2, Math.ceil(duration * CRAFT_SAMPLE_FPS) + 1),
+  );
+  const step = duration / (count - 1);
+  return mergeSampleTimes(
+    Array.from({ length: count }, (_, index) => Math.round(index * step * 1000) / 1000),
+  );
 }
 
 async function collectCraftFrame(driver: CheckAuditDriver, time: number): Promise<CraftFrame[]> {
@@ -1403,7 +1416,6 @@ function annotationBoxesFrom(issues: AnchoredLayoutIssue[]): CheckAnnotationBox[
     .map((issue, index) => ({ label: `${index + 1} ${issue.code}`, bbox: issue.bbox }));
 }
 
-/** A whole-composition keepsMoving states the author's own stillness limit, so dead_stretch defers to it. */
 function wholeCompositionKeepsMoving(assertions: MotionAssertion[]): boolean {
   return assertions.some(
     (assertion) => assertion.kind === "keepsMoving" && assertion.withinSelector === undefined,
