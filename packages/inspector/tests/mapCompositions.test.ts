@@ -200,6 +200,20 @@ describe("components report compositions", () => {
     },
   );
 
+  it("keeps primary snippets when candidate context does not fit", () => {
+    const report = inspectIds([["word", "span"]], { maxBytes: 2048 }, () => {}, {
+      "index.html": [
+        '<div id="left" data-composition-src="films/a/scene.html" data-start="0"></div>',
+        "",
+        '<div id="right" data-composition-src="films/a/scene.html" data-start="20"></div>',
+      ],
+      "films/a/scene.html": ['<span id="word">Hi</span>'],
+    });
+    expect(report.snippets.map((snippet) => snippet.kind)).toEqual([["html opening tag"]]);
+    expect(report.omittedCount).toBe(2);
+    expect(report.coverage.some((line) => line.startsWith("Composition candidates"))).toBe(false);
+  });
+
   it("leaves out a composition tag another snippet already shows", () => {
     const report = inspectIds(
       [

@@ -108,14 +108,7 @@ export function mapInspection(
     omitted: [] as { id: string; bytes: number }[],
     omittedCount: 0,
     nextOffset: null as number | null,
-    coverage: merged.some((snippet) =>
-      snippet.kind.some((kind) => kind.startsWith("composition ") && kind.endsWith(" candidate")),
-    )
-      ? [
-          ...coverage,
-          "Composition candidates are alternative source mounts and their enclosing roots, not a verified runtime instance chain; all alternatives remain available within the snippet budget and pagination.",
-        ]
-      : coverage,
+    coverage,
     recordLimitReached: raw.recordLimitReached,
     hooked: raw.hooked,
     debugAvailable: true,
@@ -138,8 +131,20 @@ export function mapInspection(
   trimCandidates(maxBytes / 2, 5);
   for (let i = offset; i < selected.length; i++) {
     response.snippets.push(selected[i]);
+    const priorCoverage = response.coverage;
+    if (
+      response.coverage === coverage &&
+      selected[i].kind.some(
+        (kind) => kind.startsWith("composition ") && kind.endsWith(" candidate"),
+      )
+    )
+      response.coverage = [
+        ...coverage,
+        "Composition candidates are alternative source mounts and their enclosing roots, not a verified runtime instance chain; all alternatives remain available within the snippet budget and pagination.",
+      ];
     if (size() > maxBytes - 700) {
       response.snippets.pop();
+      response.coverage = priorCoverage;
       response.omittedCount = selected.length - i;
       response.omitted = selected
         .slice(i, i + 8)
