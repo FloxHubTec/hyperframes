@@ -138,6 +138,7 @@ function probeVideo(filePath: string): VideoMeta | undefined {
         nb_frames?: string;
         tags?: { rotate?: string };
         side_data_list?: { rotation?: number }[];
+        sample_aspect_ratio?: string;
       }[];
       format?: { duration?: string };
     } = JSON.parse(raw);
@@ -169,7 +170,10 @@ function probeVideo(filePath: string): VideoMeta | undefined {
       formatDuration,
     });
 
-    const width = videoStream.width ?? 1920;
+    // Non-square pixels (anamorphic SD, "64:45") play wider or narrower than they are stored.
+    const [sarW, sarH] = (videoStream.sample_aspect_ratio ?? "").split(":").map(Number);
+    const sar = sarW && sarH ? sarW / sarH : 1;
+    const width = Math.round((videoStream.width ?? 1920) * sar);
     const height = videoStream.height ?? 1080;
     // A phone clip is often stored landscape with a rotation; it plays (and decodes) turned upright.
     const turn = Number(
