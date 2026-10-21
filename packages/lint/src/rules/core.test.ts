@@ -1231,14 +1231,7 @@ describe("core rules", () => {
   (global = typeof globalThis !== 'undefined' ? globalThis : global || self, factory(global.Composition = {}));
 })(this, (function (exports) { 'use strict';
 
-  /*!
-   * GSAP 3.14.2
-   * https://gsap.com
-   *
-   * @license Copyright 2008-2025, GreenSock. All rights reserved.
-   * Subject to the terms at https://gsap.com/standard-license
-   * @author: Jack Doyle, jack@greensock.com
-  */
+  ${banner}
 
   var _config = {
     autoSleep: 120,
