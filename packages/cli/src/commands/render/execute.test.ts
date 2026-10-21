@@ -80,7 +80,8 @@ describe("a render on a nearly full disk", () => {
   ])(
     "checks the disk before getting the browser: $freeMb MB free",
     async ({ freeMb, downloads }) => {
-      vi.spyOn(system, "getFreeDiskMb").mockReturnValue(freeMb);
+      const sweep = vi.spyOn(manager, "sweepKilledInstalls").mockResolvedValue();
+      const freeDisk = vi.spyOn(system, "getFreeDiskMb").mockReturnValue(freeMb);
       const ensureBrowser = vi
         .spyOn(manager, "ensureBrowser")
         .mockRejectedValue(new Error("offline"));
@@ -89,6 +90,9 @@ describe("a render on a nearly full disk", () => {
       await expect(executeRenderPlan(plan, {} as never)).rejects.toThrow("Command failed");
 
       expect(ensureBrowser).toHaveBeenCalledTimes(downloads ? 1 : 0);
+      expect(sweep.mock.invocationCallOrder[0]).toBeLessThan(
+        freeDisk.mock.invocationCallOrder[0] ?? 0,
+      );
       const said = vi.mocked(console.error).mock.calls.flat().join("\n");
       expect(said.includes("Low disk space")).toBe(!downloads);
     },

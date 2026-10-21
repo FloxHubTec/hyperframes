@@ -698,6 +698,8 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
     return ensureLinuxArmBrowser(options);
   }
 
+  // Callers hold the install lock, so every leftover belongs to an install that was killed mid-way.
+  removeInstallLeftovers();
   const freeMb = getFreeDiskMb(CACHE_ROOT_DIR);
   if (freeMb !== null && freeMb < ARCHIVE_PLUS_UNPACKED_SHELL_MB) {
     throw new Error(
@@ -712,8 +714,6 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
     throw new Error(`Unsupported platform: ${process.platform} ${process.arch}`);
   }
 
-  // Callers hold the install lock, so every leftover belongs to an install that was killed mid-way.
-  removeInstallLeftovers();
   // Same filesystem as CACHE_DIR so the final rename is atomic.
   const stagingDir = join(CACHE_ROOT_DIR, `${STAGING_PREFIX}${randomUUID()}`);
   const clearStaging = () => rmSync(stagingDir, { recursive: true, force: true });
@@ -810,6 +810,9 @@ const STAGING_PREFIX = ".chrome-staging-";
 const REPLACED_PREFIX = ".chrome-replaced-";
 
 // Staging and set-aside dirs outlive an install killed by a signal, since `finally` never runs.
+const isInstallLeftover = (name: string) =>
+  name.startsWith(STAGING_PREFIX) || name.startsWith(REPLACED_PREFIX);
+
 function removeInstallLeftovers(): boolean {
   let names: string[];
   try {
@@ -818,12 +821,16 @@ function removeInstallLeftovers(): boolean {
     if (isErrno(err, "ENOENT")) return false;
     throw err;
   }
-  const leftovers = names.filter(
-    (name) => name.startsWith(STAGING_PREFIX) || name.startsWith(REPLACED_PREFIX),
-  );
+  const leftovers = names.filter(isInstallLeftover);
   for (const name of leftovers)
     rmSync(join(CACHE_ROOT_DIR, name), { recursive: true, force: true });
   return leftovers.length > 0;
+}
+
+export async function sweepKilledInstalls(): Promise<void> {
+  const names = existsSync(CACHE_ROOT_DIR) ? readdirSync(CACHE_ROOT_DIR) : [];
+  if (!names.some(isInstallLeftover)) return;
+  await withInstallLock(async () => removeInstallLeftovers());
 }
 
 // Deletes the managed Chrome cache and interrupted-install leftovers; true when any of them existed.

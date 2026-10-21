@@ -184,6 +184,7 @@ function assertRenderActive(cancellation?: RenderCancellationScope): void {
 
 async function refuseLowDiskBeforeBrowserDownload(plan: RenderPlan): Promise<void> {
   const { checkDisk } = await import("../../browser/preflight.js");
+  await (await import("../../browser/manager.js")).sweepKilledInstalls();
   const paths = new Set([tmpdir(), renderOutputDirectory(plan)]);
   const low = [...paths].map((path) => checkDisk(path)).filter((outcome) => !outcome.ok);
   if (low.length === 0) return;

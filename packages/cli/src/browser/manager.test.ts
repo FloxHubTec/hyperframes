@@ -1436,11 +1436,12 @@ describe("downloadBrowser — too little disk for the browser", () => {
   it.each([
     { freeMb: 400, downloads: false },
     { freeMb: 4096, downloads: true },
+    { freeMb: null, downloads: true },
   ])("downloads only with room for it: $freeMb MB free", async ({ freeMb, downloads }) => {
     installFsMocks({ existing: new Set([CACHE_ROOT]) });
     const install = vi.fn(async () => ({ executablePath: HF_BINARY }));
     installPuppeteerBrowsersMock({ installedInHfCache: [], installImpl: install });
-    const freeDiskMb = vi.fn(() => freeMb);
+    const freeDiskMb = vi.fn((): number | null => freeMb);
     vi.doMock("../telemetry/system.js", async (importOriginal) => ({
       ...(await importOriginal<typeof import("../telemetry/system.js")>()),
       getFreeDiskMb: freeDiskMb,
@@ -1456,6 +1457,32 @@ describe("downloadBrowser — too little disk for the browser", () => {
       expect((result as Error).message).toMatch(
         /^Low disk space: .*needs about 512 MB.*400 MB free/,
       );
+  });
+
+  it("removes a killed install's leftovers before reading free space, so they never count against it", async () => {
+    const home = useRealCacheHome();
+    installPuppeteerBrowsersMock({ installedInHfCache: [] });
+    const staging = join(home, ".cache", "hyperframes", ".chrome-staging-dead");
+    let leftoverWhenRead: boolean | undefined;
+    vi.doMock("../telemetry/system.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../telemetry/system.js")>()),
+      getFreeDiskMb: () => {
+        leftoverWhenRead = existsSync(staging);
+        return 400;
+      },
+    }));
+    try {
+      const { ensureBrowser, sweepKilledInstalls } = await import("./manager.js");
+      mkdirSync(join(staging, "partial"), { recursive: true });
+      await expect(ensureBrowser({ force: true })).rejects.toThrow(/^Low disk space/);
+      expect(leftoverWhenRead).toBe(false);
+
+      mkdirSync(join(staging, "partial"), { recursive: true });
+      await sweepKilledInstalls();
+      expect(existsSync(staging)).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
