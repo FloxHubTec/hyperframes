@@ -142,6 +142,12 @@
       "import": "./src/timeSpans.ts",
       "types": "./src/timeSpans.ts"
     },
+    "./media-timing": {
+      "bun": "./src/mediaTiming.ts",
+      "node": "./dist/mediaTiming.js",
+      "import": "./src/mediaTiming.ts",
+      "types": "./src/mediaTiming.ts"
+    },
     "./composition-duration": {
       "bun": "./src/compositionDuration.ts",
       "node": "./dist/compositionDuration.js",
@@ -236,6 +242,10 @@
       "./time-spans": {
         "import": "./dist/timeSpans.js",
         "types": "./dist/timeSpans.d.ts"
+      },
+      "./media-timing": {
+        "import": "./dist/mediaTiming.js",
+        "types": "./dist/mediaTiming.d.ts"
       },
       "./composition-duration": {
         "import": "./dist/compositionDuration.js",
