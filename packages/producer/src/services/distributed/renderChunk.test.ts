@@ -839,7 +839,7 @@ describe("renderChunk() — an alpha format at a larger output resolution", () =
     }
     const probe = spawnSync("ffprobe", [
       ...["-v", "error", "-select_streams", "v:0"],
-      ...["-show_entries", "stream=width,height,pix_fmt", "-of", "csv=p=0", out],
+      ...["-show_entries", "stream=width,height,pix_fmt", "-of", "csv=p=0", "--", out],
     ]);
     expect(probe.stdout.toString().trim()).toMatch(/^1920,1080,yuva/);
     const frame = spawnSync(
