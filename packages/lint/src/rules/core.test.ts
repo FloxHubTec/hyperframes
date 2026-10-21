@@ -1224,6 +1224,37 @@ describe("core rules", () => {
     const separatedGsap = `${banner};${gsapUmd}`;
     const umdBundle = (body: string) =>
       `(function (root, factory) {\nif (typeof define === "function" && define.amd) define([], factory); else factory();\n})(this, function () {\n${body}\n});`;
+    // Rollup 4 `--format umd` output for `import { gsap } from "gsap"` plus author code, excerpted.
+    const rollupBundle = `(function (global, factory) {
+  typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
+  typeof define === 'function' && define.amd ? define(['exports'], factory) :
+  (global = typeof globalThis !== 'undefined' ? globalThis : global || self, factory(global.Composition = {}));
+})(this, (function (exports) { 'use strict';
+
+  /*!
+   * GSAP 3.14.2
+   * https://gsap.com
+   *
+   * @license Copyright 2008-2025, GreenSock. All rights reserved.
+   * Subject to the terms at https://gsap.com/standard-license
+   * @author: Jack Doyle, jack@greensock.com
+  */
+
+  var _config = {
+    autoSleep: 120,
+    force3D: "auto",
+    nullTargetWarn: 1,
+    units: {
+      lineHeight: ""
+    }
+  };
+
+  window.authorSeed = Math.random();
+  window.authorTime = Date.now();
+
+  exports.gsap = gsapWithCSS;
+
+}));`;
     const comp = (library: string, author = "") => `
 <html><body>
   <div data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="5"></div>
@@ -1238,7 +1269,6 @@ describe("core rules", () => {
     it.each([
       ["pasted with its banner", pastedGsap],
       ["inlined by the producer", producerInlinedGsap],
-      ["unminified, banner inside its factory", unminifiedGsap],
       ["unminified and inlined by the producer", inlinedUnminifiedGsap],
       ["after a statement separator", separatedGsap],
     ])("does not flag GSAP's own internals when %s", async (_shape, library) => {
@@ -1295,12 +1325,23 @@ describe("core rules", () => {
         "beside a stray banner inside an outer UMD bundle",
         umdBundle(`${banner}\nwindow.seed = Math.random();\n${pastedGsap}`),
       ],
-      [
-        "beside unminified GSAP inside an outer UMD bundle",
-        umdBundle(`${unminifiedGsap}\nwindow.seed = Math.random();`),
-      ],
     ])("still flags author code %s", async (_shape, library) => {
       expect(await labels(comp(library))).toEqual(["Math.random()"]);
+    });
+
+    it("flags author code that Rollup bundles into one factory with GSAP's banner", async () => {
+      expect(await labels(comp(rollupBundle))).toEqual(["Math.random()", "Date.now()"]);
+    });
+
+    // Known limit: a banner inside a factory cannot be told apart from a bundled one, so it exempts nothing.
+    it.each([
+      ["pasted unminified GSAP", unminifiedGsap],
+      [
+        "unminified GSAP beside author code in an outer UMD bundle",
+        umdBundle(`${unminifiedGsap}\nwindow.seed = Math.random();`),
+      ],
+    ])("checks %s, whose banner sits inside its factory", async (_shape, library) => {
+      expect(await labels(comp(library))).toEqual(["Math.random()", "Date.now()"]);
     });
 
     it.each([
