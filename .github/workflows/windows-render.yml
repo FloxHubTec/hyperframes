@@ -508,17 +508,20 @@ jobs:
         shell: pwsh
         run: node --import tsx packages/cli/scripts/prepare-process-test-browser.mjs
 
+      # A step limit under the job's keeps the log of a hung run; the job limit cancels it and loses it.
       - name: Run Studio shard ${{ matrix.studio_shard }}
         if: matrix.studio_shard
         shell: pwsh
-        run: bun run --cwd packages/studio test -- --shard=${{ matrix.studio_shard }} --maxWorkers=2
+        timeout-minutes: 16
+        run: bun run --cwd packages/studio test -- --shard=${{ matrix.studio_shard }} --maxWorkers=2 --reporter=verbose
 
       - name: Run ${{ matrix.lane }} package tests
         if: matrix.packages
         shell: pwsh
+        timeout-minutes: 16
         # Each package starts its own Vitest pool. Bound every pool so concurrent
         # package scripts cannot oversubscribe the hosted Windows runner.
-        run: bun run ${{ matrix.packages }} test -- --maxWorkers=2
+        run: bun run ${{ matrix.packages }} test -- --maxWorkers=2 --reporter=verbose
 
       - name: Verify waveform cache writes on Windows
         if: matrix.lane == 'engine-cli'
