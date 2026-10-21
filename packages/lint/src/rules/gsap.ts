@@ -41,7 +41,6 @@ import {
   truncateSnippet,
   stripJsComments,
   hasCaptionStyles,
-  isInlinedGsapLibrary,
   WINDOW_TIMELINE_ASSIGN_PATTERN,
   TIMELINE_REGISTRY_OBJECT_LITERAL_PATTERN,
 } from "../utils";
@@ -1403,11 +1402,15 @@ export const gsapRules: LintRule<LintContext>[] = [
       /gsap\.(to|from|fromTo|timeline|set|registerPlugin)\b/.test(t),
     );
     const hasGsapScript = allScriptSrcs.some((src) => /gsap/i.test(src));
-    // Detect GSAP bundled inline (no src attribute): the library itself, gsap.config,
-    // or a large inline script (>5KB) that references gsap (likely a bundle).
+    // Detect GSAP bundled inline (no src attribute). Match:
+    // - Producer's CDN-inlining comment: /* inlined: ...gsap... */
+    // - GSAP library internals: _gsScope, GreenSock, gsap.config
+    // - Large inline scripts (>5KB) that reference gsap (likely bundled library)
     const hasInlineGsap = allScriptTexts.some(
       (t) =>
-        isInlinedGsapLibrary(t) ||
+        /\/\*\s*inlined:.*gsap/i.test(t) ||
+        /\b_gsScope\b/.test(t) ||
+        /\bGreenSock\b/.test(t) ||
         /\bgsap\.(config|defaults|version)\b/.test(t) ||
         (t.length > 5000 && /\bgsap\b/i.test(t)),
     );

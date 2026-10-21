@@ -1209,34 +1209,49 @@ describe("core rules", () => {
   });
 
   describe("non_deterministic_code — inlined GSAP library", () => {
-    // Banner lines and internals excerpted from gsap@3.14.2 dist/gsap.min.js.
-    const gsapInternals =
-      "function gb(t){return t.sort(function(){return.5-Math.random()})}" +
-      "function Ic(){var t=Date.now(),o=[];return o}";
-    const pastedGsap = `/*! GSAP 3.14.2 | @license Copyright 2025, GreenSock. All rights reserved. */
-${gsapInternals}`;
-    const producerInlinedGsap = `/* inlined: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js */
-${gsapInternals}`;
+    // UMD wrapper, banner and internals excerpted from gsap@3.14.2 dist/gsap.min.js.
+    const banner = "/*! GSAP 3.14.2 | @license Copyright 2025, GreenSock. All rights reserved. */";
+    const gsapUmd =
+      '!function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):' +
+      '"function"==typeof define&&define.amd?define(["exports"],e):e((t=t||self).window=t.window||{})}' +
+      '(this,function(e){"use strict";function gb(t){return t.sort(function(){return.5-Math.random()})}' +
+      "function Ic(){var t=Date.now(),o=[];return o}});";
+    const pastedGsap = `${banner}\n${gsapUmd}`;
+    const producerInlinedGsap = `/* inlined: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js */\n${gsapUmd}`;
     const comp = (library: string, author = "") => `
 <html><body>
   <div data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="5"></div>
   <script>${library}</script>
   <script>const tl = gsap.timeline({ paused: true }); ${author} window.__timelines = { main: tl };</script>
 </body></html>`;
+    const labels = async (html: string) =>
+      (await lintHyperframeHtml(html)).findings
+        .filter((f) => f.code === "non_deterministic_code")
+        .map((f) => f.message.match(/`(.+?)`/)?.[1]);
 
     it.each([
       ["pasted with its banner", pastedGsap],
       ["inlined by the producer", producerInlinedGsap],
     ])("does not flag GSAP's own internals when %s", async (_shape, library) => {
-      const result = await lintHyperframeHtml(comp(library));
-      expect(result.findings.filter((f) => f.code === "non_deterministic_code")).toEqual([]);
+      expect(await labels(comp(library))).toEqual([]);
     });
 
-    it("still flags the author's Math.random() next to inlined GSAP", async () => {
-      const result = await lintHyperframeHtml(comp(pastedGsap, "const r = Math.random();"));
-      const findings = result.findings.filter((f) => f.code === "non_deterministic_code");
-      expect(findings).toHaveLength(1);
-      expect(findings[0]?.message).toContain("Math.random()");
+    it("still flags the author's Math.random() in a script next to inlined GSAP", async () => {
+      expect(await labels(comp(pastedGsap, "const r = Math.random();"))).toEqual(["Math.random()"]);
+    });
+
+    it("still flags author calls before and after GSAP in the same script", async () => {
+      const library = `const a = Math.random();\n${pastedGsap}\nconst b = performance.now();`;
+      expect(await labels(comp(library))).toEqual(["Math.random()", "performance.now()"]);
+    });
+
+    it.each([
+      ["a string", `const label = "GreenSock"; const x = Math.random();`],
+      ["a comment", `// eased like GreenSock\nconst x = Math.random();`],
+      ["a spoofed banner", `${banner}\nwindow.seed = Math.random();`],
+      ["a spoofed inlining comment", `/* inlined: gsap.min.js */\nwindow.seed = Math.random();`],
+    ])("still flags author code whose script mentions GSAP in %s", async (_where, author) => {
+      expect(await labels(comp("", author))).toEqual(["Math.random()"]);
     });
   });
 

@@ -2,7 +2,7 @@
 // Nothing in this file should emit findings — it only parses and extracts.
 
 import { Parser } from "htmlparser2";
-import { parse } from "acorn";
+import { parse, type Comment, type Program } from "acorn";
 
 export type OpenTag = {
   raw: string;
@@ -559,13 +559,46 @@ export function stripJsComments(source: string): string {
   return scanJsComments(source).out;
 }
 
-/** True when an inline script is the GSAP library itself: the producer's inlining comment or GSAP's banner. */
-export function isInlinedGsapLibrary(scriptText: string): boolean {
+function isGsapLibraryComment(comment: Comment): boolean {
+  if (comment.type !== "Block") return false;
+  const { value } = comment;
   return (
-    /\/\*\s*inlined:.*gsap/i.test(scriptText) ||
-    /\b_gsScope\b/.test(scriptText) ||
-    /\bGreenSock\b/.test(scriptText)
+    (value.startsWith("!") && /\bGreenSock\b/.test(value)) || /^\s*inlined:.*gsap/i.test(value)
   );
+}
+
+/**
+ * Offsets of inlined GSAP library code: each top-level UMD statement with a GSAP banner
+ * (or the producer's inlining comment) directly before it (minified) or inside it (unminified).
+ */
+export function findInlinedGsapLibrarySpans(source: string): Array<[number, number]> {
+  if (!/GreenSock|inlined:/.test(source)) return [];
+  const comments: Comment[] = [];
+  let body: Program["body"];
+  try {
+    ({ body } = parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      allowReturnOutsideFunction: true,
+      onComment: comments,
+    }));
+  } catch {
+    return [];
+  }
+  const banners = comments.filter(isGsapLibraryComment);
+  return body
+    .filter(
+      (stmt) =>
+        stmt.type === "ExpressionStatement" &&
+        source.slice(stmt.start, stmt.end).includes("define.amd") &&
+        banners.some(
+          (banner) =>
+            (banner.start >= stmt.start && banner.end <= stmt.end) ||
+            (banner.end <= stmt.start &&
+              stripJsComments(source.slice(banner.end, stmt.start)).trim() === ""),
+        ),
+    )
+    .map((stmt): [number, number] => [stmt.start, stmt.end]);
 }
 
 export function stripJsCode(source: string): string {

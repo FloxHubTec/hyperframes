@@ -12,7 +12,7 @@ import {
   truncateSnippet,
   stripJsComments,
   stripStringLiterals,
-  isInlinedGsapLibrary,
+  findInlinedGsapLibrarySpans,
   extractCompositionIdsFromCss,
   extractTimelineRegistryKeys,
   getInlineScriptSyntaxError,
@@ -941,10 +941,12 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
     ];
 
     for (const script of scripts) {
-      // GSAP's internals (ticker, utils.random) are library code; author calls are flagged where made.
-      // Whole-script skip: author code appended to the library in the same script goes unchecked.
-      if (isInlinedGsapLibrary(script.content)) continue;
-      const withoutComments = stripJsComments(script.content);
+      // GSAP's internals (ticker, utils.random) are library code; author code around them is still scanned.
+      let content = script.content;
+      for (const [start, end] of findInlinedGsapLibrarySpans(content)) {
+        content = content.slice(0, start) + " ".repeat(end - start) + content.slice(end);
+      }
+      const withoutComments = stripJsComments(content);
       // Strings are content, not code. A composition that DISPLAYS source (the
       // code-snippet blocks, /pr-to-video) carries `Math.random()` inside a string
       // literal it never executes, and reported itself non-deterministic with no
