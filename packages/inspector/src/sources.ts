@@ -203,7 +203,6 @@ export class Sources {
   readonly cssRules: { id: string; selector: string; file: string; start: number; end: number }[] =
     [];
   readonly htmlTags: HtmlTag[] = [];
-  /** `served`: the files the inspected document was bundled from (BundleOptions.onRead); without it, every file. */
   constructor(
     readonly project: string,
     served?: Iterable<string>,
@@ -373,8 +372,6 @@ export class Sources {
           )
           .sort((a, b) => a.end - a.start - (b.end - b.start))[0];
         const caller = result.length > 0;
-        // A caller inside a large wrapper (an IIFE around a whole scene) is its call line, so the
-        // merged snippet does not swallow the creation it encloses and outgrow every budget.
         const callLine = caller && !helper && enclosing.end - enclosing.start > SHOWN_WHOLE;
         const range = callLine ? { start: hit.local, end: hit.local + 1 } : (helper ?? enclosing);
         const snippet = this.slice(
