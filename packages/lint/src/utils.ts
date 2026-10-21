@@ -571,7 +571,7 @@ function isGsapLibraryComment(comment: Comment): boolean {
  * Offsets of inlined GSAP library code: each top-level UMD statement with a GSAP banner
  * (or the producer's inlining comment) directly before it (minified) or inside it (unminified).
  */
-export function findInlinedGsapLibrarySpans(source: string): Array<[number, number]> {
+function findInlinedGsapLibrarySpans(source: string): Array<[number, number]> {
   if (!/GreenSock|inlined:/.test(source)) return [];
   const comments: Comment[] = [];
   let body: Program["body"];
@@ -599,6 +599,14 @@ export function findInlinedGsapLibrarySpans(source: string): Array<[number, numb
         ),
     )
     .map((stmt): [number, number] => [stmt.start, stmt.end]);
+}
+
+export function blankInlinedGsapLibrary(source: string): string {
+  let out = source;
+  for (const [start, end] of findInlinedGsapLibrarySpans(source)) {
+    out = out.slice(0, start) + " ".repeat(end - start) + out.slice(end);
+  }
+  return out;
 }
 
 export function stripJsCode(source: string): string {
