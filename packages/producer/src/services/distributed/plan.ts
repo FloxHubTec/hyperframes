@@ -1354,6 +1354,32 @@ function mixPlanAudio(c: PlanComposition, compiledDir: string, seconds: number, 
   });
 }
 
+/** Extracts the composition's videos and adds the sound of each that carries one to its audios. */
+async function extractPlanVideos(c: PlanComposition, deferRangeExtraction: boolean | undefined) {
+  const extractResult = await runExtractVideosStage({
+    projectDir: c.projectDir,
+    compiledDir: c.compiledDir,
+    job: c.job,
+    cfg: c.cfg,
+    composition: c.composition,
+    abortSignal: c.abortSignal,
+    assertNotAborted: c.assertNotAborted,
+    materializeSymlinks: true,
+    deferRangeExtraction,
+    urlByAbsentLocalPath: c.urlByAbsentLocalPath,
+  });
+  if (extractResult.failureToEnforce) throw extractResult.failureToEnforce;
+  if (extractResult.extractionResult) {
+    // Distributed chunks cannot safely fall back to native remote decoding:
+    // the planner-local source may be unavailable on another worker, and a
+    // missing frame set otherwise renders as a silent blank video. Unlike the
+    // separately canaried in-process policy, distributed planning always
+    // requires every declared source to extract successfully.
+    assertVideoExtractionSucceeded(extractResult.extractionResult);
+  }
+  return extractResult;
+}
+
 /** Holds the mixed track at `audioPath` to the delivery true-peak ceiling, from its float mix. */
 async function holdPlanAudioPeak(
   c: PlanComposition,
@@ -1382,8 +1408,6 @@ export async function buildLocalExecutionPlan(
   const {
     log,
     sizeLimitBytes,
-    abortSignal,
-    assertNotAborted,
     cfg,
     job,
     workDir,
@@ -1425,28 +1449,8 @@ export async function buildLocalExecutionPlan(
   // `materializeSymlinks: true` recursively copies frames so the planDir is
   // self-contained (symlinks don't survive S3/GCS round-trips).
   let stageStarted = Date.now();
-  const extractResult = await runExtractVideosStage({
-    projectDir,
-    compiledDir,
-    job,
-    cfg,
-    composition,
-    abortSignal,
-    assertNotAborted,
-    materializeSymlinks: true,
-    deferRangeExtraction: options.deferVideoExtraction,
-    urlByAbsentLocalPath,
-  });
+  const extractResult = await extractPlanVideos(c, options.deferVideoExtraction);
   logPlanStage(log, "extract", stageStarted);
-  if (extractResult.failureToEnforce) throw extractResult.failureToEnforce;
-  if (extractResult.extractionResult) {
-    // Distributed chunks cannot safely fall back to native remote decoding:
-    // the planner-local source may be unavailable on another worker, and a
-    // missing frame set otherwise renders as a silent blank video. Unlike the
-    // separately canaried in-process policy, distributed planning always
-    // requires every declared source to extract successfully.
-    assertVideoExtractionSucceeded(extractResult.extractionResult);
-  }
   // Skip `extractResult.frameLookup.cleanup()`: it would rm-rf each
   // video's outputDir, but in `plan()` those directories ARE the source
   // material the renames below move into `planDir/video-frames/`.
@@ -1753,6 +1757,9 @@ export async function buildPlanAudio(
     const seconds = c.totalFrames / config.fps;
     const pcmPath = join(c.workDir, "plan-mix.wav");
     let stageStarted = Date.now();
+    await extractPlanVideos(c, true);
+    logPlanStage(c.log, "extract", stageStarted);
+    stageStarted = Date.now();
     const mixed = await mixPlanAudio(c, c.compiledDir, seconds, pcmPath);
     logPlanStage(c.log, "audio", stageStarted);
     if (mixed.audioError) {

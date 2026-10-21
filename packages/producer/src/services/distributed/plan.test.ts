@@ -1070,6 +1070,49 @@ describe.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0)("stitched mp4 pl
     expect(existsSync(join(withCfr, "audio.m4a"))).toBe(true);
   }, 60_000);
 
+  it("gives buildPlanAudio the sound of a video whose src the scene script sets", async () => {
+    const project = join(runRoot, "project-script-src");
+    mkdirSync(project, { recursive: true });
+    const clip = spawnSync("ffmpeg", [
+      "-nostdin",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc=s=320x240:r=30:d=1",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:sample_rate=48000:d=1",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-shortest",
+      join(project, "clip.mp4"),
+    ]);
+    if (clip.status !== 0) throw new Error(`ffmpeg clip failed: ${clip.stderr}`);
+    writeFileSync(
+      join(project, "index.html"),
+      `<!doctype html><html><head><meta charset="utf-8"></head><body>
+  <div data-composition-id="root" data-width="320" data-height="240" data-duration="1" data-no-timeline>
+    <video id="v" data-has-audio="true" data-start="0" data-duration="1" playsinline></video>
+  </div>
+  <script>document.getElementById("v").src = "clip.mp4";</script></body></html>`,
+    );
+    const config = { fps: 30, width: 320, height: 240, format: "mp4" } as const;
+    const carried = join(runRoot, "plan-script-src");
+    await buildLocalExecutionPlan(project, config, carried, { chunksCarryAudio: true });
+    const work = join(runRoot, "script-src-work");
+    mkdirSync(work, { recursive: true });
+    const audio = join(work, "audio.m4a");
+    expect(await buildPlanAudio(project, config, work, audio)).toEqual({ hasAudio: true });
+    expect(readFileSync(audio).equals(readFileSync(join(carried, "audio.m4a")))).toBe(true);
+  }, 60_000);
+
   it("encodes the audio once, at the frames' exact length", async () => {
     // 1.01 s at 30 fps is 31 frames: 49,600 samples, 48.4375 AAC frames of 1,024.
     const project = audioProject("project-one-encode", 0.3, 1.01);

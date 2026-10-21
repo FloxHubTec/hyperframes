@@ -227,15 +227,20 @@ describe("buildStitchedHeader", () => {
     expect(Math.max(...tracks[1]!.chunkOffsets)).toBeLessThan(Math.min(...tracks[0]!.chunkOffsets));
   });
 
-  it("refuses chunks that carry audio when the audio is a separate file", async () => {
-    const layouts = await Promise.all(
-      [fakeChunk(0, [video([500])]), fakeChunk(1, [video([90]), audio([1024], 0)])].map((c) =>
-        readMp4Layout(memoryRange(c.file)),
-      ),
-    );
-    const mix = await readMp4Layout(memoryRange(fakeChunk(2, [audio([1024], 1024)]).file));
-    expect(() => buildStitchedHeader(layouts, mix)).toThrow("chunk 1 carries its own audio");
-  });
+  it.each([0, 1])(
+    "refuses chunk %i carrying audio when the audio is a separate file",
+    async (carrier) => {
+      const chunk = (i: number) =>
+        fakeChunk(i, i === carrier ? [video([500]), audio([1024], 0)] : [video([500])]);
+      const layouts = await Promise.all(
+        [chunk(0), chunk(1)].map((c) => readMp4Layout(memoryRange(c.file))),
+      );
+      const mix = await readMp4Layout(memoryRange(fakeChunk(2, [audio([1024], 1024)]).file));
+      expect(() => buildStitchedHeader(layouts, mix)).toThrow(
+        `chunk ${carrier} carries its own audio`,
+      );
+    },
+  );
 
   it.each([
     [

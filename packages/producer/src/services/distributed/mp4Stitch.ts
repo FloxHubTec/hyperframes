@@ -355,9 +355,11 @@ function sourceTracks(layouts: readonly Mp4Layout[], audio: Mp4Layout | undefine
   }
   const plan = [...chunkPlan, ...audioTracks];
   const chunks = layouts.map((layout, i) => {
-    const tracks = planTracksOf(readTracks(layout.moov), plan, i);
-    if (audio && tracks.at(-1)) throw new Error(`[mp4Stitch] chunk ${i} carries its own audio`);
-    return tracks;
+    const tracks = readTracks(layout.moov);
+    if (audio && tracks.some((track) => track.handler === "soun")) {
+      throw new Error(`[mp4Stitch] chunk ${i} carries its own audio`);
+    }
+    return planTracksOf(tracks, plan, i);
   });
   return {
     plan,
