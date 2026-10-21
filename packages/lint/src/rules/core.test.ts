@@ -1220,6 +1220,8 @@ describe("core rules", () => {
     const producerInlinedGsap = `/* inlined: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js */\n${gsapUmd}`;
     // Unminified builds carry the banner inside the factory.
     const unminifiedGsap = gsapUmd.replace('"use strict";', `"use strict";${banner}`);
+    const inlinedUnminifiedGsap = `/* inlined: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.js */\n(${unminifiedGsap.slice(1, -1)});`;
+    const separatedGsap = `${banner};${gsapUmd}`;
     const umdBundle = (body: string) =>
       `(function (root, factory) {\nif (typeof define === "function" && define.amd) define([], factory); else factory();\n})(this, function () {\n${body}\n});`;
     const comp = (library: string, author = "") => `
@@ -1237,6 +1239,8 @@ describe("core rules", () => {
       ["pasted with its banner", pastedGsap],
       ["inlined by the producer", producerInlinedGsap],
       ["unminified, banner inside its factory", unminifiedGsap],
+      ["unminified and inlined by the producer", inlinedUnminifiedGsap],
+      ["after a statement separator", separatedGsap],
     ])("does not flag GSAP's own internals when %s", async (_shape, library) => {
       expect(await labels(comp(library))).toEqual([]);
     });
@@ -1278,6 +1282,18 @@ describe("core rules", () => {
       [
         "beside it inside an outer UMD bundle",
         umdBundle(`${pastedGsap}\nwindow.seed = Math.random();`),
+      ],
+      [
+        "beside producer-inlined unminified GSAP inside an outer UMD bundle",
+        umdBundle(`${inlinedUnminifiedGsap}\nwindow.seed = Math.random();`),
+      ],
+      [
+        "beside separated GSAP inside an outer UMD bundle",
+        umdBundle(`${separatedGsap}\nwindow.seed = Math.random();`),
+      ],
+      [
+        "beside a stray banner inside an outer UMD bundle",
+        umdBundle(`${banner}\nwindow.seed = Math.random();\n${pastedGsap}`),
       ],
       [
         "beside unminified GSAP inside an outer UMD bundle",

@@ -596,7 +596,7 @@ function isUmdWrapperCall(call: CallExpression): boolean {
   return checksAmd;
 }
 
-/** A GSAP banner belongs to the wrapper right after it (minified), else the innermost one around it. */
+/** A GSAP banner belongs to the wrapper right after it (minified), else to a wrapper around it that wraps no other. */
 function bannerOwner(
   banner: Comment,
   source: string,
@@ -605,17 +605,20 @@ function bannerOwner(
 ): CallExpression | undefined {
   let next = banner.end;
   for (;;) {
-    while (/[\s!]/.test(source[next] ?? "")) next++;
+    while (/[\s!;(]/.test(source[next] ?? "")) next++;
     const comment = commentAt.get(next);
     if (!comment) break;
     next = comment.end;
   }
-  return (
-    wrappers.find((call) => call.start === next) ??
-    wrappers
-      .filter((call) => call.start <= banner.start && banner.end <= call.end)
-      .sort((a, b) => a.end - a.start - (b.end - b.start))[0]
+  const adjacent = wrappers.find((call) => call.start === next);
+  if (adjacent) return adjacent;
+  const around = wrappers
+    .filter((call) => call.start <= banner.start && banner.end <= call.end)
+    .sort((a, b) => a.end - a.start - (b.end - b.start))[0];
+  const wrapsAnother = wrappers.some(
+    (call) => around && call !== around && around.start <= call.start && call.end <= around.end,
   );
+  return wrapsAnother ? undefined : around;
 }
 
 /** Offsets of inlined GSAP library code: the UMD wrapper call each GSAP banner belongs to. */
