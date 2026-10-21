@@ -428,7 +428,7 @@ jobs:
     needs: [changes, preflight]
     if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -508,7 +508,7 @@ jobs:
         shell: pwsh
         run: node --import tsx packages/cli/scripts/prepare-process-test-browser.mjs
 
-      # A step limit under the job's keeps the log of a hung run; the job limit cancels it and loses it.
+      # Step limits stay under the job limit minus setup (~5 min), so a hung run fails its step and keeps the log.
       - name: Run Studio shard ${{ matrix.studio_shard }}
         if: matrix.studio_shard
         shell: pwsh
