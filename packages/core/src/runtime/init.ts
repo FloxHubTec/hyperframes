@@ -4639,8 +4639,7 @@ export function initSandboxRuntimeModular(): void {
       }
     }
     if (rearmed.length === 0) return rearmed;
-    // GSAP counts only unpaused children in a timeline's length and play() does not re-measure the
-    // parent, so a length cached while the scenes rested paused would clamp this seek to it.
+    // GSAP leaves paused scenes out of the root's length and play() keeps that stale length.
     try {
       masterTimeline.shiftChildren?.(0);
       masterTimeline.totalDuration?.();

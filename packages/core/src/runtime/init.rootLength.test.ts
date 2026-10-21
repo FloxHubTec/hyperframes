@@ -22,8 +22,7 @@ describe("runtime root length across render seeks", () => {
   function load(sceneCount: number) {
     const hosts = Array.from(
       { length: sceneCount },
-      (_, i) =>
-        `<div data-composition-id="s${i}" data-start="${i * 5}" data-duration="5"></div>`,
+      (_, i) => `<div data-composition-id="s${i}" data-start="${i * 5}" data-duration="5"></div>`,
     ).join("");
     document.body.innerHTML = `<div data-composition-id="main" data-start="0" data-duration="${sceneCount * 5}">${hosts}</div>`;
     const timelines: Record<string, RuntimeTimelineLike> = {
@@ -38,7 +37,8 @@ describe("runtime root length across render seeks", () => {
         .to(target, { w: 1, duration: 1 }, 0)
         // Overwrites the tween above on its first render, which marks the root's length stale.
         .to(target, { w: 2, duration: 1, overwrite: "auto" }, 0);
-      if (i === 1) scene.eventCallback("onUpdate", () => drawnAt.push(Number(scene.time().toFixed(4))));
+      if (i === 1)
+        scene.eventCallback("onUpdate", () => drawnAt.push(Number(scene.time().toFixed(4))));
       timelines[`s${i}`] = scene as unknown as RuntimeTimelineLike;
     }
     window.__timelines = timelines;
