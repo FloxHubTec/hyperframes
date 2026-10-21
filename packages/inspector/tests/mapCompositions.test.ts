@@ -58,8 +58,8 @@ describe("components report compositions", () => {
       const sources = new Sources(dir);
       prepare(sources);
       const raw: RuntimeResponse = {
-        results: ids.map(([id, tag]) => ({
-          target: { selector: `#${id}` },
+        results: ids.map(([id, tag], index) => ({
+          target: request.targets?.[index] ?? { selector: `#${id}` },
           status: "found",
           candidates: [ref(id, tag)],
           animations: [],
@@ -163,6 +163,42 @@ describe("components report compositions", () => {
       ),
     ).toBe(true);
   });
+
+  it.each([{ selector: "#word", within: "#left" }, { ref: "hfi:g:word" }])(
+    "retains repeated mounts as source candidates for scoped target %j",
+    (target) => {
+      const report = inspectIds(
+        [["word", "span"]],
+        { targets: [target], maxBytes: 256000 },
+        () => {},
+        {
+          "index.html": [
+            '<div data-composition-id="main">',
+            '<div id="left" data-composition-src="films/a/scene.html" data-start="0"></div>',
+            "",
+            '<div id="right" data-composition-src="films/a/scene.html" data-start="20"></div>',
+            "</div>",
+          ],
+          "films/a/scene.html": files["films/a/scene.html"],
+        },
+      );
+      const candidates = report.snippets.filter((snippet) =>
+        snippet.kind.includes("composition host candidate"),
+      );
+      expect(candidates).toHaveLength(2);
+      expect(candidates.map((snippet) => snippet.code)).toEqual([
+        expect.stringContaining('id="left"'),
+        expect.stringContaining('id="right"'),
+      ]);
+      expect(candidates.every((snippet) => snippet.targets.includes(0))).toBe(true);
+      expect(report.snippets.some((snippet) => snippet.kind.includes("composition host"))).toBe(
+        false,
+      );
+      expect(report.coverage).toContain(
+        "Composition candidates are alternative source mounts and their enclosing roots, not a verified runtime instance chain; all alternatives remain available within the snippet budget and pagination.",
+      );
+    },
+  );
 
   it("leaves out a composition tag another snippet already shows", () => {
     const report = inspectIds(

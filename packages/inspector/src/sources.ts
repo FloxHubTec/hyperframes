@@ -380,12 +380,16 @@ export class Sources {
     if (root) show(root, "composition root");
     const parentOf = (t: HtmlTag) =>
       t.parent === undefined ? undefined : tagAt.get(`${t.file}:${t.parent}`);
-    const climb = [tag];
+    const climb = [{ tag, candidate: false }];
     for (let from = climb.shift(); from; from = climb.shift()) {
-      for (let at = parentOf(from); at; at = parentOf(at))
-        if (at.compositionId) show(at, "composition root");
-      for (const host of hostsOf.get(from.file) ?? [])
-        if (show(host, "composition host")) climb.push(host);
+      for (let at = parentOf(from.tag); at; at = parentOf(at))
+        if (at.compositionId)
+          show(at, from.candidate ? "composition root candidate" : "composition root");
+      const hosts = hostsOf.get(from.tag.file) ?? [];
+      const candidate = from.candidate || hosts.length > 1;
+      for (const host of hosts)
+        if (show(host, candidate ? "composition host candidate" : "composition host"))
+          climb.push({ tag: host, candidate });
     }
     return result;
   }

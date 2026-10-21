@@ -108,7 +108,14 @@ export function mapInspection(
     omitted: [] as { id: string; bytes: number }[],
     omittedCount: 0,
     nextOffset: null as number | null,
-    coverage,
+    coverage: merged.some((snippet) =>
+      snippet.kind.some((kind) => kind.startsWith("composition ") && kind.endsWith(" candidate")),
+    )
+      ? [
+          ...coverage,
+          "Composition candidates are alternative source mounts and their enclosing roots, not a verified runtime instance chain; all alternatives remain available within the snippet budget and pagination.",
+        ]
+      : coverage,
     recordLimitReached: raw.recordLimitReached,
     hooked: raw.hooked,
     debugAvailable: true,
