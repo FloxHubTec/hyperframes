@@ -14,19 +14,19 @@ Skip it for an edit to an existing project, captions or overlays on footage, and
 
 ## 2. Three storylines, then one
 
-Write three. They are three different films, not three titles on one film: each has its own **world** (where it happens and what it looks like) and its own **device** (how the story is told). Make one of the three the bold one you would not have picked first. Each says:
+Write three. They are three different films, not three titles on one film: each has its own **world** (where it happens and what it looks like), its own **device** (what the story is) and its own **form** (how the camera and the cuts carry it). Sketch five or more ideas first, a line each pairing a device with a form (tables below); drop those the subject cannot carry well, and of the rest keep the three that differ most. Make one of the three the bold one you would not have picked first. Each says:
 
-- its name and, in two sentences, what the viewer sees and feels;
+- its name, its device and form in a few words, and in two sentences what the viewer sees and feels;
 - the first two seconds, exactly;
 - its beats in one line (`hook → … → end card`);
 - its look in one line: ground, type, the one material or treatment, taken from the subject or the brand (`look.md`);
 - its sound in one line (`sound.md` §1).
 
-Pick a storyline for its story: the one a stranger would follow and remember, with people or a situation they know, ahead of the most striking picture. Picking a storyline picks its look and its sound. Before anyone picks, build each storyline's hero shot, about 3 s, in its own look with its LOOK numbers (`spec.md` "The look test"): the pick is made from pictures, not descriptions. Then write the picked one as `SPEC.md`.
+The storylines are words: build nothing for any of them before one is picked. Pick a storyline for its story: the one a stranger would follow and remember, with people or a situation they know, ahead of the most striking picture. Picking a storyline picks its look and its sound. Then write the picked one as `SPEC.md`.
 
 Put your recommendation first, with the reason in one clause, and save all three in the project as `STORYLINES.md` so a later turn can switch.
 
-- **The person is there to answer:** show the three and stop until they pick. A mix ("A's opening with C's middle") is one storyline. Ask nothing else unless only they can answer it (real screens you cannot capture, narrated or music only).
+- **The person is there to answer:** show the three and stop once until they pick. A mix ("A's opening with C's middle") is one storyline. Ask nothing else unless only they can answer it (real screens you cannot capture, narrated or music only). State everything else in one assumption line: the length as a range, the aspect, music or voice, and every paid item (a HeyGen voice, an avatar, catalog music) with the free option beside it.
 - **They asked for the file or for no stops:** take your recommendation, build it, and name the other two in one line each in your reply.
 - With a storyboard (`storyboard.md`), the picked storyline becomes the board's frames.
 
@@ -43,7 +43,18 @@ Put your recommendation first, with the reason in one clause, and save all three
 | A question with the input     | "What if you could make a video from your ⟨website⟩?", the blank filled by a real input |
 | The object is the explanation | a machine or model whose working is the idea; the camera tours through it               |
 
-Before and after: the new side moves calmly while the old side churns; never mock a named competitor. A recap asks one question first so each piece answers it.
+| Form                       | What the viewer sees                                                                         |
+| -------------------------- | -------------------------------------------------------------------------------------------- |
+| One continuous take        | the camera never cuts; it pushes, pulls and travels from one world into the next             |
+| Object-to-object chain     | every shot ends on the thing that opens the next: a button becomes a card becomes a phone    |
+| An endless zoom            | the camera dives into a detail that turns out to be the next world, again and again          |
+| A flight through one world | a 3D set, a map or a desk the camera travels across; each idea is a stop on the route        |
+| Cut on the beat            | hard cuts on the music, type and colour fields changing every half beat                      |
+| Match cuts                 | one shape holds while everything around it changes: a circle becomes a lens, a wheel, a logo |
+| Split screen to one        | several panes play at once, then collapse into the one that matters                          |
+| One frame that rebuilds    | a single composition keeps rearranging itself and never leaves the frame                     |
+
+A pitch where all three are plain cuts between scenes has not tried the forms. Before and after: the new side moves calmly while the old side churns; never mock a named competitor. A recap asks one question first so each piece answers it.
 
 ## 3. The hook
 

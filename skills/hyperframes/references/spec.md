@@ -63,10 +63,6 @@ These are where generated video lands when nothing else is decided. Each is bann
 
 After the first render, name every default it used anyway, from this list or not, add each to the film's BANNED line, and fix them. The list grows with every film.
 
-## The look test
-
-A full film in the wrong look is the most expensive mistake. Before building the rest, build only the hero shot, about 3 s, once in the look of each storyline (`story.md` §2), each from its own LOOK and MOTION lines, and render a still and a strip of each (`snapshot --at`, `--range`). The person picks from those; with no one to ask, judge them in this order: does a stranger understand what they are looking at and want to see what happens next; is every object recognisable without a label; does it avoid BANNED; would it stop a thumb on a phone. Pick one and say why in the reply. A storyline is never picked for its look over its story. Then write the full `SPEC.md` for the pick and build the rest to match its shot.
-
 ## A look built from a medium
 
 A look holds together when it is the rules of one medium, not a palette. A risograph look, for example, is five parts and nothing else:
