@@ -227,9 +227,9 @@ describe("components report shape", () => {
     const result = (n: number) => ({
       target: { selector: `.w-dot.t${n}` },
       status: "found" as const,
-      candidates: [element(0)],
+      candidates: [element(n)],
       animations: [{ stack: "s", attachmentStacks: [], targets: moved } as never],
-      elements: [element(0)],
+      elements: [element(n)],
       css: [],
       truncated: false,
     });
@@ -267,6 +267,14 @@ describe("components report shape", () => {
 
   it("says which target each snippet serves when the query names more than one", () => {
     expect(report(2, 0).snippets[0]).toMatchObject({ id: "index.html:4-4", targets: [0, 1] });
+  });
+
+  it("keeps an unqueried co-target visible when four queried elements share its tween", () => {
+    for (const result of report(4, 4).results) {
+      expect(result.coTargets[0]?.ref).toBe(element(4).ref);
+      expect(result.coTargets).toHaveLength(3);
+      expect(result.coTargetsOmitted).toBe(1);
+    }
   });
 
   it("lists three elements the same animation also moves and counts the rest", () => {

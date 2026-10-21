@@ -62,7 +62,7 @@ The default JSON is capped at 12,000 UTF-8 bytes, including metadata. Each snipp
 
 This illustration omits metadata. Actual files in the implementation report show the full output.
 
-Shared helpers appear once with all **queried** targets using them. `coTargets` names up to three observed additional DOM targets of the same tween, and `coTargetsOmitted` counts the rest; it does not claim to enumerate all separate calls to a helper. Creation statements and authored caller statements are mapped; small named helper functions are returned whole. Variable assignments are not a stack/data-flow history. A missing source origin increments `unmappedAnimations`, rather than guessing an editable location.
+Shared helpers appear once with all **queried** targets using them. `coTargets` names up to three observed additional DOM targets of the same tween, prioritizing elements outside the query, and `coTargetsOmitted` counts the rest; it does not claim to enumerate all separate calls to a helper. Creation statements and authored caller statements are mapped; small named helper functions are returned whole. Variable assignments are not a stack/data-flow history. A missing source origin increments `unmappedAnimations`, rather than guessing an editable location.
 
 HTML snippets are uniquely identified authored opening tags (their full source lines); dynamically generated markup may have no authored tag match. CSS is an authored-selector candidate scan, not proof of active cascade, media-query state, or inherited styles. In particular, a class reused in different scoped scene styles can have multiple candidate source rules.
 

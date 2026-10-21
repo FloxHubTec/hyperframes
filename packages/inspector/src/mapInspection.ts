@@ -41,6 +41,7 @@ export function mapInspection(
   const { sources, map, catalog, generation, sourceVersion, reused, start, visualState } = context;
   const maxBytes = request.maxBytes ?? 12000;
   const collected: Snippet[] = [];
+  const queriedRefs = new Set(raw.results.flatMap((result) => result.elements.map((el) => el.ref)));
   const results = raw.results.map((result, index) => {
     let unmappedAnimations = 0;
     for (const animation of result.animations) {
@@ -76,7 +77,7 @@ export function mapInspection(
           .filter((element) => !result.elements.some((own) => own.ref === element.ref))
           .map((element) => [element.ref, element]),
       ).values(),
-    ];
+    ].sort((a, b) => Number(queriedRefs.has(a.ref)) - Number(queriedRefs.has(b.ref)));
     return {
       target: index,
       status: result.status,
