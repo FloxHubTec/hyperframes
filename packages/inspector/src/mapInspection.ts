@@ -1,4 +1,4 @@
-import { Sources, markupSnippet, mergeSnippets } from "./sources";
+import { Sources, mergeSnippets } from "./sources";
 import type { InspectRequest, RuntimeResponse, Snippet } from "./types";
 const coverage = [
   "GSAP associations observed since page initialization; callback-created animations may require an explicit time query.",
@@ -39,6 +39,7 @@ export function mapInspection(
   const { sources, map, catalog, generation, sourceVersion, reused, start, visualState } = context;
   const maxBytes = request.maxBytes ?? 12000;
   const collected: Snippet[] = [];
+  const compositions: Snippet[] = [];
   const results = raw.results.map((result, index) => {
     let unmappedAnimations = 0;
     for (const animation of result.animations) {
@@ -51,8 +52,11 @@ export function mapInspection(
         );
     }
     for (const el of result.elements) {
-      const snippet = markupSnippet(sources, el, index);
+      const tag = sources.markupTag(el);
+      if (!tag) continue;
+      const snippet = sources.slice(tag.file, tag.start, tag.end, "html opening tag", index);
       if (snippet) collected.push(snippet);
+      compositions.push(...sources.compositions(tag, index));
     }
     for (const id of result.css) {
       const rule = sources.cssRules.find((rule) => rule.id === id);
@@ -85,7 +89,7 @@ export function mapInspection(
       scopeTruncated: result.truncated,
     };
   });
-  const merged = mergeSnippets(collected, sources);
+  const merged = withCompositionsLast(mergeSnippets(collected, sources), compositions, sources);
   for (const snippet of merged) catalog.set(snippet.id, snippet);
   let selected = [...merged].sort((a, b) => priority(a) - priority(b));
   if (request.snippets)
@@ -144,4 +148,15 @@ export function mapInspection(
     throw new Error("metadata_exceeds_budget: use fewer targets or increase maxBytes");
   if (request.debug) return { ...response, debug: raw };
   return response;
+}
+function withCompositionsLast(merged: Snippet[], compositions: Snippet[], sources: Sources) {
+  const covered = (s: Snippet) =>
+    merged.some((m) => m.file === s.file && m.startLine <= s.startLine && m.endLine >= s.endLine);
+  return [
+    ...merged,
+    ...mergeSnippets(
+      compositions.filter((s) => !covered(s)),
+      sources,
+    ),
+  ];
 }
