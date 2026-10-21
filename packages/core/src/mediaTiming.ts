@@ -1,2 +1,2 @@
-// ponytail: moved to parsers so lint can share it; this path stays for existing importers.
+// Kept for existing importers; the rule lives in @hyperframes/parsers.
 export * from "@hyperframes/parsers/media-timing";

@@ -611,7 +611,7 @@ function nestedScopeOf(
   if (!el.hasAttribute("data-composition-id") && !el.hasAttribute("data-composition-src")) {
     return null;
   }
-  // ponytail: a reference start ("intro + 2") reads as NaN, so that scene's audio goes unchecked.
+  // A reference start ("intro + 2") reads as NaN, so that scene's audio goes unchecked.
   const start = origin + parseFloat(el.getAttribute("data-start") ?? "0");
   const duration = parseFloat(el.getAttribute("data-duration") ?? "");
   const window = Number.isFinite(duration) ? [{ start, end: start + duration }] : [];
