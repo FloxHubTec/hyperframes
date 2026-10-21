@@ -31,7 +31,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { managedChromeVersion } from "./manager.js";
 
@@ -1525,8 +1525,8 @@ describe("downloadBrowser — too little disk for the browser", () => {
         await ensureBrowser({ force: true });
         if (!unzipsFirst) return expect(unzip).not.toHaveBeenCalled();
         const [archive, into] = unzip.mock.calls[0] as unknown as [string, string];
-        expect(dirname(archive)).toBe(dirname(dirname(into)));
-        expect(into).toMatch(/\.chrome-staging-[^/]+\/chrome-headless-shell\/linux-[^/]+$/);
+        expect(into).toBe(stagedVersionDir(dirname(archive), managedChromeVersion()));
+        expect(basename(dirname(archive))).toMatch(/^\.chrome-staging-/);
       } finally {
         Object.defineProperty(process, "platform", { value: origPlatform, configurable: true });
         Object.defineProperty(process, "arch", { value: origArch, configurable: true });
@@ -1537,22 +1537,27 @@ describe("downloadBrowser — too little disk for the browser", () => {
 
   it("a disk that fills mid-unzip fails the install at once and leaves no staged copy", async () => {
     const home = useRealCacheHome();
+    const { platform: origPlatform, arch: origArch } = process;
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    Object.defineProperty(process, "arch", { value: "x64", configurable: true });
     const install = vi.fn(async ({ cacheDir, buildId }: InstallMockOptions) =>
       writeStagedInstall(cacheDir, buildId, "fresh"),
     );
     installPuppeteerBrowsersMock({
       installImpl: install,
       unzip: async () => {
-        throw new Error("Extraction failed: write error (disk full?).  Continue? (y/n/^C)");
+        throw new Error("Extraction failed: the disk filled up while unpacking Chrome.");
       },
     });
     try {
       const { ensureBrowser } = await import("./manager.js");
-      await expect(ensureBrowser({ force: true })).rejects.toThrow("write error (disk full?)");
+      await expect(ensureBrowser({ force: true })).rejects.toThrow("the disk filled up");
       expect(install).not.toHaveBeenCalled();
       const root = join(home, ".cache", "hyperframes");
       expect(readdirSync(root).filter((name) => name.startsWith(".chrome-staging-"))).toEqual([]);
     } finally {
+      Object.defineProperty(process, "platform", { value: origPlatform, configurable: true });
+      Object.defineProperty(process, "arch", { value: origArch, configurable: true });
       rmSync(home, { recursive: true, force: true });
     }
   });

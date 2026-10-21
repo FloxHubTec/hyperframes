@@ -1,4 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -97,7 +106,7 @@ it.skipIf(process.platform === "win32")(
     vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
     try {
       await expect(unzipArchive(join(root, "a.zip"), join(root, "out"))).rejects.toThrow(
-        "Extraction failed: write error (disk full?)",
+        "Extraction failed: the disk filled up while unpacking Chrome. Free disk space, then retry.",
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -107,9 +116,52 @@ it.skipIf(process.platform === "win32")(
 );
 
 it.skipIf(process.platform === "win32")(
-  "says there is no unzip command, so install() unpacks it itself",
+  "runs unzip in the caller's process group, so cancelling the setup worker stops it",
   async () => {
-    vi.stubEnv("PATH", join(tmpdir(), "hf-no-such-bin"));
-    expect(await unzipArchive("a.zip", "out")).toBe(false);
+    const root = mkdtempSync(join(tmpdir(), "hf-unzip-group-"));
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "unzip"), `#!/bin/sh\nps -o pgid= -p $$ > "${join(root, "pgid")}"\n`);
+    chmodSync(join(bin, "unzip"), 0o755);
+    vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+    try {
+      expect(await unzipArchive(join(root, "a.zip"), join(root, "out"))).toBe(true);
+      const callerGroup = execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], {
+        encoding: "utf8",
+      });
+      expect(readFileSync(join(root, "pgid"), "utf8").trim()).toBe(callerGroup.trim());
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "unzips into a folder whose parents do not exist yet",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "hf-unzip-deep-"));
+    const archive = new AdmZip();
+    archive.addFile("chrome", Buffer.from("browser"));
+    archive.writeZip(join(root, "a.zip"));
+    try {
+      expect(await unzipArchive(join(root, "a.zip"), join(root, "one", "two"))).toBe(true);
+      expect(existsSync(join(root, "one", "two", "chrome"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "says there is no unzip command, and leaves no empty folder for install() to mistake for a broken install",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "hf-unzip-none-"));
+    vi.stubEnv("PATH", join(root, "empty-bin"));
+    try {
+      expect(await unzipArchive(join(root, "a.zip"), join(root, "one", "two"))).toBe(false);
+      expect(existsSync(join(root, "one", "two"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   },
 );
