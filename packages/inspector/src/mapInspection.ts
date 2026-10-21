@@ -1,11 +1,5 @@
 import { Sources, mergeSnippets } from "./sources";
 import type { InspectRequest, RuntimeResponse, Snippet } from "./types";
-const coverage = [
-  "GSAP associations observed since page initialization; callback-created animations may require an explicit time query.",
-  "Animation source dependencies include lexically resolved declarations in the same script; later mutations, imports, and cross-script bindings are not traced.",
-  "CSS selector matches are candidates, not a full cascade or dependency graph. HTML is the authored opening tag when uniquely located.",
-  "Direct constructors, other animation systems, iframe contents, removed animations and unexecuted paths may be absent; missing origins are reported.",
-];
 const KEPT_FIRST_UNDER_BUDGET = [
   "animation creation",
   "animation caller",
@@ -21,6 +15,14 @@ const rank = (kind: string) => {
 const priority = (snippet: Snippet) => Math.min(...snippet.kind.map(rank));
 const byPosition = (a: Snippet, b: Snippet) =>
   a.file.localeCompare(b.file) || a.startLine - b.startLine;
+const CO_TARGETS_SHOWN = 3;
+
+function shown(snippet: Snippet, targetCount: number) {
+  const { id, kind, code, uniqueInFile, targets } = snippet;
+  return targetCount === 1
+    ? { id, kind, code, uniqueInFile }
+    : { id, kind, targets, code, uniqueInFile };
+}
 
 export function mapInspection(
   raw: RuntimeResponse,
@@ -40,6 +42,7 @@ export function mapInspection(
   const maxBytes = request.maxBytes ?? 12000;
   const collected: Snippet[] = [];
   const compositions: Snippet[] = [];
+  const queriedRefs = new Set(raw.results.flatMap((result) => result.elements.map((el) => el.ref)));
   const results = raw.results.map((result, index) => {
     let unmappedAnimations = 0;
     for (const animation of result.animations) {
@@ -71,20 +74,24 @@ export function mapInspection(
         if (snippet) collected.push(snippet);
       }
     }
+    const coTargets = [
+      ...new Map(
+        result.animations
+          .flatMap((animation) => animation.targets)
+          .filter((element) => !result.elements.some((own) => own.ref === element.ref))
+          .map((element) => [element.ref, element]),
+      ).values(),
+    ].sort((a, b) => Number(queriedRefs.has(a.ref)) - Number(queriedRefs.has(b.ref)));
     return {
       target: index,
       status: result.status,
       candidates: result.candidates,
       candidatesOmitted: 0,
       animations: result.animations.length,
-      coTargets: [
-        ...new Map(
-          result.animations
-            .flatMap((animation) => animation.targets)
-            .filter((element) => !result.elements.some((own) => own.ref === element.ref))
-            .map((element) => [element.ref, element]),
-        ).values(),
-      ].slice(0, 10),
+      coTargets: coTargets.slice(0, CO_TARGETS_SHOWN),
+      ...(coTargets.length > CO_TARGETS_SHOWN && {
+        coTargetsOmitted: coTargets.length - CO_TARGETS_SHOWN,
+      }),
       unmappedAnimations,
       scopeTruncated: result.truncated,
     };
@@ -98,17 +105,18 @@ export function mapInspection(
       if (!snippet) throw new Error(`unknown_snippet: ${id}`);
       return snippet;
     });
+  const candidateContext: { coverage?: string[] } = {};
   const response = {
     generation: generation,
     visualState,
     sourceVersion: sourceVersion,
     reused,
     results,
-    snippets: [] as Snippet[],
+    snippets: [] as ReturnType<typeof shown>[],
     omitted: [] as { id: string; bytes: number }[],
     omittedCount: 0,
     nextOffset: null as number | null,
-    coverage,
+    ...candidateContext,
     recordLimitReached: raw.recordLimitReached,
     hooked: raw.hooked,
     debugAvailable: true,
@@ -129,17 +137,18 @@ export function mapInspection(
     }
   };
   trimCandidates(maxBytes / 2, 5);
+  const targetCount = request.targets.length;
+  const kept: Snippet[] = [];
   for (let i = offset; i < selected.length; i++) {
-    response.snippets.push(selected[i]);
+    response.snippets.push(shown(selected[i], targetCount));
     const priorCoverage = response.coverage;
     if (
-      response.coverage === coverage &&
+      response.coverage === undefined &&
       selected[i].kind.some(
         (kind) => kind.startsWith("composition ") && kind.endsWith(" candidate"),
       )
     )
       response.coverage = [
-        ...coverage,
         "Composition candidates are alternative source mounts and their enclosing roots, not a verified runtime instance chain; all alternatives remain available within the snippet budget and pagination.",
       ];
     if (size() > maxBytes - 700) {
@@ -153,8 +162,10 @@ export function mapInspection(
       response.nextOffset = nothingFit ? (i + 1 < selected.length ? i + 1 : null) : i;
       break;
     }
+    kept.push(selected[i]);
   }
-  if (!request.snippets) response.snippets.sort(byPosition);
+  if (!request.snippets)
+    response.snippets = kept.sort(byPosition).map((snippet) => shown(snippet, targetCount));
   trimCandidates(maxBytes, 0);
   if (Buffer.byteLength(JSON.stringify(response)) > maxBytes)
     throw new Error("metadata_exceeds_budget: use fewer targets or increase maxBytes");

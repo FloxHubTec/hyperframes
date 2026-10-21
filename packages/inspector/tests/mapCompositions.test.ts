@@ -134,8 +134,8 @@ describe("components report compositions", () => {
         ],
       },
     );
-    const roots = report.snippets.filter((snippet) => snippet.file === "films/a/scene.html");
-    expect(roots.map((snippet) => snippet.startLine)).toEqual(
+    const roots = report.snippets.filter((snippet) => snippet.id.startsWith("films/a/scene.html:"));
+    expect(roots.map((snippet) => Number(snippet.id.split(":").at(-1)?.split("-")[0]))).toEqual(
       id === "scene" ? [2] : id === "missing" ? [] : [1],
     );
   });
@@ -154,12 +154,13 @@ describe("components report compositions", () => {
     });
     expect(
       report.snippets.some(
-        (snippet) => snippet.file === "index.html" && snippet.code.includes('id="film"'),
+        (snippet) => snippet.id.startsWith("index.html:") && snippet.code.includes('id="film"'),
       ),
     ).toBe(true);
     expect(
       report.snippets.some(
-        (snippet) => snippet.file === "films\\a\\index.html" && snippet.code.includes('id="sec"'),
+        (snippet) =>
+          snippet.id.startsWith("films\\a\\index.html:") && snippet.code.includes('id="sec"'),
       ),
     ).toBe(true);
   });
@@ -190,7 +191,7 @@ describe("components report compositions", () => {
         expect.stringContaining('id="left"'),
         expect.stringContaining('id="right"'),
       ]);
-      expect(candidates.every((snippet) => snippet.targets.includes(0))).toBe(true);
+      expect(report.results.map((result) => result.target)).toEqual([0]);
       expect(report.snippets.some((snippet) => snippet.kind.includes("composition host"))).toBe(
         false,
       );
@@ -207,11 +208,13 @@ describe("components report compositions", () => {
         "",
         '<div id="right" data-composition-src="films/a/scene.html" data-start="20"></div>',
       ],
-      "films/a/scene.html": ['<span id="word">Hi</span>'],
+      "films/a/scene.html": [`<span id="word" title="${"x".repeat(650)}">Hi</span>`],
     });
     expect(report.snippets.map((snippet) => snippet.kind)).toEqual([["html opening tag"]]);
     expect(report.omittedCount).toBe(2);
-    expect(report.coverage.some((line) => line.startsWith("Composition candidates"))).toBe(false);
+    expect(
+      report.coverage?.some((line) => line.startsWith("Composition candidates")) ?? false,
+    ).toBe(false);
   });
 
   it("leaves out a composition tag another snippet already shows", () => {
@@ -222,7 +225,7 @@ describe("components report compositions", () => {
       ],
       { maxBytes: 256000 },
     );
-    const lines = report.snippets.map((s) => `${s.file}:${s.startLine}`);
+    const lines = report.snippets.map((s) => s.id.split("-")[0]);
     expect(new Set(lines).size).toBe(lines.length);
     expect(report.snippets.find((s) => s.id === "index.html:3-4")?.kind).toEqual([
       "html opening tag",
@@ -233,7 +236,7 @@ describe("components report compositions", () => {
   });
 
   it("omits composition tags before the snippets about the element itself", () => {
-    const report = inspectIds([["word", "span"]], { maxBytes: 2700 });
+    const report = inspectIds([["word", "span"]], { maxBytes: 1800 });
     expect(report.snippets.map((s) => s.kind[0])).toEqual([
       "matched CSS candidate",
       "html opening tag",
