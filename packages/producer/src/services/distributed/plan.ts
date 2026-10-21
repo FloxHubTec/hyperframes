@@ -321,11 +321,7 @@ export interface BuildLocalExecutionPlanOptions {
   readonly chunksCarryAudio?: boolean;
   /** With `chunksCarryAudio`, also write each chunk's audio packets to their own file. Plan v2 only. */
   readonly sliceChunkAudio?: boolean;
-  /**
-   * Leave the audio out of the plan: mp4 chunks render video only and {@link buildPlanAudio}
-   * makes the track beside them, for the assembler to stitch in. Ignored where audio cannot be
-   * stitched in (non-mp4, `cfr`): the plan mixes it as usual.
-   */
+  /** Leave the audio to {@link buildPlanAudio}; chunks render video only. mp4 without `cfr` only. */
   readonly deferAudio?: boolean;
 }
 
@@ -1370,11 +1366,8 @@ async function extractPlanVideos(c: PlanComposition, deferRangeExtraction: boole
   });
   if (extractResult.failureToEnforce) throw extractResult.failureToEnforce;
   if (extractResult.extractionResult) {
-    // Distributed chunks cannot safely fall back to native remote decoding:
-    // the planner-local source may be unavailable on another worker, and a
-    // missing frame set otherwise renders as a silent blank video. Unlike the
-    // separately canaried in-process policy, distributed planning always
-    // requires every declared source to extract successfully.
+    // A chunk cannot fall back to decoding a source the planner held: a missing frame set
+    // renders as a silent blank video, so every declared source must extract.
     assertVideoExtractionSucceeded(extractResult.extractionResult);
   }
   return extractResult;
