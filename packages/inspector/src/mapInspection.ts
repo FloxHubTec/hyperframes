@@ -17,7 +17,6 @@ const byPosition = (a: Snippet, b: Snippet) =>
   a.file.localeCompare(b.file) || a.startLine - b.startLine;
 const CO_TARGETS_SHOWN = 3;
 
-/** What a report shows of a snippet: its id already names the file and lines, and a one-target query needs no index. */
 function shown(snippet: Snippet, targetCount: number) {
   const { id, kind, code, uniqueInFile, targets } = snippet;
   return targetCount === 1
