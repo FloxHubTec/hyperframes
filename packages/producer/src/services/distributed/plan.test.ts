@@ -41,6 +41,7 @@ import { CURRENT_PLAN_PROTOCOL } from "./planProtocol.js";
 import {
   applyDistributedAudioWarningPolicy,
   buildLocalExecutionPlan,
+  buildPlanAudio,
   buildChunkSlices,
   CHUNK_EXCEEDS_WORKER_TIMEOUT,
   ChunkExceedsWorkerTimeoutError,
@@ -1038,6 +1039,35 @@ describe.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0)("stitched mp4 pl
     });
     const cfrEncoder = JSON.parse(readFileSync(join(withCfr, "meta", "encoder.json"), "utf-8"));
     expect(cfrEncoder.chunksCarryAudio).toBeUndefined();
+  }, 60_000);
+
+  it("leaves the audio to buildPlanAudio, which makes the track the plan would", async () => {
+    // A hot tone, so the true-peak hold re-encodes as well.
+    const project = audioProject("project-separate-audio");
+    const config = { fps: 30, width: 320, height: 240, format: "mp4" } as const;
+    const carried = join(runRoot, "plan-carried-audio");
+    await buildLocalExecutionPlan(project, config, carried, { chunksCarryAudio: true });
+
+    const separate = join(runRoot, "plan-separate-audio");
+    await buildLocalExecutionPlan(project, config, separate, {
+      chunksCarryAudio: true,
+      deferAudio: true,
+    });
+    const encoder = JSON.parse(readFileSync(join(separate, "meta", "encoder.json"), "utf-8"));
+    expect([encoder.chunksCarryAudio, encoder.separateAudio]).toEqual([undefined, true]);
+    expect(existsSync(join(separate, "audio.m4a"))).toBe(false);
+
+    const work = join(runRoot, "separate-audio-work");
+    mkdirSync(work, { recursive: true });
+    const audio = join(work, "audio.m4a");
+    expect(await buildPlanAudio(project, config, work, audio)).toEqual({ hasAudio: true });
+    expect(readFileSync(audio).equals(readFileSync(join(carried, "audio.m4a")))).toBe(true);
+
+    const withCfr = join(runRoot, "plan-separate-audio-cfr");
+    await buildLocalExecutionPlan(project, { ...config, cfr: true }, withCfr, { deferAudio: true });
+    const cfrEncoder = JSON.parse(readFileSync(join(withCfr, "meta", "encoder.json"), "utf-8"));
+    expect(cfrEncoder.separateAudio).toBeUndefined();
+    expect(existsSync(join(withCfr, "audio.m4a"))).toBe(true);
   }, 60_000);
 
   it("encodes the audio once, at the frames' exact length", async () => {
