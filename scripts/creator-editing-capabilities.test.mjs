@@ -34,7 +34,7 @@ test("the entry skill sends motion edits to the motion reference and media to me
   const entry = await read(files.entry);
   assert.match(
     entry,
-    /`references\/motion\.md` \|[^\n]*punch-ins, speed changes, holds/,
+    /\| Motion: [^\n]*punch-ins, speed, holds \| `references\/motion\.md` \|/,
     "the References table routes punch-ins, speed changes and holds",
   );
   assert.match(entry, /Any media[\s\S]{0,200}`\/media-use`/);
@@ -96,7 +96,7 @@ test("source trims and a video's own sound stay on the clip", async () => {
   assert.match(format, /Prefer one `<video data-has-audio="true">`/);
   assert.match(
     entry,
-    /A `<video>` with sound keeps it \(`data-has-audio="true"`\); silent footage is `muted`\. A separate `<audio>` is for music, voiceover, replacement sound or a J\/L cut\./,
+    /A `<video>` keeps its sound with `data-has-audio="true"`, else it is `muted`; music, voice, replacement sound and J\/L cuts are a separate `<audio>`\./,
   );
 });
 

@@ -42,6 +42,9 @@ export interface AudioStageInput {
   /** Read-only view of `composition.audios`. */
   audios: CompositionMetadata["audios"];
   masterFxChain?: string;
+  urlByAbsentLocalPath?: ReadonlyMap<string, string>;
+  /** Keep the float mix the AAC was encoded from here, for a later re-encode from it. */
+  keepEncoderInputAt?: string;
   abortSignal: AbortSignal | undefined;
   assertNotAborted: () => void;
   /** Where a per-track failure's detail goes. Optional so tests need not pass one. */
@@ -82,6 +85,8 @@ export async function runAudioStage(input: AudioStageInput): Promise<AudioStageR
     audioGain,
     audios,
     masterFxChain,
+    urlByAbsentLocalPath,
+    keepEncoderInputAt,
     abortSignal,
     assertNotAborted,
     log,
@@ -109,7 +114,13 @@ export async function runAudioStage(input: AudioStageInput): Promise<AudioStageR
         audioOutputPath,
         duration,
         abortSignal,
-        { ffmpegProcessTimeout, audioGain, masterFxChain },
+        {
+          ffmpegProcessTimeout,
+          audioGain,
+          masterFxChain,
+          urlByAbsentLocalPath,
+          keepEncoderInputAt,
+        },
         compiledDir,
       );
     } catch (err) {

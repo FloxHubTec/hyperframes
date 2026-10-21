@@ -736,6 +736,9 @@ const RETIRED_ROUTING_FILES = [
   "skills/hyperframes/references/workflow-catalog.md",
 ];
 
+const FALLOW_PRUNE_REASON =
+  "fallow 3 reuses one audit snapshot per checkout and the hook prunes with `fallow audit-cache prune`, replacing this script";
+
 export const ALLOWED_DELETIONS = new Map([
   [
     "packages/cli/src/beats/headlessAnalyzer.ts",
@@ -1895,6 +1898,16 @@ export const ALLOWED_DELETIONS = new Map([
   ...RETIRED_WORKFLOW_FILES.map((path) => [path, RETIRED_WORKFLOW_REASON]),
   ...RETIRED_GUIDE_FILES.map((path) => [path, RETIRED_GUIDE_REASON]),
   ...RETIRED_ROUTING_FILES.map((path) => [path, RETIRED_ROUTING_REASON]),
+  [
+    "packages/producer/src/services/audioExtractor.ts",
+    "imported by nothing; its own ffmpeg spawn quoted stderr unredacted, outside ManagedChildProcess",
+  ],
+  ["scripts/prune-fallow-audit-caches.mjs", FALLOW_PRUNE_REASON],
+  ["scripts/prune-fallow-audit-caches.test.mjs", FALLOW_PRUNE_REASON],
+  [
+    "packages/engine/src/services/frameCapture-releaseInjectedVideoMedia.browser.test.ts",
+    "the revert of #5795 removes releaseInjectedVideoMedia, the only code this file tested",
+  ],
 ]);
 
 export function parseBase(argv, fallback = "origin/main") {

@@ -160,7 +160,7 @@ describe("media treatment routing documentation", () => {
     // The symptom-triggered description is the other half of the fix: the skill
     // has to be reachable from the user naming an effect, not from the command.
     const registrySkill = read("skills", "hyperframes-registry", "SKILL.md");
-    expect(registrySkill).toContain("Use BEFORE hand-building any named visual");
+    expect(registrySkill).toContain("Use it before hand-building any named visual");
     expect(registrySkill).toContain("CRT scanlines");
   });
 

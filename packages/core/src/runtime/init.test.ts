@@ -513,6 +513,25 @@ describe("initSandboxRuntimeModular", () => {
       }
     });
 
+    it.each(["seek", "renderSeek"] as const)(
+      "shows a clip's child again after a %s skipped past the GSAP set that hides it at the clip's end",
+      (seek) => {
+        document.body.innerHTML =
+          `<div data-composition-id="main" data-root="true" data-start="0" data-duration="10" data-width="1920" data-height="1080">` +
+          `<div id="line" style="position: absolute" data-start="2" data-duration="2"><div id="words"></div></div>` +
+          `</div>`;
+        const tl = gsap.timeline({ paused: true });
+        tl.set("#words", { visibility: "hidden" }, 3.9);
+        window.__timelines = { main: tl as unknown as RuntimeTimelineLike };
+        initSandboxRuntimeModular();
+        const words = document.getElementById("words")!;
+        // The set first renders on this jump, while its clip is off screen.
+        window.__player?.[seek](6);
+        window.__player?.[seek](3);
+        expect(getComputedStyle(words).visibility).toBe("visible");
+      },
+    );
+
     it("keeps a hidden scene's contents hidden when a rewound GSAP set marks one visible inline", () => {
       hideTimedClipsUntilFirstPass();
       try {
@@ -1470,6 +1489,46 @@ describe("initSandboxRuntimeModular", () => {
 
       window.__player?.renderSeek(5);
       expect(earlyClip.style.visibility).toBe("hidden");
+    });
+
+    it("shows only the full-frame <svg> clip whose window holds the seek", () => {
+      const root = buildRoot();
+      const SVG_NS = "http://www.w3.org/2000/svg";
+      const windows = [
+        [0, 4],
+        [4, 8],
+        [12, 8],
+      ];
+      const layers = windows.map(([start, duration]) => {
+        const svg = document.createElementNS(SVG_NS, "svg");
+        svg.setAttribute("data-start", String(start));
+        svg.setAttribute("data-duration", String(duration));
+        // A timed shape that outlives its layer must still go with it.
+        const shape = document.createElementNS(SVG_NS, "rect");
+        shape.setAttribute("data-start", "0");
+        shape.setAttribute("data-duration", "20");
+        svg.appendChild(shape);
+        root.appendChild(svg);
+        return { svg, shape };
+      });
+      window.__timelines = { main: createMockTimeline(20) };
+      initSandboxRuntimeModular();
+
+      for (const [time, shown] of [
+        [1, 0],
+        [5, 1],
+        [16, 2],
+      ]) {
+        window.__player?.renderSeek(time);
+        expect(
+          layers.map(({ svg }) => svg.style.visibility),
+          `layers at ${time}s`,
+        ).toEqual(layers.map((_, i) => (i === shown ? "visible" : "hidden")));
+        expect(
+          layers.map(({ shape }) => shape.style.visibility),
+          `shapes at ${time}s`,
+        ).toEqual(layers.map((_, i) => (i === shown ? "visible" : "hidden")));
+      }
     });
 
     it("never shows two back-to-back clips at their shared boundary", () => {
@@ -5305,6 +5364,47 @@ describe("initSandboxRuntimeModular", () => {
         }) as CSSStyleDeclaration;
       }) as typeof window.getComputedStyle);
     };
+
+    it("lays a clip out again only once its layout inputs change", async () => {
+      const raf = createManualRaf();
+      vi.spyOn(performance, "now").mockImplementation(() => raf.now());
+      window.requestAnimationFrame =
+        raf.requestAnimationFrame as typeof window.requestAnimationFrame;
+      window.cancelAnimationFrame = raf.cancelAnimationFrame as typeof window.cancelAnimationFrame;
+      const root = makeRoot();
+      const clip = document.createElement("div");
+      clip.setAttribute("data-start", "0");
+      root.appendChild(clip);
+      const reads = vi.spyOn(window, "getComputedStyle");
+      const readsOfClip = () => reads.mock.calls.filter(([el]) => el === clip).length;
+      const frames = async (n: number) => {
+        for (let i = 0; i < n; i++) {
+          raf.step(1000 / 60);
+          await Promise.resolve();
+        }
+      };
+      const posts = vi.spyOn(window.parent, "postMessage");
+      const timelinePosts = () =>
+        posts.mock.calls.filter(([m]) => (m as { type?: string })?.type === "stage-size").length;
+
+      window.__timelines = { main: createMockTimeline(10) };
+      initSandboxRuntimeModular();
+      await frames(5);
+      const settled = readsOfClip();
+      const postedBefore = timelinePosts();
+      expect(settled).toBeGreaterThan(0);
+
+      // A timing edit posts the timeline again; the clip's layout inputs did not move.
+      clip.setAttribute("data-duration", "5");
+      await frames(60);
+      expect(timelinePosts()).toBeGreaterThan(postedBefore);
+      expect(readsOfClip()).toBe(settled);
+
+      clip.setAttribute("data-width", "640");
+      await frames(60);
+      expect(readsOfClip()).toBeGreaterThan(settled);
+      expect(clip.style.width).toBe("640px");
+    });
 
     it("force-absolutizes an authored data-start clip and leaves its position to CSS", () => {
       const root = makeRoot();

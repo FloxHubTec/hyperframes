@@ -8,6 +8,8 @@ import { join } from "node:path";
 import type { Browser, Page, PuppeteerNode } from "puppeteer-core";
 
 import type { CaptureMode } from "./browserLeasePool.js";
+import { managedChromeVersion } from "./chromeHostCeiling.js";
+import { resolveConfig } from "../config.js";
 
 import {
   _resetAutoBrowserGpuModeCacheForTests,
@@ -108,6 +110,30 @@ describe("BeginFrame capability probe", () => {
     expect(result.supported).toBe(false);
     expect(result.detail).toContain("timeout during screenshot beginFrame attempt 1");
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a passed probe supported when its page close is slow", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ hasDamage: true, screenshotData: png.toString("base64") });
+    const browser = {
+      newPage: vi.fn().mockResolvedValue({
+        goto: vi.fn().mockResolvedValue(null),
+        createCDPSession: vi.fn().mockResolvedValue({
+          send,
+          detach: vi.fn().mockResolvedValue(undefined),
+        }),
+        close: vi.fn().mockReturnValue(new Promise<never>(() => {})),
+      }),
+    } as unknown as Browser;
+
+    const result = await _probeBeginFrameSupportForTests(browser);
+
+    expect(result.supported).toBe(true);
+    expect(result.detail).toContain("probe page cleanup timed out");
   });
 
   it("force-kills and disconnects when graceful browser cleanup never resolves", async () => {
@@ -263,7 +289,21 @@ describe("compositionRequiresWebGpu", () => {
     ).toBe(false);
   });
 
-  it("reads only the composition root tag and stays linear on repeated '<'", () => {
+  it("detects the marker on a mounted sub-composition's root in bundled HTML", () => {
+    expect(
+      compositionRequiresWebGpu(
+        '<div id="root" data-composition-id="main"><div id="aurora-host" data-composition-id="aurora">' +
+          '<div data-hf-inner-root="true" data-requires-webgpu=""><canvas data-shader="Aurora"></canvas></div></div></div>',
+      ),
+    ).toBe(true);
+    expect(
+      compositionRequiresWebGpu(
+        '<div data-composition-id="main"><div data-composition-id="scene"><div data-hf-inner-root="true"></div></div></div>',
+      ),
+    ).toBe(false);
+  });
+
+  it("reads only composition root tags and stays linear on repeated '<'", () => {
     expect(
       compositionRequiresWebGpu('<p data-requires-webgpu></p><div data-composition-id="a"></div>'),
     ).toBe(false);
@@ -803,6 +843,12 @@ describe("resolveHeadlessShellPath", () => {
   const originalHeadlessShellPath = process.env.PRODUCER_HEADLESS_SHELL_PATH;
   const originalHyperframesBrowserPath = process.env.HYPERFRAMES_BROWSER_PATH;
 
+  // A runner may export either var (the Windows job sets HYPERFRAMES_BROWSER_PATH); each case sets its own.
+  beforeEach(() => {
+    delete process.env.PRODUCER_HEADLESS_SHELL_PATH;
+    delete process.env.HYPERFRAMES_BROWSER_PATH;
+  });
+
   afterEach(() => {
     if (originalHeadlessShellPath === undefined) delete process.env.PRODUCER_HEADLESS_SHELL_PATH;
     else process.env.PRODUCER_HEADLESS_SHELL_PATH = originalHeadlessShellPath;
@@ -816,6 +862,38 @@ describe("resolveHeadlessShellPath", () => {
     expect(() => resolveHeadlessShellPath({})).toThrow(
       /Chrome binary not found at PRODUCER_HEADLESS_SHELL_PATH/,
     );
+  });
+
+  it("prefers HYPERFRAMES_BROWSER_PATH over PRODUCER_HEADLESS_SHELL_PATH, as the CLI does", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-env-"));
+    try {
+      const cliChoice = join(dir, "chosen-browser");
+      const other = join(dir, "other-browser");
+      writeFileSync(cliChoice, "");
+      writeFileSync(other, "");
+      process.env.HYPERFRAMES_BROWSER_PATH = cliChoice;
+      process.env.PRODUCER_HEADLESS_SHELL_PATH = other;
+
+      expect(resolveHeadlessShellPath({})).toBe(cliChoice);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps that precedence through a render's resolved engine config", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-env-"));
+    try {
+      const cliChoice = join(dir, "chosen-browser");
+      const other = join(dir, "other-browser");
+      writeFileSync(cliChoice, "");
+      writeFileSync(other, "");
+      process.env.HYPERFRAMES_BROWSER_PATH = cliChoice;
+      process.env.PRODUCER_HEADLESS_SHELL_PATH = other;
+
+      expect(resolveHeadlessShellPath(resolveConfig())).toBe(cliChoice);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("uses HYPERFRAMES_BROWSER_PATH when the CLI resolved a browser explicitly", () => {
@@ -873,7 +951,7 @@ describe("resolveHeadlessShellPath", () => {
           ".cache",
           "puppeteer",
           "chrome-headless-shell",
-          "host-152.0.7928.2",
+          `host-${managedChromeVersion("linux", "24.0.0")}`,
         );
         const candidates = [
           ["chrome-headless-shell-linux64", "chrome-headless-shell"],
@@ -918,7 +996,7 @@ describe("resolveHeadlessShellPath", () => {
           ".cache",
           "puppeteer",
           "chrome-headless-shell",
-          "host-152.0.7928.2",
+          `host-${managedChromeVersion("linux", "24.0.0")}`,
         );
         for (const [directory, executable] of [
           ["chrome-headless-shell-linux64", "chrome-headless-shell"],
@@ -939,6 +1017,96 @@ describe("resolveHeadlessShellPath", () => {
         });
 
         expect(stdout).toBe("");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("never uses another tool's shell that does not start", () => {
+    // Field report: only mac_arm-121 in the shared cache, and that shell died at launch.
+    const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-shared-old-"));
+    try {
+      const old = join(home, ".cache", "puppeteer", "chrome-headless-shell", "linux-121.0.6167.85");
+      const binary = join(old, "chrome-headless-shell-linux64", "chrome-headless-shell");
+      mkdirSync(join(binary, ".."), { recursive: true });
+      writeFileSync(binary, "shell");
+      const env = { ...process.env, HOME: home, USERPROFILE: home };
+      delete env.PRODUCER_HEADLESS_SHELL_PATH;
+      delete env.HYPERFRAMES_BROWSER_PATH;
+
+      expect(resolveHeadlessShellInSubprocess(env, { platform: "linux", arch: "x64" })).toBe("");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers the managed build in the shared cache over an older build of ours", () => {
+    const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-shared-managed-"));
+    try {
+      const shell = (root: string, version: string) =>
+        join(
+          home,
+          ".cache",
+          ...root.split("/"),
+          `linux-${version}`,
+          "chrome-headless-shell-linux64",
+          "chrome-headless-shell",
+        );
+      const managed = shell(
+        "puppeteer/chrome-headless-shell",
+        managedChromeVersion("linux", "24.0.0"),
+      );
+      for (const binary of [
+        managed,
+        shell("puppeteer/chrome-headless-shell", "121.0.6167.85"),
+        shell("hyperframes/chrome/chrome-headless-shell", "150.0.7871.124"),
+      ]) {
+        mkdirSync(join(binary, ".."), { recursive: true });
+        writeFileSync(binary, "shell");
+      }
+      const env = { ...process.env, HOME: home, USERPROFILE: home };
+      delete env.PRODUCER_HEADLESS_SHELL_PATH;
+      delete env.HYPERFRAMES_BROWSER_PATH;
+
+      expect(resolveHeadlessShellInSubprocess(env, { platform: "linux", arch: "x64" })).toBe(
+        managed,
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Stand-in shells are shell scripts.
+  it.skipIf(process.platform === "win32")(
+    "keeps the newest shared shell that starts and skips one that dies",
+    () => {
+      const home = mkdtempSync(join(tmpdir(), "hyperframes-engine-browser-shared-starts-"));
+      try {
+        const shell = (version: string, script: string) => {
+          const binary = join(
+            home,
+            ".cache",
+            "puppeteer",
+            "chrome-headless-shell",
+            `linux-${version}`,
+            "chrome-headless-shell-linux64",
+            "chrome-headless-shell",
+          );
+          mkdirSync(join(binary, ".."), { recursive: true });
+          writeFileSync(binary, script, { mode: 0o755 });
+          return binary;
+        };
+        shell("149.0.7800.1", "#!/bin/sh\nkill -TRAP $$\n");
+        const working = shell("148.0.7778.97", "#!/bin/sh\nexit 0\n");
+        shell("99.0.6533.123", "#!/bin/sh\nexit 0\n");
+        const env = { ...process.env, HOME: home, USERPROFILE: home };
+        delete env.PRODUCER_HEADLESS_SHELL_PATH;
+        delete env.HYPERFRAMES_BROWSER_PATH;
+
+        expect(resolveHeadlessShellInSubprocess(env, { platform: "linux", arch: "x64" })).toBe(
+          working,
+        );
       } finally {
         rmSync(home, { recursive: true, force: true });
       }
