@@ -148,6 +148,12 @@
       "import": "./src/mediaTiming.ts",
       "types": "./src/mediaTiming.ts"
     },
+    "./reference-resolver": {
+      "bun": "./src/referenceResolver.ts",
+      "node": "./dist/referenceResolver.js",
+      "import": "./src/referenceResolver.ts",
+      "types": "./src/referenceResolver.ts"
+    },
     "./composition-duration": {
       "bun": "./src/compositionDuration.ts",
       "node": "./dist/compositionDuration.js",
@@ -246,6 +252,10 @@
       "./media-timing": {
         "import": "./dist/mediaTiming.js",
         "types": "./dist/mediaTiming.d.ts"
+      },
+      "./reference-resolver": {
+        "import": "./dist/referenceResolver.js",
+        "types": "./dist/referenceResolver.d.ts"
       },
       "./composition-duration": {
         "import": "./dist/compositionDuration.js",

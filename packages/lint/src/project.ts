@@ -11,6 +11,13 @@ import {
   resolveMediaStartSeconds,
   type HostSlot,
 } from "@hyperframes/parsers/media-timing";
+import { parseNumeric } from "@hyperframes/parsers/composition-contract";
+import {
+  resolveReferencedDuration,
+  resolveReferencedStart,
+  type RefResolverDoc,
+  type RefResolverEl,
+} from "@hyperframes/parsers/reference-resolver";
 import { checkSubCompositionUsability } from "@hyperframes/parsers/sub-composition-validity";
 import { parseHTML } from "linkedom";
 import {
@@ -566,76 +573,94 @@ interface AudioSpan {
   src: string;
 }
 
+/** One parsed file: reference starts resolve within it, memoised. */
+interface TimingFile {
+  doc: RefResolverDoc;
+  starts: Map<RefResolverEl, number>;
+}
+
+const timingFile = (doc: RefResolverDoc): TimingFile => ({ doc, starts: new Map() });
+const localStart = (file: TimingFile, el: Element) =>
+  resolveReferencedStart(file.doc, el, file.starts, new Set());
+const localDuration = (file: TimingFile, el: Element) =>
+  resolveReferencedDuration(file.doc, el, file.starts, new Set());
+
 /** Audible media on the main timeline, walked from the root through the scenes it mounts. */
 function collectMainTimelineAudio(projectDir: string, rootHtml: string): AudioSpan[] {
   const spans: AudioSpan[] = [];
-  const mount = (html: string, origin: number, slots: HostSlot[], mounting: string[]) => {
+  type Placement = { file: TimingFile; origin: number; slots: HostSlot[]; mounting: string[] };
+  const mount = (html: string, at: Omit<Placement, "file">) => {
     const { document } = parseHTML(html);
     const root = querySelectorAllIncludingTemplates(document, "[data-composition-id]")[0];
-    if (root) visit(root, origin, slots, mounting);
+    if (root) visit(root, { ...at, file: timingFile(document) });
   };
-  const visit = (parent: ParentNode, origin: number, slots: HostSlot[], mounting: string[]) => {
+  const visit = (parent: ParentNode, at: Placement) => {
     for (const el of parent.children) {
       if (el.tagName === "TEMPLATE") {
-        visit((el as HTMLTemplateElement).content, origin, slots, mounting);
+        visit((el as HTMLTemplateElement).content, at);
         continue;
       }
-      const span = audioSpanOf(el, origin, slots);
+      const span = audioSpanOf(el, at.file, at.origin, at.slots);
       if (span) spans.push(span);
-      const scope = nestedScopeOf(el, origin, slots);
+      const scope = nestedScopeOf(el, at.file, at.origin, at.slots);
       if (!scope) {
-        visit(el, origin, slots, mounting);
+        visit(el, at);
         continue;
       }
+      const inner = { ...at, ...scope };
       const src = el.getAttribute("data-composition-src")?.trim();
       const file = src && !isUnresolvedAssetPlaceholder(src) && !isRemoteOrInlineUrl(src);
       const filePath = file ? resolve(projectDir, src) : null;
-      if (filePath && !mounting.includes(filePath)) {
+      if (filePath && !at.mounting.includes(filePath)) {
         const read = readProjectFile(filePath);
         if (read.kind === "file")
-          mount(read.text, scope.origin, scope.slots, [...mounting, filePath]);
+          mount(read.text, { ...inner, mounting: [...at.mounting, filePath] });
       }
-      visit(el, scope.origin, scope.slots, mounting);
+      visit(el, inner);
     }
   };
-  visit(parseHTML(rootHtml).document, 0, [], []);
+  const { document } = parseHTML(rootHtml);
+  visit(document, { file: timingFile(document), origin: 0, slots: [], mounting: [] });
   return spans;
 }
 
 /** A composition or scene host: its children's local t=0 sits at the host's start, cut to its window. */
 function nestedScopeOf(
   el: Element,
+  file: TimingFile,
   origin: number,
   slots: HostSlot[],
 ): { origin: number; slots: HostSlot[] } | null {
   if (!el.hasAttribute("data-composition-id") && !el.hasAttribute("data-composition-src")) {
     return null;
   }
-  // A reference start ("intro + 2") reads as NaN, so that scene's audio goes unchecked.
-  const start = origin + parseFloat(el.getAttribute("data-start") ?? "0");
-  const duration = parseFloat(el.getAttribute("data-duration") ?? "");
-  const window = Number.isFinite(duration) ? [{ start, end: start + duration }] : [];
+  const start = origin + localStart(file, el);
+  const duration = localDuration(file, el);
+  const window = duration === null ? [] : [{ start, end: start + duration }];
   return { origin: compositionOriginSeconds(start, el), slots: [...slots, ...window] };
 }
 
-function audioSpanOf(el: Element, origin: number, slots: HostSlot[]): AudioSpan | null {
+function audioSpanOf(
+  el: Element,
+  file: TimingFile,
+  origin: number,
+  slots: HostSlot[],
+): AudioSpan | null {
   const tag = el.tagName.toLowerCase();
   if (tag !== "audio" && !(tag === "video" && isAudibleVideo((name) => el.getAttribute(name)))) {
     return null;
   }
   const trackStr = el.getAttribute("data-track-index");
-  const authoredStart = parseFloat(el.getAttribute("data-start") ?? "");
-  if (!trackStr || !Number.isFinite(authoredStart) || !Number.isFinite(origin)) return null;
+  if (!trackStr || !el.hasAttribute("data-start")) return null;
   const start = resolveMediaStartSeconds({
-    authoredStart,
+    authoredStart: parseNumeric(el.getAttribute("data-start")),
     hostStart: origin,
     hasAutoStart: el.hasAttribute("data-hf-auto-start"),
     basis: el.getAttribute(MEDIA_START_BASIS_ATTR),
-    ordinaryStart: () => origin + authoredStart,
+    ordinaryStart: () => origin + localStart(file, el),
   });
-  const durStr = el.getAttribute("data-duration");
-  const end = start + (durStr ? parseFloat(durStr) : Infinity);
-  const kept = cutToHostSlots({ start, end }, slots);
+  const duration = parseNumeric(el.getAttribute("data-duration")) ?? localDuration(file, el);
+  const kept = cutToHostSlots({ start, end: start + (duration ?? Infinity) }, slots);
   if (kept.end <= kept.start) return null;
   return { trackIndex: parseInt(trackStr, 10), ...kept, src: el.getAttribute("src") || "unknown" };
 }

@@ -1052,10 +1052,10 @@ describe("audio-aware project rules", () => {
       .replace('data-duration="5"', `data-duration="${videoDuration}"`)}
   </div>
 </template>`;
-    const host = (id: string, start: number, length: number | null) =>
+    const host = (id: string, start: number | string, length: number | null) =>
       `<div data-composition-id="${id}" data-composition-src="compositions/${id}.html" data-start="${start}"${length === null ? "" : ` data-duration="${length}"`} data-track-index="1"></div>`;
     const scenesCodes = (
-      starts: number[],
+      starts: Array<number | string>,
       { videoDuration = 5, hostDuration = 5 as number | null } = {},
     ) => {
       const ids = starts.map((_, i) => `s${i}`);
@@ -1077,6 +1077,11 @@ describe("audio-aware project rules", () => {
 
     it("still warns when two scenes' hosts overlap", async () => {
       expect(await scenesCodes([0, 2])).toContain("duplicate_audio_track");
+    });
+
+    it("places a scene chained to the one before it with a reference start", async () => {
+      expect(await scenesCodes([0, "s0"])).not.toContain("duplicate_audio_track");
+      expect(await scenesCodes([0, "s0 - 2"])).toContain("duplicate_audio_track");
     });
 
     it("cuts a scene's audio at its host's end, as playback does", async () => {
