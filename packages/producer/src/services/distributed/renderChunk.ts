@@ -723,6 +723,7 @@ export async function renderChunk(
     const captureAttempts: Parameters<typeof runCaptureStage>[0]["captureAttempts"] = [];
     let forceScreenshotForChunk = encoder.forceScreenshot;
     let shownBoxes: Map<string, ShownBox> | undefined;
+    let extraction: Promise<unknown> | undefined;
     try {
       if (chunkWorkerCount === 1 || !forceScreenshotForChunk) {
         // Sequential capture reuses this session. Parallel BeginFrame capture
@@ -800,8 +801,9 @@ export async function renderChunk(
       // its own injector hook because the hook remembers the last injected frame
       // per video; sharing that state across a fresh retry page can suppress the
       // first injection and produce a blank/stale frame.
+      // Extraction runs while the capture browsers start; each waits for it on its first frame.
       const deferredVideoFrames = planVideos
-        ? await extractDeferredVideoFramesForChunk({
+        ? extractDeferredVideoFramesForChunk({
             planDir,
             planVideos,
             frames: chunkFrameNumbers,
@@ -811,22 +813,27 @@ export async function renderChunk(
             remoteSources,
             shownBoxes,
           })
-        : [];
+        : Promise.resolve([]);
+      extraction = deferredVideoFrames;
       const videoFrameLookup =
         planVideos && planVideos.extracted.length > 0
-          ? createFrameLookupTable(
-              planVideos.videos,
-              [
-                ...rebuildExtractedFramesFromPlanDir(
-                  planDir,
-                  planVideos.extracted.filter((video) => !video.deferredRange),
-                  v2Manifest === null ? "dense-v1" : "sparse-v2",
-                ),
-                ...deferredVideoFrames,
-              ],
-              resolveRenderFpsConfig(job.config.fps).value,
+          ? deferredVideoFrames.then((deferred) =>
+              createFrameLookupTable(
+                planVideos.videos,
+                [
+                  ...rebuildExtractedFramesFromPlanDir(
+                    planDir,
+                    planVideos.extracted.filter((video) => !video.deferredRange),
+                    v2Manifest === null ? "dense-v1" : "sparse-v2",
+                  ),
+                  ...deferred,
+                ],
+                resolveRenderFpsConfig(job.config.fps).value,
+              ),
             )
           : null;
+      // A capture can fail before any session reads it; the failure is rethrown below.
+      videoFrameLookup?.catch(() => {});
       const createChunkVideoFrameInjector = createChunkVideoFrameInjectorFactory(videoFrameLookup);
 
       const captureStarted = Date.now();
@@ -920,7 +927,12 @@ export async function renderChunk(
             },
           );
         },
+      }).catch(async (error: unknown) => {
+        // An extraction failure is the root cause of a capture that waited on it.
+        await deferredVideoFrames;
+        throw error;
       });
+      await deferredVideoFrames;
       captureStageMs = Date.now() - captureStarted;
       applyRenderWarningPolicy(
         job,
@@ -1018,6 +1030,8 @@ export async function renderChunk(
       }
       encodeStageMs = Date.now() - encodeStarted;
     } finally {
+      // No ffmpeg left writing into a work dir the caller removes; its error surfaced above.
+      await extraction?.catch(() => {});
       // Cleanest path: captureStage closed the session for us. The defensive
       // close handles error paths where we threw before delegating.
       if (session) {
