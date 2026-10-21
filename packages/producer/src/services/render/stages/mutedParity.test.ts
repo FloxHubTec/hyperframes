@@ -46,7 +46,10 @@ describe("a muted video's sound in the mix", () => {
     <audio id="music" src="music.mp3" data-start="0" data-duration="4" data-volume="0.19"></audio>
   </div>`;
   // Both files carry an audio stream, so the auto-detect fallback would add any video the parsers miss.
-  const extracted = ["quiet", "voice"].map((videoId) => ({ videoId, metadata: { hasAudio: true } }));
+  const extracted = ["quiet", "voice"].map((videoId) => ({
+    videoId,
+    metadata: { hasAudio: true },
+  }));
 
   for (const probed of [false, true]) {
     it(`stays out of the mix ${probed ? "after" : "without"} the browser probe`, () => {
