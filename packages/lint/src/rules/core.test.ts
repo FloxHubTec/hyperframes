@@ -1245,11 +1245,39 @@ describe("core rules", () => {
       expect(await labels(comp(library))).toEqual(["Math.random()", "performance.now()"]);
     });
 
+    it("checks a UMD wrapper whose GSAP banner is separated from it by other code", async () => {
+      expect(await labels(comp(`${banner}\nwindow.x = 1;\n${gsapUmd}`))).toEqual([
+        "Math.random()",
+        "Date.now()",
+      ]);
+    });
+
+    it.each([
+      [
+        "joined to it with a comma",
+        `${banner}\n${gsapUmd.slice(0, -1)}, window.seed = Math.random();`,
+      ],
+      [
+        "beside it inside an outer wrapper",
+        `(function () {\n${pastedGsap}\nwindow.seed = Math.random();\n})();`,
+      ],
+    ])("still flags author code %s", async (_shape, library) => {
+      expect(await labels(comp(library))).toEqual(["Math.random()"]);
+    });
+
     it.each([
       ["a string", `const label = "GreenSock"; const x = Math.random();`],
       ["a comment", `// eased like GreenSock\nconst x = Math.random();`],
       ["a spoofed banner", `${banner}\nwindow.seed = Math.random();`],
       ["a spoofed inlining comment", `/* inlined: gsap.min.js */\nwindow.seed = Math.random();`],
+      [
+        "a banner plus define.amd in a string",
+        `${banner}\nwindow.seed = ("define.amd", Math.random());`,
+      ],
+      [
+        "a banner plus define.amd in a comment",
+        `${banner}\nwindow.seed = /* define.amd */ Math.random();`,
+      ],
     ])("still flags author code whose script mentions GSAP in %s", async (_where, author) => {
       expect(await labels(comp("", author))).toEqual(["Math.random()"]);
     });

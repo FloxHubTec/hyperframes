@@ -2,7 +2,8 @@
 // Nothing in this file should emit findings — it only parses and extracts.
 
 import { Parser } from "htmlparser2";
-import { parse, type Comment, type Program } from "acorn";
+import { parse, type CallExpression, type Comment, type Program } from "acorn";
+import { simple } from "acorn-walk";
 
 export type OpenTag = {
   raw: string;
@@ -567,38 +568,65 @@ function isGsapLibraryComment(comment: Comment): boolean {
   );
 }
 
+/** GSAP's UMD wrapper: `function (global, factory) { ...define.amd... }(this, function (exports) {...})`. */
+function isUmdWrapperCall(call: CallExpression): boolean {
+  const [scope, factory] = call.arguments;
+  if (
+    call.callee.type !== "FunctionExpression" ||
+    call.arguments.length !== 2 ||
+    scope?.type !== "ThisExpression" ||
+    factory?.type !== "FunctionExpression"
+  )
+    return false;
+  let checksAmd = false;
+  simple(call.callee.body, {
+    MemberExpression(member) {
+      if (
+        !member.computed &&
+        member.object.type === "Identifier" &&
+        member.object.name === "define" &&
+        member.property.type === "Identifier" &&
+        member.property.name === "amd"
+      )
+        checksAmd = true;
+    },
+  });
+  return checksAmd;
+}
+
 /**
- * Offsets of inlined GSAP library code: each top-level UMD statement with a GSAP banner
- * (or the producer's inlining comment) directly before it (minified) or inside it (unminified).
+ * Offsets of inlined GSAP library code: each UMD wrapper call with a GSAP banner (or the
+ * producer's inlining comment) directly before it (minified) or inside it (unminified).
  */
 function findInlinedGsapLibrarySpans(source: string): Array<[number, number]> {
   if (!/GreenSock|inlined:/.test(source)) return [];
   const comments: Comment[] = [];
-  let body: Program["body"];
+  let program: Program;
   try {
-    ({ body } = parse(source, {
+    program = parse(source, {
       ecmaVersion: "latest",
       sourceType: "script",
       allowReturnOutsideFunction: true,
       onComment: comments,
-    }));
+    });
   } catch {
     return [];
   }
   const banners = comments.filter(isGsapLibraryComment);
-  return body
-    .filter(
-      (stmt) =>
-        stmt.type === "ExpressionStatement" &&
-        source.slice(stmt.start, stmt.end).includes("define.amd") &&
-        banners.some(
-          (banner) =>
-            (banner.start >= stmt.start && banner.end <= stmt.end) ||
-            (banner.end <= stmt.start &&
-              stripJsComments(source.slice(banner.end, stmt.start)).trim() === ""),
-        ),
-    )
-    .map((stmt): [number, number] => [stmt.start, stmt.end]);
+  const spans: Array<[number, number]> = [];
+  simple(program, {
+    CallExpression(call) {
+      if (!isUmdWrapperCall(call)) return;
+      const hasBanner = banners.some(
+        (banner) =>
+          (banner.start >= call.start && banner.end <= call.end) ||
+          (banner.end <= call.start &&
+            /^[\s!]*$/.test(stripJsComments(source.slice(banner.end, call.start)))),
+      );
+      if (hasBanner) spans.push([call.start, call.end]);
+    },
+  });
+  return spans;
 }
 
 export function blankInlinedGsapLibrary(source: string): string {
