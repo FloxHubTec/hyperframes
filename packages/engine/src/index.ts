@@ -143,6 +143,7 @@ export {
   type DiscardWarmupInnerCapture,
   type StaticVerificationOutcome,
   VfxFailureError,
+  waitForImagesReady,
 } from "./services/frameCapture.js";
 export {
   CaptureFailure,
@@ -360,6 +361,7 @@ export {
   type RunFfmpegOptions,
   type RunFfmpegResult,
 } from "./utils/runFfmpeg.js";
+export { aacSegmentCount, encodeAac } from "./services/aacEncode.js";
 export {
   ManagedChildProcess,
   type ManagedChildProcessOptions,
@@ -432,6 +434,8 @@ export {
   showVideoElements,
   queryVideoElementBounds,
   queryElementStacking,
+  measureVideoShownBoxes,
+  type ShownBox,
   type VideoElementBounds,
   type ElementStackingInfo,
 } from "./services/videoFrameInjector.js";

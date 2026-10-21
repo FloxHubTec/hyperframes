@@ -53,12 +53,14 @@ import {
   type EngineConfig,
   getEncoderPreset,
   initializeSession,
+  measureVideoShownBoxes,
   probeBeginFrameLiveness,
   readWebGlVendorInfoFromCanvas,
   resolveConfig,
+  type ShownBox,
 } from "@hyperframes/engine";
 import { defaultLogger } from "../../logger.js";
-import { applyRenderWarningPolicy } from "../renderOrchestrator.js";
+import { applyRenderWarningPolicy, collectVideoMetadataHints } from "../renderOrchestrator.js";
 import { runEncodeStage } from "../render/stages/encodeStage.js";
 import { runCaptureStage } from "../render/stages/captureStage.js";
 import { createCapturePlan } from "../render/capturePlan.js";
@@ -84,11 +86,10 @@ import {
   PLAN_VIDEOS_META_RELATIVE_PATH,
   type PlanVideosJson,
   readFfmpegVersion,
-  resolvePlanAudioPath,
 } from "./shared.js";
-import { muxChunkWithAudio } from "./chunkAudio.js";
+import { chunkAudioSource, chunksWithSubRange, muxChunkWithAudio } from "./chunkAudio.js";
 import { DISTRIBUTED_RENDER_CAPABILITIES, readPlanProtocolV1 } from "./planProtocol.js";
-import { validatePlanV2MaterializedTarget } from "./planV2.js";
+import { readValidatedPlanV2Materialization } from "./planV2.js";
 import {
   buildChunkCaptureOptions,
   createChunkVideoFrameInjectorFactory,
@@ -96,13 +97,16 @@ import {
   MISSING_PLAN_ARTIFACT,
   PLAN_HASH_MISMATCH,
   FFMPEG_VERSION_MISMATCH,
+  CHUNK_FRAME_RANGE_INVALID,
   CHUNK_INDEX_OUT_OF_RANGE,
   MISSING_RUNTIME_ENV_SNAPSHOT,
   rebuildExtractedFramesFromPlanDir,
   RenderChunkValidationError,
+  shownDeferredFrameIndexes,
 } from "./chunkFrames.js";
 
 export {
+  CHUNK_FRAME_RANGE_INVALID,
   CHUNK_INDEX_OUT_OF_RANGE,
   createChunkVideoFrameInjectorFactory,
   extractDeferredVideoFramesForChunk,
@@ -141,6 +145,7 @@ export interface ChunkResult {
   /** `"file"` for mp4/mov; `"frame-dir"` for png-sequence. */
   outputKind: "file" | "frame-dir";
   framesEncoded: number;
+  frameRange?: ChunkFrameRange;
   sha256: string;
   durationMs: number;
   /**
@@ -183,6 +188,49 @@ export interface ChunkResult {
 /** Result returned by the built-in renderer, which always observes its mode. */
 export interface EffectiveChunkResult extends ChunkResult {
   captureMode: CaptureMode;
+  frameRange: ChunkFrameRange;
+}
+
+/** Absolute composition frame indices, end exclusive, like a chunk's slice. */
+export interface ChunkFrameRange {
+  startFrame: number;
+  endFrame: number;
+}
+
+export interface RenderChunkOptions {
+  /**
+   * Render only these frames of the chunk, e.g. to retry a slow chunk as
+   * parts rendered in parallel. Must be a non-empty range inside the chunk's
+   * slice. Each part is a self-contained output (its own IDR keyframe, frame
+   * names from zero, the audio packets it owns); pass the parts of a chunk,
+   * in order, as one `chunkPaths` entry to `assemble`. Omitted renders the
+   * whole slice.
+   */
+  frameRange?: ChunkFrameRange;
+}
+
+/** The frames a chunk renders: its slice, or a validated sub-range of it. */
+export function resolveChunkFrameRange(
+  slice: ChunkSliceJson,
+  chunkIndex: number,
+  frameRange: ChunkFrameRange | undefined,
+): ChunkFrameRange {
+  if (frameRange === undefined) return { startFrame: slice.startFrame, endFrame: slice.endFrame };
+  const { startFrame, endFrame } = frameRange;
+  if (
+    !Number.isSafeInteger(startFrame) ||
+    !Number.isSafeInteger(endFrame) ||
+    startFrame < slice.startFrame ||
+    endFrame > slice.endFrame ||
+    endFrame <= startFrame
+  ) {
+    throw new RenderChunkValidationError(
+      CHUNK_FRAME_RANGE_INVALID,
+      `[renderChunk] frameRange ${JSON.stringify(frameRange)} must be a non-empty integer range ` +
+        `inside chunk ${chunkIndex}'s slice [${slice.startFrame}, ${slice.endFrame})`,
+    );
+  }
+  return { startFrame, endFrame };
 }
 
 /** Compatibility-safe adapter seam for built-in or injected chunk renderers. */
@@ -399,6 +447,7 @@ export async function renderChunk(
   planDir: string,
   chunkIndex: number,
   outputChunkPath: string,
+  options?: RenderChunkOptions,
 ): Promise<EffectiveChunkResult> {
   const start = Date.now();
   const log = defaultLogger;
@@ -416,10 +465,12 @@ export async function renderChunk(
   const plan = JSON.parse(readFileSync(planJsonPath, "utf-8")) as PlanJson;
   readPlanProtocolV1(plan, DISTRIBUTED_RENDER_CAPABILITIES.roles.chunk);
   const planHashStarted = Date.now();
-  const v2Manifest = validatePlanV2MaterializedTarget(planDir, {
+  const v2Materialization = readValidatedPlanV2Materialization(planDir, {
     role: "chunk",
     chunkIndex,
   });
+  const v2Manifest = v2Materialization?.manifest ?? null;
+  const remoteSources = v2Materialization?.remoteSources ?? {};
   for (const required of [encoderJsonPath, chunksJsonPath]) {
     if (!existsSync(required)) {
       throw new RenderChunkValidationError(
@@ -459,13 +510,17 @@ export async function renderChunk(
   if (slice === undefined) {
     throw new RenderChunkValidationError(CHUNK_INDEX_OUT_OF_RANGE, "[renderChunk] missing slice");
   }
-  const framesInChunk = slice.endFrame - slice.startFrame;
-  if (framesInChunk <= 0) {
+  const sliceFrames = slice.endFrame - slice.startFrame;
+  if (sliceFrames <= 0) {
     throw new RenderChunkValidationError(
       CHUNK_INDEX_OUT_OF_RANGE,
-      `[renderChunk] chunk ${chunkIndex} has non-positive frame count: ${framesInChunk}`,
+      `[renderChunk] chunk ${chunkIndex} has non-positive frame count: ${sliceFrames}`,
     );
   }
+  // Every frame-bound below (capture, video frames, GOP, audio packets, perf)
+  // reads `range`, so a sub-range renders exactly as a chunk of its own would.
+  const range = resolveChunkFrameRange(slice, chunkIndex, options?.frameRange);
+  const framesInChunk = range.endFrame - range.startFrame;
 
   const compiledDir = join(planDir, "compiled");
   if (!existsSync(compiledDir)) {
@@ -571,36 +626,21 @@ export async function renderChunk(
     // Beside workDir, not in it: a screenshot retry wipes workDir.
     const videoFramesDir = `${workDir}.video-frames`;
 
-    // Build the immutable frame lookup once. Each browser session/worker gets
-    // its own injector hook because the hook remembers the last injected frame
-    // per video; sharing that state across a fresh retry page can suppress the
-    // first injection and produce a blank/stale frame.
-    const videoFrameLookup =
-      planVideos && planVideos.extracted.length > 0
-        ? createFrameLookupTable(
-            planVideos.videos,
-            [
-              ...rebuildExtractedFramesFromPlanDir(
-                planDir,
-                planVideos.extracted.filter((video) => !video.deferredRange),
-                v2Manifest === null ? "dense-v1" : "sparse-v2",
-              ),
-              ...(await extractDeferredVideoFramesForChunk({
-                planDir,
-                planVideos,
-                frames: Array.from(
-                  { length: slice.endFrame - slice.startFrame },
-                  (_, i) => slice.startFrame + i,
-                ),
-                fps: { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen },
-                outputRoot: videoFramesDir,
-                cfg,
-              })),
-            ],
-            resolveRenderFpsConfig(job.config.fps).value,
-          )
-        : null;
-    const createChunkVideoFrameInjector = createChunkVideoFrameInjectorFactory(videoFrameLookup);
+    const chunkFrameNumbers = Array.from({ length: framesInChunk }, (_, i) => range.startFrame + i);
+    const chunkFps = { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen };
+    const deferredVideos = planVideos?.extracted.filter((video) => video.deferredRange) ?? [];
+    const shownFrames = planVideos
+      ? shownDeferredFrameIndexes(planVideos, chunkFrameNumbers, chunkFps)
+      : new Map<string, Set<number>>();
+    // The browser cannot load a source read by URL; size its <video> from the plan instead.
+    const remoteVideoIds = new Set(
+      planVideos?.extracted
+        .filter(
+          (video) =>
+            video.deferredRange && Object.hasOwn(remoteSources, video.deferredRange.sourcePath),
+        )
+        .map((video) => video.videoId),
+    );
 
     // ── File server with the seeded-random shim ──
     // `Math.random` / `crypto.getRandomValues` are seeded from virtual
@@ -620,6 +660,15 @@ export async function renderChunk(
       encoder,
       videoCount: planVideos?.videos.length ?? 0,
       html: readFileSync(join(compiledDir, "index.html"), "utf-8"),
+      // The plan ships a deferred source only to chunks that show it; don't wait on the rest.
+      skipReadinessVideoIds: deferredVideos
+        .filter(
+          (video) => !shownFrames.get(video.videoId)?.size || remoteVideoIds.has(video.videoId),
+        )
+        .map((video) => video.videoId),
+      videoMetadataHints: collectVideoMetadataHints(
+        deferredVideos.filter((video) => remoteVideoIds.has(video.videoId)),
+      ),
     });
 
     // Resolve worker count up-front. Sequential capture reuses the initialized
@@ -649,6 +698,7 @@ export async function renderChunk(
     const capturePerfs: CapturePerfSummary[] = [];
     const captureAttempts: Parameters<typeof runCaptureStage>[0]["captureAttempts"] = [];
     let forceScreenshotForChunk = encoder.forceScreenshot;
+    let shownBoxes: Map<string, ShownBox> | undefined;
     try {
       if (chunkWorkerCount === 1 || !forceScreenshotForChunk) {
         // Sequential capture reuses this session. Parallel BeginFrame capture
@@ -670,6 +720,12 @@ export async function renderChunk(
           cfg,
         );
         sessionBootMs = Date.now() - bootStarted;
+        // Measured before extraction so each video is extracted at the size it is drawn.
+        shownBoxes = await measureVideoShownBoxes(
+          session.page,
+          [...shownFrames.keys()],
+          chunkFrameNumbers.map((frame) => (frame * chunkFps.den) / chunkFps.num),
+        );
         // `discardWarmupCapture` is intentionally NOT called: every frame
         // seeks fresh DOM, so `lastFrameCache` is never read; priming it
         // would deadlock Chrome's compositor by issuing a second beginFrame
@@ -715,6 +771,39 @@ export async function renderChunk(
           session = null;
         }
       }
+
+      // Build the immutable frame lookup once. Each browser session/worker gets
+      // its own injector hook because the hook remembers the last injected frame
+      // per video; sharing that state across a fresh retry page can suppress the
+      // first injection and produce a blank/stale frame.
+      const deferredVideoFrames = planVideos
+        ? await extractDeferredVideoFramesForChunk({
+            planDir,
+            planVideos,
+            frames: chunkFrameNumbers,
+            fps: chunkFps,
+            outputRoot: videoFramesDir,
+            cfg,
+            remoteSources,
+            shownBoxes,
+          })
+        : [];
+      const videoFrameLookup =
+        planVideos && planVideos.extracted.length > 0
+          ? createFrameLookupTable(
+              planVideos.videos,
+              [
+                ...rebuildExtractedFramesFromPlanDir(
+                  planDir,
+                  planVideos.extracted.filter((video) => !video.deferredRange),
+                  v2Manifest === null ? "dense-v1" : "sparse-v2",
+                ),
+                ...deferredVideoFrames,
+              ],
+              resolveRenderFpsConfig(job.config.fps).value,
+            )
+          : null;
+      const createChunkVideoFrameInjector = createChunkVideoFrameInjectorFactory(videoFrameLookup);
 
       const captureStarted = Date.now();
       captureMode = await runCaptureWithScreenshotFallback({
@@ -772,7 +861,7 @@ export async function renderChunk(
             createRenderVideoFrameInjector: createChunkVideoFrameInjector,
             abortSignal: undefined,
             assertNotAborted: () => {},
-            frameRange: { startFrame: slice.startFrame, endFrame: slice.endFrame },
+            frameRange: range,
           });
 
           const observedModes = new Set(capturePerfs.map((perf) => perf.captureMode));
@@ -886,16 +975,22 @@ export async function renderChunk(
         gopSize: framesInChunk,
       });
       if (encoder.chunksCarryAudio) {
+        const audioScratchPath = `${outputChunkPath}.audio.m4a`;
+        // A sub-range muxes the packets it owns as if it were a chunk of its own.
+        const audioChunks = options?.frameRange
+          ? chunksWithSubRange(chunks, chunkIndex, range)
+          : { chunks, index: chunkIndex };
         await muxChunkWithAudio({
           videoPath: videoOnlyPath,
-          audioPath: resolvePlanAudioPath(planDir),
+          audioPath: chunkAudioSource(planDir, chunkIndex, audioScratchPath),
           outputPath: outputChunkPath,
-          chunks,
-          chunkIndex,
+          chunks: audioChunks.chunks,
+          chunkIndex: audioChunks.index,
           fps: { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen },
           timeoutMs: cfg.ffmpegProcessTimeout,
         });
         rmSync(videoOnlyPath, { force: true });
+        rmSync(audioScratchPath, { force: true });
       }
       encodeStageMs = Date.now() - encodeStarted;
     } finally {
@@ -925,8 +1020,8 @@ export async function renderChunk(
     const perfPayload = {
       planHash: plan.planHash,
       chunkIndex,
-      startFrame: slice.startFrame,
-      endFrame: slice.endFrame,
+      startFrame: range.startFrame,
+      endFrame: range.endFrame,
       framesEncoded,
       durationMs,
       planHashMs,
@@ -935,6 +1030,8 @@ export async function renderChunk(
       encodeStageMs,
       workers: chunkWorkerCount,
       captureMode,
+      // Device-pixel box each video's frames were extracted to cover; a video not listed kept full size.
+      videoShownBoxes: Object.fromEntries(shownBoxes ?? []),
       sha256,
       outputKind,
       producerVersion: plan.producerVersion,
@@ -958,6 +1055,7 @@ export async function renderChunk(
       outputPath: outputChunkPath,
       outputKind,
       framesEncoded,
+      frameRange: range,
       sha256,
       durationMs,
       planHashMs,

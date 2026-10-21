@@ -42,9 +42,14 @@ import { isKnownInactiveTimelineWindow } from "./mediaTimelineWindow.js";
 import {
   extractFinalVideoFrameTimestamp,
   extractMediaMetadata,
+  mediaFileIdentity,
+  readMetadataCache,
+  writeMetadataCache,
+  type MediaProbeCacheEntry,
   type VideoMetadata,
 } from "../utils/ffprobe.js";
 import { inputAlphaOpaqueWarning, probeInputAlphaPlane } from "../utils/alphaPlaneProbe.js";
+import { redactUrlQueriesInError, urlInputArgs } from "../utils/urlInput.js";
 import {
   analyzeCompositionHdr,
   isHdrColorSpace as isHdrColorSpaceUtil,
@@ -247,6 +252,8 @@ export interface ExtractionOptions {
   deferRangeExtraction?: boolean;
   /** Directories the caller rewrites on every render (downloaded media); their sources are cached by content. */
   contentKeyedDirs?: readonly string[];
+  urlByAbsentLocalPath?: ReadonlyMap<string, string>;
+  shownBox?: { width: number; height: number };
 }
 
 const DOWNLOAD_SUBDIR = "_downloads";
@@ -257,6 +264,14 @@ const SDR_TO_HDR_COLORSPACE_FILTER = "colorspace=all=bt2020:iall=bt709:range=tv"
 const HDR_TO_SDR_ZSCALE_TRANSFORM_KEY = "hdr2sdr-hable-srgb";
 const HDR_TO_SDR_VIDEOTOOLBOX_TRANSFORM_KEY = "hdr2sdr-videotoolbox-hdr";
 const SDR_CANVAS_PASSTHROUGH_FILTER = "setparams=color_primaries=bt709:color_trc=iec61966-2-1";
+function halveToCoverScaleFilter(box: { width: number; height: number }): string {
+  const fit = `max(${Math.ceil(box.width)}/iw\\,${Math.ceil(box.height)}/ih)`;
+  const halvings = `floor(log(1/${fit})/log(2))`;
+  const side = (dim: "iw" | "ih") =>
+    `if(lt(${fit}\\,0.5)\\,2*ceil(${dim}/pow(2\\,${halvings})/2)\\,${dim})`;
+  return `scale=w=${side("iw")}:h=${side("ih")}:flags=area+accurate_rnd`;
+}
+
 const SDR_JPEG_AS_BT601_FULL_RANGE_FILTER =
   "scale=flags=neighbor+accurate_rnd,format=gbrp,scale=out_color_matrix=bt601:out_range=pc:flags=neighbor,format=yuv420p";
 
@@ -813,10 +828,28 @@ export function parseImageElements(html: string): ImageElement[] {
   return images;
 }
 
-/** The first shown frame's colour tags; see {@link firstFrameColourArgs}. */
-async function readFirstFrameColour(videoPath: string, signal?: AbortSignal) {
-  const result = await runFfmpeg(firstFrameColourArgs(videoPath), { signal });
-  return parseFirstFrameColour(result.stderr);
+const firstFrameColourCache = new Map<
+  string,
+  MediaProbeCacheEntry<ReturnType<typeof parseFirstFrameColour>>
+>();
+
+/** The first shown frame's colour tags (see {@link firstFrameColourArgs}), probed once per source file. */
+function readFirstFrameColour(videoPath: string) {
+  const identity = mediaFileIdentity(videoPath);
+  const cached = readMetadataCache(firstFrameColourCache, videoPath, identity);
+  if (cached) return cached;
+  // In an extraction slot, so it never adds a decoder; unsignalled, so one cancel cannot cut it short for others.
+  const probe = inExtractionSlot(() =>
+    runFfmpeg([...urlInputArgs(videoPath), ...firstFrameColourArgs(videoPath)]),
+  ).then((result) => {
+    // A failed probe answers this cut only; the next one probes again.
+    if (!result.success && firstFrameColourCache.get(videoPath)?.promise === probe) {
+      firstFrameColourCache.delete(videoPath);
+    }
+    return parseFirstFrameColour(result.stderr);
+  });
+  writeMetadataCache(firstFrameColourCache, videoPath, identity, probe);
+  return probe;
 }
 
 /** Chrome plays untagged VP9 and AV1 as BT.601, H.264 and VP8 as BT.709 from 720 coded lines (assumed for the rest). */
@@ -830,10 +863,9 @@ function chromeGuessForUntaggedMatrix(metadata: VideoMetadata): string[] {
 }
 
 /**
- * Longest stretch of output one ffmpeg process extracts. `ffmpegProcessTimeout` bounds a
- * single process, so one process over a long clip timed out however much time the render
- * had left. Longer ranges split into segments that run side by side. Segments sample the
- * same absolute times as a single pass, so their frames are byte-identical to it.
+ * Longest stretch of output one ffmpeg process extracts; longer ranges split into segments
+ * that run side by side. Segments sample the same absolute times as a single pass, so their
+ * frames are byte-identical to it.
  */
 const EXTRACTION_SEGMENT_SECONDS = 120;
 /** Frame times since file start are `PTS*TB + seek`; snapping them to `lead + k/FR` gives every process one grid. */
@@ -856,7 +888,7 @@ interface SegmentedExtraction {
   startTime: number;
   fps: number;
   segments: readonly FrameRange[];
-  runOptions: { signal?: AbortSignal; timeout: number };
+  runOptions: { signal?: AbortSignal; stallTimeout: number };
 }
 
 /** Split runs so no single ffmpeg process extracts more than `segmentFrames` frames. */
@@ -936,6 +968,16 @@ async function runSegmentedExtraction(job: SegmentedExtraction): Promise<RunFfmp
 }
 
 export async function extractVideoFramesRange(
+  ...args: Parameters<typeof extractVideoFramesRangeUnredacted>
+): Promise<ExtractedFrames> {
+  try {
+    return await extractVideoFramesRangeUnredacted(...args);
+  } catch (error) {
+    throw redactUrlQueriesInError(error);
+  }
+}
+
+async function extractVideoFramesRangeUnredacted(
   videoPath: string,
   videoId: string,
   startTime: number,
@@ -995,7 +1037,7 @@ export async function extractVideoFramesRange(
     throw new Error("frameRanges extraction needs a constant-frame-rate source");
   }
 
-  const args: string[] = [];
+  const args: string[] = urlInputArgs(videoPath);
   if (decodeWithVideoToolbox) {
     args.push("-hwaccel", "videotoolbox");
   }
@@ -1053,7 +1095,7 @@ export async function extractVideoFramesRange(
     vfFilters.push(SDR_TO_HDR_COLORSPACE_FILTER);
   }
   if (toneMappedToSdr) {
-    const frameColour = await readFirstFrameColour(videoPath, signal);
+    const frameColour = await readFirstFrameColour(videoPath);
     vfFilters.push(hdrToSdrToneMapFilter(metadata.colorSpace ?? {}, frameColour));
   }
   if (toneMappedToSdr || (!isHdr && !options.sdrToHdrTransfer)) {
@@ -1061,14 +1103,18 @@ export async function extractVideoFramesRange(
       ...(isHdr ? [] : chromeGuessForUntaggedMatrix(metadata)),
       SDR_CANVAS_PASSTHROUGH_FILTER,
     );
-    if (format === "jpg") vfFilters.push(SDR_JPEG_AS_BT601_FULL_RANGE_FILTER);
+    if (format === "jpg") {
+      if (options.shownBox) vfFilters.push(halveToCoverScaleFilter(options.shownBox));
+      vfFilters.push(SDR_JPEG_AS_BT601_FULL_RANGE_FILTER);
+    }
   }
   const encodeArgs = ["-q:v", format === "jpg" ? String(Math.ceil((100 - quality) / 3)) : "0"];
   // Render-scoped temp frames are read once; level 1 measured 3-5x faster for ~14% larger files.
   if (format === "png") encodeArgs.push("-compression_level", "1");
   encodeArgs.push("-y", outputPattern);
 
-  const runOptions = { signal, timeout: ffmpegProcessTimeout };
+  // A long 4K run can take far longer than the timeout and still be healthy; only a stall is a hang.
+  const runOptions = { signal, stallTimeout: ffmpegProcessTimeout };
   const filterArgsFor = (seek: number): string[] => {
     const filters = [...vfFilters];
     filters.splice(samplingAt, 0, ...samplingFilters(seek));
@@ -1120,8 +1166,8 @@ export async function extractVideoFramesRange(
     const hdrPrefix = options.sdrToHdrTransfer
       ? `SDR→HDR conversion failed (colorspace filter in extract pass, target ${options.sdrToHdrTransfer}): `
       : "";
-    const timedOut = processResult.terminationReason === "deadline";
-    const timeoutSuffix = timedOut ? ` (timed out after ${ffmpegProcessTimeout} ms)` : "";
+    const timedOut = processResult.terminationReason === "inactivity";
+    const timeoutSuffix = timedOut ? ` (no new frame for ${ffmpegProcessTimeout} ms)` : "";
     const diagnostic =
       `${hdrPrefix}FFmpeg exited with code ${processResult.exitCode}${timeoutSuffix}: ` +
       processResult.stderr.slice(-500);
@@ -1816,6 +1862,11 @@ export async function extractAllVideoFrames(
       if (!isHttpUrl(videoPath)) {
         videoPath = resolveProjectRelativeSrc(video.src, baseDir, compiledDir);
       }
+      const remoteUrl = options.urlByAbsentLocalPath?.get(videoPath);
+      if (remoteUrl) {
+        resolvedVideos.push({ video, videoPath: remoteUrl });
+        continue;
+      }
 
       if (isHttpUrl(videoPath)) {
         const downloadDir = join(options.outputDir, DOWNLOAD_SUBDIR);
@@ -2330,7 +2381,7 @@ export async function extractAllVideoFrames(
 
     try {
       rmSync(tempDir, { recursive: true, force: true });
-      // A long union can hit the fixed FFmpeg deadline even when each shorter
+      // A long union can fail even when each shorter
       // member range succeeds. Do not retry the optimization itself; preserve
       // the established grouped→direct fallback and apply bounded retries only
       // to the individual source ranges below.
