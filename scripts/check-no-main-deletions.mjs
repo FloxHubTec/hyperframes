@@ -163,6 +163,7 @@ const RETIRED_WORKFLOW_FILES = [
   "skills/embedded-captions/scripts/fixtures/heroless/transcript.json",
   "skills/embedded-captions/scripts/gen-stroke-path.py",
   "skills/embedded-captions/scripts/hf-cli.cjs",
+  "skills/embedded-captions/scripts/hf-cli.test.mjs",
   "skills/embedded-captions/scripts/inject-fonts.cjs",
   "skills/embedded-captions/scripts/lib-dna.cjs",
   "skills/embedded-captions/scripts/make-cinematic.cjs",
