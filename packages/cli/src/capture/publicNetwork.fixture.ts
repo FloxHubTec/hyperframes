@@ -10,12 +10,20 @@ dns.Resolver = class extends Resolver {
     this.setServers([server]);
   }
 };
+const requireBuiltin = createRequire(import.meta.url);
+const fsPromises = requireBuiltin("node:fs/promises");
+const readFile = fsPromises.readFile;
+fsPromises.readFile = (path: string, ...rest: unknown[]) =>
+  /hosts$/.test(String(path))
+    ? Promise.resolve(process.env.HF_TEST_HOSTS ?? "")
+    : readFile(path, ...rest);
 // HF_TEST_SYSTEM: "stall" for a system lookup that never returns, or the address it answers.
 const system = process.env.HF_TEST_SYSTEM ?? "stall";
-const childProcess = createRequire(import.meta.url)("node:child_process");
+const childProcess = requireBuiltin("node:child_process");
 const execFile = childProcess.execFile;
-childProcess.execFile = (file: string, _args: string[], ...rest: unknown[]) =>
-  execFile(
+let lookupPid: number | undefined;
+childProcess.execFile = (file: string, _args: string[], ...rest: unknown[]) => {
+  const child = execFile(
     file,
     [
       "-e",
@@ -23,7 +31,17 @@ childProcess.execFile = (file: string, _args: string[], ...rest: unknown[]) =>
     ],
     ...rest,
   );
+  lookupPid = child.pid;
+  return child;
+};
 syncBuiltinESMExports();
+const exitAfterMs = Number(process.env.HF_TEST_EXIT_AFTER_MS ?? 0);
+if (exitAfterMs) {
+  setTimeout(() => {
+    process.stdout.write(`exit ${lookupPid}\n`);
+    process.exit(0);
+  }, exitAfterMs);
+}
 const { resolvePublicAddress } = await import("./publicNetwork.js");
 const outcome = await resolvePublicAddress("assets.capture-fixture.com").catch(
   (error: Error) => error.message,

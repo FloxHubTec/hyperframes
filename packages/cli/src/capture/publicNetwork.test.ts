@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 const mocks = vi.hoisted(() => ({ resolve4: vi.fn(), request: vi.fn(), execFile: vi.fn() }));
 vi.mock("node:child_process", () => ({ execFile: mocks.execFile }));
+vi.mock("node:fs/promises", () => ({ readFile: async () => "" }));
 vi.mock("node:dns", () => ({
   promises: {
     Resolver: class {
@@ -17,9 +18,10 @@ import { isPublicIPv4, publicRequest, resolvePublicAddress } from "./publicNetwo
 
 /** The system lookup child prints `stdout`, or fails with `stderr`. */
 function systemLookupPrints(stdout: string, stderr = "") {
-  mocks.execFile.mockImplementation((_file, _args, _options, callback) =>
-    callback(stdout ? null : new Error("Command failed"), stdout, stderr),
-  );
+  mocks.execFile.mockImplementation((_file, _args, _options, callback) => {
+    callback(stdout ? null : new Error("Command failed"), stdout, stderr);
+    return new EventEmitter();
+  });
 }
 
 beforeEach(() => {
@@ -87,6 +89,28 @@ describe("public address policy", () => {
     await expect(resolvePublicAddress("cached.example.org")).resolves.toBe("8.8.8.8");
     await expect(resolvePublicAddress("cached.example.org")).resolves.toBe("8.8.8.8");
     expect(mocks.execFile).toHaveBeenCalledTimes(2);
+  });
+  it("holds a later caller to its own deadline when it joins a system lookup already running", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.resolve4.mockRejectedValue(new Error("queryA ENOTFOUND"));
+      mocks.execFile.mockImplementation(() => new EventEmitter());
+      const first = resolvePublicAddress("slow.example.org").catch((error: Error) => error.message);
+      await vi.advanceTimersByTimeAsync(9_000);
+      const second = resolvePublicAddress("slow.example.org").catch(
+        (error: Error) => error.message,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await first).toBe("Capture DNS timed out");
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(await Promise.race([second, "still waiting"])).toBe("still waiting");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await second).toBe("Capture DNS timed out");
+      expect(mocks.execFile).toHaveBeenCalledOnce();
+      expect(mocks.resolve4).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("never starts the system lookup when DNS answers", async () => {
     mocks.resolve4.mockResolvedValue(["8.8.8.8"]);

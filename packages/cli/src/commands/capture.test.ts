@@ -238,6 +238,25 @@ describe("capture command — vision control", () => {
     }
   });
 
+  it("asks to end the process with 1 after a capture that threw", async () => {
+    vi.useFakeTimers();
+    const exit = vi.fn();
+    registerRootExitRequester(exit);
+    try {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      captureWebsiteMock.mockRejectedValueOnce(new Error("browser crashed"));
+      await captureCommand.run!({
+        args: { url: "https://example.com", output: "/tmp/hf-exit-threw", json: true },
+      } as never).catch(() => {});
+      vi.advanceTimersByTime(100);
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      registerRootExitRequester(() => {});
+      vi.useRealTimers();
+    }
+  });
+
   it("returns a nonzero command result after presenting failed capture JSON once", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});

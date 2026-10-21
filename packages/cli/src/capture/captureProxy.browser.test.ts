@@ -37,6 +37,7 @@ vi.mock("node:child_process", async (importOriginal) => {
       if (!(args[1] as string[] | undefined)?.includes("-e")) return real.execFile(...args);
       const callback = args.at(-1) as (error: Error, stdout: string, stderr: string) => void;
       callback(new Error("Fixture has no system DNS"), "", "ENOTFOUND");
+      return { once() {}, kill() {} } as unknown as ReturnType<typeof real.execFile>;
     },
   };
 });

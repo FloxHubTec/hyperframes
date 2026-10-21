@@ -1,5 +1,6 @@
-import { execFile } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { promises as dns } from "node:dns";
+import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { request as httpRequest, type IncomingMessage, type ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -54,15 +55,58 @@ export async function resolvePublicAddress(hostname: string): Promise<string> {
   ) {
     throw new Error("Capture requires a public hostname");
   }
-  const deadline = Date.now() + DNS_TIMEOUT_MS;
-  const answers = await resolveWithCares(host).catch(() =>
-    resolveWithSystemInKillableChild(host, deadline - Date.now()),
-  );
+  const answers = await resolveIPv4(host);
   const first = answers[0];
   if (!first || !answers.every(isPublicIPv4)) {
     throw new Error("Capture DNS returned a non-public address");
   }
   return first;
+}
+
+async function resolveIPv4(host: string): Promise<string[]> {
+  const fromHostsFile = (await hostsFileAnswers()).get(host);
+  if (fromHostsFile) return fromHostsFile;
+  const deadline = Date.now() + DNS_TIMEOUT_MS;
+  const fromSystem = systemAnswers.get(host);
+  if (fromSystem) return beforeDeadline(fromSystem, deadline);
+  return resolveWithCares(host).catch(() =>
+    beforeDeadline(systemLookupInKillableChild(host, deadline - Date.now()), deadline),
+  );
+}
+
+let hostsFile: Promise<Map<string, string[]>> | undefined;
+
+function hostsFileAnswers(): Promise<Map<string, string[]>> {
+  const path =
+    process.platform === "win32"
+      ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\drivers\\etc\\hosts`
+      : "/etc/hosts";
+  hostsFile ??= readFile(path, "utf8").then(parseHostsFile, () => new Map());
+  return hostsFile;
+}
+
+function parseHostsFile(text: string): Map<string, string[]> {
+  const answers = new Map<string, string[]>();
+  for (const line of text.split(/\r?\n/)) {
+    const [address, ...names] = line.replace(/#.*/, "").trim().split(/\s+/);
+    if (!address || isIP(address) !== 4) continue;
+    for (const name of names) {
+      const key = name.toLowerCase().replace(/\.$/, "");
+      if (!answers.has(key)) answers.set(key, [address]);
+    }
+  }
+  return answers;
+}
+
+function beforeDeadline<T>(work: Promise<T>, deadline: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("Capture DNS timed out")),
+      Math.max(0, deadline - Date.now()),
+    );
+  });
+  return Promise.race([work, late]).finally(() => clearTimeout(timer));
 }
 
 async function resolveWithCares(host: string): Promise<string[]> {
@@ -79,11 +123,12 @@ const systemAnswers = new Map<string, Promise<string[]>>();
 const SYSTEM_LOOKUP = `require("node:dns").lookup(process.argv[1], { all: true, family: 4 }, (error, answers) =>
   error ? process.stderr.write(String(error.code)) : process.stdout.write(JSON.stringify(answers.map((a) => a.address))))`;
 
-function resolveWithSystemInKillableChild(host: string, timeoutMs: number): Promise<string[]> {
-  const cached = systemAnswers.get(host);
-  if (cached) return cached;
+const liveLookups = new Set<ChildProcess>();
+
+export function systemLookupInKillableChild(host: string, timeoutMs: number): Promise<string[]> {
+  if (!process.listeners("exit").includes(killLiveLookups)) process.on("exit", killLiveLookups);
   const answers = new Promise<string[]>((resolve, reject) => {
-    execFile(
+    const child = execFile(
       process.execPath,
       ["-e", SYSTEM_LOOKUP, host],
       {
@@ -104,10 +149,16 @@ function resolveWithSystemInKillableChild(host: string, timeoutMs: number): Prom
         }
       },
     );
+    liveLookups.add(child);
+    child.once("exit", () => liveLookups.delete(child));
   });
   systemAnswers.set(host, answers);
   answers.catch(() => systemAnswers.delete(host));
   return answers;
+}
+
+function killLiveLookups(): void {
+  for (const child of liveLookups) child.kill("SIGKILL");
 }
 
 /** Pinned asset transport; redirects are returned for caller validation. */
