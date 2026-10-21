@@ -168,7 +168,6 @@ export function buildChunkCaptureOptions(input: {
 }
 
 /** Extracts the given frames of deferred videos under the names a full extraction gives them. */
-/** Source frame indexes each deferred video shows over `frames` (composition frame numbers). */
 export function shownDeferredFrameIndexes(
   planVideos: PlanVideosJson,
   frames: Iterable<number>,
@@ -205,7 +204,6 @@ export async function extractDeferredVideoFramesForChunk(input: {
   outputRoot: string;
   cfg: Pick<EngineConfig, "ffmpegProcessTimeout">;
   remoteSources?: PlanV2RemoteSources;
-  /** Device-pixel box each video is drawn in over these frames; a video without one keeps full size. */
   shownBoxes?: ReadonlyMap<string, ShownBox>;
 }): Promise<ExtractedFrames[]> {
   const deferred = input.planVideos.extracted.filter((video) => video.deferredRange);

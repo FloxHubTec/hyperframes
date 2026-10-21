@@ -253,7 +253,6 @@ export interface ExtractionOptions {
   /** Directories the caller rewrites on every render (downloaded media); their sources are cached by content. */
   contentKeyedDirs?: readonly string[];
   urlByAbsentLocalPath?: ReadonlyMap<string, string>;
-  /** Largest box the video is drawn in, in device pixels: SDR JPEG frames shrink to cover it, never grow. */
   shownBox?: { width: number; height: number };
 }
 
@@ -265,11 +264,7 @@ const SDR_TO_HDR_COLORSPACE_FILTER = "colorspace=all=bt2020:iall=bt709:range=tv"
 const HDR_TO_SDR_ZSCALE_TRANSFORM_KEY = "hdr2sdr-hable-srgb";
 const HDR_TO_SDR_VIDEOTOOLBOX_TRANSFORM_KEY = "hdr2sdr-videotoolbox-hdr";
 const SDR_CANVAS_PASSTHROUGH_FILTER = "setparams=color_primaries=bt709:color_trc=iec61966-2-1";
-/**
- * ffmpeg scale by the largest power of two that still covers `box`, from the decoded (rotated) size.
- * 2x2 area averaging is how Chrome builds its own downscale levels, so the drawn picture stays as before.
- */
-function shownSizeScaleFilter(box: { width: number; height: number }): string {
+function halveToCoverScaleFilter(box: { width: number; height: number }): string {
   const fit = `max(${Math.ceil(box.width)}/iw\\,${Math.ceil(box.height)}/ih)`;
   const halvings = `floor(log(1/${fit})/log(2))`;
   const side = (dim: "iw" | "ih") =>
@@ -1109,7 +1104,7 @@ async function extractVideoFramesRangeUnredacted(
       SDR_CANVAS_PASSTHROUGH_FILTER,
     );
     if (format === "jpg") {
-      if (options.shownBox) vfFilters.push(shownSizeScaleFilter(options.shownBox));
+      if (options.shownBox) vfFilters.push(halveToCoverScaleFilter(options.shownBox));
       vfFilters.push(SDR_JPEG_AS_BT601_FULL_RANGE_FILTER);
     }
   }
