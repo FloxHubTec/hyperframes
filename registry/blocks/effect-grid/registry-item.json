@@ -26,5 +26,15 @@
       "target": "compositions/effect-grid.html",
       "type": "hyperframes:composition"
     }
+  ],
+  "variables": [
+    {
+      "id": "frameSrc",
+      "type": "string",
+      "role": "content",
+      "label": "Frame source",
+      "description": "Path or URL of the frame to grade in every cell. Defaults to the shipped monochrome placeholder.",
+      "default": ""
+    }
   ]
 }
