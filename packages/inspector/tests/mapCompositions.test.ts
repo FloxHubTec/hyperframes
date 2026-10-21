@@ -47,13 +47,16 @@ describe("components report compositions", () => {
   function inspectIds(
     ids: [string, string][],
     request: Partial<Parameters<typeof mapInspection>[1]>,
+    prepare: (sources: Sources) => void = () => {},
+    projectFiles: Record<string, string[]> = files,
   ) {
     const dir = mkdtempSync(join(tmpdir(), "inspect-compositions-"));
     mkdirSync(join(dir, "films/a"), { recursive: true });
-    for (const [file, lines] of Object.entries(files))
+    for (const [file, lines] of Object.entries(projectFiles))
       writeFileSync(join(dir, file), lines.join("\n"));
     try {
       const sources = new Sources(dir);
+      prepare(sources);
       const raw: RuntimeResponse = {
         results: ids.map(([id, tag]) => ({
           target: { selector: `#${id}` },
@@ -112,6 +115,53 @@ describe("components report compositions", () => {
         ["index.html:2-4", "composition root,composition host"],
       ].sort(),
     );
+  });
+
+  it.each(["scene", "missing", undefined])("selects the mounted root for host ID %s", (id) => {
+    const report = inspectIds(
+      [["sec", "div"]],
+      { maxBytes: 256000 },
+      (sources) => {
+        const host = sources.htmlTags.find((tag) => tag.id === "sec");
+        if (!host) throw new Error("missing fixture host");
+        host.compositionId = id;
+      },
+      {
+        ...files,
+        "films/a/scene.html": [
+          '<div data-composition-id="first" data-duration="1"></div>',
+          '<div data-composition-id="scene" data-duration="9"></div>',
+        ],
+      },
+    );
+    const roots = report.snippets.filter((snippet) => snippet.file === "films/a/scene.html");
+    expect(roots.map((snippet) => snippet.startLine)).toEqual(
+      id === "scene" ? [2] : id === "missing" ? [] : [1],
+    );
+  });
+
+  it("resolves root-relative and host-relative mounts with Windows source keys", () => {
+    const report = inspectIds([["word", "span"]], { maxBytes: 256000 }, (sources) => {
+      for (const [file, source] of [...sources.files]) {
+        sources.files.delete(file);
+        sources.files.set(file.replaceAll("/", "\\"), source);
+      }
+      for (const tag of sources.htmlTags) {
+        tag.file = tag.file.replaceAll("/", "\\");
+        if (tag.id === "sec") tag.compositionSrc = "scene.html";
+      }
+      for (const rule of sources.cssRules) rule.file = rule.file.replaceAll("/", "\\");
+    });
+    expect(
+      report.snippets.some(
+        (snippet) => snippet.file === "index.html" && snippet.code.includes('id="film"'),
+      ),
+    ).toBe(true);
+    expect(
+      report.snippets.some(
+        (snippet) => snippet.file === "films\\a\\index.html" && snippet.code.includes('id="sec"'),
+      ),
+    ).toBe(true);
   });
 
   it("leaves out a composition tag another snippet already shows", () => {

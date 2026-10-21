@@ -344,12 +344,17 @@ export class Sources {
     }
     return (this.nestingIndex = { tagAt, hostsOf });
   }
+  private fileByPath?: Map<string, string>;
   private mountedFile(host: HtmlTag) {
+    const files = (this.fileByPath ??= new Map(
+      [...this.files.keys()].map((file) => [file.replace(/\\/g, "/"), file]),
+    ));
     const src = (host.compositionSrc ?? "").split(/[?#]/)[0].replace(/\\/g, "/");
-    return [
+    const path = [
       posix.normalize(src.replace(/^\.?\//, "")),
-      posix.join(posix.dirname(host.file), src),
-    ].find((file) => this.files.has(file));
+      posix.join(posix.dirname(host.file.replace(/\\/g, "/")), src),
+    ].find((file) => files.has(file));
+    return path === undefined ? undefined : files.get(path);
   }
   compositions(tag: HtmlTag, target: number): Snippet[] {
     const { tagAt, hostsOf } = this.nested;
@@ -364,7 +369,14 @@ export class Sources {
     };
     const mounted = tag.compositionSrc && this.mountedFile(tag);
     const root =
-      mounted && this.htmlTags.find((t) => t.file === mounted && t.inMarkup && t.compositionId);
+      mounted &&
+      this.htmlTags.find(
+        (t) =>
+          t.file === mounted &&
+          t.inMarkup &&
+          t.compositionId &&
+          (!tag.compositionId || t.compositionId === tag.compositionId),
+      );
     if (root) show(root, "composition root");
     const parentOf = (t: HtmlTag) =>
       t.parent === undefined ? undefined : tagAt.get(`${t.file}:${t.parent}`);
