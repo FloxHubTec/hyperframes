@@ -197,22 +197,16 @@ function probeVideo(filePath: string): VideoMeta | undefined {
 
 type CanvasSize = { width: number; height: number };
 
-// A from-file stage (the clip itself) snaps to the nearest of 9:16, 4:5, 1:1; 16:9 is the template's own.
-const CLIP_FRAMES: CanvasSize[] = [
-  { width: 1080, height: 1920 },
-  { width: 1080, height: 1350 },
-  { width: 1080, height: 1080 },
-  { width: 1920, height: 1080 },
-];
-
+// A from-file stage (the clip itself) takes the clip's own shape with a 1080 short side, as every preset has, so the
+// whole picture shows with no bars; a clip that matches a preset gets exactly it. 16:9 is the template's own size.
 function clipFrame(templateId: string, clip: CanvasSize | undefined): CanvasSize | undefined {
-  if (templateId !== "from-file" || !clip) return undefined;
-  const distance = (frame: CanvasSize) =>
-    Math.abs(Math.log(frame.width / frame.height) - Math.log(clip.width / clip.height));
-  const nearest = CLIP_FRAMES.reduce((best, frame) =>
-    distance(frame) < distance(best) ? frame : best,
-  );
-  return nearest.width > nearest.height ? undefined : nearest;
+  if (templateId !== "from-file" || !clip || !(clip.width > 0 && clip.height > 0)) return undefined;
+  const even = (n: number) => 2 * Math.round(n / 2);
+  const frame =
+    clip.width >= clip.height
+      ? { width: even((1080 * clip.width) / clip.height), height: 1080 }
+      : { width: 1080, height: even((1080 * clip.height) / clip.width) };
+  return frame.width === 1920 && frame.height === 1080 ? undefined : frame;
 }
 
 function isWebCompatible(codec: string): boolean {
@@ -802,7 +796,7 @@ export default defineCommand({
     resolution: {
       type: "string",
       description:
-        "Canvas resolution preset: landscape (1920x1080), portrait (1080x1920), landscape-4k (3840x2160), portrait-4k (2160x3840), square (1080x1080), square-4k (2160x2160). Aliases: 1080p, 4k, uhd, 1080p-square, square-1080p, 4k-square. Default: a --video clip's shape as it plays, snapped to 9:16, 4:5 or 1:1 (1080 wide), else the template's dimensions (typically 1920x1080).",
+        "Canvas resolution preset: landscape (1920x1080), portrait (1080x1920), landscape-4k (3840x2160), portrait-4k (2160x3840), square (1080x1080), square-4k (2160x2160). Aliases: 1080p, 4k, uhd, 1080p-square, square-1080p, 4k-square. Default: a --video clip's own shape as it plays, 1080 on the short side (4:3 -> 1440x1080), else the template's dimensions (typically 1920x1080).",
     },
     skill: {
       type: "string",

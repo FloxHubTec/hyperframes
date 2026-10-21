@@ -238,7 +238,8 @@ describe("hyperframes init flag rename", () => {
   it.each([
     ["portrait.mp4", "1080", "1920"],
     ["rotated-portrait.mp4", "1080", "1920"],
-    ["three-four.mp4", "1080", "1350"],
+    ["three-four.mp4", "1080", "1440"],
+    ["four-three.mp4", "1440", "1080"],
     ["square.mp4", "1080", "1080"],
     ["anamorphic.mp4", "1920", "1080"],
   ])("sizes the project to the --video's shape as it plays (%s)", (fixture, width, height) => {
