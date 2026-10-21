@@ -65,6 +65,12 @@ it("refuses a host the hosts file blocks", async () => {
   expect(run.printed).toBe("Capture DNS returned a non-public address");
 }, 30_000);
 
+it("refuses a host when any of its hosts file addresses is not public", async () => {
+  const hosts = "8.8.4.4 assets.capture-fixture.com\n0.0.0.0 assets.capture-fixture.com\n";
+  const run = await resolveInChild("answer", "stall", "93.184.216.34", { HF_TEST_HOSTS: hosts });
+  expect(run.printed).toBe("Capture DNS returned a non-public address");
+}, 30_000);
+
 it("leaves no system lookup running when the CLI exits mid-lookup", async () => {
   const run = await resolveInChild("silent", "stall", undefined, { HF_TEST_EXIT_AFTER_MS: "6000" });
   const pid = Number(/^exit (\d+)$/m.exec(run.printed)?.[1]);

@@ -92,7 +92,7 @@ function parseHostsFile(text: string): Map<string, string[]> {
     if (!address || isIP(address) !== 4) continue;
     for (const name of names) {
       const key = name.toLowerCase().replace(/\.$/, "");
-      if (!answers.has(key)) answers.set(key, [address]);
+      answers.set(key, [...(answers.get(key) ?? []), address]);
     }
   }
   return answers;
