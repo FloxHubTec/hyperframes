@@ -90,7 +90,7 @@ export async function executeRenderPlan(
     }
   }
 
-  if (!plan.useDocker) await refuseLowDisk(plan);
+  if (!plan.useDocker) await refuseLowDiskBeforeBrowserDownload(plan);
   const browserPath = plan.useDocker
     ? undefined
     : await ensureRenderBrowser(plan, cancellation?.signal);
@@ -182,8 +182,7 @@ function assertRenderActive(cancellation?: RenderCancellationScope): void {
   cancellation?.signal.throwIfAborted();
 }
 
-/** The disk before the browser: a render the disk refuses must not first spend its last space on a download. */
-async function refuseLowDisk(plan: RenderPlan): Promise<void> {
+async function refuseLowDiskBeforeBrowserDownload(plan: RenderPlan): Promise<void> {
   const { checkDisk } = await import("../../browser/preflight.js");
   const paths = new Set([tmpdir(), renderOutputDirectory(plan)]);
   const low = [...paths].map((path) => checkDisk(path)).filter((outcome) => !outcome.ok);
