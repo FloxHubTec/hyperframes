@@ -801,7 +801,6 @@ export async function renderChunk(
       // its own injector hook because the hook remembers the last injected frame
       // per video; sharing that state across a fresh retry page can suppress the
       // first injection and produce a blank/stale frame.
-      // Extraction runs while the capture browsers start; each waits for it on its first frame.
       const deferredVideoFrames = planVideos
         ? extractDeferredVideoFramesForChunk({
             planDir,
@@ -927,10 +926,9 @@ export async function renderChunk(
             },
           );
         },
-      }).catch(async (error: unknown) => {
-        // An extraction failure is the root cause of a capture that waited on it.
+      }).catch(async (captureError: unknown) => {
         await deferredVideoFrames;
-        throw error;
+        throw captureError;
       });
       await deferredVideoFrames;
       captureStageMs = Date.now() - captureStarted;

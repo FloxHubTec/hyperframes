@@ -57,7 +57,6 @@ export function createChunkVideoFrameInjectorFactory(
   frameLookup: FrameLookupTable | Promise<FrameLookupTable> | null,
 ): () => BeforeCaptureHook | null {
   if (!(frameLookup instanceof Promise)) return () => createVideoFrameInjector(frameLookup);
-  // Frames still being extracted: a session's first injection waits for them.
   return () => {
     let hook: BeforeCaptureHook | null | undefined;
     return async (page, time, heldVideoTime) => {
