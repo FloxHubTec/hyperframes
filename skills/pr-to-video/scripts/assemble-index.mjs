@@ -50,9 +50,10 @@
 // duration, an inner data-composition-id mismatch, or a guard ② violation).
 // No backstop: fix upstream.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseStoryboard } from "./lib/storyboard.mjs";
 import { parseFormat } from "./lib/dimensions.mjs";
 import { stageAssets } from "./lib/assets.mjs";
@@ -63,6 +64,9 @@ import { bgmDefaultVolume } from "./lib/bgm-volume.mjs";
 // ---------- argv ----------
 const argv = process.argv.slice(2);
 const flag = (name, def) => {
+  // Both spellings: `--name value` and `--name=value`.
+  const inline = argv.find((a) => a.startsWith(`--${name}=`));
+  if (inline) return inline.slice(name.length + 3);
   const i = argv.indexOf(`--${name}`);
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : def;
 };
@@ -127,6 +131,42 @@ const hyperframesDir = resolve(flag("hyperframes", "."));
 const storyboardPath = resolve(flag("storyboard", join(hyperframesDir, "STORYBOARD.md")));
 const audioMetaPath = resolve(flag("audio-meta", join(hyperframesDir, "audio_meta.json")));
 const outPath = resolve(flag("out", join(hyperframesDir, "index.html")));
+
+// GSAP: stage a local copy instead of depending on a CDN. Every frame's
+// composition registers its paused timeline on window.__timelines, so a GSAP
+// that never loads means no frame animates - and on a network that cannot
+// reach the CDN the failure surfaces three minutes later as a silent static
+// render that looks like a frame bug. The CDN stays available as an explicit
+// opt-in (--gsap=cdn); when neither a local copy nor the opt-in is available
+// we warn instead of failing quietly.
+const GSAP_CDN_TAG =
+  '<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js" ' +
+  'integrity="sha384-sG0Hv1tP1lZCk9KQmrIbY/XNwi+OY84GQqhMscbnsoBFqAz8KNCil1kvfL3Hbbk2" ' +
+  'crossorigin="anonymous"></script>';
+
+function localGsapSource() {
+  const skillDir = fileURLToPath(new URL("..", import.meta.url));
+  const bundled = join(skillDir, "assets", "vendor", "gsap.min.js");
+  if (existsSync(bundled)) return bundled;
+  const installed = join(skillDir, "node_modules", "gsap", "dist", "gsap.min.js");
+  if (existsSync(installed)) return installed;
+  return null;
+}
+
+function gsapScriptTag() {
+  if (flag("gsap", "local") === "cdn") return GSAP_CDN_TAG;
+  const source = localGsapSource();
+  if (!source) {
+    console.error(
+      "  (warn: no local GSAP copy found - falling back to the jsDelivr CDN. A network that cannot reach it means no frame animates.)",
+    );
+    return GSAP_CDN_TAG;
+  }
+  const dest = join(hyperframesDir, "assets", "vendor", "gsap.min.js");
+  mkdirSync(join(hyperframesDir, "assets", "vendor"), { recursive: true });
+  copyFileSync(source, dest);
+  return '<script src="./assets/vendor/gsap.min.js"></script>';
+}
 
 const r3 = (x) => Math.round(x * 1000) / 1000;
 const anomalies = [];
@@ -584,7 +624,7 @@ const html = `<!doctype html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=${WIDTH}, height=${HEIGHT}" />
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js" integrity="sha384-sG0Hv1tP1lZCk9KQmrIbY/XNwi+OY84GQqhMscbnsoBFqAz8KNCil1kvfL3Hbbk2" crossorigin="anonymous"></script>
+    ${gsapScriptTag()}
     <style>
 ${headStyle}
     </style>

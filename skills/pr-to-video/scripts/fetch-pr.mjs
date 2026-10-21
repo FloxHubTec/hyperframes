@@ -29,6 +29,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import { parsePrRef } from "./lib/pr-ref.mjs";
+
 const argv = process.argv.slice(2);
 const flag = (name, def) => {
   const i = argv.indexOf(`--${name}`);
@@ -41,6 +43,7 @@ function die(msg) {
 
 const prRef = flag("pr", null);
 if (!prRef) die('--pr "<url | owner/repo#N | N>" is required');
+const ref = parsePrRef(prRef);
 const outDir = resolve(flag("out-dir", "./capture"));
 
 // Run gh, capture stdout. Returns { ok, stdout, stderr } — never throws (callers
@@ -56,6 +59,18 @@ function ghTry(args) {
       stderr: (e.stderr || e.message || "").toString().trim(),
     };
   }
+}
+
+// gh resolves both the repository and the argument against the local git
+// context, so `gh pr view owner/repo#N` reads the whole thing as a branch name
+// and fails outright outside a git repository. Pin the repo whenever the ref
+// names one, and pass the number alone so nothing is left to guess.
+function prArgs(sub, ref, fallback, extra = []) {
+  const args = ["pr", sub];
+  if (ref.number != null) args.push(String(ref.number));
+  else args.push(fallback);
+  if (ref.owner && ref.repo) args.push("--repo", `${ref.owner}/${ref.repo}`);
+  return [...args, ...extra];
 }
 
 // ── 0. auth — fail fast with gh's own hint ───────────────────────────────────
@@ -88,7 +103,7 @@ const FIELDS = [
   "mergedAt",
 ].join(",");
 
-const view = ghTry(["pr", "view", prRef, "--json", FIELDS]);
+const view = ghTry(prArgs("view", ref, prRef, ["--json", FIELDS]));
 if (!view.ok) die(`gh pr view "${prRef}" failed (auth / not found / private?):\n${view.stderr}`);
 
 let pr;
@@ -103,8 +118,8 @@ try {
 // cap. --jq runs per page, so the output is NDJSON (one file object per line).
 const number = pr.number;
 const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/.exec(pr.url || "");
-const owner = m?.[1];
-const repo = m?.[2];
+const owner = m?.[1] ?? ref.owner;
+const repo = m?.[2] ?? ref.repo;
 let filesNote = `${Array.isArray(pr.files) ? pr.files.length : 0} (from pr view)`;
 if (owner && repo && number != null) {
   const apiFiles = ghTry([
@@ -210,7 +225,7 @@ mkdirSync(outDir, { recursive: true });
 const prJsonPath = join(outDir, "pr.json");
 writeFileSync(prJsonPath, JSON.stringify(pr, null, 2) + "\n");
 
-const diff = ghTry(["pr", "diff", prRef]);
+const diff = ghTry(prArgs("diff", ref, prRef));
 const diffPath = join(outDir, "diff.patch");
 if (diff.ok) {
   writeFileSync(diffPath, diff.stdout);

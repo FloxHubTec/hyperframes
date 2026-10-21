@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const assembleScript = new URL("./assemble-index.mjs", import.meta.url).pathname;
+const assembleScript = fileURLToPath(new URL("./assemble-index.mjs", import.meta.url));
 const HAS_FFMPEG =
   spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0 &&
   spawnSync("ffprobe", ["-version"], { stdio: "ignore" }).status === 0;
@@ -128,3 +129,27 @@ test(
     assert.equal(probe.stdout.trim(), "mp3");
   },
 );
+
+// ── GSAP is staged locally, not fetched from a CDN ───────────────────────────
+// Regression: the assembled index.html hardcoded a jsDelivr script tag, so on
+// a network that cannot reach the CDN the frames never register their
+// timelines and the render comes out static - three minutes later, looking
+// like a frame bug rather than a missing library.
+test("assembles the GSAP script from a local copy, not the CDN", () => {
+  const { dir, r } = assembleWith({});
+
+  assert.equal(r.status, 0, r.stderr);
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  assert.match(html, /<script src="\.\/assets\/vendor\/gsap\.min\.js"><\/script>/);
+  assert.doesNotMatch(html, /cdn\.jsdelivr\.net/);
+  // The copy the page points at is staged next to it.
+  assert.equal(existsSync(join(dir, "assets", "vendor", "gsap.min.js")), true);
+});
+
+test("keeps the CDN when it is asked for explicitly", () => {
+  const { dir, r } = assembleWith({ extraArgs: ["--gsap=cdn"] });
+
+  assert.equal(r.status, 0, r.stderr);
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  assert.match(html, /cdn\.jsdelivr\.net/);
+});
