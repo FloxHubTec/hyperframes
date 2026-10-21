@@ -108,12 +108,10 @@ export function sanitizeSuccessfulExitCode(): void {
   rootExitCodeSanitizer?.();
 }
 
-export function exitAfterOutput(exitCode: number): void {
+export async function outputWritten(): Promise<void> {
   const written = (stream: NodeJS.WriteStream) =>
     new Promise<void>((resolve) => stream.write("", () => resolve()));
-  void Promise.all([written(process.stdout), written(process.stderr)]).then(() =>
-    process.exit(exitCode),
-  );
+  await Promise.all([written(process.stdout), written(process.stderr)]);
 }
 
 /** Ask cli.ts to finalize telemetry/output and then terminate the process. */
