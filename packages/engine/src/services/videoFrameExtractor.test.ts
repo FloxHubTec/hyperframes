@@ -2245,6 +2245,7 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling at the output frame rate", () => {
           "stream=width,height",
           "-of",
           "csv=p=0",
+          "--",
           frame!,
         ])
           .stdout.toString()

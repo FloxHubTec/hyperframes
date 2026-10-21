@@ -1100,6 +1100,7 @@ describe("extractDeferredVideoFramesForChunk", () => {
       "stream=width,height",
       "-of",
       "csv=p=0",
+      "--",
       frame!,
     ]);
     expect(size.stdout.toString().trim()).toBe("16,10");
