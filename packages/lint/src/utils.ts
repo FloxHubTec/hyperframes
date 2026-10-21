@@ -560,11 +560,14 @@ export function stripJsComments(source: string): string {
   return scanJsComments(source).out;
 }
 
+// A GreenSock banner, or the producer's inlined-source comment when its URL path is an npm gsap dist file.
 function isGsapLibraryComment(comment: Comment): boolean {
   if (comment.type !== "Block") return false;
   const { value } = comment;
+  const src = /^\s*inlined:\s*(\S+)\s*$/.exec(value)?.[1]?.split(/[?#]/)[0];
   return (
-    (value.startsWith("!") && /\bGreenSock\b/.test(value)) || /^\s*inlined:.*gsap/i.test(value)
+    (value.startsWith("!") && /\bGreenSock\b/.test(value)) ||
+    (src !== undefined && /(?:^|\/)gsap(?:@[^/]+)?\/dist\/[^/]+\.js$/.test(src))
   );
 }
 

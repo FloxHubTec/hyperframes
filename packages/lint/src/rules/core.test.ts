@@ -1248,6 +1248,8 @@ describe("core rules", () => {
   exports.gsap = gsapWithCSS;
 
 }));`;
+    // The same import through Rollup UMD plus Terser, excerpted: the banner stays inside the factory.
+    const minifiedRollupBundle = `!function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"function"==typeof define&&define.amd?define(["exports"],e):e((t="undefined"!=typeof globalThis?globalThis:t||self).Composition={})}(this,function(t){"use strict";function r(t,e){t.prototype=Object.create(e.prototype),t.prototype.constructor=t,t.__proto__=e}\n${banner}\nvar Ji=Ar.registerPlugin($i)||Ar;Ji.core.Tween,window.authorSeed=Math.random(),window.authorTime=Date.now(),t.gsap=Ji});`;
     const comp = (library: string, author = "") => `
 <html><body>
   <div data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="5"></div>
@@ -1263,6 +1265,13 @@ describe("core rules", () => {
       ["pasted with its banner", pastedGsap],
       ["inlined by the producer", producerInlinedGsap],
       ["unminified and inlined by the producer", inlinedUnminifiedGsap],
+      [
+        "inlined by the producer from an unversioned dist URL with a query and hash",
+        inlinedUnminifiedGsap.replace(
+          "https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.js",
+          "https://unpkg.com/gsap/dist/gsap.js?module#top",
+        ),
+      ],
       ["after a statement separator", separatedGsap],
     ])("does not flag GSAP's own internals when %s", async (_shape, library) => {
       expect(await labels(comp(library))).toEqual([]);
@@ -1324,6 +1333,16 @@ describe("core rules", () => {
 
     it("flags author code that Rollup bundles into one factory with GSAP's banner", async () => {
       expect(await labels(comp(rollupBundle))).toEqual(["Math.random()", "Date.now()"]);
+    });
+
+    it.each([
+      "gsap-composition.js",
+      "composition.js",
+      "scene.js?vendor=gsap",
+      "https://example.com/gsap-demo/scene.js",
+    ])("flags author code in a minified bundle inlined from %s", async (src) => {
+      const library = `/* inlined: ${src} */\n${minifiedRollupBundle}`;
+      expect(await labels(comp(library))).toEqual(["Math.random()", "Date.now()"]);
     });
 
     // Known limit: a banner inside a factory cannot be told apart from a bundled one, so it exempts nothing.
