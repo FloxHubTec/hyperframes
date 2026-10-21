@@ -167,6 +167,8 @@ Do not change story, script, `transition_in`, `asset_candidates`, or the PR sour
 
 Goal: Build every storyboard frame as an HTML composition and assemble the playable video.
 
+GSAP is bundled in this skill (`assets/vendor/gsap.min.js`) and staged into the project by `assemble-index.mjs`, so the assembled page loads no library from a CDN. A render-time network fetch is not allowed (it is also what makes a restricted network produce a silently static video). Pass `--gsap=cdn` to assemble against the CDN instead.
+
 Wait for Step 3.1 audio to finish if audio was started. Then sync durations and fetch SFX; skip both if silent.
 
 `node <SKILL_DIR>/scripts/audio.mjs sync-durations --audio-meta ./audio_meta.json --storyboard ./STORYBOARD.md`
