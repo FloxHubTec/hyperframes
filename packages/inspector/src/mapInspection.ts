@@ -138,7 +138,7 @@ export function mapInspection(
       break;
     }
   }
-  response.snippets.sort(byPosition);
+  if (!request.snippets) response.snippets.sort(byPosition);
   trimCandidates(maxBytes, 0);
   if (Buffer.byteLength(JSON.stringify(response)) > maxBytes)
     throw new Error("metadata_exceeds_budget: use fewer targets or increase maxBytes");

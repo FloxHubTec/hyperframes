@@ -189,4 +189,20 @@ describe("components report priority", () => {
     expect(report.snippets.at(-1)?.kind).toEqual(["animation creation"]);
     expect(report.omittedCount).toBe(0);
   });
+
+  it("returns explicit snippet IDs in request order rather than file order", () => {
+    const catalog = new Map<string, Snippet>();
+    const { report } = withAnimation(
+      { targets: [{ selector: ".w-dot" }], maxBytes: 256000 },
+      catalog,
+    );
+    const ids = report.snippets.map((snippet) => snippet.id).reverse();
+    expect(ids).toHaveLength(2);
+    const { report: fetched } = withAnimation(
+      { targets: [], snippets: ids, maxBytes: 256000 },
+      catalog,
+    );
+    expect(fetched.snippets.map((snippet) => snippet.id)).toEqual(ids);
+    expect(fetched.omittedCount).toBe(0);
+  });
 });
