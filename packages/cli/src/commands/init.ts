@@ -197,8 +197,7 @@ function probeVideo(filePath: string): VideoMeta | undefined {
 
 type CanvasSize = { width: number; height: number };
 
-// A from-file stage (the clip itself) takes the clip's own shape with a 1080 short side, as every preset has, so the
-// whole picture shows with no bars; a clip that matches a preset gets exactly it. 16:9 is the template's own size.
+// A from-file stage is the clip at its own shape, 1080 short side like every preset; 16:9 is the template's own.
 function clipFrame(templateId: string, clip: CanvasSize | undefined): CanvasSize | undefined {
   if (templateId !== "from-file" || !clip || !(clip.width > 0 && clip.height > 0)) return undefined;
   const even = (n: number) => 2 * Math.round(n / 2);
