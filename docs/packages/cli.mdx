@@ -673,11 +673,12 @@ FFmpeg.
 #### Audio services
 
 Stems and the `api` provider call HeyGen with the same credential as the other
-HeyGen commands: `HEYGEN_API_KEY`, `HYPERFRAMES_API_KEY`, or one saved by
-`hyperframes auth login --api-key`, on the API at `HEYGEN_API_URL` when set.
-These routes take an API key; a `hyperframes auth login` browser sign-in is
-refused, and the analysis falls back with a warning. Without a credential,
-stems are skipped and `api` is passed over.
+HeyGen commands: `HEYGEN_API_KEY`, `HYPERFRAMES_API_KEY`, `HEYGEN_ACCESS_TOKEN`,
+or a credential saved by `hyperframes auth login`, on the API at
+`HEYGEN_API_URL` when set. API keys are sent as `x-api-key`; OAuth credentials
+are sent as bearer tokens. If the service refuses a request, analysis falls
+back with a warning. Without a credential, stems are skipped and `api` is
+passed over.
 
 To use another service, set `HYPERFRAMES_AUDIO_STEMS_URL` or
 `HYPERFRAMES_AUDIO_API_URL` to its full URL together with

@@ -42,7 +42,7 @@ describe("findEffects", () => {
     expect(events.map((e) => [Math.round(e.t * 10) / 10, e.kind])).toEqual([
       [1, "boom"],
       [3.2, "tick"],
-      [5, "riser"],
+      [5.1, "riser"],
     ]);
     expect(events[0]).toMatchObject({ band: "low", count: 1, overMusicDb: null });
     expect(events[0]!.tail).toBeGreaterThan(0.6);

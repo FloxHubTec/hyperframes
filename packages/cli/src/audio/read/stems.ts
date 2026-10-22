@@ -2,8 +2,10 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { join } from "node:path";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
+import { setTimeout as sleep } from "node:timers/promises";
+import { downloadToFile } from "../../cloud/download.js";
 import { HyperframesCloudClient } from "../../cloud/_gen/client.js";
 import { uploadAssetViaDirectUpload } from "../../cloud/upload.js";
 import {
@@ -38,6 +40,7 @@ const TIMEOUT_ENV = "HYPERFRAMES_AUDIO_STEMS_TIMEOUT_MS";
 const DEFAULT_TIMEOUT_MS = 30 * 60_000;
 const POLL_MS = 5000;
 const DONE = "stems.json";
+const STEM_NAMES = ["vocals", "drums", "bass", "guitar", "piano", "other"] as const;
 
 export const VOICE_STEM = "vocals";
 export const DRUM_STEM = "drums";
@@ -67,19 +70,17 @@ async function job(response: Response): Promise<StemsJob> {
   return value;
 }
 
-async function encoded(path: string, dir: string): Promise<string> {
+async function encoded(path: string, dir: string, signal: AbortSignal): Promise<string> {
   const ffmpeg = findFfBinary("ffmpeg", { configuredMustExist: true });
   if (!ffmpeg) throw new Error("ffmpeg is required to separate stems; run: npx hyperframes doctor");
   const out = join(dir, "upload.mp3");
   await runFile(
     ffmpeg,
     ["-v", "error", "-y", "-i", path, "-vn", "-ac", "2", "-ar", "44100", "-b:a", "192k", out],
-    { windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+    { windowsHide: true, maxBuffer: 8 * 1024 * 1024, signal },
   );
   return out;
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Separate the recording through the configured service and save each stem into `dir`. */
 export async function fetchStems(
@@ -87,14 +88,14 @@ export async function fetchStems(
   dir: string,
   { url, headers, timeoutMs }: ServiceAccess,
 ): Promise<Record<string, string>> {
-  const deadline = Date.now() + timeoutMs;
+  const signal = AbortSignal.timeout(timeoutMs);
   const scratch = await mkdtemp(join(tmpdir(), "hf-stems-"));
   try {
-    const mp3 = await encoded(path, scratch);
+    const mp3 = await encoded(path, scratch, signal);
     const client = new HyperframesCloudClient({
       baseUrl: new URL(url).origin,
       getAuthHeaders: () => headers,
-      fetchImpl: (input, init) => fetch(input, { ...init, redirect: "error" }),
+      fetchImpl: (input, init) => fetch(input, { ...init, redirect: "error", signal }),
     });
     const asset = await uploadAssetViaDirectUpload({
       client,
@@ -103,10 +104,12 @@ export async function fetchStems(
       filename: "audio.mp3",
       contentType: "audio/mpeg",
       idempotencyKey: randomUUID(),
+      signal,
     });
     let current = await job(
       await fetch(url, {
         method: "POST",
+        signal,
         redirect: "error",
         headers: {
           ...headers,
@@ -117,13 +120,12 @@ export async function fetchStems(
       }),
     );
     while (current.status === "pending" || current.status === "processing") {
-      if (Date.now() > deadline)
-        throw new Error(`stem separation did not finish within ${Math.round(timeoutMs / 1000)} s`);
-      await sleep(POLL_MS);
+      await sleep(POLL_MS, undefined, { signal });
       current = await job(
         await fetch(`${url.replace(/\/$/, "")}/${encodeURIComponent(current.id)}`, {
           redirect: "error",
           headers,
+          signal,
         }),
       );
     }
@@ -136,13 +138,12 @@ export async function fetchStems(
       throw new Error("the stems service returned no vocals stem");
     mkdirSync(dir, { recursive: true });
     const names: Record<string, string> = {};
-    for (const stem of stems) {
-      const response = await fetch(stem.url);
-      if (!response.ok)
-        throw new Error(`could not download the ${stem.name} stem: ${response.status}`);
-      const file = `${stem.name.replace(/[^\w-]/g, "_")}${extname(new URL(stem.url).pathname) || ".mp3"}`;
-      writeFileSync(join(dir, file), Buffer.from(await response.arrayBuffer()));
-      names[stem.name] = file;
+    for (const name of STEM_NAMES) {
+      const stem = stems.find((candidate) => candidate.name === name);
+      if (!stem) continue;
+      const file = `${name}.audio`;
+      await downloadToFile(stem.url, join(dir, file), { signal });
+      names[name] = file;
     }
     writeFileSync(join(dir, DONE), JSON.stringify(names));
     return cachedStems(dir)!;

@@ -22,17 +22,10 @@ import {
 } from "./shared.js";
 
 /**
- * The audio analysis service contract.
- *
- * Request: `POST /v3/audio/analysis` on the HeyGen API with the CLI's HeyGen credential, or `POST
- * <HYPERFRAMES_AUDIO_API_URL>` exactly as configured with `x-api-key: <HYPERFRAMES_AUDIO_API_KEY>`; a new
- * `Idempotency-Key` per request, and an {@link AudioApiRequest} JSON body.
- * The analyzed span is uploaded once as 16-bit PCM WAV, mono at 16 kHz, using the same origin
- * public asset direct-upload and completion routes. The body references that finalized asset.
- *
- * Response: `200` with `application/json`, `{ "data": AudioApiResponse }`; a bare {@link AudioApiResponse} is read
- * too. Every time is in seconds from the start of the uploaded audio. A capability the service cannot answer is left
- * out of the response. Any other status is a failure; its body may be `{ "error": { "message": string } }`.
+ * POST an asset-backed request to the configured audio service with a fresh Idempotency-Key.
+ * Uploads are 16 kHz mono WAV through the same origin's direct-upload routes.
+ * Responses may be bare or wrapped in `data`; times start at the uploaded audio's beginning.
+ * Unavailable capabilities are omitted. Other HTTP statuses fail with the service's error.
  */
 export interface AudioApiRequest {
   version: 1;

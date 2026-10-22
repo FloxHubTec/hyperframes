@@ -31,14 +31,14 @@ export function levels(
   hop: number,
   window = hop * 2,
 ): Float32Array {
-  const hopSamples = Math.max(1, Math.round(hop * sampleRate));
+  const hopSamples = Math.max(1, hop * sampleRate);
   const half = Math.max(1, Math.round((window * sampleRate) / 2));
   const squares = new Float64Array(samples.length + 1);
   for (let i = 0; i < samples.length; i++) squares[i + 1] = squares[i]! + samples[i]! ** 2;
   const frames = Math.ceil(samples.length / hopSamples);
   const out = new Float32Array(frames);
   for (let f = 0; f < frames; f++) {
-    const center = f * hopSamples;
+    const center = Math.round(f * hopSamples);
     const a = Math.max(0, center - half);
     const b = Math.min(samples.length, center + half);
     const power = b > a ? (squares[b]! - squares[a]!) / (b - a) : 0;

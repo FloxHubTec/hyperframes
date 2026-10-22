@@ -1,6 +1,6 @@
 import type { Span } from "@hyperframes/core/audio-analysis";
 
-export const READ_VERSION = 1;
+export const READ_VERSION = 2;
 
 export type Separation = "stems" | "mix";
 

@@ -96,12 +96,7 @@ async function heygenHeaders(): Promise<Record<string, string> | string> {
   }
 }
 
-/**
- * Where a HeyGen audio service is and how to call it, or why it cannot be called. By default that is `path` on the
- * HeyGen API with the CLI's HeyGen credential. `env.url` points at another service, which then needs its own
- * `env.key`, so the HeyGen credential never leaves for a host it was not issued for; `env.key` alone replaces the
- * credential.
- */
+/** An explicit service URL requires its own key; never forward the HeyGen credential to it. */
 export async function serviceAccess(
   env: { url: string; key: string; timeout: string },
   path: string,

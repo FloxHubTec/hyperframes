@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { readAudio } from "./read.js";
+import { fetchStems } from "./stems.js";
 
 const RATE = 22_050;
 const dir = mkdtempSync(join(tmpdir(), "hf-audio-read-"));
@@ -44,6 +45,8 @@ const bed = (t: number) =>
     : 0.08 * Math.sin(2 * Math.PI * 261.63 * t) + 0.08 * Math.sin(2 * Math.PI * 392 * t);
 
 let server: Server;
+let stalledPath: string | null = null;
+let onStalled = () => {};
 let polls = 0;
 let stemCalls = 0;
 let stemRequest: unknown = null;
@@ -59,40 +62,46 @@ const origin = () => `http://127.0.0.1:${(server.address() as AddressInfo).port}
 
 type Reply = (status: number, value: unknown) => void;
 
-const routes: Record<string, (reply: Reply, req: IncomingMessage, bytes: Buffer) => void> = {
-  "POST /v3/assets/direct-uploads": (reply) =>
-    reply(200, {
-      data: { asset_id: "episode", upload_url: `${origin()}/put`, upload_headers: {} },
-    }),
-  "PUT /put": (reply) => reply(200, {}),
-  "POST /v3/assets/episode/complete": (reply) => reply(200, { data: { asset_id: "episode" } }),
-  "POST /v3/audio/stems": (reply, req, bytes) => {
-    expect(req.headers["x-api-key"]).toBe("test-key");
-    stemCalls++;
-    stemRequest = JSON.parse(bytes.toString());
-    reply(202, { data: { id: "job-1", status: "processing" } });
-  },
-  "GET /v3/audio/stems/job-1": (reply) => {
-    polls++;
-    reply(200, {
-      data: {
-        id: "job-1",
-        status: "completed",
-        stems: Object.keys(stemFiles).map((name) => ({
-          name,
-          url: `${origin()}/stem/${name}.wav`,
-        })),
-      },
-    });
-  },
-};
+const routes = new Map<string, (reply: Reply, req: IncomingMessage, bytes: Buffer) => void>(
+  Object.entries({
+    "POST /v3/assets/direct-uploads": (reply) =>
+      reply(200, {
+        data: { asset_id: "episode", upload_url: `${origin()}/put`, upload_headers: {} },
+      }),
+    "PUT /put": (reply) => reply(200, {}),
+    "POST /v3/assets/episode/complete": (reply) => reply(200, { data: { asset_id: "episode" } }),
+    "POST /v3/audio/stems": (reply, req, bytes) => {
+      expect(req.headers["x-api-key"]).toBe("test-key");
+      stemCalls++;
+      stemRequest = JSON.parse(bytes.toString());
+      reply(202, { data: { id: "job-1", status: "processing" } });
+    },
+    "GET /v3/audio/stems/job-1": (reply) => {
+      polls++;
+      reply(200, {
+        data: {
+          id: "job-1",
+          status: "completed",
+          stems: Object.keys(stemFiles).map((name) => ({
+            name,
+            url: `${origin()}/stem/${name}.wav`,
+          })),
+        },
+      });
+    },
+  }),
+);
 
 beforeAll(async () => {
   server = createServer(async (req, res) => {
+    if (req.url === stalledPath) {
+      onStalled();
+      return;
+    }
     const bytes = await body(req);
     const reply: Reply = (status, value) =>
       res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
-    const route = routes[`${req.method} ${req.url}`];
+    const route = routes.get(`${req.method} ${req.url}`);
     if (route) return route(reply, req, bytes);
     const stem = req.url?.match(/^\/stem\/(\w+)\.wav$/)?.[1];
     if (stem && stemFiles[stem]) return res.writeHead(200).end(readFileSync(stemFiles[stem]));
@@ -110,6 +119,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  stalledPath = null;
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   delete process.env.HYPERFRAMES_AUDIO_STEMS_URL;
   delete process.env.HYPERFRAMES_AUDIO_API_KEY;
@@ -157,6 +168,7 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     stemFiles.drums = wav("drums.wav", 8, boom);
     stemFiles.piano = wav("piano.wav", 8, bed);
     stemFiles.bass = wav("bass.wav", 8, () => 0);
+    stemFiles["../../escape"] = stemFiles.bass;
     const path = wav("episode.wav", 8, (t) => voiced(t) + boom(t) + bed(t));
     vi.stubEnv("HEYGEN_API_KEY", "test-key");
     const cacheDir = join(dir, "cache-stems");
@@ -180,6 +192,25 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     await readAudio(path, "episode.wav", { cacheDir });
     expect(stemCalls).toBe(1);
   });
+
+  it.each(["/put", "/v3/audio/stems"])(
+    "aborts a stalled %s request at the separation deadline",
+    async (endpoint) => {
+      const controller = new AbortController();
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+      stalledPath = endpoint;
+      onStalled = () => controller.abort();
+      const path = wav("timeout.wav", 1, voiced);
+      await expect(
+        fetchStems(path, join(dir, `timeout-${endpoint.replaceAll("/", "-")}`), {
+          url: `${origin()}/v3/audio/stems`,
+          headers: { "x-api-key": "test-key" },
+          timeoutMs: 1000,
+        }),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      expect(timeout).toHaveBeenCalledWith(1000);
+    },
+  );
 
   it("keeps audio on the machine at quality local, and reads neither voice nor effects from a bare mix", async () => {
     process.env.HYPERFRAMES_AUDIO_STEMS_URL = `${origin()}/v3/audio/stems`;
