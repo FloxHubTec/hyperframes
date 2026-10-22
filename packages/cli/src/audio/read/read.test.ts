@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { readAudio } from "./read.js";
 
@@ -103,7 +103,14 @@ beforeAll(async () => {
 
 afterAll(() => new Promise<void>((done) => server.close(() => done())));
 
+beforeEach(() => {
+  for (const name of ["HEYGEN_API_KEY", "HYPERFRAMES_API_KEY", "HEYGEN_ACCESS_TOKEN"])
+    vi.stubEnv(name, "");
+  vi.stubEnv("HEYGEN_API_URL", origin());
+});
+
 afterEach(() => {
+  vi.unstubAllEnvs();
   delete process.env.HYPERFRAMES_AUDIO_STEMS_URL;
   delete process.env.HYPERFRAMES_AUDIO_API_KEY;
 });
@@ -130,7 +137,7 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     expect(first.analysis).toMatchObject({ separation: "mix", stems: [], music: null });
     expect(first.analysis.voice!.sentences.map((s) => s.text)).toEqual(["一口气了解。", "伊朗"]);
     expect(first.analysis.voice!.medianPitchHz).toBeGreaterThan(170);
-    expect(first.analysis.warnings.join("\n")).toContain("HYPERFRAMES_AUDIO_STEMS_URL is not set");
+    expect(first.analysis.warnings.join("\n")).toContain("no HeyGen credential");
     const text = readFileSync(first.textPath, "utf8");
     expect(text).toContain('voice   "一口气了解。"');
     expect(text).toContain("pause   1.0 s");
@@ -145,14 +152,13 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     expect(edited.analysis.voice!.sentences[0]!.text).toBe("换了");
   });
 
-  it("separates through the stems service, then reads effects from the drums and the bed from the rest", async () => {
+  it("separates through HeyGen's stems route with the CLI's HeyGen API key, then reads effects from the drums and the bed from the rest", async () => {
     stemFiles.vocals = wav("vocals.wav", 8, voiced);
     stemFiles.drums = wav("drums.wav", 8, boom);
     stemFiles.piano = wav("piano.wav", 8, bed);
     stemFiles.bass = wav("bass.wav", 8, () => 0);
     const path = wav("episode.wav", 8, (t) => voiced(t) + boom(t) + bed(t));
-    process.env.HYPERFRAMES_AUDIO_STEMS_URL = `${origin()}/v3/audio/stems`;
-    process.env.HYPERFRAMES_AUDIO_API_KEY = "test-key";
+    vi.stubEnv("HEYGEN_API_KEY", "test-key");
     const cacheDir = join(dir, "cache-stems");
     const { analysis, textPath } = await readAudio(path, "episode.wav", { cacheDir });
     expect(stemRequest).toEqual({ version: 1, audio: { type: "asset_id", asset_id: "episode" } });

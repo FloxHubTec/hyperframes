@@ -6,17 +6,23 @@ import { extname, join } from "node:path";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { HyperframesCloudClient } from "../../cloud/_gen/client.js";
 import { uploadAssetViaDirectUpload } from "../../cloud/upload.js";
-import { runFile, serviceConfig, serviceFailure } from "../analysis/providers/shared.js";
+import {
+  runFile,
+  serviceAccess,
+  serviceFailure,
+  type ServiceAccess,
+} from "../analysis/providers/shared.js";
 
 /**
  * The stem separation service contract.
  *
- * Request: `POST <HYPERFRAMES_AUDIO_STEMS_URL>` with `x-api-key: <HYPERFRAMES_AUDIO_API_KEY>`, a new
- * `Idempotency-Key`, and `{ version: 1, audio: { type: "asset_id", asset_id } }`. The recording is uploaded
+ * Request: `POST /v3/audio/stems` on the HeyGen API with the CLI's HeyGen credential, or `POST
+ * <HYPERFRAMES_AUDIO_STEMS_URL>` with `x-api-key: <HYPERFRAMES_AUDIO_API_KEY>`; a new `Idempotency-Key`, and
+ * `{ version: 1, audio: { type: "asset_id", asset_id } }`. The recording is uploaded
  * first as 192 kb/s stereo MP3 through the same origin's asset direct-upload routes.
  *
  * Response: `{ data: StemsJob }`, or a bare `StemsJob`. While `status` is `pending` or `processing`,
- * `GET <HYPERFRAMES_AUDIO_STEMS_URL>/<id>` returns the job again. A `completed` job lists one URL per stem;
+ * `GET <that url>/<id>` returns the job again. A `completed` job lists one URL per stem;
  * the names are vocals, drums, bass, guitar, piano and other.
  */
 interface StemsJob {
@@ -36,16 +42,13 @@ const DONE = "stems.json";
 export const VOICE_STEM = "vocals";
 export const DRUM_STEM = "drums";
 
-const config = () =>
-  serviceConfig({ url: URL_ENV, key: KEY_ENV, timeout: TIMEOUT_ENV }, DEFAULT_TIMEOUT_MS);
-
-/** Why stems cannot be fetched here, or null when they can. */
-export function stemsUnavailable(): string | null {
-  const { url, key } = config();
-  if (!url) return `${URL_ENV} is not set`;
-  if (!key) return `${KEY_ENV} is not set`;
-  return null;
-}
+/** How to reach the stems service, or why it cannot be reached. */
+export const stemsAccess = () =>
+  serviceAccess(
+    { url: URL_ENV, key: KEY_ENV, timeout: TIMEOUT_ENV },
+    "/v3/audio/stems",
+    DEFAULT_TIMEOUT_MS,
+  );
 
 /** Stems already fetched into `dir`, by name; null when there are none yet. */
 export function cachedStems(dir: string): Record<string, string> | null {
@@ -79,11 +82,12 @@ async function encoded(path: string, dir: string): Promise<string> {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Separate the recording through the configured service and save each stem into `dir`. */
-export async function fetchStems(path: string, dir: string): Promise<Record<string, string>> {
-  const { url, key, timeoutMs } = config();
-  if (!url || !key) throw new Error(stemsUnavailable()!);
+export async function fetchStems(
+  path: string,
+  dir: string,
+  { url, headers, timeoutMs }: ServiceAccess,
+): Promise<Record<string, string>> {
   const deadline = Date.now() + timeoutMs;
-  const headers = { "x-api-key": key };
   const scratch = await mkdtemp(join(tmpdir(), "hf-stems-"));
   try {
     const mp3 = await encoded(path, scratch);

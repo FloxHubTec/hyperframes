@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   rhythm,
   signalProvider,
@@ -28,6 +28,7 @@ function clicks(seconds: number): AudioSignal {
 
 interface Received {
   method: string;
+  url: string | undefined;
   apiKey: string | undefined;
   authorization: string | undefined;
   idempotencyKey: string | undefined;
@@ -94,6 +95,7 @@ beforeAll(async () => {
     };
     received.push({
       method: req.method!,
+      url: req.url,
       apiKey: req.headers["x-api-key"] as string | undefined,
       authorization: req.headers.authorization,
       idempotencyKey: req.headers["idempotency-key"] as string | undefined,
@@ -108,32 +110,54 @@ beforeAll(async () => {
 
 afterAll(() => new Promise<void>((done) => server.close(() => done())));
 
+const serverOrigin = () => `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+beforeEach(() => {
+  for (const name of ["HEYGEN_API_KEY", "HYPERFRAMES_API_KEY", "HEYGEN_ACCESS_TOKEN"])
+    vi.stubEnv(name, "");
+  vi.stubEnv("HEYGEN_API_URL", serverOrigin());
+});
+
 afterEach(() => {
   received = [];
   uploads = 0;
   enveloped = true;
+  vi.unstubAllEnvs();
   delete process.env.HYPERFRAMES_AUDIO_API_URL;
   delete process.env.HYPERFRAMES_AUDIO_API_KEY;
 });
 
 function configure() {
-  process.env.HYPERFRAMES_AUDIO_API_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/audio`;
+  process.env.HYPERFRAMES_AUDIO_API_URL = `${serverOrigin()}/v1/audio`;
   process.env.HYPERFRAMES_AUDIO_API_KEY = "test-key";
 }
 
 describe("apiProvider", () => {
-  it("is unavailable until both the URL and the key are set", () => {
-    expect(apiProvider.available!()).toEqual({
+  it("is unavailable without a HeyGen credential", async () => {
+    expect(await apiProvider.available!()).toEqual({
       ok: false,
-      reason: "HYPERFRAMES_AUDIO_API_URL is not set",
+      reason: expect.stringContaining("no HeyGen credential"),
     });
+    vi.stubEnv("HEYGEN_API_KEY", "test-key");
+    expect(await apiProvider.available!()).toEqual({ ok: true });
+  });
+
+  it("calls HeyGen's audio analysis route with the CLI's HeyGen API key", async () => {
+    vi.stubEnv("HEYGEN_API_KEY", "test-key");
+    reply = () => ({ status: 200, body: { version: 1, beats: { times: [0.25, 0.75] } } });
+    await apiProvider.analyze("beats", clicks(2), {});
+    expect(received.map((r) => [r.url, r.apiKey])).toEqual([["/v3/audio/analysis", "test-key"]]);
+  });
+
+  it("never sends the HeyGen credential to a service named by HYPERFRAMES_AUDIO_API_URL", async () => {
+    vi.stubEnv("HEYGEN_API_KEY", "heygen-key");
     process.env.HYPERFRAMES_AUDIO_API_URL = "http://127.0.0.1:1/";
-    expect(apiProvider.available!()).toEqual({
+    expect(await apiProvider.available!()).toEqual({
       ok: false,
-      reason: "HYPERFRAMES_AUDIO_API_KEY is not set",
+      reason: "HYPERFRAMES_AUDIO_API_URL is set but HYPERFRAMES_AUDIO_API_KEY is not",
     });
     process.env.HYPERFRAMES_AUDIO_API_KEY = "k";
-    expect(apiProvider.available!()).toEqual({ ok: true });
+    expect(await apiProvider.available!()).toEqual({ ok: true });
   });
 
   it("refuses redirects without sending the API key to another origin", async () => {

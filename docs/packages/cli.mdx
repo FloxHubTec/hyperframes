@@ -611,11 +611,12 @@ Sentences come from a transcript: `--transcript <file>`, or
 carry no words.
 
 Effects and music are read from stems. At `--quality best` (the default) the
-recording is separated into vocals, drums, bass, guitar, piano and other by the
-service at `HYPERFRAMES_AUDIO_STEMS_URL`, with `HYPERFRAMES_AUDIO_API_KEY`: it
-is uploaded as 192 kb/s MP3 through the same origin's direct-upload endpoints,
-`POST` starts a job, and `GET <url>/<id>` is polled until the stems are ready
-(`HYPERFRAMES_AUDIO_STEMS_TIMEOUT_MS`, 30 minutes by default). Effects are read
+recording is separated into vocals, drums, bass, guitar, piano and other by
+HeyGen's `/v3/audio/stems`, with your HeyGen credential (see
+[audio services](#audio-services)): it is uploaded as 192 kb/s MP3 through the
+same origin's direct-upload endpoints, `POST` starts a job, and `GET <url>/<id>`
+is polled until the stems are ready (`HYPERFRAMES_AUDIO_STEMS_TIMEOUT_MS`, 30
+minutes by default). Effects are read
 from the drums stem and the music from the other four. Without stems, effects are
 read from the mix outside speech and the music is not read; with neither stems nor
 a transcript, voice and effects are not read either, because the mix alone does
@@ -635,13 +636,12 @@ answers:
 | sections | `api`, `apple-mu`, `signal` |
 | describe | `api`, `apple-sound` |
 
-- `api` is an audio analysis service, used when `HYPERFRAMES_AUDIO_API_URL` and
-  `HYPERFRAMES_AUDIO_API_KEY` are both set. The audio is uploaded as 16 kHz mono
+- `api` is HeyGen's `/v3/audio/analysis`, used when a HeyGen credential is
+  found (see [audio services](#audio-services)). The audio is uploaded as 16 kHz mono
   WAV through the same origin’s public asset direct-upload and completion endpoints.
   Each decoded signal is uploaded once; analysis requests send its finalized asset ID as JSON.
-  The API key needs asset upload and audio-analysis permissions. Channels are averaged unless cancellation removes over 90% of the loudest
-  channel’s energy, in which case that channel is used. Requests carry the key in an `x-api-key` header and a new `Idempotency-Key` on each
-  request; the answer may come wrapped in `{ "data": … }`. Every beat,
+  The credential needs asset upload and audio permissions. Channels are averaged unless cancellation removes over 90% of the loudest
+  channel’s energy, in which case that channel is used. Each request carries a new `Idempotency-Key`; the answer may come wrapped in `{ "data": … }`. Every beat,
   downbeat or section boundary it answers moves onto the nearest beat signal
   processing measured, when one is within a quarter beat; the rest are listed in
   `snap.unsnapped`, and `snap.medianShiftMs` says how far the moved ones went.
@@ -669,6 +669,20 @@ the audio on this machine, `fast` allows only signal processing),
 Tune the analysis with `--onset-method`, `--threshold`, `--band lo,hi`,
 `--hop-ms`, `--onset-ratio`, `--tail-db` and `--silence-db`. Decoding needs
 FFmpeg.
+
+#### Audio services
+
+Stems and the `api` provider call HeyGen with the same credential as the other
+HeyGen commands: `HEYGEN_API_KEY`, `HYPERFRAMES_API_KEY`, or one saved by
+`hyperframes auth login --api-key`, on the API at `HEYGEN_API_URL` when set.
+These routes take an API key; a `hyperframes auth login` browser sign-in is
+refused, and the analysis falls back with a warning. Without a credential,
+stems are skipped and `api` is passed over.
+
+To use another service, set `HYPERFRAMES_AUDIO_STEMS_URL` or
+`HYPERFRAMES_AUDIO_API_URL` to its full URL together with
+`HYPERFRAMES_AUDIO_API_KEY`, which is sent as `x-api-key`. Your HeyGen
+credential is never sent to a URL set this way.
 
 ## Look at it
 

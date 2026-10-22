@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AudioSignal, Availability, Downbeats } from "@hyperframes/core/audio-analysis";
 import { medianInterval } from "@hyperframes/core/audio-analysis";
+import { buildAuthHeaders } from "../../../auth/client.js";
+import { tryResolveCredential } from "../../../auth/resolver.js";
+import { refreshIfNeeded, resolveCloudBaseUrl } from "../../../cloud/auth.js";
 
 export const runFile = promisify(execFile);
 
@@ -75,16 +78,49 @@ export function downbeatsWithMeter(beats: number[], downbeats: number[]): Downbe
 const round = (t: number) => Math.round(t * 1000) / 1000;
 export const rounded = (times: readonly number[]) => times.map(round);
 
-export function serviceConfig(
+export interface ServiceAccess {
+  url: string;
+  headers: Record<string, string>;
+  timeoutMs: number;
+}
+
+const NO_HEYGEN_CREDENTIAL =
+  "no HeyGen credential: set HEYGEN_API_KEY or run `hyperframes auth login --api-key`";
+
+async function heygenHeaders(): Promise<Record<string, string> | string> {
+  try {
+    const credential = await tryResolveCredential();
+    return credential ? buildAuthHeaders(await refreshIfNeeded(credential)) : NO_HEYGEN_CREDENTIAL;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+/**
+ * Where a HeyGen audio service is and how to call it, or why it cannot be called. By default that is `path` on the
+ * HeyGen API with the CLI's HeyGen credential. `env.url` points at another service, which then needs its own
+ * `env.key`, so the HeyGen credential never leaves for a host it was not issued for; `env.key` alone replaces the
+ * credential.
+ */
+export async function serviceAccess(
   env: { url: string; key: string; timeout: string },
+  path: string,
   defaultMs: number,
-) {
+): Promise<ServiceAccess | string> {
   const timeout = Number(process.env[env.timeout]);
-  return {
-    url: process.env[env.url]?.trim(),
-    key: process.env[env.key]?.trim(),
-    timeoutMs: timeout > 0 ? timeout : defaultMs,
-  };
+  const timeoutMs = timeout > 0 ? timeout : defaultMs;
+  const url = process.env[env.url]?.trim();
+  const key = process.env[env.key]?.trim();
+  if (key)
+    return {
+      url: url || `${resolveCloudBaseUrl()}${path}`,
+      headers: { "x-api-key": key },
+      timeoutMs,
+    };
+  if (url) return `${env.url} is set but ${env.key} is not`;
+  const headers = await heygenHeaders();
+  if (typeof headers === "string") return headers;
+  return { url: `${resolveCloudBaseUrl()}${path}`, headers, timeoutMs };
 }
 
 function errorMessageIn(text: string): string | undefined {

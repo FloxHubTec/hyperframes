@@ -15,7 +15,7 @@ import { formatRead } from "./format.js";
 import { readMusic } from "./music.js";
 import { pitchTrack } from "./pitch.js";
 import { PITCH_RATE, READ_RATE, decodeMono, mixed, round } from "./signal.js";
-import { DRUM_STEM, VOICE_STEM, cachedStems, fetchStems, stemsUnavailable } from "./stems.js";
+import { DRUM_STEM, VOICE_STEM, cachedStems, fetchStems, stemsAccess } from "./stems.js";
 import { READ_VERSION, type ReadAudio } from "./types.js";
 import { voiceFromActivity, voiceFromWords, type TimedWord } from "./voice.js";
 
@@ -77,13 +77,13 @@ async function stemsFor(
     warnings.push(`not separated into stems: quality ${quality} keeps audio on this machine`);
     return null;
   }
-  const missing = stemsUnavailable();
-  if (missing) {
-    warnings.push(`not separated into stems: ${missing}`);
+  const access = await stemsAccess();
+  if (typeof access === "string") {
+    warnings.push(`not separated into stems: ${access}`);
     return null;
   }
   try {
-    return await fetchStems(path, dir);
+    return await fetchStems(path, dir, access);
   } catch (error) {
     warnings.push(`not separated into stems: ${error instanceof Error ? error.message : error}`);
     return null;
@@ -190,7 +190,7 @@ export async function readAudio(
     const stemsNowPossible =
       entry.analysis.separation === "mix" &&
       quality === "best" &&
-      (cachedStems(stemDir) !== null || stemsUnavailable() === null);
+      (cachedStems(stemDir) !== null || typeof (await stemsAccess()) !== "string");
     if (
       entry.analysis.version === READ_VERSION &&
       entry.transcriptKey === transcriptKey &&
