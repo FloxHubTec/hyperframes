@@ -6,6 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { commentBlocks } from "./check-comment-citations.mjs";
 
 const MAX_BLOCK_LINES = 12;
@@ -118,7 +119,7 @@ function packageShare(pkg, isNew) {
   return share(own.lines > 0 ? own : packageTotal("packages", isNew));
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const ref = git(["merge-base", process.env.COMMENT_CHECK_BASE ?? "origin/main", "HEAD"]).trim();
   // Against the working tree, where contents are read from; in CI that is HEAD.
   const changed = changedPaths(git(["diff", "--name-status", "-M", ref, "--", "packages"]))
