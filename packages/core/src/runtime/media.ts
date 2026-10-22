@@ -457,7 +457,8 @@ export function syncRuntimeMedia(params: {
       // there is one time base, and this is it.
       const laneGain = elementVolumeLaneGain(el, params.timeSeconds - origin);
       if (laneGain !== null) {
-        authorVolume = clampAudioGain(laneGain);
+        // Routed, the transport plays the lane on its own gain; this tick's gain multiplies it.
+        authorVolume = params.isWebAudioRouted?.(el) ? 1 : clampAudioGain(laneGain);
       } else if (clip.volumeKeyframes && clip.volumeKeyframes.length > 0) {
         // Keyframes probed from the GSAP timeline — same source as the renderer.
         // Use the interpolated envelope value directly; no need to track GSAP changes.

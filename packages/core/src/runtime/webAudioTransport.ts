@@ -112,9 +112,28 @@ function scheduleVolumeLane(
   scheduleParamLane([{ param: gainNode.gain }], lane, VOLUME_RANGE.scale, timing);
 }
 
+/**
+ * A clip's volume lane on its own gain ahead of `gainNode`, like a group's fader beside its
+ * mute gain: `setElementVolume` rewrites `gainNode` every tick and would cut into the ramps.
+ */
+function clipVolumeLaneStage(
+  ctx: AudioContext,
+  el: HTMLMediaElement,
+  gainNode: GainNode,
+  timing: AutomationTiming,
+): GainNode | null {
+  if (!volumeLane(readElementAutomation(el))) return null;
+  const laneNode = ctx.createGain();
+  laneNode.connect(gainNode);
+  scheduleVolumeLane(el, laneNode, timing);
+  return laneNode;
+}
+
 type ScheduledSourceBase = {
   el: HTMLMediaElement;
   gainNode: GainNode;
+  /** The clip's volume lane, between its FX and `gainNode`, when it has one. */
+  laneNode: GainNode | null;
   /** FX chain spliced between source and gain, when the element carries one. */
   fx?: ElementFxHandle | null;
   compositionStart: number;
@@ -414,7 +433,8 @@ export class WebAudioTransport {
       const scheduledAt = this._ctx.currentTime;
       const elapsed = compositionTime - compositionStart;
       const timing: AutomationTiming = { scheduledAt, elapsed, rate: safeRate };
-      const fx = attachElementFxChain(this._ctx, el, sourceNode, gainNode, timing);
+      const laneNode = clipVolumeLaneStage(this._ctx, el, gainNode, timing);
+      const fx = attachElementFxChain(this._ctx, el, sourceNode, laneNode ?? gainNode, timing);
       // The group bus, not master, for a member — same as the decoded-buffer
       // path. This transport is the PRIMARY one for audio (the decode path is
       // its fallback), so routing it at master would have left every grouped
@@ -423,7 +443,6 @@ export class WebAudioTransport {
       gainNode.connect(
         this.resolveDestination(el, scheduledAt, compositionTime, safeRate) ?? this._masterGain,
       );
-      scheduleVolumeLane(el, gainNode, timing);
 
       this._rate = safeRate;
       this._rateAnchorCtx = scheduledAt;
@@ -435,6 +454,7 @@ export class WebAudioTransport {
         sourceNode,
         sourceKind: "media-element",
         gainNode,
+        laneNode,
         compositionStart,
         mediaStart: _mediaStart,
         scheduledAt,
@@ -688,6 +708,7 @@ export class WebAudioTransport {
     try {
       sourceNode.disconnect();
       scheduled.fx?.dispose();
+      scheduled.laneNode?.disconnect();
       scheduled.gainNode.disconnect();
     } catch {
       // Already torn down.
@@ -741,12 +762,11 @@ export class WebAudioTransport {
       // so effects see the raw signal and volume automation rides on their
       // output — the same order the offline render uses. Preview and render run
       // the identical graph builders, so what is heard here is what is written.
-      const fx = attachElementFxChain(this._ctx, el, sourceNode, gainNode, timing);
+      const laneNode = clipVolumeLaneStage(this._ctx, el, gainNode, timing);
+      const fx = attachElementFxChain(this._ctx, el, sourceNode, laneNode ?? gainNode, timing);
       gainNode.connect(
         this.resolveDestination(el, scheduledAt, compositionTime, safeRate) ?? this._masterGain,
       );
-
-      scheduleVolumeLane(el, gainNode, timing);
 
       this._rate = safeRate;
       this._rateAnchorCtx = scheduledAt;
@@ -766,6 +786,7 @@ export class WebAudioTransport {
         // Playhead already past the clip end — discard the nodes we built.
         sourceNode.disconnect();
         fx?.dispose();
+        laneNode?.disconnect();
         gainNode.disconnect();
         return null;
       }
@@ -780,6 +801,7 @@ export class WebAudioTransport {
         sourceNode,
         sourceKind: "buffer",
         gainNode,
+        laneNode,
         compositionStart,
         mediaStart,
         scheduledAt,
@@ -865,6 +887,7 @@ export class WebAudioTransport {
         if (isBufferSource(source)) source.sourceNode.stop();
         source.sourceNode.disconnect();
         source.fx?.dispose();
+        source.laneNode?.disconnect();
         source.gainNode.disconnect();
       } catch {
         // already stopped

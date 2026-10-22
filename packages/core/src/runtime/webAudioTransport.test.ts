@@ -890,6 +890,47 @@ describe("WebAudioTransport", () => {
       document.body.innerHTML = "";
     });
 
+    it.each([
+      [
+        "decoded",
+        (t: WebAudioTransport, el: HTMLMediaElement, gen: number) =>
+          t.schedulePlayback(el, mockBuffer, 0, 0, () => 0, 1, gen),
+      ],
+      [
+        "media-element",
+        (t: WebAudioTransport, el: HTMLMediaElement, gen: number) =>
+          t.scheduleMediaElementPlayback(el, 0, 0, 0, 1, gen),
+      ],
+    ])(
+      "keeps a %s clip's volume lane off the gain each tick rewrites",
+      async (_route, schedule) => {
+        const { transport, mock, gen } = setupGroupTransport();
+        const el = groupedAudioEl("voice");
+        const points = [
+          { t: 0, v: 0 },
+          { t: 3, v: 1 },
+          { t: 6, v: 0 },
+        ];
+        el.setAttribute(
+          "data-automation",
+          JSON.stringify({ version: 1, lanes: [{ target: "volume", points }] }),
+        );
+
+        expect(await schedule(transport, el, gen)).not.toBeNull();
+        type Ramps = { linearRampToValueAtTime: ReturnType<typeof vi.fn> };
+        const laneGains = mock.gainNodes.filter(
+          (node) => (node.gain as unknown as Ramps).linearRampToValueAtTime.mock.calls.length > 0,
+        );
+        expect(laneGains).toHaveLength(1);
+        const laneValue = laneGains[0]!.gain.value;
+
+        transport.setElementVolume(el, 0.5);
+
+        expect(laneGains[0]!.gain.value).toBe(laneValue);
+        expect(mock.gainNodes.filter((node) => node.gain.value === 0.5)).toHaveLength(1);
+      },
+    );
+
     it("routes an ungrouped clip straight to master through its own gain", async () => {
       const { transport, mock, gen } = setupGroupTransport();
 
