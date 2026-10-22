@@ -406,8 +406,8 @@ async function sendFilePart(
   return { ETag: result.ETag, PartNumber: partNumber, ChecksumSHA256: checksum };
 }
 
-// The SDK never retries a streamed body, so each attempt opens a fresh stream. Only a dropped
-// connection or a 5xx is retried: any other S3 answer (412, BadDigest) would repeat.
+// The SDK never retries a streamed body, so each attempt opens a fresh stream. Only a transient
+// failure is retried: any other S3 answer (412, BadDigest) would repeat.
 async function sendFileBody<T>(
   path: string,
   range: ByteRange | undefined,
@@ -626,10 +626,15 @@ function isS3PreconditionFailed(error: unknown): boolean {
   return error.name === "PreconditionFailed" || metadata?.httpStatusCode === 412;
 }
 
+// The AWS SDK's own transient codes; S3 sends RequestTimeout as HTTP 400.
+const TRANSIENT_S3_ERRORS = new Set(["TimeoutError", "RequestTimeout", "RequestTimeoutException"]);
+
+/** A dropped connection (no HTTP status), a timeout, throttling (429) or a 5xx. */
 function isTransientS3Error(error: unknown): boolean {
   if (!isRecord(error)) return false;
+  if (typeof error.name === "string" && TRANSIENT_S3_ERRORS.has(error.name)) return true;
   const status = isRecord(error.$metadata) ? error.$metadata.httpStatusCode : undefined;
-  return typeof status !== "number" || status >= 500;
+  return typeof status !== "number" || status === 429 || status >= 500;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
