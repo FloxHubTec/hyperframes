@@ -10,7 +10,7 @@ import {
   CompleteLayerUploadCommand,
   CreateRepositoryCommand,
   DescribeRepositoriesCommand,
-  type ECRClient,
+  ECRClient,
   InitiateLayerUploadCommand,
   PutImageCommand,
   type Repository,
@@ -34,7 +34,8 @@ interface Descriptor {
 
 /** Options for {@link ensureEcrRepository}. */
 export interface EnsureEcrRepositoryOptions {
-  ecr: ECRClient;
+  ecr?: ECRClient;
+  region?: string;
   repositoryName: string;
   /** Applied only when the repository is created; an existing repository keeps its tags. */
   tags?: Tag[];
@@ -44,7 +45,8 @@ export interface EnsureEcrRepositoryOptions {
 export async function ensureEcrRepository(
   opts: EnsureEcrRepositoryOptions,
 ): Promise<{ repositoryUri: string }> {
-  const { ecr, repositoryName, tags } = opts;
+  const { repositoryName, tags } = opts;
+  const ecr = opts.ecr ?? new ECRClient({ region: opts.region });
   try {
     const created = await ecr.send(new CreateRepositoryCommand({ repositoryName, tags }));
     return { repositoryUri: repositoryUriOf(created.repository, repositoryName) };
@@ -66,7 +68,8 @@ function repositoryUriOf(repository: Repository | undefined, repositoryName: str
 
 /** Options for {@link pushImageToEcr}. */
 export interface PushImageToEcrOptions {
-  ecr: ECRClient;
+  ecr?: ECRClient;
+  region?: string;
   /** OCI image layout directory: `index.json` plus `blobs/sha256/<hex>`. */
   layoutDir: string;
   repositoryName: string;
@@ -88,7 +91,8 @@ export interface PushedImage {
 
 /** Upload the layout's missing blobs, then put its manifest under `tag`. Safe to re-run. */
 export async function pushImageToEcr(opts: PushImageToEcrOptions): Promise<PushedImage> {
-  const { ecr, layoutDir, repositoryName, log = () => {} } = opts;
+  const { layoutDir, repositoryName, log = () => {} } = opts;
+  const ecr = opts.ecr ?? new ECRClient({ region: opts.region });
   const manifestDescriptor = await readManifestDescriptor(layoutDir);
   await verifyBlob(layoutDir, manifestDescriptor);
   const manifestText = await readFile(blobPath(layoutDir, manifestDescriptor.digest), "utf-8");
