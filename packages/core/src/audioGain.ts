@@ -32,6 +32,11 @@ export function gainTimesLane(gain: number, lane: number): number {
   return clampAudioGain(gain * lane);
 }
 
+/** `data-volume` as clip gain, ahead of the FX chain; unity when a GSAP tween's absolute values own the level. */
+export function clipGain(volume: number, tweened: boolean): number {
+  return tweened ? 1 : clampAudioGain(volume);
+}
+
 export function clampNativeMediaVolume(value: number): number {
   if (!Number.isFinite(value)) return 1;
   return Math.max(0, Math.min(1, value));

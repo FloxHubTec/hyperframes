@@ -602,7 +602,7 @@ describe("processCompositionAudio", () => {
     });
   });
 
-  it("bakes data-volume as a gain on the volume lane", async () => {
+  it("applies data-volume as clip gain ahead of the chain, leaving the lane as the level", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
     const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
     tempDirs.push(baseDir, workDir);
@@ -641,9 +641,11 @@ describe("processCompositionAudio", () => {
       2,
     );
 
-    expect(applyAudioFxChainMock.mock.calls[0]?.[3]?.envelope?.keyframes).toEqual([
+    const fxOptions = applyAudioFxChainMock.mock.calls[0]?.[3];
+    expect(fxOptions?.inputGain).toBe(0.5);
+    expect(fxOptions?.envelope?.keyframes).toEqual([
       { time: 0, volume: 0 },
-      { time: 2, volume: 0.5 },
+      { time: 2, volume: 1 },
     ]);
   });
 

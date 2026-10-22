@@ -15,7 +15,7 @@ import { parseHTML } from "linkedom";
 import { extractAudioMetadata, type AudioMetadata } from "../utils/ffprobe.js";
 import { isNotMediaPayload } from "../utils/notMediaPayload.js";
 import { urlInputArgs } from "../utils/urlInput.js";
-import { clampAudioGain, gainTimesLane } from "@hyperframes/core/audio-gain";
+import { clampAudioGain, clipGain, gainTimesLane } from "@hyperframes/core/audio-gain";
 import { clampFadesToDuration, readElementFades } from "@hyperframes/core/audio-fade";
 import {
   downloadToTemp,
@@ -40,6 +40,7 @@ import type {
 } from "./audioMixer.types.js";
 import { applyVolumeEnvelopeToWav } from "./audioVolumeEnvelope.js";
 import {
+  enabledAudioFxNodes,
   HF_AUDIO_FX_ATTR,
   parseAudioFxChain,
   type HfAudioFxChain,
@@ -1347,11 +1348,9 @@ export async function processCompositionAudio(
         // envelope belongs on their output. A missing or broken chain is fatal
         // for the whole mix rather than a per-track warning — quietly rendering
         // the dry signal ships a mix that sounds plausible and is wrong.
+        const chain = element.fxChain ? parseAudioFxChain(element.fxChain) : undefined;
         const automation = element.automation
-          ? resolveAutomation(
-              parseAutomation(element.automation),
-              element.fxChain ? parseAudioFxChain(element.fxChain) : undefined,
-            )
+          ? resolveAutomation(parseAutomation(element.automation), chain)
           : null;
 
         // Computed before the chain runs, not after: the FX pass bakes the
@@ -1361,14 +1360,18 @@ export async function processCompositionAudio(
         // A volume lane supersedes keyframes probed from the timeline: the two
         // would fight, and the lane is the explicit one. `lint` warns when a
         // track carries both.
+        //
+        // With effects, `data-volume` is clip gain ahead of the chain, so the lane carries none.
+        const gainBeforeFx = chain !== undefined && enabledAudioFxNodes(chain).length > 0;
         const laneKeyframes = automation
           ? volumeLaneKeyframes(
               automation,
               element.start,
               element.end - element.start,
-              element.volume ?? 1,
+              gainBeforeFx ? 1 : (element.volume ?? 1),
             )
           : null;
+        const tweened = !laneKeyframes && (element.volumeKeyframes?.length ?? 0) > 0;
         const envelopeKeyframes = laneKeyframes ?? element.volumeKeyframes;
         const envelope =
           envelopeKeyframes && envelopeKeyframes.length > 0
@@ -1381,11 +1384,10 @@ export async function processCompositionAudio(
 
         let bakedEnvelope = false;
         let tailSeconds = 0;
-        if (element.fxChain) {
+        if (chain) {
           // The chain is serialised into the attribute, the same way colour
           // grading carries its config, so there is no side-car file to find,
           // resolve or lose.
-          const chain = parseAudioFxChain(element.fxChain);
           // The rendered WAV is longer than the input by exactly this much, so
           // the mix has to be told to let it through.
           tailSeconds = chainTailSeconds(chain, automation ?? undefined);
@@ -1398,6 +1400,7 @@ export async function processCompositionAudio(
               signal: effectiveSignal,
               ...(automation ? { automation } : {}),
               ...(envelope ? { envelope } : {}),
+              ...(gainBeforeFx ? { inputGain: clipGain(element.volume ?? 1, tweened) } : {}),
             },
           );
           audioSrcPath = fxResult.path;
@@ -1425,7 +1428,7 @@ export async function processCompositionAudio(
           mediaStart: element.mediaStart,
           duration: element.end - element.start,
           // Gain is already in the samples when baked, so mix at unity.
-          volume: bakedEnvelope ? 1.0 : (element.volume ?? 1.0),
+          volume: bakedEnvelope || (gainBeforeFx && !tweened) ? 1.0 : (element.volume ?? 1.0),
           volumeKeyframes: bakedEnvelope ? undefined : (envelopeKeyframes ?? undefined),
           ...(element.fadeIn ? { fadeIn: element.fadeIn } : {}),
           ...(element.fadeOut ? { fadeOut: element.fadeOut } : {}),

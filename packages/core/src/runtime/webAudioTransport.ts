@@ -91,21 +91,23 @@ function startBoundedSource(
   return true;
 }
 
-// FX, then the volume lane on its own gain ahead of `gainNode` (rewritten every tick); the FX
-// handle re-aims the lane on rate changes and edits.
+// Clip gain, FX, then the volume lane on its own gain ahead of `gainNode` (all but the lane
+// rewritten every tick); the FX handle re-aims the lane on rate changes and edits.
 function attachClipStages(
   ctx: AudioContext,
   el: HTMLMediaElement,
   source: AudioNode,
   gainNode: GainNode,
   timing: AutomationTiming,
-): { fx: ElementFxHandle | null; laneNode: GainNode } {
+): { fx: ElementFxHandle | null; laneNode: GainNode; clipGainNode: GainNode } {
   const laneNode = ctx.createGain();
   laneNode.connect(gainNode);
-  const fx = attachElementFxChain(ctx, el, source, laneNode, timing, undefined, {
+  const clipGainNode = ctx.createGain();
+  source.connect(clipGainNode);
+  const fx = attachElementFxChain(ctx, el, clipGainNode, laneNode, timing, undefined, {
     param: laneNode.gain,
   });
-  return { fx, laneNode };
+  return { fx, laneNode, clipGainNode };
 }
 
 type ScheduledSourceBase = {
@@ -113,6 +115,8 @@ type ScheduledSourceBase = {
   gainNode: GainNode;
   /** The clip's volume lane, between its FX and `gainNode`; unity when it has none. */
   laneNode: GainNode;
+  /** `data-volume` as clip gain, between the source and its FX. */
+  clipGainNode: GainNode;
   /** FX chain spliced between source and gain, when the element carries one. */
   fx?: ElementFxHandle | null;
   compositionStart: number;
@@ -420,7 +424,13 @@ export class WebAudioTransport {
       gainNode.connect(
         this.resolveDestination(el, scheduledAt, compositionTime, safeRate) ?? this._masterGain,
       );
-      const { fx, laneNode } = attachClipStages(this._ctx, el, sourceNode, gainNode, timing);
+      const { fx, laneNode, clipGainNode } = attachClipStages(
+        this._ctx,
+        el,
+        sourceNode,
+        gainNode,
+        timing,
+      );
 
       this._rate = safeRate;
       this._rateAnchorCtx = scheduledAt;
@@ -433,6 +443,7 @@ export class WebAudioTransport {
         sourceKind: "media-element",
         gainNode,
         laneNode,
+        clipGainNode,
         compositionStart,
         mediaStart: _mediaStart,
         scheduledAt,
@@ -688,6 +699,7 @@ export class WebAudioTransport {
     try {
       sourceNode.disconnect();
       scheduled.fx?.dispose();
+      scheduled.clipGainNode.disconnect();
       scheduled.laneNode.disconnect();
       scheduled.gainNode.disconnect();
     } catch {
@@ -745,7 +757,13 @@ export class WebAudioTransport {
       gainNode.connect(
         this.resolveDestination(el, scheduledAt, compositionTime, safeRate) ?? this._masterGain,
       );
-      const { fx, laneNode } = attachClipStages(this._ctx, el, sourceNode, gainNode, timing);
+      const { fx, laneNode, clipGainNode } = attachClipStages(
+        this._ctx,
+        el,
+        sourceNode,
+        gainNode,
+        timing,
+      );
 
       this._rate = safeRate;
       this._rateAnchorCtx = scheduledAt;
@@ -765,6 +783,7 @@ export class WebAudioTransport {
         // Playhead already past the clip end — discard the nodes we built.
         sourceNode.disconnect();
         fx?.dispose();
+        clipGainNode.disconnect();
         laneNode.disconnect();
         gainNode.disconnect();
         return null;
@@ -781,6 +800,7 @@ export class WebAudioTransport {
         sourceKind: "buffer",
         gainNode,
         laneNode,
+        clipGainNode,
         compositionStart,
         mediaStart,
         scheduledAt,
@@ -866,6 +886,7 @@ export class WebAudioTransport {
         if (isBufferSource(source)) source.sourceNode.stop();
         source.sourceNode.disconnect();
         source.fx?.dispose();
+        source.clipGainNode.disconnect();
         source.laneNode.disconnect();
         source.gainNode.disconnect();
       } catch {
@@ -900,13 +921,14 @@ export class WebAudioTransport {
    * divergence this ceiling exists to close. Automation lanes hid it, because
    * they schedule ramps onto the param directly and never pass through here.
    */
-  setElementVolume(el: HTMLMediaElement, volume: number): void {
+  setElementVolume(el: HTMLMediaElement, volume: number, clipGain = 1): void {
     const safeVolume = clampAudioGain(volume);
     for (const source of this._activeSources) {
       if (source.el !== el) continue;
       try {
         if (source.sourceKind === "media-element") source.el.volume = 1;
         source.gainNode.gain.value = safeVolume;
+        source.clipGainNode.gain.value = clampAudioGain(clipGain);
       } catch (err) {
         swallow("webAudioTransport.setElementVolume", err);
       }

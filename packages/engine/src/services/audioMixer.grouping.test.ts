@@ -299,6 +299,41 @@ describe.skipIf(!HAS_FFMPEG)(
       expect(Math.abs(groupedTail - flatTail)).toBeLessThan(0.5);
     });
 
+    it("applies a clip's data-volume as a gain on its volume lane", async () => {
+      const projectDir = mkdtempSync(join(tmpdir(), "hf-clip-lane-"));
+      const workDir = mkdtempSync(join(tmpdir(), "hf-clip-lane-work-"));
+      tempDirs.push(projectDir, workDir);
+
+      writeTone(join(projectDir, "a.wav"), 440, 2, 0.5);
+      const laneOut = join(projectDir, `lane-${MIXED_AUDIO_FILENAME}`);
+      const flatOut = join(projectDir, `flat-${MIXED_AUDIO_FILENAME}`);
+      const automation = JSON.stringify({
+        version: 1,
+        lanes: [
+          {
+            target: "volume",
+            points: [
+              { t: 0, v: 1 },
+              { t: 2, v: 1 },
+            ],
+          },
+        ],
+      });
+
+      const lane = await processCompositionAudio(
+        [{ ...track("a", 2, 0.5), automation }],
+        projectDir,
+        workDir,
+        laneOut,
+        2,
+      );
+      const flat = await processCompositionAudio([track("a", 2)], projectDir, workDir, flatOut, 2);
+      expect(lane.success).toBe(true);
+      expect(flat.success).toBe(true);
+
+      expect(meanVolumeDb(flatOut) - meanVolumeDb(laneOut)).toBeCloseTo(6.02, 0);
+    });
+
     it("applies a group's data-volume as a gain on its volume lane", async () => {
       const projectDir = mkdtempSync(join(tmpdir(), "hf-grp-lane-"));
       const workDir = mkdtempSync(join(tmpdir(), "hf-grp-lane-work-"));

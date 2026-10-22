@@ -465,10 +465,11 @@ describe("syncRuntimeMedia", () => {
         clip.el,
         expect.closeTo(0.22, 5),
         expect.closeTo(0.44, 5),
+        1,
       );
     });
 
-    it("leaves a routed clip's lane to the transport, sending data-volume to multiply it", () => {
+    it("leaves a routed clip's lane to the transport, sending data-volume as clip gain", () => {
       const clip = createMockClip({ start: 0, end: 10, volume: 0.55 });
       clip.el.setAttribute("data-automation", DUCK);
       const onElementVolume = vi.fn();
@@ -481,7 +482,7 @@ describe("syncRuntimeMedia", () => {
         isWebAudioRouted: () => true,
       });
 
-      expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 0.55, 0.55);
+      expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 1, 1, 0.55);
     });
 
     it("ramps between points across ticks", () => {
@@ -1468,7 +1469,7 @@ describe("syncRuntimeMedia", () => {
     });
 
     expect(clip.el.volume).toBeCloseTo(0.375);
-    expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 0.375, 0.75);
+    expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 0.375, 0.75, 1);
   });
 
   it("preserves author volume through user zero then restore", () => {
@@ -1491,8 +1492,8 @@ describe("syncRuntimeMedia", () => {
       onElementVolume,
     });
 
-    expect(onElementVolume.mock.calls.at(-2)).toEqual([clip.el, 0, 0.8]);
-    expect(onElementVolume.mock.calls.at(-1)).toEqual([clip.el, 0.4, 0.8]);
+    expect(onElementVolume.mock.calls.at(-2)).toEqual([clip.el, 0, 0.8, 1]);
+    expect(onElementVolume.mock.calls.at(-1)).toEqual([clip.el, 0.4, 0.8, 1]);
   });
 
   it("does not mistake routed upstream unity for an authored volume change", () => {
@@ -1509,7 +1510,7 @@ describe("syncRuntimeMedia", () => {
       onElementVolume,
     });
 
-    expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 0.4, 0.8);
+    expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 0.5, 1, 0.8);
   });
 
   describe("per-element mute (Web Audio ownership)", () => {
