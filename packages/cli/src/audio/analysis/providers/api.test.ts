@@ -149,6 +149,16 @@ describe("apiProvider", () => {
     expect(received.map((r) => [r.url, r.apiKey])).toEqual([["/v3/audio/analysis", "test-key"]]);
   });
 
+  it("stays off when the host blanks HYPERFRAMES_AUDIO_API_URL, whatever HeyGen credential it holds", async () => {
+    vi.stubEnv("HEYGEN_API_KEY", "gateway-token");
+    process.env.HYPERFRAMES_AUDIO_API_URL = "";
+    process.env.HYPERFRAMES_AUDIO_API_KEY = "";
+    expect(await apiProvider.available!()).toEqual({
+      ok: false,
+      reason: "HYPERFRAMES_AUDIO_API_URL is empty, which turns this service off",
+    });
+  });
+
   it("never sends the HeyGen credential to a service named by HYPERFRAMES_AUDIO_API_URL", async () => {
     vi.stubEnv("HEYGEN_API_KEY", "heygen-key");
     process.env.HYPERFRAMES_AUDIO_API_URL = "http://127.0.0.1:1/";

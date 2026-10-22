@@ -687,7 +687,8 @@ is looked up and nothing leaves the machine.
 To use another service, set `HYPERFRAMES_AUDIO_STEMS_URL` or
 `HYPERFRAMES_AUDIO_API_URL` to its full URL together with
 `HYPERFRAMES_AUDIO_API_KEY`, which is sent as `x-api-key`. Your HeyGen
-credential is never sent to a URL set this way.
+credential is never sent to a URL set this way. Setting either URL to an empty
+string turns that service off, whatever credential is present.
 
 ## Look at it
 
