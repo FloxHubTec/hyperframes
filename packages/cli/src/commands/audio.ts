@@ -125,9 +125,14 @@ interface AudioFlags {
   json?: boolean;
 }
 
+function parseQuality(flags: AudioFlags): AnalysisQuality {
+  const quality = (flags.quality ?? "local") as AnalysisQuality;
+  if (!QUALITIES.has(quality)) throw new CliUsageError("--quality is local, best or fast");
+  return quality;
+}
+
 function analyzeRequest(flags: AudioFlags): AnalyzeOptions {
-  const quality = (flags.quality ?? "best") as AnalysisQuality;
-  if (!QUALITIES.has(quality)) throw new CliUsageError("--quality is best, local or fast");
+  const quality = parseQuality(flags);
   const method = flags["onset-method"] as OnsetMethod | undefined;
   if (method && method !== "spectral-flux" && method !== "energy")
     throw new CliUsageError("--onset-method is spectral-flux or energy");
@@ -173,9 +178,7 @@ function readQuality(files: string[], flags: AudioFlags): AnalysisQuality {
   if (files.length !== 1) throw new CliUsageError("--read reads exactly one file");
   if (flags.element || flags.at || flags["place-at"])
     throw new CliUsageError("--read takes a file and --range, not a film query");
-  const quality = (flags.quality ?? "best") as AnalysisQuality;
-  if (!QUALITIES.has(quality)) throw new CliUsageError("--quality is best, local or fast");
-  return quality;
+  return parseQuality(flags);
 }
 
 async function read(files: string[], flags: AudioFlags) {
@@ -221,7 +224,8 @@ export default defineCommand({
     },
     quality: {
       type: "string",
-      description: "best (any provider), local (this machine), fast (signal only)",
+      description:
+        "local (this machine, the default), best (also uploads to HeyGen's audio services, which may bill your account), fast (signal only)",
     },
     provider: { type: "string", description: "Pin capabilities to providers: onsets=signal,..." },
     "onset-method": { type: "string", description: "spectral-flux (default) or energy" },

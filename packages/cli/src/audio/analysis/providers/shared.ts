@@ -106,6 +106,7 @@ export async function serviceAccess(
   const timeoutMs = timeout > 0 ? timeout : defaultMs;
   const url = process.env[env.url]?.trim();
   const key = process.env[env.key]?.trim();
+  if (url === "") return `${env.url} is empty, which turns this service off`;
   if (key)
     return {
       url: url || `${resolveCloudBaseUrl()}${path}`,

@@ -610,7 +610,7 @@ Sentences come from a transcript: `--transcript <file>`, or
 `<recording>.transcript.json` beside the recording. Without one, voice lines
 carry no words.
 
-Effects and music are read from stems. At `--quality best` (the default) the
+Effects and music are read from stems. At `--quality best` the
 recording is separated into vocals, drums, bass, guitar, piano and other by
 HeyGen's `/v3/audio/stems`, with your HeyGen credential (see
 [audio services](#audio-services)): it is uploaded as 192 kb/s MP3 through the
@@ -663,27 +663,33 @@ answers:
   helper compiled once with the Xcode command line tools.
 
 A provider that cannot run, or fails, is passed over with a warning that says
-why. `--quality fast|local|best` limits which providers may run (`local` keeps
-the audio on this machine, `fast` allows only signal processing),
-`--provider beats=signal` pins one, and `--full` shows each ladder step.
+why. `--quality local|best|fast` limits which providers may run: `local`, the
+default, keeps the audio on this machine; `best` also sends it to the audio
+services below; `fast` allows only signal processing. When a capability goes
+unanswered because a service was left out, a warning says `--quality best` could
+answer it. `--provider beats=signal` pins a capability to one provider, and
+`--full` shows each ladder step.
 Tune the analysis with `--onset-method`, `--threshold`, `--band lo,hi`,
 `--hop-ms`, `--onset-ratio`, `--tail-db` and `--silence-db`. Decoding needs
 FFmpeg.
 
 #### Audio services
 
-Stems and the `api` provider call HeyGen with the same credential as the other
+Only at `--quality best` is audio uploaded. Stems and the `api` provider then
+call HeyGen, which may bill your account, with the same credential as the other
 HeyGen commands: `HEYGEN_API_KEY`, `HYPERFRAMES_API_KEY`, `HEYGEN_ACCESS_TOKEN`,
 or a credential saved by `hyperframes auth login`, on the API at
 `HEYGEN_API_URL` when set. API keys are sent as `x-api-key`; OAuth credentials
 are sent as bearer tokens. If the service refuses a request, analysis falls
 back with a warning. Without a credential, stems are skipped and `api` is
-passed over.
+passed over. At `local`, the default, no credential is looked up and nothing
+leaves the machine.
 
 To use another service, set `HYPERFRAMES_AUDIO_STEMS_URL` or
 `HYPERFRAMES_AUDIO_API_URL` to its full URL together with
 `HYPERFRAMES_AUDIO_API_KEY`, which is sent as `x-api-key`. Your HeyGen
-credential is never sent to a URL set this way.
+credential is never sent to a URL set this way. Setting either URL to an empty
+string turns that service off, whatever credential is present.
 
 ## Look at it
 
