@@ -959,14 +959,64 @@ describe("WebAudioTransport", () => {
       const settle = () => new Promise((r) => setTimeout(r, 0));
 
       // An unbounded media-element clip: the runtime does not stopAll and reschedule it on a rate change.
-      async function playBed(automation?: string) {
+      async function playBed(automation?: string, volume?: string) {
         const setup = setupGroupTransport();
         const el = groupedAudioEl("bed");
         if (automation) el.setAttribute("data-automation", automation);
+        if (volume) el.setAttribute("data-volume", volume);
         await setup.transport.scheduleMediaElementPlayback(el, 0, 0, 0, 1, setup.gen);
         expect(setup.transport.hasBoundedActiveSources()).toBe(false);
         return { ...setup, el, laneGain: setup.mock.gainNodes[1]! };
       }
+
+      // Gain 2 times a 0 -> 3 ramp crosses the ceiling at 6.635 s; the product holds there after.
+      const CROSSING = lane([
+        { t: 0, v: 0 },
+        { t: 10, v: 3 },
+      ]);
+      const crossAt = 100 + (MAX_AUDIO_GAIN / 2 / 3) * 10;
+
+      it("caps the routed graph's product when gain 2 and a constant lane 3 would make 6", async () => {
+        const { transport, el, mock, laneGain } = await playBed(lane([{ t: 0, v: 3 }]), "2");
+        transport.setElementVolume(el, 1, 2);
+        const booked = (laneGain.gain as unknown as { setValueAtTime: ReturnType<typeof vi.fn> })
+          .setValueAtTime.mock.calls;
+        expect(mock.gainNodes[2]!.gain.value * booked[0]![0]).toBeCloseTo(MAX_AUDIO_GAIN, 9);
+      });
+
+      it("holds a clip's gain times its lane under the ceiling, with data-volume played ahead", async () => {
+        const { laneGain } = await playBed(CROSSING, "2");
+        expect(rampsAfter(laneGain, 0)).toContainEqual([
+          expect.closeTo(MAX_AUDIO_GAIN / 2, 6),
+          expect.closeTo(crossAt, 6),
+        ]);
+        expect(rampsAfter(laneGain, 0)).toContainEqual([
+          expect.closeTo(MAX_AUDIO_GAIN / 2, 6),
+          110,
+        ]);
+      });
+
+      it("re-books a clip's lane when its data-volume changes", async () => {
+        const { el, laneGain } = await playBed(CROSSING, "2");
+        const before = param(laneGain).linearRampToValueAtTime.mock.calls.length;
+
+        el.setAttribute("data-volume", "1");
+        await settle();
+
+        expect(rampsAfter(laneGain, before)).toContainEqual([3, 110]);
+      });
+
+      it("holds a group's gain times its lane under the ceiling, through a ramp", async () => {
+        document.body.innerHTML = `<hf-audio-group id="vo" data-volume="2"></hf-audio-group>`;
+        document.getElementById("vo")!.setAttribute("data-automation", CROSSING);
+        const { transport, mock, gen } = setupGroupTransport();
+        await scheduleGrouped(transport, gen, "a", "vo");
+        const fader = mock.gainNodes[4]!;
+        expect(rampsAfter(fader, 0)).toContainEqual([
+          expect.closeTo(MAX_AUDIO_GAIN, 6),
+          expect.closeTo(crossAt, 6),
+        ]);
+      });
 
       it("re-aims a clip's lane at a new rate", async () => {
         const { transport, laneGain } = await playBed(FADE);

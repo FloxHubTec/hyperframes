@@ -602,52 +602,70 @@ describe("processCompositionAudio", () => {
     });
   });
 
-  it("applies data-volume as clip gain ahead of the chain, leaving the lane as the level", async () => {
-    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
-    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
-    tempDirs.push(baseDir, workDir);
-    writeFileSync(join(baseDir, "vo.wav"), "stub");
-    const automation = JSON.stringify({
-      version: 1,
-      lanes: [
-        {
-          target: "volume",
-          points: [
-            { t: 0, v: 0 },
-            { t: 2, v: 1 },
-          ],
-        },
+  it.each([
+    {
+      gain: 0.5,
+      level: 1,
+      points: [
+        { time: 0, volume: 0 },
+        { time: 2, volume: 1 },
       ],
-    });
-
-    await processCompositionAudio(
-      [
-        {
-          id: "vo",
-          src: "vo.wav",
-          start: 0,
-          end: 2,
-          mediaStart: 0,
-          layer: 0,
-          volume: 0.5,
-          automation,
-          fxChain: gainChain,
-          type: "audio",
-        },
+    },
+    {
+      gain: 2,
+      level: 3,
+      points: [
+        { time: 0, volume: 0 },
+        { time: expect.closeTo(1.3270239018, 8), volume: expect.closeTo(1.9905358528, 8) },
+        { time: 2, volume: expect.closeTo(1.9905358528, 8) },
       ],
-      baseDir,
-      workDir,
-      join(baseDir, "out.m4a"),
-      2,
-    );
+    },
+  ])(
+    "applies pre-FX clip gain $gain with a ceiling-aware lane",
+    async ({ gain, level, points }) => {
+      const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+      const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+      tempDirs.push(baseDir, workDir);
+      writeFileSync(join(baseDir, "vo.wav"), "stub");
+      const automation = JSON.stringify({
+        version: 1,
+        lanes: [
+          {
+            target: "volume",
+            points: [
+              { t: 0, v: 0 },
+              { t: 2, v: level },
+            ],
+          },
+        ],
+      });
 
-    const fxOptions = applyAudioFxChainMock.mock.calls[0]?.[3];
-    expect(fxOptions?.inputGain).toBe(0.5);
-    expect(fxOptions?.envelope?.keyframes).toEqual([
-      { time: 0, volume: 0 },
-      { time: 2, volume: 1 },
-    ]);
-  });
+      await processCompositionAudio(
+        [
+          {
+            id: "vo",
+            src: "vo.wav",
+            start: 0,
+            end: 2,
+            mediaStart: 0,
+            layer: 0,
+            volume: gain,
+            automation,
+            fxChain: gainChain,
+            type: "audio",
+          },
+        ],
+        baseDir,
+        workDir,
+        join(baseDir, "out.m4a"),
+        2,
+      );
+
+      const fxOptions = applyAudioFxChainMock.mock.calls[0]?.[3];
+      expect(fxOptions?.inputGain).toBe(gain);
+      expect(fxOptions?.envelope?.keyframes).toEqual(points);
+    },
+  );
 
   it.each([
     ["the master pass", {}, { masterFxChain: gainChain }],

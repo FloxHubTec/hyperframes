@@ -12,6 +12,7 @@
 
 import { HF_AUDIO_FX_ATTR, parseAudioFxChain, type HfAudioFxChain } from "../audioFx.js";
 import {
+  gainedVolumePoints,
   HF_AUDIO_AUTOMATION_ATTR,
   parseAutomation,
   resolveAutomation,
@@ -27,7 +28,6 @@ import {
   type AutomationTiming,
 } from "../audio/audioFxAutomation.js";
 import type { FxParamTarget } from "../audio/audioFxGraph.js";
-import { gainTimesLane } from "../audioGain.js";
 import {
   audioFxWorkletsReady,
   buildFxChain,
@@ -127,10 +127,11 @@ export interface FxAttributes {
   automation: string | null;
 }
 
-/** Where a volume lane plays, and the `data-volume` it carries when nothing downstream does. */
+/** Where a volume lane plays, and the `data-volume` it multiplies (`gainAhead`: played upstream). */
 export interface VolumeTarget {
   param: AudioParam;
   gain?: () => number;
+  gainAhead?: boolean;
 }
 
 /** The element's volume lane on `target`, as a target to cancel later; none when it has no lane. */
@@ -141,8 +142,7 @@ export function scheduleVolume(
 ): FxParamTarget[] {
   const lane = volumeLane(automation);
   if (!lane) return [];
-  const gain = target.gain?.() ?? 1;
-  const points = lane.points.map((p) => ({ ...p, v: gainTimesLane(gain, p.v) }));
+  const points = gainedVolumePoints(lane, target.gain?.() ?? 1, target.gainAhead);
   scheduleParamLane([{ param: target.param }], { ...lane, points }, VOLUME_RANGE.scale, at);
   return [{ param: target.param }];
 }
@@ -319,7 +319,12 @@ export function attachElementFxChain(
     });
     observer.observe(target, {
       attributes: true,
-      attributeFilter: attrs.automation ? [HF_AUDIO_FX_ATTR, attrs.automation] : [HF_AUDIO_FX_ATTR],
+      attributeFilter: [
+        HF_AUDIO_FX_ATTR,
+        ...(attrs.automation ? [attrs.automation] : []),
+        // The lane's ceiling depends on the gain it multiplies.
+        ...(volume?.gain ? ["data-volume"] : []),
+      ],
     });
   }
 

@@ -15,7 +15,7 @@ import { parseHTML } from "linkedom";
 import { extractAudioMetadata, type AudioMetadata } from "../utils/ffprobe.js";
 import { isNotMediaPayload } from "../utils/notMediaPayload.js";
 import { urlInputArgs } from "../utils/urlInput.js";
-import { clampAudioGain, clipGain, gainTimesLane } from "@hyperframes/core/audio-gain";
+import { clampAudioGain, clipGain } from "@hyperframes/core/audio-gain";
 import { clampFadesToDuration, readElementFades } from "@hyperframes/core/audio-fade";
 import {
   downloadToTemp,
@@ -46,7 +46,11 @@ import {
   type HfAudioFxChain,
 } from "@hyperframes/core/audio-fx";
 import {
+  gainedVolume,
+  gainedVolumePoints,
   HF_AUDIO_AUTOMATION_ATTR,
+  isBentSegment,
+  volumeSegmentSampleCount,
   parseAutomation,
   resolveAutomation,
   sampleAutomationLane,
@@ -488,9 +492,6 @@ function ffmpegFailure(
   };
 }
 
-/** Extra samples per second inside a segment the baker cannot draw straight. */
-const CURVED_SEGMENT_SAMPLES_PER_SEC = 30;
-
 /**
  * A volume lane as keyframes for the PCM baker.
  *
@@ -499,43 +500,45 @@ const CURVED_SEGMENT_SAMPLES_PER_SEC = 30;
  * sampled, or the bake would quietly straighten it.
  *
  * Times come out in composition seconds, which is what the baker subtracts the
- * track start from. Values carry `gain`, the track's `data-volume`. Returns null
- * when the track has no volume lane.
+ * track start from. Values are `gainedVolume` of the track's `data-volume`.
+ * Returns null when the track has no volume lane.
  */
 export function volumeLaneKeyframes(
   automation: { lanes: HfAutomationLane[] },
   trackStart: number,
   duration: number,
   gain: number,
+  gainAhead = false,
 ): AudioVolumeKeyframe[] | null {
   const lane = automation.lanes.find((l) => l.target === VOLUME_TARGET);
   if (!lane || lane.points.length === 0) return null;
+  const points = gainedVolumePoints(lane, gain, gainAhead);
 
   const out: AudioVolumeKeyframe[] = [];
   const push = (t: number, v: number): void => {
-    out.push({ time: trackStart + t, volume: gainTimesLane(gain, v) });
+    out.push({ time: trackStart + t, volume: v });
   };
 
   // The envelope holds its first value before the first point, rather than
   // falling back to `data-volume`.
-  const first = lane.points[0]!;
+  const first = points[0]!;
   if (first.t > 0) push(0, first.v);
 
-  for (let i = 0; i < lane.points.length; i += 1) {
-    const a = lane.points[i]!;
+  for (let i = 0; i < points.length; i += 1) {
+    const a = points[i]!;
     push(a.t, a.v);
-    const b = lane.points[i + 1];
-    if (!b || !a.curve) continue;
-    const steps = Math.max(2, Math.ceil((b.t - a.t) * CURVED_SEGMENT_SAMPLES_PER_SEC));
+    const b = points[i + 1];
+    if (!b || !isBentSegment(a)) continue;
+    const steps = volumeSegmentSampleCount(b.t - a.t);
     for (let k = 1; k < steps; k += 1) {
       const t = a.t + ((b.t - a.t) * k) / steps;
-      push(t, sampleAutomationLane(lane, t));
+      push(t, gainedVolume(sampleAutomationLane(lane, t), gain, gainAhead));
     }
   }
 
   // Hold the last value to the clip's end, so the baker does not ramp away
   // from it toward whatever it would otherwise assume.
-  const last = lane.points[lane.points.length - 1]!;
+  const last = points[points.length - 1]!;
   if (duration > last.t) push(duration, last.v);
   return out;
 }
@@ -1361,14 +1364,15 @@ export async function processCompositionAudio(
         // would fight, and the lane is the explicit one. `lint` warns when a
         // track carries both.
         //
-        // With effects, `data-volume` is clip gain ahead of the chain, so the lane carries none.
+        // With clip gain ahead of the chain, the lane carries its share of the capped product.
         const gainBeforeFx = chain !== undefined && enabledAudioFxNodes(chain).length > 0;
         const laneKeyframes = automation
           ? volumeLaneKeyframes(
               automation,
               element.start,
               element.end - element.start,
-              gainBeforeFx ? 1 : (element.volume ?? 1),
+              element.volume ?? 1,
+              gainBeforeFx,
             )
           : null;
         const tweened = !laneKeyframes && (element.volumeKeyframes?.length ?? 0) > 0;

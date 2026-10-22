@@ -106,6 +106,8 @@ function attachClipStages(
   source.connect(clipGainNode);
   const fx = attachElementFxChain(ctx, el, clipGainNode, laneNode, timing, undefined, {
     param: laneNode.gain,
+    gain: () => readAudioGroupVolume(el),
+    gainAhead: true,
   });
   return { fx, laneNode, clipGainNode };
 }
