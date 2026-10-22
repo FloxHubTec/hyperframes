@@ -112,11 +112,8 @@ function scheduleVolumeLane(
   scheduleParamLane([{ param: gainNode.gain }], lane, VOLUME_RANGE.scale, timing);
 }
 
-/**
- * A clip's FX, then its volume lane on a gain of its own ahead of `gainNode`, which
- * `setElementVolume` rewrites every tick. The FX handle books the lane, so a rate change or an
- * edit re-aims it with the clip's other envelopes.
- */
+// FX, then the volume lane on its own gain ahead of `gainNode` (rewritten every tick); the FX
+// handle re-aims the lane on rate changes and edits.
 function attachClipStages(
   ctx: AudioContext,
   el: HTMLMediaElement,
