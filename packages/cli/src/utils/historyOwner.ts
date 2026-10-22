@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
   DEFAULT_HISTORY_ROOT,
@@ -262,6 +262,35 @@ export async function withOwner<T>(
 }
 
 const CANNOT_WRITE = new Set(["ENOSPC", "EDQUOT", "EACCES", "EPERM", "EROFS"]);
+const WRITE_CALLS = new Set([
+  "mkdir",
+  "write",
+  "rename",
+  "unlink",
+  "link",
+  "copyfile",
+  "rmdir",
+  "symlink",
+  "utime",
+  "ftruncate",
+  "fsync",
+]);
+
+function absent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/** A write the history could not make, never a read it could not: `open` counts only when it was creating the file. */
+function failedWrite(error: unknown): boolean {
+  const { code = "", syscall = "", path } = error as NodeJS.ErrnoException;
+  if (!CANNOT_WRITE.has(code)) return false;
+  return WRITE_CALLS.has(syscall) || (syscall === "open" && path !== undefined && absent(path));
+}
 
 export async function withReader<T>(
   dir: string | undefined,
@@ -274,7 +303,7 @@ export async function withReader<T>(
       return task(owner);
     });
   } catch (error) {
-    const unwritable = CANNOT_WRITE.has((error as NodeJS.ErrnoException).code ?? "");
+    const unwritable = failedWrite(error);
     if (ran || !(error instanceof HistoryBusyError || unwritable)) throw error;
     if (unwritable)
       console.error(

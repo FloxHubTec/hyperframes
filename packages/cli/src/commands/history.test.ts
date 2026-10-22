@@ -716,8 +716,8 @@ describe("hyperframes history, refusals", () => {
 describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   "hyperframes history, a history this run cannot write",
   () => {
-    /** The project's history folder, made read-only for the rest of the test. */
-    function readOnly(...parts: string[]) {
+    /** The project's history folder (or a folder in it) set to `mode` for the rest of the test. */
+    function lock(mode: number, ...parts: string[]) {
       const [id] = readdirSync(historyDeps.historyRoot).filter((name) =>
         existsSync(join(historyDeps.historyRoot, name, "log.jsonl")),
       );
@@ -728,7 +728,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
           .filter((entry) => entry.isDirectory())
           .map((entry) => join(entry.parentPath, entry.name)),
       ];
-      for (const dir of dirs.reverse()) chmodSync(dir, 0o555);
+      for (const dir of dirs.reverse()) chmodSync(dir, mode);
       onTestFinished(() => dirs.forEach((dir) => chmodSync(dir, 0o755)));
     }
 
@@ -736,7 +736,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       const { hf, turn } = project();
       await hf();
       const entry = await turn("claude", "Retitle", "index.html", "A2");
-      readOnly();
+      lock(0o555);
       const listed = await hf("--json");
       expect(listed.code).toBe(0);
       expect(JSON.parse(listed.out).entries.map((item: { id: string }) => item.id)).toContain(
@@ -749,7 +749,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       const { hf, write, turn } = project();
       await hf();
       const entry = await turn("claude", "Retitle", "index.html", "A2");
-      readOnly("blobs");
+      lock(0o555, "blobs");
       write("notes.html", "N2");
       const listed = await hf("--json");
       expect(listed.code).toBe(0);
@@ -762,7 +762,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       const { dir, hf } = project();
       await hf();
       let runs = 0;
-      const unwritable = Object.assign(new Error("no space"), { code: "ENOSPC" });
+      const unwritable = Object.assign(new Error("no space"), { code: "ENOSPC", syscall: "write" });
       await expect(
         withReader(dir, async () => {
           runs += 1;
@@ -772,11 +772,45 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       expect(runs).toBe(1);
     });
 
+    it("a folder it cannot read fails the read with that error, never as one it could not write", async () => {
+      const { hf, turn } = project();
+      await hf();
+      await turn("claude", "Retitle", "index.html", "A2");
+      lock(0o111, "blobs");
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(hf("--json")).rejects.toMatchObject({ code: "EACCES", syscall: "scandir" });
+        expect(error.mock.calls.flat().join(" ")).not.toMatch(/could not write/i);
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it("an owner file it cannot read fails the read with that error, never as one it could not write", async () => {
+      const { hf, turn } = project();
+      await hf();
+      await turn("claude", "Retitle", "index.html", "A2");
+      const [id] = readdirSync(historyDeps.historyRoot).filter((name) =>
+        existsSync(join(historyDeps.historyRoot, name, "log.jsonl")),
+      );
+      const owner = join(historyDeps.historyRoot, id!, "owner.pid");
+      writeFileSync(owner, "999999999");
+      chmodSync(owner, 0o000);
+      onTestFinished(() => chmodSync(owner, 0o644));
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(hf("--json")).rejects.toMatchObject({ code: "EACCES", syscall: "open" });
+        expect(error.mock.calls.flat().join(" ")).not.toMatch(/could not write/i);
+      } finally {
+        error.mockRestore();
+      }
+    });
+
     it("still fails an undo it cannot record, and leaves the files as they are", async () => {
       const { hf, read, turn } = project();
       await hf();
       await turn("claude", "Retitle", "index.html", "A2");
-      readOnly();
+      lock(0o555);
       await expect(hf("undo", "--who", "claude")).rejects.toMatchObject({ code: "EACCES" });
       expect(read("index.html")).toBe("A2");
     });
