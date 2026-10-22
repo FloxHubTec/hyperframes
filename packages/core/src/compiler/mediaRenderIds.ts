@@ -92,17 +92,23 @@ function uniqueRenderId(baseId: string, taken: Set<string>): string {
 /**
  * Stamp `data-hf-render-id` on every media element in a compiled document.
  *
- * Idempotent: an element that already carries the attribute keeps it, so
+ * Idempotent: an element with a unique existing attribute keeps it, so
  * re-compiling a document (the resolved-durations recompile path) does not
- * renumber ids out from under an in-flight extraction.
+ * renumber ids out from under an in-flight extraction. Duplicate stamps from
+ * separately compiled scenes are repaired after merging.
  */
 export function assignMediaRenderIds(document: DocumentLike): void {
   const taken = new Set<string>();
   const pending: MediaElementLike[] = [];
 
-  for (const el of document.querySelectorAll(MEDIA_SELECTOR)) {
+  // Reserve existing identities across both namespaces before allocating new ones.
+  const elements = [
+    ...document.querySelectorAll(MEDIA_SELECTOR),
+    ...document.querySelectorAll(AUDIO_GROUP_SELECTOR),
+  ];
+  for (const el of elements) {
     const existing = el.getAttribute(MEDIA_RENDER_ID_ATTR);
-    if (existing) {
+    if (existing && !taken.has(existing)) {
       taken.add(existing);
       continue;
     }
@@ -119,7 +125,7 @@ export function assignMediaRenderIds(document: DocumentLike): void {
     el.setAttribute(MEDIA_RENDER_ID_ATTR, renderId);
   }
 
-  assignAudioGroupRenderIds(document, taken);
+  assignAudioGroupRenderIds(document);
 }
 
 /**
@@ -138,8 +144,8 @@ export function assignMediaRenderIds(document: DocumentLike): void {
  * the first bus with that id, which is the pre-existing behaviour and the only
  * sensible reading when there is one bus and several scenes referencing it.
  */
-function assignAudioGroupRenderIds(document: DocumentLike, taken: Set<string>): void {
-  const busesById = stampAudioGroupBuses(document, taken);
+function assignAudioGroupRenderIds(document: DocumentLike): void {
+  const busesById = indexAudioGroupBuses(document);
   if (busesById.size === 0) return;
 
   for (const member of document.querySelectorAll(
@@ -153,21 +159,15 @@ function assignAudioGroupRenderIds(document: DocumentLike, taken: Set<string>): 
   }
 }
 
-/** Every id'd bus, stamped and indexed by author id — several per id when a
+/** Index stamped buses by author id; several share an id when a
  *  sub-composition that declares one is used more than once. */
-function stampAudioGroupBuses(
-  document: DocumentLike,
-  taken: Set<string>,
-): Map<string, ScopedElementLike[]> {
+function indexAudioGroupBuses(document: DocumentLike): Map<string, ScopedElementLike[]> {
   const busesById = new Map<string, ScopedElementLike[]>();
   for (const bus of document.querySelectorAll(
     AUDIO_GROUP_SELECTOR,
   ) as Iterable<ScopedElementLike>) {
     const id = bus.getAttribute("id");
     if (!id) continue;
-    const renderId = bus.getAttribute(MEDIA_RENDER_ID_ATTR) ?? uniqueRenderId(id, taken);
-    taken.add(renderId);
-    bus.setAttribute(MEDIA_RENDER_ID_ATTR, renderId);
     const existing = busesById.get(id);
     if (existing) existing.push(bus);
     else busesById.set(id, [bus]);
