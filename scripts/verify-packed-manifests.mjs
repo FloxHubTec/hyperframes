@@ -481,11 +481,7 @@ export const CONSUMER_MIN_RELEASE_AGE_SECONDS = 24 * 60 * 60;
 const BLOCKED_BY_AGE =
   /No version matching "([^"]+)" found for specifier "([^"]+)" \(blocked by minimum-release-age/g;
 
-/**
- * Packages bun refused for being younger than the release age, or null when its output names one
- * it cannot pin down. Bun 1.4.3 quotes the package first and 1.4.4 the range; the
- * `<name>@<range> failed to resolve` line it prints with both says which is which.
- */
+/** Packages bun refused as too new, or null when its output does not pair a name with a range. */
 export function ageBlockedPackages(stderr) {
   const names = [...stderr.matchAll(BLOCKED_BY_AGE)].map(([, a, b]) =>
     [a, b].find((name) => stderr.includes(`${name}@${name === a ? b : a} failed to resolve`)),
