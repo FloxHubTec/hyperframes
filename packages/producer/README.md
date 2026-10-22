@@ -47,15 +47,15 @@ are rejected before a render starts. This is separate from engine sub-frame
 
 `RenderConfig` controls the render pipeline:
 
-| Option              | Default      | Description                                                                                                                                                                          |
-| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `entryFile`         | `index.html` | Entry composition inside the project directory. Its authored dimensions set the canvas size. |
-| `fps`               | required     | Frame rate as an integer or exact `{ num, den }` rational. |
-| `quality`           | required     | Encoder preset (`"draft"`, `"standard"`, `"high"`). |
-| `pageMotionBlur`    | authored setting | Set `"off"` to disable page motion blur; omit to preserve authored behavior. |
-| `format`            | `"mp4"`      | Output container — `"mp4"`, `"webm"`, `"mov"`, `"gif"`, `"png-sequence"`, or `"hls"`. See [Transparent Video Output](#transparent-video-output) and [HLS Output](#hls-output) below. |
-| `hlsSegmentSeconds` | `4`          | HLS target segment length in whole seconds. Ignored for every other format.                                                                                                          |
-| `videoFrameFormat`  | `"auto"`     | Source video frame extraction format — `"auto"`, `"jpg"`, or `"png"`. Use `"png"` for UI recordings, screen captures, and color-sensitive source videos.                             |
+| Option              | Default          | Description                                                                                                                                                                          |
+| ------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `entryFile`         | `index.html`     | Entry composition inside the project directory. Its authored dimensions set the canvas size.                                                                                         |
+| `fps`               | required         | Frame rate as an integer or exact `{ num, den }` rational.                                                                                                                           |
+| `quality`           | required         | Encoder preset (`"draft"`, `"standard"`, `"high"`).                                                                                                                                  |
+| `pageMotionBlur`    | authored setting | Set `"off"` to disable page motion blur; omit to preserve authored behavior.                                                                                                         |
+| `format`            | `"mp4"`          | Output container — `"mp4"`, `"webm"`, `"mov"`, `"gif"`, `"png-sequence"`, or `"hls"`. See [Transparent Video Output](#transparent-video-output) and [HLS Output](#hls-output) below. |
+| `hlsSegmentSeconds` | `4`              | HLS target segment length in whole seconds. Ignored for every other format.                                                                                                          |
+| `videoFrameFormat`  | `"auto"`         | Source video frame extraction format — `"auto"`, `"jpg"`, or `"png"`. Use `"png"` for UI recordings, screen captures, and color-sensitive source videos.                             |
 
 ## Transparent Video Output
 

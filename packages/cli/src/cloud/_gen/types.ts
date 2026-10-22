@@ -181,8 +181,7 @@ export interface CreateHyperframesRenderRequest {
    */
   crf?: number | null;
   /**
-   * Set to 'off' to disable authored page motion blur. Omit or pass null to
-   * preserve the current render behavior.
+   * Set 'off' to disable page motion blur. Omit or null to keep behavior.
    */
   page_motion_blur?: "off" | null;
   /**
