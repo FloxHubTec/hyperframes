@@ -55,6 +55,12 @@ export interface DecodeWindow {
   seconds?: number;
 }
 
+/** Decode to this rate, and to one channel, instead of the file's own layout. */
+export interface DecodeFormat {
+  sampleRate?: number;
+  mono?: boolean;
+}
+
 export interface Decoded {
   signal: AudioSignal;
   stream: AudioStreamInfo;
@@ -65,9 +71,15 @@ export async function decodeAudio(
   file: string,
   window: DecodeWindow = {},
   probed?: AudioStreamInfo,
+  format: DecodeFormat = {},
 ): Promise<Decoded | null> {
-  const info = probed ?? (await probeAudio(file));
-  if (!info) return null;
+  const probedInfo = probed ?? (await probeAudio(file));
+  if (!probedInfo) return null;
+  const info = {
+    ...probedInfo,
+    sampleRate: format.sampleRate ?? probedInfo.sampleRate,
+    channels: format.mono ? 1 : probedInfo.channels,
+  };
   const seek = window.from ? ["-ss", String(window.from)] : [];
   const length = window.seconds === undefined ? [] : ["-t", String(window.seconds)];
   const { stdout } = await run(
@@ -81,6 +93,8 @@ export async function decodeAudio(
       ...length,
       "-map",
       "0:a:0",
+      ...(format.mono ? ["-ac", "1"] : []),
+      ...(format.sampleRate ? ["-ar", String(format.sampleRate)] : []),
       "-f",
       "f32le",
       "-acodec",

@@ -10,7 +10,15 @@ import {
   type AudioSignal,
   type Snapper,
 } from "@hyperframes/core/audio-analysis";
-import { AVAILABLE, encodeWav, perSignal, rounded, unavailable } from "./shared.js";
+import {
+  AVAILABLE,
+  encodeWav,
+  perSignal,
+  rounded,
+  serviceConfig,
+  serviceFailure,
+  unavailable,
+} from "./shared.js";
 
 /**
  * The audio analysis service contract.
@@ -115,12 +123,8 @@ function uploaded(signal: AudioSignal): AudioSignal {
 const askedTogether = (capability: AudioApiCapability): AudioApiCapability[] =>
   capability === "beats" || capability === "downbeats" ? ["beats", "downbeats"] : [capability];
 
-function config() {
-  const url = process.env[URL_ENV]?.trim();
-  const key = process.env[KEY_ENV]?.trim();
-  const timeout = Number(process.env[TIMEOUT_ENV]);
-  return { url, key, timeoutMs: timeout > 0 ? timeout : DEFAULT_TIMEOUT_MS };
-}
+const config = () =>
+  serviceConfig({ url: URL_ENV, key: KEY_ENV, timeout: TIMEOUT_ENV }, DEFAULT_TIMEOUT_MS);
 
 const isNumberList = (value: unknown): value is number[] =>
   Array.isArray(value) && value.every((t) => typeof t === "number" && Number.isFinite(t));
@@ -144,17 +148,6 @@ function checked(capability: AudioApiCapability, body: AudioApiResponse): void {
   }[capability];
   if (!valid())
     throw new Error(`the service answered ${capability} in a shape this CLI cannot read`);
-}
-
-async function failure(response: Response): Promise<Error> {
-  const text = await response.text().catch(() => "");
-  let detail = text.slice(0, 200);
-  try {
-    detail = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? detail;
-  } catch {
-    // not JSON: keep the text
-  }
-  return new Error(`the service answered ${response.status}${detail ? `: ${detail}` : ""}`);
 }
 
 const uploadedAsset = perSignal(async (analyzed: AudioSignal) => {
@@ -202,7 +195,7 @@ async function ask(analyzed: AudioSignal, capabilities: AudioApiCapability[]) {
     body: JSON.stringify(request),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!response.ok) throw await failure(response);
+  if (!response.ok) throw await serviceFailure(response, "the service");
   const body = (await response.json()) as { data?: AudioApiResponse } | null;
   return (body?.data ?? body ?? {}) as AudioApiResponse;
 }

@@ -583,6 +583,48 @@ first, and the result warns when the cut part held the file's loudest moment.
 
 Word timing is not here: use [`transcribe`](#transcribe).
 
+#### Reading a whole recording
+
+`--read` turns one recording — an episode, a reference video — into
+time-stamped lines an agent can read or grep, instead of measurements of one sound:
+
+```bash
+npx hyperframes audio refs/episode.mp4 --read                 # the whole recording
+npx hyperframes audio refs/episode.mp4 --read --range 60,70   # only what overlaps 60–70 s
+```
+
+- **voice**: one line per sentence with its text, speaking rate against the
+  recording's mean, pitch when it is 3 semitones or more off the median, and a
+  rising or falling end; pauses of 0.4 s or more between sentences.
+- **effects**: each sound effect with a kind (`riser`, `boom`, `thump`, `whoosh`,
+  `click`, `tick`, `ding`, `hit`), the group of identical sounds it belongs to
+  (`S1` is the most used), band, attack, tail, how far it stands over the music,
+  and where it falls in a pause. Quick runs of one sound are a single line with a
+  count; hits on the music's beat are the music's own drums, and sounds more than
+  20 dB under the recording are separation residue nobody hears; both are left out.
+- **music**: the bed split at its cut-outs, each part naming its piece, the
+  instruments that carry it and its tempo, whether it starts, resumes after a
+  break, returns or is new, and where it fades.
+
+Sentences come from a transcript: `--transcript <file>`, or
+`<recording>.transcript.json` beside the recording. Without one, voice lines
+carry no words.
+
+Effects and music are read from stems. At `--quality best` (the default) the
+recording is separated into vocals, drums, bass, guitar, piano and other by the
+service at `HYPERFRAMES_AUDIO_STEMS_URL`, with `HYPERFRAMES_AUDIO_API_KEY`: it
+is uploaded as 192 kb/s MP3 through the same origin's direct-upload endpoints,
+`POST` starts a job, and `GET <url>/<id>` is polled until the stems are ready
+(`HYPERFRAMES_AUDIO_STEMS_TIMEOUT_MS`, 30 minutes by default). Effects are read
+from the drums stem and the music from the other four. Without stems, effects are
+read from the mix outside speech and the music is not read; with neither stems nor
+a transcript, voice and effects are not read either, because the mix alone does
+not tell speech from music. Each case says so in a warning.
+
+The result is computed once per file content and kept in `.hyperframes/read-audio`
+under the project, with the stems; the text output ends with the path of the
+whole recording's text, and `--json` returns the analysis.
+
 Every measurement comes from a provider ladder, tried in this order until one
 answers:
 

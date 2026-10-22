@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { defineCommand } from "citty";
 import type {
   AnalysisQuality,
@@ -10,6 +10,8 @@ import { DEFAULT_CAPABILITIES, type AnalyzeOptions } from "../audio/analysis/ana
 import { formatReport } from "../audio/analysis/format.js";
 import { analyzeTargets, previewTarget } from "../audio/analysis/run.js";
 import { filmTargets, type AudioTarget, type FilmQuery } from "../audio/analysis/targets.js";
+import { formatRead } from "../audio/read/format.js";
+import { readAudio } from "../audio/read/read.js";
 import { describeProject } from "../timeline/describeProject.js";
 import { CliUsageError } from "../utils/commandResult.js";
 import { ensureDOMParser } from "../utils/dom.js";
@@ -28,6 +30,10 @@ export const examples: Example[] = [
   [
     "The beat grid, tempo and sections of a music bed",
     "hyperframes audio music.mp3 --only beats,downbeats,bpm,sections",
+  ],
+  [
+    "A whole recording as voice, effect and music lines, 60–70 s shown",
+    "hyperframes audio refs/episode.mp4 --read --range 60,70",
   ],
   [
     "Only onsets, from 60–200 Hz, finer",
@@ -114,6 +120,9 @@ interface AudioFlags {
   "onset-ratio"?: string;
   "tail-db"?: string;
   "silence-db"?: string;
+  read?: boolean;
+  transcript?: string;
+  json?: boolean;
 }
 
 function analyzeRequest(flags: AudioFlags): AnalyzeOptions {
@@ -158,6 +167,30 @@ async function clipTargets(flags: AudioFlags, query: FilmQuery | null): Promise<
   ensureDOMParser();
   const timeline = await describeProject(project.indexPath);
   return filmTargets(project.dir, timeline, query ?? { by: "all" });
+}
+
+function readQuality(files: string[], flags: AudioFlags): AnalysisQuality {
+  if (files.length !== 1) throw new CliUsageError("--read reads exactly one file");
+  if (flags.element || flags.at || flags["place-at"])
+    throw new CliUsageError("--read takes a file and --range, not a film query");
+  const quality = (flags.quality ?? "best") as AnalysisQuality;
+  if (!QUALITIES.has(quality)) throw new CliUsageError("--quality is best, local or fast");
+  return quality;
+}
+
+async function read(files: string[], flags: AudioFlags) {
+  const quality = readQuality(files, flags);
+  const range = pair("range", flags.range);
+  const result = await readAudio(resolve(process.cwd(), files[0]!), files[0]!, {
+    cacheDir: join(resolve(flags.dir ?? process.cwd()), ".hyperframes", "read-audio"),
+    transcript: flags.transcript ? resolve(process.cwd(), flags.transcript) : undefined,
+    quality,
+  });
+  if (flags.json) {
+    console.log(JSON.stringify(withMeta(result)));
+    return;
+  }
+  console.log(`${formatRead(result.analysis, range)}\n\nwhole recording: ${result.textPath}`);
 }
 
 export default defineCommand({
@@ -212,6 +245,16 @@ export default defineCommand({
       description: "Include each capability's provider ladder",
       default: false,
     },
+    read: {
+      type: "boolean",
+      description:
+        "Read one whole recording as voice, effect and music lines (--range picks what is shown)",
+      default: false,
+    },
+    transcript: {
+      type: "string",
+      description: "With --read: the recording's transcript (default <file>.transcript.json)",
+    },
     json: { type: "boolean", description: "Output as JSON", default: false },
   },
   setup({ rawArgs, cmd }) {
@@ -220,6 +263,8 @@ export default defineCommand({
   async run({ args }) {
     const flags = args as unknown as AudioFlags;
     const files = args._.map(String);
+    if (flags.read) return read(files, flags);
+    if (flags.transcript) throw new CliUsageError("--transcript only works with --read");
     const query = filmQuery(flags);
     if (files.length && query) throw new CliUsageError("give files or a film query, not both");
     const targets = files.length

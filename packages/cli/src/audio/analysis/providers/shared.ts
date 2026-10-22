@@ -74,3 +74,28 @@ export function downbeatsWithMeter(beats: number[], downbeats: number[]): Downbe
 
 const round = (t: number) => Math.round(t * 1000) / 1000;
 export const rounded = (times: readonly number[]) => times.map(round);
+
+/** A remote service's URL, key and timeout, read from the environment each call. */
+export function serviceConfig(
+  env: { url: string; key: string; timeout: string },
+  defaultMs: number,
+) {
+  const timeout = Number(process.env[env.timeout]);
+  return {
+    url: process.env[env.url]?.trim(),
+    key: process.env[env.key]?.trim(),
+    timeoutMs: timeout > 0 ? timeout : defaultMs,
+  };
+}
+
+/** A failed response as an error carrying the service's own message when it sent one. */
+export async function serviceFailure(response: Response, service: string): Promise<Error> {
+  const text = await response.text().catch(() => "");
+  let detail = text.slice(0, 200);
+  try {
+    detail = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? detail;
+  } catch {
+    // not JSON: keep the text
+  }
+  return new Error(`${service} answered ${response.status}${detail ? `: ${detail}` : ""}`);
+}
