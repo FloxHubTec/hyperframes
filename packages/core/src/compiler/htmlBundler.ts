@@ -1487,7 +1487,6 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
     }
   }
 
-  // Two scenes may each use id="clip"; allocate after inlining so their frames stay distinct.
   assignMediaRenderIds(document);
   return document.toString();
 }

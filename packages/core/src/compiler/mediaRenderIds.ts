@@ -92,16 +92,13 @@ function uniqueRenderId(baseId: string, taken: Set<string>): string {
 /**
  * Stamp `data-hf-render-id` on every media element in a compiled document.
  *
- * Idempotent: an element with a unique existing attribute keeps it, so
- * re-compiling a document (the resolved-durations recompile path) does not
- * renumber ids out from under an in-flight extraction. Duplicate stamps from
- * separately compiled scenes are repaired after merging.
+ * Preserve unique existing stamps on recompilation. Repair stamps that collide
+ * after independently compiled scenes are merged.
  */
 export function assignMediaRenderIds(document: DocumentLike): void {
   const taken = new Set<string>();
   const pending: MediaElementLike[] = [];
 
-  // Reserve existing identities across both namespaces before allocating new ones.
   const elements = [
     ...document.querySelectorAll(MEDIA_SELECTOR),
     ...document.querySelectorAll(AUDIO_GROUP_SELECTOR),
