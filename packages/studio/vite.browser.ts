@@ -84,7 +84,7 @@ function findPuppeteerCacheChrome(
   return undefined;
 }
 
-function browserVersion(
+export function browserVersion(
   executable: string,
   run: (file: string) => string = (file) => execFileSync(file, ["--version"], { encoding: "utf8" }),
 ): string | undefined {
