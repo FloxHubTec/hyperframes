@@ -442,10 +442,10 @@ describe("syncRuntimeMedia", () => {
       return seen;
     }
 
-    it("drives the transport gain from the lane, not from data-volume", () => {
+    it("drives the transport gain from the lane times data-volume", () => {
       const [held, ducked] = volumesAt([1, 5], DUCK);
-      expect(held).toBeCloseTo(0.8, 5);
-      expect(ducked).toBeCloseTo(0.1, 5);
+      expect(held).toBeCloseTo(0.8 * 0.55, 5);
+      expect(ducked).toBeCloseTo(0.1 * 0.55, 5);
     });
 
     it("keeps automation author-only while user volume remains a separate layer", () => {
@@ -461,10 +461,14 @@ describe("syncRuntimeMedia", () => {
         onElementVolume,
       });
 
-      expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 0.4, 0.8);
+      expect(onElementVolume).toHaveBeenLastCalledWith(
+        clip.el,
+        expect.closeTo(0.22, 5),
+        expect.closeTo(0.44, 5),
+      );
     });
 
-    it("leaves a routed clip's lane to the transport, sending only what multiplies it", () => {
+    it("leaves a routed clip's lane to the transport, sending data-volume to multiply it", () => {
       const clip = createMockClip({ start: 0, end: 10, volume: 0.55 });
       clip.el.setAttribute("data-automation", DUCK);
       const onElementVolume = vi.fn();
@@ -477,15 +481,15 @@ describe("syncRuntimeMedia", () => {
         isWebAudioRouted: () => true,
       });
 
-      expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 1, 1);
+      expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 0.55, 0.55);
     });
 
     it("ramps between points across ticks", () => {
       const [a, b, c] = volumesAt([2, 2.5, 3], DUCK);
-      expect(a).toBeCloseTo(0.8, 5);
-      expect(b).toBeGreaterThan(0.1);
-      expect(b).toBeLessThan(0.8);
-      expect(c).toBeCloseTo(0.1, 5);
+      expect(a).toBeCloseTo(0.8 * 0.55, 5);
+      expect(b).toBeGreaterThan(0.1 * 0.55);
+      expect(b).toBeLessThan(0.8 * 0.55);
+      expect(c).toBeCloseTo(0.1 * 0.55, 5);
     });
 
     it("falls back to data-volume when there is no lane", () => {
@@ -591,8 +595,8 @@ describe("syncRuntimeMedia", () => {
       // `data-media-start="30"` on a clip whose lane holds 0.8 until t=2 then
       // ducks to 0.1 by t=3. At media time the playhead is already 30 s past the
       // last point, so preview held 0.1 from the first frame and never ducked.
-      expect(trimmed(1)).toBeCloseTo(0.8, 5);
-      expect(trimmed(5)).toBeCloseTo(0.1, 5);
+      expect(trimmed(1)).toBeCloseTo(0.8 * 0.55, 5);
+      expect(trimmed(5)).toBeCloseTo(0.1 * 0.55, 5);
     });
 
     it("supersedes keyframes probed from the timeline", () => {
@@ -614,7 +618,7 @@ describe("syncRuntimeMedia", () => {
           seen = v;
         },
       });
-      expect(seen).toBeCloseTo(0.1, 5);
+      expect(seen).toBeCloseTo(0.1 * 0.55, 5);
     });
   });
 

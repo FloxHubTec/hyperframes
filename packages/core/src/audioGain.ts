@@ -27,6 +27,11 @@ export function clampAudioGain(value: number): number {
   return Math.max(0, Math.min(MAX_AUDIO_GAIN, value));
 }
 
+/** `data-volume` is a gain on the volume lane, as clip gain offsets the keyframes in an NLE. */
+export function gainTimesLane(gain: number, lane: number): number {
+  return clampAudioGain(gain * lane);
+}
+
 export function clampNativeMediaVolume(value: number): number {
   if (!Number.isFinite(value)) return 1;
   return Math.max(0, Math.min(1, value));

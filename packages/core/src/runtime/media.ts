@@ -6,7 +6,7 @@ import { elementVolumeLaneGain } from "./audioAutomationVolume.js";
 import { fadeGain, NO_FADES, readElementFades, type AudioFades } from "../audioFade.js";
 import { readElementPlaybackRate, readElementRateSpec, readMediaStart } from "./playbackRate.js";
 import { rateAt, sourceTimeAt, timeAtSourceTime, type RateSpec } from "../speedRamp.js";
-import { clampAudioGain } from "../audioGain.js";
+import { clampAudioGain, gainTimesLane } from "../audioGain.js";
 import { isMemberGroupHidden } from "../audioGroups.js";
 import { findInjectedRenderFrame } from "./renderFrameSibling.js";
 import { registerSeekCompletion } from "./adapters/seek-dispatch.js";
@@ -444,7 +444,7 @@ export function syncRuntimeMedia(params: {
       const currentElementVolume = clampVolume(el.volume);
 
       let authorVolume: number;
-      // An explicit volume lane owns the fader. It is checked before the probed
+      // An explicit volume lane, times `data-volume`, sets the level. Checked before the probed
       // keyframes because the two would otherwise fight, and it is the one the
       // author drew — `lint` warns when a track carries both.
       // Clip-local, NOT `relTime`. A lane's `t` is "seconds from the start of
@@ -458,7 +458,9 @@ export function syncRuntimeMedia(params: {
       const laneGain = elementVolumeLaneGain(el, params.timeSeconds - origin);
       if (laneGain !== null) {
         const transportOwnsLane = params.isWebAudioRouted?.(el);
-        authorVolume = transportOwnsLane ? 1 : clampAudioGain(laneGain);
+        authorVolume = transportOwnsLane
+          ? fallbackAuthorVolume
+          : gainTimesLane(fallbackAuthorVolume, laneGain);
       } else if (clip.volumeKeyframes && clip.volumeKeyframes.length > 0) {
         // Keyframes probed from the GSAP timeline — same source as the renderer.
         // Use the interpolated envelope value directly; no need to track GSAP changes.

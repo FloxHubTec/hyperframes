@@ -27,6 +27,7 @@ import {
   type AutomationTiming,
 } from "../audio/audioFxAutomation.js";
 import type { FxParamTarget } from "../audio/audioFxGraph.js";
+import { gainTimesLane } from "../audioGain.js";
 import {
   audioFxWorkletsReady,
   buildFxChain,
@@ -126,16 +127,24 @@ export interface FxAttributes {
   automation: string | null;
 }
 
-/** The element's volume lane on `param`, as a target to cancel later; none when it has no lane. */
-function scheduleVolume(
-  param: AudioParam,
+/** Where a volume lane plays, and the `data-volume` it carries when nothing downstream does. */
+export interface VolumeTarget {
+  param: AudioParam;
+  gain?: () => number;
+}
+
+/** The element's volume lane on `target`, as a target to cancel later; none when it has no lane. */
+export function scheduleVolume(
+  target: VolumeTarget,
   automation: HfAutomation,
   at: AutomationTiming,
 ): FxParamTarget[] {
   const lane = volumeLane(automation);
   if (!lane) return [];
-  scheduleParamLane([{ param }], lane, VOLUME_RANGE.scale, at);
-  return [{ param }];
+  const gain = target.gain?.() ?? 1;
+  const points = lane.points.map((p) => ({ ...p, v: gainTimesLane(gain, p.v) }));
+  scheduleParamLane([{ param: target.param }], { ...lane, points }, VOLUME_RANGE.scale, at);
+  return [{ param: target.param }];
 }
 
 export function attachElementFxChain(
@@ -145,7 +154,7 @@ export function attachElementFxChain(
   destination: AudioNode,
   timing?: AutomationTiming,
   attrs: FxAttributes = { automation: HF_AUDIO_AUTOMATION_ATTR },
-  volume?: AudioParam,
+  volume?: VolumeTarget,
 ): ElementFxHandle | null {
   const { chain } = readChain(el);
 

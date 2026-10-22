@@ -15,7 +15,7 @@ import { parseHTML } from "linkedom";
 import { extractAudioMetadata, type AudioMetadata } from "../utils/ffprobe.js";
 import { isNotMediaPayload } from "../utils/notMediaPayload.js";
 import { urlInputArgs } from "../utils/urlInput.js";
-import { clampAudioGain } from "@hyperframes/core/audio-gain";
+import { clampAudioGain, gainTimesLane } from "@hyperframes/core/audio-gain";
 import { clampFadesToDuration, readElementFades } from "@hyperframes/core/audio-fade";
 import {
   downloadToTemp,
@@ -498,19 +498,21 @@ const CURVED_SEGMENT_SAMPLES_PER_SEC = 30;
  * sampled, or the bake would quietly straighten it.
  *
  * Times come out in composition seconds, which is what the baker subtracts the
- * track start from. Returns null when the track has no volume lane.
+ * track start from. Values carry `gain`, the track's `data-volume`. Returns null
+ * when the track has no volume lane.
  */
 export function volumeLaneKeyframes(
   automation: { lanes: HfAutomationLane[] },
   trackStart: number,
   duration: number,
+  gain: number,
 ): AudioVolumeKeyframe[] | null {
   const lane = automation.lanes.find((l) => l.target === VOLUME_TARGET);
   if (!lane || lane.points.length === 0) return null;
 
   const out: AudioVolumeKeyframe[] = [];
   const push = (t: number, v: number): void => {
-    out.push({ time: trackStart + t, volume: v });
+    out.push({ time: trackStart + t, volume: gainTimesLane(gain, v) });
   };
 
   // The envelope holds its first value before the first point, rather than
@@ -1360,7 +1362,12 @@ export async function processCompositionAudio(
         // would fight, and the lane is the explicit one. `lint` warns when a
         // track carries both.
         const laneKeyframes = automation
-          ? volumeLaneKeyframes(automation, element.start, element.end - element.start)
+          ? volumeLaneKeyframes(
+              automation,
+              element.start,
+              element.end - element.start,
+              element.volume ?? 1,
+            )
           : null;
         const envelopeKeyframes = laneKeyframes ?? element.volumeKeyframes;
         const envelope =
@@ -1576,7 +1583,9 @@ export async function processCompositionAudio(
             meta.fxChain ? parseAudioFxChain(meta.fxChain) : undefined,
           )
         : null;
-      const laneKeyframes = automation ? volumeLaneKeyframes(automation, 0, totalDuration) : null;
+      const laneKeyframes = automation
+        ? volumeLaneKeyframes(automation, 0, totalDuration, meta.volume)
+        : null;
       const envelope =
         laneKeyframes && laneKeyframes.length > 0
           ? { keyframes: laneKeyframes, trackStart: 0, baseVolume: meta.volume }

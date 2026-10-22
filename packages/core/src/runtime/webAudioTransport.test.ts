@@ -1007,17 +1007,17 @@ describe("WebAudioTransport", () => {
         expect(rampsAfter(laneGain, 0)).toContainEqual([1, 103]);
       });
 
-      it("re-aims a group fader's lane at a new rate and on an edit", async () => {
+      it("books a group's lane times its data-volume, at a new rate and on an edit", async () => {
         document.body.innerHTML = `<hf-audio-group id="vo" data-volume="0.5"></hf-audio-group>`;
         document.getElementById("vo")!.setAttribute("data-automation", FADE);
         const { transport, mock, gen } = setupGroupTransport();
         await scheduleGrouped(transport, gen, "a", "vo");
         const fader = mock.gainNodes[4]!;
-        expect(rampsAfter(fader, 0)).toContainEqual([1, 103]);
+        expect(rampsAfter(fader, 0)).toContainEqual([0.5, 103]);
 
         let before = param(fader).linearRampToValueAtTime.mock.calls.length;
         transport.setRate(2);
-        expect(rampsAfter(fader, before)).toContainEqual([1, 101.5]);
+        expect(rampsAfter(fader, before)).toContainEqual([0.5, 101.5]);
 
         before = param(fader).linearRampToValueAtTime.mock.calls.length;
         document.getElementById("vo")!.setAttribute(
@@ -1028,7 +1028,7 @@ describe("WebAudioTransport", () => {
           ]),
         );
         await settle();
-        expect(rampsAfter(fader, before)).toContainEqual([0.5, 102]);
+        expect(rampsAfter(fader, before)).toContainEqual([0.25, 102]);
       });
     });
 

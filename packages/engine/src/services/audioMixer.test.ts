@@ -602,6 +602,51 @@ describe("processCompositionAudio", () => {
     });
   });
 
+  it("bakes data-volume as a gain on the volume lane", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "vo.wav"), "stub");
+    const automation = JSON.stringify({
+      version: 1,
+      lanes: [
+        {
+          target: "volume",
+          points: [
+            { t: 0, v: 0 },
+            { t: 2, v: 1 },
+          ],
+        },
+      ],
+    });
+
+    await processCompositionAudio(
+      [
+        {
+          id: "vo",
+          src: "vo.wav",
+          start: 0,
+          end: 2,
+          mediaStart: 0,
+          layer: 0,
+          volume: 0.5,
+          automation,
+          fxChain: gainChain,
+          type: "audio",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+    );
+
+    expect(applyAudioFxChainMock.mock.calls[0]?.[3]?.envelope?.keyframes).toEqual([
+      { time: 0, volume: 0 },
+      { time: 2, volume: 0.5 },
+    ]);
+  });
+
   it.each([
     ["the master pass", {}, { masterFxChain: gainChain }],
     ["a group bus", { groupId: "bus", groupFxChain: gainChain }, {}],

@@ -15,6 +15,7 @@ describe("volumeLaneKeyframes", () => {
       ]),
       5,
       2,
+      1,
     );
     expect(out).toEqual([
       { time: 5, volume: 1 },
@@ -30,6 +31,7 @@ describe("volumeLaneKeyframes", () => {
       ]),
       0,
       2,
+      1,
     );
     // Not `data-volume` at t=0 — the lane's own first value.
     expect(out?.[0]).toEqual({ time: 0, volume: 0.3 });
@@ -43,6 +45,7 @@ describe("volumeLaneKeyframes", () => {
       ]),
       0,
       4,
+      1,
     );
     expect(out?.at(-1)).toEqual({ time: 4, volume: 0.5 });
   });
@@ -55,6 +58,7 @@ describe("volumeLaneKeyframes", () => {
       ]),
       0,
       2,
+      1,
     );
     const bent = volumeLaneKeyframes(
       lanes([
@@ -63,6 +67,7 @@ describe("volumeLaneKeyframes", () => {
       ]),
       0,
       2,
+      1,
     );
     expect(straight?.length).toBe(2);
     expect(bent?.length ?? 0).toBeGreaterThan(30);
@@ -74,7 +79,7 @@ describe("volumeLaneKeyframes", () => {
   });
 
   it("has nothing to bake for a track whose only lane is an FX one", () => {
-    expect(volumeLaneKeyframes(lanes([{ t: 0, v: 200 }], "fx.n1.frequency"), 0, 2)).toBeNull();
+    expect(volumeLaneKeyframes(lanes([{ t: 0, v: 200 }], "fx.n1.frequency"), 0, 2, 1)).toBeNull();
   });
 });
 
