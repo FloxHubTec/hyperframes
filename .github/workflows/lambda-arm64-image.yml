@@ -10,6 +10,9 @@ on:
     paths:
       - "packages/aws-lambda/image/**"
       - "packages/aws-lambda/scripts/stage-arm64-image.ts"
+      # A @sparticuz/chromium bump or a ZIP layout change must re-stage the image.
+      - "packages/aws-lambda/package.json"
+      - "packages/aws-lambda/scripts/build-zip.ts"
       - ".github/workflows/lambda-arm64-image.yml"
   workflow_dispatch:
 
@@ -85,7 +88,7 @@ jobs:
           --build-context task=staged/task --load -t hf-video:ci packages/aws-lambda/image
       - name: ffmpeg and Chrome run in the image
         run: >-
-          docker run --rm --entrypoint /var/lang/bin/node
+          docker run --rm --entrypoint /var/lang/bin/node -e AWS_EXECUTION_ENV=AWS_Lambda_nodejs22.x
           -v "$PWD/packages/aws-lambda/image/smoke-video.mjs:/var/task/smoke-video.mjs:ro"
           hf-video:ci /var/task/smoke-video.mjs
       - name: The Lambda runtime loads the handler
