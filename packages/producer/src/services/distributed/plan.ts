@@ -1082,12 +1082,15 @@ function createVideoSourceShipper(input: {
  * Build the shared local execution representation used by both transport
  * protocols. See the module docstring for the directory layout.
  */
-/** Whether the plan leaves its audio to {@link buildPlanAudio}. */
+/**
+ * Whether the plan leaves its audio to {@link buildPlanAudio}: every muxed format except a cfr re-encode,
+ * so one function makes every audio byte whichever machine plans. png-sequence keeps its sidecar.
+ */
 export function plansSeparateAudio(
   config: Pick<DistributedRenderConfig, "format" | "cfr">,
   options: Pick<BuildLocalExecutionPlanOptions, "deferAudio">,
 ): boolean {
-  return options.deferAudio === true && config.format === "mp4" && config.cfr !== true;
+  return options.deferAudio === true && config.format !== "png-sequence" && config.cfr !== true;
 }
 
 // The plan's copy, compile and probe, shared by the plan and by buildPlanAudio so both see the
