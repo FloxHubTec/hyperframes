@@ -55,7 +55,6 @@ export interface DecodeWindow {
   seconds?: number;
 }
 
-/** Decode to this rate, and to one channel, instead of the file's own layout. */
 export interface DecodeFormat {
   sampleRate?: number;
   mono?: boolean;
