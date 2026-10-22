@@ -65,9 +65,9 @@ function logFallbackHandoff(el: HTMLMediaElement, priorMuted: boolean): void {
 /**
  * Start a buffer source, bounding it to the clip's authored window
  * (`data-duration`) so a trimmed clip stops at its edge instead of running the
- * buffer to the source file's natural end. `clipSourceLen` is the clip span in
- * buffer seconds; the third `start()` arg is the portion to play from the
- * offset. An infinite `clipDuration` plays unbounded (legacy behavior).
+ * buffer to the source file's natural end. `remaining`, the third `start()` arg,
+ * is the rest of the clip from the offset in buffer seconds. An infinite
+ * `clipDuration` plays unbounded (legacy behavior).
  *
  * Returns false when the playhead is already past the clip end (nothing to
  * play); the caller should discard the source.

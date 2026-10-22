@@ -3,7 +3,7 @@
  *
  * Read per tick for a clip that sounds through `el.volume`. A clip the Web Audio
  * transport routes plays its lane scheduled on a gain of its own
- * (`clipVolumeLaneStage`), out of reach of the per-tick gain write.
+ * (`attachClipStages`), out of reach of the per-tick gain write.
  */
 
 import {
