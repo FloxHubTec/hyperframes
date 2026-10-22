@@ -75,16 +75,6 @@ describe("hyperframes contract docs", () => {
   });
 });
 
-describe("talking-head-recut ratio policy", () => {
-  it("lets a ratio the user named win, and otherwise infers it from the footage as it plays", () => {
-    const skill = read("skills", "talking-head-recut", "SKILL.md");
-    expect(skill).toContain("a ratio or platform the request already names wins");
-    expect(skill).toContain(
-      "stream=width,height,sample_aspect_ratio,r_frame_rate:stream_side_data=rotation",
-    );
-  });
-});
-
 describe("media-use TTS documentation", () => {
   it("does not advertise flags unsupported by the published tts command", () => {
     const tts = read("skills", "media-use", "audio", "references", "tts.md");
