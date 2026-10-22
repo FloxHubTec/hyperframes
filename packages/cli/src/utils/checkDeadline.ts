@@ -53,7 +53,6 @@ export class CheckDeadline {
     });
   }
 
-  /** Names the work under way, so an expired check says where its time went. */
   enter = (phase: CheckPhase): void => {
     if (this.expired) return;
     const now = Date.now();

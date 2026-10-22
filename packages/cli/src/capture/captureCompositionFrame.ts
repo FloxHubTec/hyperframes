@@ -115,7 +115,6 @@ export interface OpenSettledCompositionPageOptions {
   // Runs after the page exists but before page.goto, so console/pageerror/
   // request listeners can attach without missing load-time events.
   beforeNavigate?: (page: Page) => void | Promise<void>;
-  // The page has loaded; the wait for render-ready starts.
   onLoaded?: () => void;
   // Started before the project was bundled; used only if it was launched with the same arguments.
   prelaunched?: PrelaunchedBrowser;
