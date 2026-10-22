@@ -8,16 +8,6 @@ import "./scripts/test-home.mjs";
 // Windows: sharp's first text render builds Fontconfig's cache for every OS font (about 9 s on a
 // fresh runner). Set here, before workers fork, because an in-process env write never reaches it.
 if (process.platform === "win32") {
-  const exit = process.exit;
-  process.exit = (code) => {
-    console.error(new Error(`[DEBUG-6056] runner ${process.pid} explicit exit ${code}`).stack);
-    return exit(code);
-  };
-  process.on("uncaughtExceptionMonitor", (error) =>
-    console.error("[DEBUG-6056] runner uncaught exception", error),
-  );
-  process.on("exit", (code) => console.error(`[DEBUG-6056] runner ${process.pid} exit ${code}`));
-  console.error(`[DEBUG-6056] runner ${process.pid} parent ${process.ppid}`);
   const dir = mkdtempSync(join(tmpdir(), "hf-vitest-fontconfig-"));
   process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
   copyFileSync(
