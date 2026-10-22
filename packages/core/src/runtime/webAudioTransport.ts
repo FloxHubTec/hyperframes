@@ -113,27 +113,28 @@ function scheduleVolumeLane(
 }
 
 /**
- * A clip's volume lane on its own gain ahead of `gainNode`, like a group's fader beside its
- * mute gain: `setElementVolume` rewrites `gainNode` every tick and would cut into the ramps.
+ * A clip's FX, then its volume lane on a gain of its own ahead of `gainNode`, which
+ * `setElementVolume` rewrites every tick. The FX handle books the lane, so a rate change or an
+ * edit re-aims it with the clip's other envelopes.
  */
-function clipVolumeLaneStage(
+function attachClipStages(
   ctx: AudioContext,
   el: HTMLMediaElement,
+  source: AudioNode,
   gainNode: GainNode,
   timing: AutomationTiming,
-): GainNode | null {
-  if (!volumeLane(readElementAutomation(el))) return null;
+): { fx: ElementFxHandle | null; laneNode: GainNode } {
   const laneNode = ctx.createGain();
   laneNode.connect(gainNode);
-  scheduleVolumeLane(el, laneNode, timing);
-  return laneNode;
+  const fx = attachElementFxChain(ctx, el, source, laneNode, timing, undefined, laneNode.gain);
+  return { fx, laneNode };
 }
 
 type ScheduledSourceBase = {
   el: HTMLMediaElement;
   gainNode: GainNode;
-  /** The clip's volume lane, between its FX and `gainNode`, when it has one. */
-  laneNode: GainNode | null;
+  /** The clip's volume lane, between its FX and `gainNode`; unity when it has none. */
+  laneNode: GainNode;
   /** FX chain spliced between source and gain, when the element carries one. */
   fx?: ElementFxHandle | null;
   compositionStart: number;
@@ -433,8 +434,6 @@ export class WebAudioTransport {
       const scheduledAt = this._ctx.currentTime;
       const elapsed = compositionTime - compositionStart;
       const timing: AutomationTiming = { scheduledAt, elapsed, rate: safeRate };
-      const laneNode = clipVolumeLaneStage(this._ctx, el, gainNode, timing);
-      const fx = attachElementFxChain(this._ctx, el, sourceNode, laneNode ?? gainNode, timing);
       // The group bus, not master, for a member — same as the decoded-buffer
       // path. This transport is the PRIMARY one for audio (the decode path is
       // its fallback), so routing it at master would have left every grouped
@@ -443,6 +442,7 @@ export class WebAudioTransport {
       gainNode.connect(
         this.resolveDestination(el, scheduledAt, compositionTime, safeRate) ?? this._masterGain,
       );
+      const { fx, laneNode } = attachClipStages(this._ctx, el, sourceNode, gainNode, timing);
 
       this._rate = safeRate;
       this._rateAnchorCtx = scheduledAt;
@@ -545,8 +545,9 @@ export class WebAudioTransport {
       input,
       fader,
       timing,
+      undefined,
+      groupEl ? fader.gain : undefined,
     );
-    if (groupEl) scheduleVolumeLane(groupEl, fader, timing);
 
     this._groups.set(groupId, {
       input,
@@ -557,19 +558,16 @@ export class WebAudioTransport {
       fx,
       generation: this._playGeneration,
       reanchor: (at: AutomationTiming) => {
-        // Cleared BEFORE the value write, and unconditionally. `scheduleVolumeLane`
-        // clears as part of scheduling, but returns early when the group no
-        // longer has a lane — and a scheduled envelope outranks a `.value`
-        // write, so deleting a group's automation mid-session otherwise left
-        // the previous pass's ramps still owning the param (for a fade-out,
-        // silence) for the rest of the session.
+        // Cleared BEFORE the value write, and unconditionally: a scheduled envelope
+        // outranks a `.value` write, so a deleted lane's ramps would keep the param.
         clearParamLane([{ param: fader.gain }]);
         // Re-resolved, not the element captured at build time — see `resolveEl`.
         const live = resolveEl();
         fader.gain.value = clampGroupVolume(readAudioGroupVolume(live));
         muteGain.gain.value = live?.hasAttribute("data-hidden") ? 0 : 1;
         fx?.reanchor(at);
-        if (live) scheduleVolumeLane(live, fader, at);
+        // The handle books the fader from the element the bus was built with.
+        if (live && live !== groupEl) scheduleVolumeLane(live, fader, at);
       },
       dispose: () => {
         try {
@@ -708,7 +706,7 @@ export class WebAudioTransport {
     try {
       sourceNode.disconnect();
       scheduled.fx?.dispose();
-      scheduled.laneNode?.disconnect();
+      scheduled.laneNode.disconnect();
       scheduled.gainNode.disconnect();
     } catch {
       // Already torn down.
@@ -762,11 +760,10 @@ export class WebAudioTransport {
       // so effects see the raw signal and volume automation rides on their
       // output — the same order the offline render uses. Preview and render run
       // the identical graph builders, so what is heard here is what is written.
-      const laneNode = clipVolumeLaneStage(this._ctx, el, gainNode, timing);
-      const fx = attachElementFxChain(this._ctx, el, sourceNode, laneNode ?? gainNode, timing);
       gainNode.connect(
         this.resolveDestination(el, scheduledAt, compositionTime, safeRate) ?? this._masterGain,
       );
+      const { fx, laneNode } = attachClipStages(this._ctx, el, sourceNode, gainNode, timing);
 
       this._rate = safeRate;
       this._rateAnchorCtx = scheduledAt;
@@ -786,7 +783,7 @@ export class WebAudioTransport {
         // Playhead already past the clip end — discard the nodes we built.
         sourceNode.disconnect();
         fx?.dispose();
-        laneNode?.disconnect();
+        laneNode.disconnect();
         gainNode.disconnect();
         return null;
       }
@@ -887,7 +884,7 @@ export class WebAudioTransport {
         if (isBufferSource(source)) source.sourceNode.stop();
         source.sourceNode.disconnect();
         source.fx?.dispose();
-        source.laneNode?.disconnect();
+        source.laneNode.disconnect();
         source.gainNode.disconnect();
       } catch {
         // already stopped
