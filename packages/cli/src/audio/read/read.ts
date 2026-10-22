@@ -194,6 +194,7 @@ export async function readAudio(
       quality === "best" &&
       (cachedStems(stemDir) !== null || typeof (await stemsAccess()) !== "string");
     if (
+      (entry.analysis.separation !== "stems" || cachedStems(stemDir) !== null) &&
       entry.analysis.version === READ_VERSION &&
       entry.transcriptKey === transcriptKey &&
       !stemsNowPossible

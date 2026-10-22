@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { readAudio } from "./read.js";
-import { fetchStems } from "./stems.js";
+import { cachedStems, fetchStems } from "./stems.js";
 
 const RATE = 22_050;
 const dir = mkdtempSync(join(tmpdir(), "hf-audio-read-"));
@@ -168,6 +168,8 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     stemFiles.drums = wav("drums.wav", 8, boom);
     stemFiles.piano = wav("piano.wav", 8, bed);
     stemFiles.bass = wav("bass.wav", 8, () => 0);
+    stemFiles.guitar = stemFiles.bass;
+    stemFiles.other = stemFiles.bass;
     stemFiles["../../escape"] = stemFiles.bass;
     const path = wav("episode.wav", 8, (t) => voiced(t) + boom(t) + bed(t));
     vi.stubEnv("HEYGEN_API_KEY", "test-key");
@@ -180,7 +182,7 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     expect(polls).toBe(1);
     expect(analysis).toMatchObject({
       separation: "stems",
-      stems: ["bass", "drums", "piano", "vocals"],
+      stems: ["bass", "drums", "guitar", "other", "piano", "vocals"],
       warnings: [expect.stringContaining("no transcript")],
     });
     expect(analysis.voice!.source).toBe("activity");
@@ -194,6 +196,32 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     expect(existsSync(join(cacheDir, "stems"))).toBe(true);
     await readAudio(path, "episode.wav", { cacheDir, quality: "best" });
     expect(stemCalls).toBe(1);
+  });
+
+  it("falls back on partial stems and retries instead of caching unmeasured layers as silence", async () => {
+    for (const name of Object.keys(stemFiles)) delete stemFiles[name];
+    stemFiles.vocals = wav("partial-vocals.wav", 2, voiced);
+    const path = wav("partial.wav", 2, voiced);
+    vi.stubEnv("HEYGEN_API_KEY", "test-key");
+    const cacheDir = join(dir, "cache-partial");
+    const partial = await readAudio(path, "partial.wav", { cacheDir, quality: "best" });
+    expect(partial.analysis).toMatchObject({ separation: "mix", effects: null, music: null });
+    expect(partial.analysis.warnings.join("\n")).toContain("incomplete separation: missing drums");
+    const callsBefore = stemCalls;
+    const silence = wav("partial-silence.wav", 2, () => 0);
+    for (const name of ["drums", "bass", "guitar", "piano", "other"]) stemFiles[name] = silence;
+    const complete = await readAudio(path, "partial.wav", { cacheDir, quality: "best" });
+    expect(complete.cached).toBe(false);
+    expect(complete.analysis.separation).toBe("stems");
+    expect(stemCalls).toBe(callsBefore + 1);
+
+    const stemDir = join(cacheDir, "stems", complete.analysis.sha256.slice(0, 12));
+    writeFileSync(join(stemDir, "stems.json"), JSON.stringify({ vocals: "vocals.audio" }));
+    expect(cachedStems(stemDir)).toBeNull();
+    const repaired = await readAudio(path, "partial.wav", { cacheDir, quality: "best" });
+    expect(repaired.cached).toBe(false);
+    expect(stemCalls).toBe(callsBefore + 2);
+    expect(Object.keys(cachedStems(stemDir)!)).toHaveLength(6);
   });
 
   it.each(["/put", "/v3/audio/stems"])(

@@ -58,7 +58,8 @@ export function cachedStems(dir: string): Record<string, string> | null {
   const done = join(dir, DONE);
   if (!existsSync(done)) return null;
   const names = JSON.parse(readFileSync(done, "utf8")) as Record<string, string>;
-  const paths = Object.fromEntries(Object.entries(names).map(([n, f]) => [n, join(dir, f)]));
+  if (!STEM_NAMES.every((name) => typeof names[name] === "string")) return null;
+  const paths = Object.fromEntries(STEM_NAMES.map((name) => [name, join(dir, names[name]!)]));
   return Object.values(paths).every((p) => existsSync(p)) ? paths : null;
 }
 
@@ -134,8 +135,11 @@ export async function fetchStems(
         `stem separation failed${current.error?.message ? `: ${current.error.message}` : ""}`,
       );
     const stems = current.stems ?? [];
-    if (!stems.some((s) => s.name === VOICE_STEM))
-      throw new Error("the stems service returned no vocals stem");
+    const missing = STEM_NAMES.filter((name) => !stems.some((stem) => stem.name === name));
+    if (missing.length)
+      throw new Error(
+        `the stems service returned an incomplete separation: missing ${missing.join(", ")}`,
+      );
     mkdirSync(dir, { recursive: true });
     const names: Record<string, string> = {};
     for (const name of STEM_NAMES) {
