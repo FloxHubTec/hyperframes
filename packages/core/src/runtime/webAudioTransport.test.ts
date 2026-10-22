@@ -1006,6 +1006,35 @@ describe("WebAudioTransport", () => {
         expect(rampsAfter(laneGain, before)).toContainEqual([3, 110]);
       });
 
+      it("restores unity after a playing clip's volume lane is removed", async () => {
+        const { el, laneGain, transport, mock } = await playBed(lane([{ t: 0, v: 0.25 }]), "2");
+        transport.setElementVolume(el, 1, 2);
+
+        el.removeAttribute("data-automation");
+        await Promise.resolve();
+
+        const booked = (laneGain.gain as unknown as { setValueAtTime: ReturnType<typeof vi.fn> })
+          .setValueAtTime.mock.calls;
+        expect(booked.at(-1)).toEqual([1, 100]);
+        expect(mock.gainNodes[2]!.gain.value * booked.at(-1)![0]).toBe(2);
+      });
+
+      it("restores the static group gain after its playing volume lane is removed", async () => {
+        document.body.innerHTML = `<hf-audio-group id="vo" data-volume="2"></hf-audio-group>`;
+        const group = document.getElementById("vo")!;
+        group.setAttribute("data-automation", lane([{ t: 0, v: 0.25 }]));
+        const { transport, mock, gen } = setupGroupTransport();
+        await scheduleGrouped(transport, gen, "a", "vo");
+        const fader = mock.gainNodes[4]!;
+
+        group.removeAttribute("data-automation");
+        await Promise.resolve();
+
+        const booked = (fader.gain as unknown as { setValueAtTime: ReturnType<typeof vi.fn> })
+          .setValueAtTime.mock.calls;
+        expect(booked.at(-1)).toEqual([2, 100]);
+      });
+
       it("holds a group's gain times its lane under the ceiling, through a ramp", async () => {
         document.body.innerHTML = `<hf-audio-group id="vo" data-volume="2"></hf-audio-group>`;
         document.getElementById("vo")!.setAttribute("data-automation", CROSSING);

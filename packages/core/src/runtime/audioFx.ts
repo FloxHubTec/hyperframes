@@ -28,6 +28,7 @@ import {
   type AutomationTiming,
 } from "../audio/audioFxAutomation.js";
 import type { FxParamTarget } from "../audio/audioFxGraph.js";
+import { clampAudioGain } from "../audioGain.js";
 import {
   audioFxWorkletsReady,
   buildFxChain,
@@ -147,6 +148,14 @@ export function scheduleVolume(
   return [{ param: target.param }];
 }
 
+function restoreStaticVolume(target: VolumeTarget, at: AutomationTiming): void {
+  clearParamLane([target]);
+  target.param.setValueAtTime(
+    target.gainAhead ? 1 : clampAudioGain(target.gain?.() ?? 1),
+    at.scheduledAt,
+  );
+}
+
 export function attachElementFxChain(
   ctx: BaseAudioContext,
   el: { getAttribute?(name: string): string | null },
@@ -235,12 +244,18 @@ export function attachElementFxChain(
       return;
     }
     const automation = readAutomation(el, next, attrs.automation);
-    automated = [
-      ...(handle
-        ? scheduleChainAutomation(automation, next, handle.nodes, at, handle.presets)
-        : []),
-      ...(volume ? scheduleVolume(volume, automation, at) : []),
-    ];
+    const fxTargets = handle
+      ? scheduleChainAutomation(automation, next, handle.nodes, at, handle.presets)
+      : [];
+    const volumeTargets = volume ? scheduleVolume(volume, automation, at) : [];
+    if (
+      volume &&
+      volumeTargets.length === 0 &&
+      automated.some((target) => target.param === volume.param)
+    ) {
+      restoreStaticVolume(volume, at);
+    }
+    automated = [...fxTargets, ...volumeTargets];
   };
 
   // The reference frame every later reschedule measures from. Mutable because a
