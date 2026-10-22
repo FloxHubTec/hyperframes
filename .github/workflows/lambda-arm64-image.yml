@@ -86,15 +86,20 @@ jobs:
         run: >-
           docker buildx build --progress=plain --platform linux/arm64 --target video
           --build-context task=staged/task --load -t hf-video:ci packages/aws-lambda/image
-      - name: ffmpeg and Chrome run in the image
-        run: >-
-          docker run --rm --entrypoint /var/lang/bin/node -e AWS_EXECUTION_ENV=AWS_Lambda_nodejs22.x
-          -v "$PWD/packages/aws-lambda/image/smoke-video.mjs:/var/task/smoke-video.mjs:ro"
-          hf-video:ci /var/task/smoke-video.mjs
+      - name: ffmpeg and Chrome run under the image's own Lambda runtime
+        run: |
+          docker run -d --name hf-smoke -p 9001:8080 \
+            -v "$PWD/packages/aws-lambda/image/smoke-video.mjs:/var/task/smoke-video.mjs:ro" \
+            hf-video:ci smoke-video.handler
+          reply=$(curl -sS --retry 30 --retry-all-errors --retry-delay 1 \
+            -d '{}' http://localhost:9001/2015-03-31/functions/function/invocations)
+          docker logs hf-smoke
+          echo "$reply"
+          jq -e '.arch == "arm64" and .screenshotBytes > 0 and (.ffmpeg | startswith("ffmpeg version 7.0.2"))' <<<"$reply"
       - name: The Lambda runtime loads the handler
         run: |
           docker run -d --name hf-video -p 9000:8080 hf-video:ci
-          reply=$(curl -sS --retry 20 --retry-connrefused --retry-delay 1 \
+          reply=$(curl -sS --retry 30 --retry-all-errors --retry-delay 1 \
             -d '{"Action":"not-an-action"}' http://localhost:9000/2015-03-31/functions/function/invocations)
           docker logs hf-video
           echo "$reply"
