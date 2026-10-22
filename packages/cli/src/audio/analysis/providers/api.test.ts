@@ -204,10 +204,11 @@ describe("apiProvider", () => {
         downbeats: { times: measured.filter((_, k) => k % 4 === 0).map((t) => t - 0.02), meter: 4 },
       } satisfies AudioApiResponse,
     });
-    const analysis = await analyzeSignal(signal, { capabilities: ["beats", "downbeats", "bpm"] }, [
-      apiProvider,
-      signalProvider,
-    ]);
+    const analysis = await analyzeSignal(
+      signal,
+      { quality: "best", capabilities: ["beats", "downbeats", "bpm"] },
+      [apiProvider, signalProvider],
+    );
 
     expect(received).toHaveLength(1);
     const [call] = received;
@@ -249,6 +250,7 @@ describe("apiProvider", () => {
     configure();
     reply = () => ({ status: 200, body: { version: 1, beats: { times: [0.5, 1, 1.5] } } });
     const analysis = await analyzeSignal(clicks(8), {
+      quality: "best",
       capabilities,
       provider: { bpm: "signal" },
     });
@@ -271,6 +273,7 @@ describe("apiProvider", () => {
       });
       await expect(
         analyzeSignal(clicks(8), {
+          quality: "best",
           capabilities: ["describe", "beats", "bpm"],
           provider,
         }),
@@ -296,10 +299,11 @@ describe("apiProvider", () => {
         describe: { text: "clicks", tags: [{ label: "click", score: 0.9 }] },
       },
     });
-    const analysis = await analyzeSignal(signal, { capabilities: ["sections", "describe"] }, [
-      apiProvider,
-      signalProvider,
-    ]);
+    const analysis = await analyzeSignal(
+      signal,
+      { quality: "best", capabilities: ["sections", "describe"] },
+      [apiProvider, signalProvider],
+    );
     expect(received.map((r) => r.request.capabilities)).toEqual([["sections"], ["describe"]]);
     expect(new Set(received.map((r) => r.idempotencyKey)).size).toBe(2);
     expect(uploads).toBe(1);
@@ -320,7 +324,7 @@ describe("apiProvider", () => {
   it("falls through to signal processing with a warning when the service fails or answers in another shape", async () => {
     configure();
     reply = () => ({ status: 503, body: { error: { message: "busy" } } });
-    const failed = await analyzeSignal(clicks(8), { capabilities: ["beats"] }, [
+    const failed = await analyzeSignal(clicks(8), { quality: "best", capabilities: ["beats"] }, [
       apiProvider,
       signalProvider,
     ]);
@@ -330,7 +334,7 @@ describe("apiProvider", () => {
     ]);
 
     reply = () => ({ status: 200, body: { version: 1, beats: { times: ["soon"] } } });
-    const garbled = await analyzeSignal(clicks(8), { capabilities: ["beats"] }, [
+    const garbled = await analyzeSignal(clicks(8), { quality: "best", capabilities: ["beats"] }, [
       apiProvider,
       signalProvider,
     ]);
@@ -352,7 +356,7 @@ describe("apiProvider", () => {
     reply = () => ({ status: 200, body: { version: 1, describe: { tags: [] } } });
     await analyzeSignal(
       { sampleRate: rate, channels: [left, right] },
-      { capabilities: ["describe"] },
+      { quality: "best", capabilities: ["describe"] },
       [apiProvider],
     );
 
@@ -402,7 +406,7 @@ describe("apiProvider", () => {
       reply = () => ({ status: 200, body: { version: 1, describe: { tags: [] } } });
       await analyzeSignal(
         { sampleRate: rate, channels: [left, right] },
-        { capabilities: ["describe"] },
+        { quality: "best", capabilities: ["describe"] },
         [apiProvider],
       );
       const wav = Buffer.from(received[0]!.audio.bytes);
@@ -417,14 +421,22 @@ describe("apiProvider", () => {
     configure();
     enveloped = false;
     reply = () => ({ status: 200, body: { version: 1, describe: { text: "bare", tags: [] } } });
-    const analysis = await analyzeSignal(clicks(2), { capabilities: ["describe"] }, [apiProvider]);
+    const analysis = await analyzeSignal(
+      clicks(2),
+      { quality: "best", capabilities: ["describe"] },
+      [apiProvider],
+    );
     expect(analysis.values.describe).toEqual({ text: "bare", tags: [] });
   });
 
   it("never sends the key anywhere but the x-api-key header", async () => {
     configure();
     reply = () => ({ status: 401, body: { error: { message: "bad key" } } });
-    const analysis = await analyzeSignal(clicks(8), { capabilities: ["describe"] }, [apiProvider]);
+    const analysis = await analyzeSignal(
+      clicks(8),
+      { quality: "best", capabilities: ["describe"] },
+      [apiProvider],
+    );
     expect(JSON.stringify(analysis)).not.toContain("test-key");
     const [call] = received;
     expect(call).toMatchObject({ apiKey: "test-key", authorization: undefined });

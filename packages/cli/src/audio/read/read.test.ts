@@ -132,7 +132,7 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
       }),
     );
     const cacheDir = join(dir, "cache-mix");
-    const first = await readAudio(path, "talk.wav", { cacheDir });
+    const first = await readAudio(path, "talk.wav", { cacheDir, quality: "best" });
     expect(first.cached).toBe(false);
     expect(first.analysis).toMatchObject({ separation: "mix", stems: [], music: null });
     expect(first.analysis.voice!.sentences.map((s) => s.text)).toEqual(["一口气了解。", "伊朗"]);
@@ -141,13 +141,13 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     const text = readFileSync(first.textPath, "utf8");
     expect(text).toContain('voice   "一口气了解。"');
     expect(text).toContain("pause   1.0 s");
-    const again = await readAudio(path, "talk.wav", { cacheDir });
+    const again = await readAudio(path, "talk.wav", { cacheDir, quality: "best" });
     expect(again.cached).toBe(true);
     writeFileSync(
       `${path}.transcript.json`,
       JSON.stringify({ words: [{ text: "换了", start: 0.5, end: 2 }] }),
     );
-    const edited = await readAudio(path, "talk.wav", { cacheDir });
+    const edited = await readAudio(path, "talk.wav", { cacheDir, quality: "best" });
     expect(edited.cached).toBe(false);
     expect(edited.analysis.voice!.sentences[0]!.text).toBe("换了");
   });
@@ -160,7 +160,10 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     const path = wav("episode.wav", 8, (t) => voiced(t) + boom(t) + bed(t));
     vi.stubEnv("HEYGEN_API_KEY", "test-key");
     const cacheDir = join(dir, "cache-stems");
-    const { analysis, textPath } = await readAudio(path, "episode.wav", { cacheDir });
+    const { analysis, textPath } = await readAudio(path, "episode.wav", {
+      cacheDir,
+      quality: "best",
+    });
     expect(stemRequest).toEqual({ version: 1, audio: { type: "asset_id", asset_id: "episode" } });
     expect(polls).toBe(1);
     expect(analysis).toMatchObject({
@@ -177,20 +180,19 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     expect(analysis.music!.segments.map((s) => s.entry)).toEqual(["start", "resumes"]);
     expect(readFileSync(textPath, "utf8")).toContain("effect  boom (S1): low");
     expect(existsSync(join(cacheDir, "stems"))).toBe(true);
-    await readAudio(path, "episode.wav", { cacheDir });
+    await readAudio(path, "episode.wav", { cacheDir, quality: "best" });
     expect(stemCalls).toBe(1);
   });
 
-  it("keeps audio on the machine at quality local, and reads neither voice nor effects from a bare mix", async () => {
-    process.env.HYPERFRAMES_AUDIO_STEMS_URL = `${origin()}/v3/audio/stems`;
-    process.env.HYPERFRAMES_AUDIO_API_KEY = "test-key";
+  it("keeps audio on the machine by default, and reads neither voice nor effects from a bare mix", async () => {
     const path = wav("local.wav", 3, voiced);
-    const { analysis } = await readAudio(path, "local.wav", {
-      cacheDir: join(dir, "cache-local"),
-      quality: "local",
-    });
+    vi.stubEnv("HEYGEN_API_KEY", "test-key");
+    const callsBefore = stemCalls;
+    const { analysis } = await readAudio(path, "local.wav", { cacheDir: join(dir, "cache-local") });
     expect(analysis).toMatchObject({ separation: "mix", voice: null, effects: null });
     expect(analysis.warnings[0]).toContain("quality local keeps audio on this machine");
+    expect(analysis.warnings[0]).toContain("--quality best");
+    expect(stemCalls).toBe(callsBefore);
     expect(analysis.warnings[1]).toContain("no transcript and no stems");
   });
 });

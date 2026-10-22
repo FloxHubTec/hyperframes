@@ -74,7 +74,9 @@ async function stemsFor(
   const cached = cachedStems(dir);
   if (cached) return cached;
   if (quality !== "best") {
-    warnings.push(`not separated into stems: quality ${quality} keeps audio on this machine`);
+    warnings.push(
+      `not separated into stems: quality ${quality} keeps audio on this machine; --quality best separates it through HeyGen`,
+    );
     return null;
   }
   const access = await stemsAccess();
@@ -176,7 +178,7 @@ export async function readAudio(
   file: string,
   options: ReadOptions,
 ): Promise<ReadResult> {
-  const quality = options.quality ?? "best";
+  const quality = options.quality ?? "local";
   const sha = await sha256(path);
   const transcript = transcriptFor(path, options.transcript);
   const transcriptKey = fingerprint(transcript);
