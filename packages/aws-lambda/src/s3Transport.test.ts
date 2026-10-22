@@ -24,6 +24,7 @@ import {
   untarDirectory,
   putContentStoreFile,
   uploadContentAddressedFileToS3,
+  uploadFileToS3,
 } from "./s3Transport.js";
 
 let scratchRoot: string;
@@ -278,6 +279,17 @@ describe("presignVerifiedS3GetUrl", () => {
   });
 });
 
+describe("single-PUT uploads", () => {
+  it("resends the file from a fresh read after a dropped connection", async () => {
+    const source = join(scratchRoot, "single-retry.bin");
+    writeFileSync(source, "chunk bytes");
+    const s3 = new ContentAddressedFakeS3();
+    s3.resetNextPut = true;
+    await uploadFileToS3(s3.asClient(), source, "s3://bucket/chunks/0.mp4");
+    expect(s3.objects.get("s3://bucket/chunks/0.mp4")?.bytes.toString()).toBe("chunk bytes");
+  });
+});
+
 describe("objects over the single-PUT limit", () => {
   const bigSize = MAX_SINGLE_PUT_BYTES + 1;
   // sha256 of bigSize zero bytes, computed outside this code.
@@ -460,6 +472,7 @@ class ContentAddressedFakeS3 {
   readonly objects = new Map<string, { bytes: Buffer; sha256: string; lastModified?: Date }>();
   readonly copies: Record<string, unknown>[] = [];
   putCount = 0;
+  resetNextPut = false;
   raceOnNextPut: { bytes: Buffer; sha256: string } | undefined;
 
   asClient(): import("@aws-sdk/client-s3").S3Client {
@@ -533,6 +546,13 @@ class ContentAddressedFakeS3 {
       const chunks: Buffer[] = [];
       for await (const chunk of value.input.Body ?? []) chunks.push(Buffer.from(chunk));
       const bytes = Buffer.concat(chunks);
+      if (this.resetNextPut) {
+        this.resetNextPut = false;
+        throw Object.assign(new Error("socket hang up"), {
+          name: "TimeoutError",
+          code: "ECONNRESET",
+        });
+      }
       const checksum = createHash("sha256").update(bytes).digest("base64");
       if (value.input.ChecksumSHA256 !== undefined && value.input.ChecksumSHA256 !== checksum) {
         const error = new Error("checksum mismatch");
