@@ -19,7 +19,7 @@ import {
   validateVariablesAgainstProject,
 } from "../../utils/variables.js";
 import { warnOnDimensionMismatch } from "./_dimensions.js";
-import { chunkArchitecture, requireStack, type StackOutputs, stateFilePath } from "./state.js";
+import { videoArchitecture, requireStack, type StackOutputs, stateFilePath } from "./state.js";
 
 // Dynamic-import the SDK so tsup keeps it out of the static-import head of
 // the CLI bundle. See sites.ts loadSDK() for the full rationale.
@@ -188,7 +188,7 @@ async function waitForCompletion(
       executionArn,
       region: stack.region,
       defaultMemorySizeMb: stack.lambdaMemoryMb,
-      chunkArchitecture: chunkArchitecture(stack),
+      videoArchitecture: videoArchitecture(stack),
     });
     for (const warning of progress.warnings) {
       if (!warned.has(warning)) console.warn(c.warn(warning));

@@ -46,8 +46,8 @@ export interface GetRenderProgressOptions {
    * `LambdaMemoryMb` parameter the stack was deployed with.
    */
   defaultMemorySizeMb?: number;
-  /** Architecture of the function that renders chunks: `arm64` when the stack has a video function. */
-  chunkArchitecture?: LambdaArchitecture;
+  /** Architecture of the stack's video function, which runs the plan and the chunks: `arm64` when it has one. */
+  videoArchitecture?: LambdaArchitecture;
   region?: string;
   /** Test injection seam. */
   sfn?: SFNClient;
@@ -116,10 +116,10 @@ export async function getRenderProgress(opts: GetRenderProgressOptions): Promise
   const endedAt = describe.stopDate?.toISOString() ?? null;
 
   const history = await loadFullHistory(sfn, opts.executionArn);
-  const summary = summarizeHistory(history, memoryMb, opts.chunkArchitecture);
+  const summary = summarizeHistory(history, memoryMb, opts.videoArchitecture);
   const mapRun = findChunkMapRun(history);
   const warnings: string[] = [];
-  if (mapRun?.exited) addChunkResults(summary, mapRun.output, memoryMb, opts.chunkArchitecture);
+  if (mapRun?.exited) addChunkResults(summary, mapRun.output, memoryMb, opts.videoArchitecture);
   else if (mapRun) {
     await addRunningMapRun(sfn, mapRun.arn, summary, memoryMb).catch((err: unknown) => {
       if ((err as { name?: unknown } | null)?.name !== "AccessDeniedException") throw err;
@@ -273,7 +273,7 @@ interface HistorySummary {
 function summarizeHistory(
   events: HistoryEvent[],
   memoryMb: number,
-  chunkArchitecture?: LambdaArchitecture,
+  videoArchitecture?: LambdaArchitecture,
 ): HistorySummary {
   let framesRendered = 0;
   let totalFrames: number | null = null;
@@ -325,7 +325,7 @@ function summarizeHistory(
           billedInvocation(
             payload,
             memoryMb,
-            stateArchitecture(currentLambdaState, chunkArchitecture),
+            stateArchitecture(currentLambdaState, videoArchitecture),
           ),
         );
         applyPayloadFrameCounts(payload, currentLambdaState, (delta) => {
@@ -343,7 +343,7 @@ function summarizeHistory(
           billedInvocation(
             payload,
             memoryMb,
-            stateArchitecture(currentLambdaState, chunkArchitecture),
+            stateArchitecture(currentLambdaState, videoArchitecture),
           ),
         );
         applyPayloadFrameCounts(payload, currentLambdaState, (delta) => {
@@ -500,12 +500,14 @@ function billedInvocation(
   };
 }
 
-/** Only RenderChunk runs on the video function; every other state runs on the x86 one. */
+/** The video function runs the plan and the chunks; audio and assemble run on the render function. */
 function stateArchitecture(
   state: string | null,
-  chunkArchitecture: LambdaArchitecture | undefined,
+  videoArchitecture: LambdaArchitecture | undefined,
 ): LambdaArchitecture | undefined {
-  return isRenderChunkState(state) ? chunkArchitecture : undefined;
+  return state === "Plan" || state === "PlanV2" || isRenderChunkState(state)
+    ? videoArchitecture
+    : undefined;
 }
 
 function inferBilledMs(payload: unknown): number {

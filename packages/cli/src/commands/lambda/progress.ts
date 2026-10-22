@@ -7,7 +7,7 @@ import { setCommandExitCode } from "../../utils/commandResult.js";
  */
 
 import { c } from "../../ui/colors.js";
-import { chunkArchitecture, requireStack } from "./state.js";
+import { videoArchitecture, requireStack } from "./state.js";
 
 export interface ProgressArgs {
   /** Full SFN execution ARN OR the renderId (== execution name). */
@@ -33,7 +33,7 @@ export async function runProgress(args: ProgressArgs): Promise<void> {
     executionArn,
     region: stack.region,
     defaultMemorySizeMb: stack.lambdaMemoryMb,
-    chunkArchitecture: chunkArchitecture(stack),
+    videoArchitecture: videoArchitecture(stack),
   });
 
   if (args.json) {

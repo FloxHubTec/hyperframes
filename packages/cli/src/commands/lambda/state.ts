@@ -29,7 +29,7 @@ export interface StackOutputs {
   deployedAt: string;
 }
 
-export function chunkArchitecture(stack: StackOutputs): "arm64" | undefined {
+export function videoArchitecture(stack: StackOutputs): "arm64" | undefined {
   return stack.videoFunctionName ? "arm64" : undefined;
 }
 

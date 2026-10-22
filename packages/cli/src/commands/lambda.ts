@@ -124,7 +124,7 @@ export default defineCommand({
     "video-arch": {
       type: "string",
       description:
-        "x86_64 | arm64: where chunks render; arm64 adds a container-image function (default: x86_64)",
+        "x86_64 | arm64: where the plan and chunks run; arm64 adds a container-image function (default: x86_64)",
     },
     "skip-build": { type: "boolean", description: "Reuse existing handler.zip (deploy)" },
 
