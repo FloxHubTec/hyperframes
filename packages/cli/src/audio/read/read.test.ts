@@ -101,7 +101,7 @@ beforeAll(async () => {
     const reply: Reply = (status, value) =>
       res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
     const route = routes.get(`${req.method} ${req.url}`);
-    if (route) return route(reply, req, bytes);
+    if (typeof route === "function") return route(reply, req, bytes);
     const stem = req.url?.match(/^\/stem\/(\w+)\.wav$/)?.[1];
     if (stem && stemFiles[stem]) return res.writeHead(200).end(readFileSync(stemFiles[stem]));
     res.writeHead(404).end();
