@@ -12,6 +12,7 @@ import {
   DescribeRepositoriesCommand,
   ECRClient,
   InitiateLayerUploadCommand,
+  ListTagsForResourceCommand,
   PutImageCommand,
   type Repository,
   type Tag,
@@ -37,11 +38,11 @@ export interface EnsureEcrRepositoryOptions {
   ecr?: ECRClient;
   region?: string;
   repositoryName: string;
-  /** Applied only when the repository is created; an existing repository keeps its tags. */
+  /** Set on create. An existing repository is adopted only if it already carries every one. */
   tags?: Tag[];
 }
 
-/** Create the repository, or look it up when it already exists. */
+/** Create the repository, or adopt an existing one that carries `tags`. */
 export async function ensureEcrRepository(
   opts: EnsureEcrRepositoryOptions,
 ): Promise<{ repositoryUri: string }> {
@@ -56,7 +57,21 @@ export async function ensureEcrRepository(
   const found = await ecr.send(
     new DescribeRepositoriesCommand({ repositoryNames: [repositoryName] }),
   );
-  return { repositoryUri: repositoryUriOf(found.repositories?.[0], repositoryName) };
+  const repository = found.repositories?.[0];
+  if (tags?.length) {
+    const listed = await ecr.send(
+      new ListTagsForResourceCommand({ resourceArn: repository?.repositoryArn }),
+    );
+    const has = new Map((listed.tags ?? []).map((tag) => [tag.Key, tag.Value]));
+    const missing = tags.filter((tag) => has.get(tag.Key) !== tag.Value);
+    if (missing.length > 0) {
+      const wanted = missing.map((tag) => `${tag.Key}=${tag.Value}`).join(", ");
+      throw new Error(
+        `[ensureEcrRepository] ${repositoryName} already exists without ${wanted}; refusing to adopt a repository this caller did not create`,
+      );
+    }
+  }
+  return { repositoryUri: repositoryUriOf(repository, repositoryName) };
 }
 
 function repositoryUriOf(repository: Repository | undefined, repositoryName: string): string {

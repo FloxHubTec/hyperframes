@@ -61,9 +61,14 @@ class FakeEcr {
   DescribeRepositoriesCommand(input: { repositoryNames: string[] }): unknown {
     return {
       repositories: input.repositoryNames.map((name) => ({
+        repositoryArn: `arn:aws:ecr:r:1:repository/${name}`,
         repositoryUri: this.repositories.get(name),
       })),
     };
+  }
+
+  ListTagsForResourceCommand(input: { resourceArn: string }): unknown {
+    return { tags: this.repositoryTags.get(input.resourceArn.split("/").pop() ?? "") ?? [] };
   }
 
   BatchCheckLayerAvailabilityCommand(input: { layerDigests: string[] }): unknown {
@@ -343,5 +348,20 @@ describe("ensureEcrRepository", () => {
 
     expect(repositoryUri).toBe(`${REGISTRY}/hyperframes-render`);
     expect(ecr.calls).toEqual(["CreateRepositoryCommand", "DescribeRepositoriesCommand"]);
+  });
+
+  it("adopts an existing repository only when it carries the tags", async () => {
+    const ecr = new FakeEcr();
+    const tags = [{ Key: "hyperframes:stack", Value: "s" }];
+    await ensureEcrRepository({ ecr: asEcr(ecr), repositoryName: "s-video", tags });
+
+    const again = await ensureEcrRepository({ ecr: asEcr(ecr), repositoryName: "s-video", tags });
+    expect(again.repositoryUri).toBe(`${REGISTRY}/s-video`);
+
+    ecr.repositories.set("other-video", `${REGISTRY}/other-video`);
+    ecr.repositoryTags.set("other-video", [{ Key: "hyperframes:stack", Value: "other" }]);
+    await expect(
+      ensureEcrRepository({ ecr: asEcr(ecr), repositoryName: "other-video", tags }),
+    ).rejects.toThrow("other-video already exists without hyperframes:stack=s");
   });
 });
