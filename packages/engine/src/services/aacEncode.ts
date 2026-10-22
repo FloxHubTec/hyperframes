@@ -77,7 +77,6 @@ export async function encodeAac(
       segments.map(({ trim, path }) =>
         runFfmpeg(
           [
-            // Scalar DSP keeps AAC bytes identical across CPU architectures.
             "-cpuflags",
             "0",
             "-i",
