@@ -40,6 +40,7 @@ export async function pushVideoImage(
     const { repositoryUri } = await sdk.ensureEcrRepository({
       region: opts.region,
       repositoryName,
+      tags: [{ Key: "hyperframes:stack", Value: opts.stackName }],
     });
     deps.log(`→ Pushing the arm64 video image to ${repositoryUri}`);
     const pushed = await sdk.pushImageToEcr({

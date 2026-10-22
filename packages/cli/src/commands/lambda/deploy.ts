@@ -26,7 +26,6 @@ export interface DeployArgs {
   reservedConcurrency?: number;
   chromeSource: "sparticuz" | "chrome-headless-shell";
   lambdaMemoryMb: number;
-  /** `arm64` renders chunks on an arm64 container-image function; plan, audio and assemble stay x86. */
   videoArch: VideoArch;
   /** Override the handler-ZIP rebuild step. Useful for CI runs that already built it. */
   skipBuild: boolean;

@@ -68,7 +68,7 @@ function setup(opts: { architecture?: string } = {}) {
 
 describe("pushVideoImage", () => {
   it("outside a checkout, pushes the pinned image to the stack's repository and returns its digest URI", async () => {
-    const { deps, pushedLayouts, pushed } = setup();
+    const { deps, sdk, pushedLayouts, pushed } = setup();
     const result = await pushVideoImage(
       { stackName: "My-Stack", region: "r", inCheckout: false },
       deps,
@@ -78,6 +78,10 @@ describe("pushVideoImage", () => {
       repositoryName: "my-stack-video",
     });
     expect(pushedLayouts).toEqual(['{"manifests":[]}']);
+    // destroy deletes this repository, so it is only ever one this stack created and tagged.
+    expect(sdk.ensureEcrRepository).toHaveBeenCalledWith(
+      expect.objectContaining({ tags: [{ Key: "hyperframes:stack", Value: "My-Stack" }] }),
+    );
     expect(existsSync(pushed[0]?.layoutDir as string)).toBe(false);
   });
 
