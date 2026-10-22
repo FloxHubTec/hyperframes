@@ -77,8 +77,9 @@ async function videoImageTarball(
 
 function noVideoImageMessage(inCheckout: boolean): string {
   return inCheckout
-    ? "[lambda deploy] --video-arch arm64 from a checkout needs an image built from that checkout: " +
-        "build packages/aws-lambda/image's `video` target as an OCI tarball and set HYPERFRAMES_LAMBDA_VIDEO_IMAGE to it."
+    ? "[lambda deploy] An arm64 deploy from a checkout needs an image built from that checkout: " +
+        "build packages/aws-lambda/image's `video` target as an OCI tarball and set HYPERFRAMES_LAMBDA_VIDEO_IMAGE to it, " +
+        "or pass --video-arch x86_64."
     : "[lambda deploy] The installed @hyperframes/aws-lambda pins no arm64 video image. " +
-        "Install a newer one, or deploy without --video-arch arm64.";
+        "Install a newer one, or pass --video-arch x86_64.";
 }

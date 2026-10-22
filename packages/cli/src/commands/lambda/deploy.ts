@@ -42,12 +42,15 @@ export async function runDeploy(args: Partial<DeployArgs> = {}): Promise<void> {
     reservedConcurrency: args.reservedConcurrency,
     chromeSource: args.chromeSource ?? "sparticuz",
     lambdaMemoryMb: args.lambdaMemoryMb ?? DEFAULT_MEMORY_MB,
-    videoArch: args.videoArch ?? "x86_64",
+    videoArch: args.videoArch ?? "arm64",
     skipBuild: args.skipBuild ?? false,
   };
 
   if (resolved.videoArch === "arm64" && resolved.chromeSource !== "sparticuz") {
-    throw new Error("[lambda deploy] The arm64 video image bundles sparticuz Chrome only.");
+    throw new Error(
+      "[lambda deploy] The arm64 video image bundles sparticuz Chrome only. " +
+        "Pass --video-arch x86_64 to deploy with --chrome-source chrome-headless-shell.",
+    );
   }
   const root = repoRoot();
   const samDir = await prepareSamDir(root, resolved);

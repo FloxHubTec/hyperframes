@@ -51,13 +51,13 @@ describe("runDeploy", () => {
   });
 
   it("outside a checkout, refuses a Chrome source the prebuilt handler does not bundle", async () => {
-    await expect(runDeploy({ chromeSource: "chrome-headless-shell" })).rejects.toThrow(
-      /needs a hyperframes checkout/,
-    );
+    await expect(
+      runDeploy({ videoArch: "x86_64", chromeSource: "chrome-headless-shell" }),
+    ).rejects.toThrow(/needs a hyperframes checkout/);
     expect(samDeploy).not.toHaveBeenCalled();
   });
 
-  it("inside a checkout, deploys the checkout's template as before", async () => {
+  it("with --video-arch x86_64, deploys the checkout's template with no video function", async () => {
     dir = mkdtempSync(join(tmpdir(), "hf-deploy-checkout-"));
     const samDir = join(dir, "examples", "aws-lambda");
     mkdirSync(samDir, { recursive: true });
@@ -66,13 +66,13 @@ describe("runDeploy", () => {
     writeFileSync(join(dir, "packages", "aws-lambda", "dist", "handler.zip"), "zip");
     root.value = dir;
 
-    await runDeploy({ skipBuild: true });
+    await runDeploy({ skipBuild: true, videoArch: "x86_64" });
     expect(vi.mocked(samDeploy).mock.calls[0]?.[0]).toMatchObject({ samDir });
     expect(vi.mocked(samDeploy).mock.calls[0]?.[0].videoImageUri).toBeUndefined();
     expect(pushVideoImage).not.toHaveBeenCalled();
   });
 
-  it("with --video-arch arm64, deploys the pushed image and records its repository", async () => {
+  it("by default, deploys the pushed arm64 image and records its repository", async () => {
     dir = mkdtempSync(join(tmpdir(), "hf-deploy-arm64-"));
     mkdirSync(join(dir, "examples", "aws-lambda"), { recursive: true });
     writeFileSync(join(dir, "examples", "aws-lambda", "template.yaml"), "Resources: {}\n");
@@ -80,16 +80,19 @@ describe("runDeploy", () => {
     writeFileSync(join(dir, "packages", "aws-lambda", "dist", "handler.zip"), "zip");
     root.value = dir;
 
-    await runDeploy({ skipBuild: true, videoArch: "arm64", stackName: "hf" });
+    await runDeploy({ skipBuild: true, stackName: "hf" });
     expect(vi.mocked(pushVideoImage).mock.calls[0]?.[0]).toMatchObject({ inCheckout: true });
     expect(vi.mocked(samDeploy).mock.calls[0]?.[0].videoImageUri).toBe("repo@sha256:a");
     expect(written[0]).toMatchObject({ videoRepository: "hf-video" });
   });
 
-  it("refuses arm64 with a Chrome source the video image does not bundle", async () => {
-    await expect(
-      runDeploy({ videoArch: "arm64", chromeSource: "chrome-headless-shell" }),
-    ).rejects.toThrow("sparticuz Chrome only");
-    expect(pushVideoImage).not.toHaveBeenCalled();
-  });
+  it.each([undefined, "arm64" as const])(
+    "refuses arm64 (--video-arch %s) with a Chrome source the video image does not bundle, naming x86_64",
+    async (videoArch) => {
+      await expect(runDeploy({ videoArch, chromeSource: "chrome-headless-shell" })).rejects.toThrow(
+        /sparticuz Chrome only[\s\S]*--video-arch x86_64/,
+      );
+      expect(pushVideoImage).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -124,7 +124,7 @@ export default defineCommand({
     "video-arch": {
       type: "string",
       description:
-        "x86_64 | arm64: where the plan and chunks run; arm64 adds a container-image function (default: x86_64)",
+        "arm64 | x86_64: where the plan and chunks run; arm64 adds a container-image function (default: arm64)",
     },
     "skip-build": { type: "boolean", description: "Reuse existing handler.zip (deploy)" },
 
@@ -491,8 +491,8 @@ const parseQuality = (raw: unknown): (typeof QUALITIES)[number] | undefined =>
 const parseChromeSource = (raw: unknown): (typeof CHROME_SOURCES)[number] =>
   parseEnum(raw, CHROME_SOURCES, "[lambda deploy] --chrome-source", "sparticuz")!;
 const VIDEO_ARCHS = ["x86_64", "arm64"] as const satisfies readonly VideoArch[];
-const parseVideoArch = (raw: unknown): (typeof VIDEO_ARCHS)[number] =>
-  parseEnum(raw, VIDEO_ARCHS, "[lambda deploy] --video-arch", "x86_64")!;
+const parseVideoArch = (raw: unknown): (typeof VIDEO_ARCHS)[number] | undefined =>
+  parseEnum(raw, VIDEO_ARCHS, "[lambda deploy] --video-arch", undefined);
 
 /**
  * Lambda flavor of the shared {@link parseOutputResolutionFlag} — same wire

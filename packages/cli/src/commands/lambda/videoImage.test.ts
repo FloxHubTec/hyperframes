@@ -96,7 +96,16 @@ describe("pushVideoImage", () => {
     const { deps, sdk } = setup();
     await expect(
       pushVideoImage({ stackName: "s", region: "r", inCheckout: true }, deps),
-    ).rejects.toThrow("set HYPERFRAMES_LAMBDA_VIDEO_IMAGE");
+    ).rejects.toThrow(/set HYPERFRAMES_LAMBDA_VIDEO_IMAGE[\s\S]*--video-arch x86_64/);
+    expect(sdk.pushImageToEcr).not.toHaveBeenCalled();
+  });
+
+  it("outside a checkout, an adapter that pins no image names --video-arch x86_64", async () => {
+    const { deps, sdk } = setup();
+    sdk.prebuiltVideoImage.mockReturnValue(undefined as never);
+    await expect(
+      pushVideoImage({ stackName: "s", region: "r", inCheckout: false }, deps),
+    ).rejects.toThrow(/pins no arm64 video image[\s\S]*--video-arch x86_64/);
     expect(sdk.pushImageToEcr).not.toHaveBeenCalled();
   });
 
