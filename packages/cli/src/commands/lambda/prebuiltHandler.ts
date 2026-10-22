@@ -56,7 +56,6 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
-/** A release asset `@hyperframes/aws-lambda` pins by URL, sha256 and size. */
 export interface PinnedAsset {
   version: string;
   url: string;
@@ -64,7 +63,6 @@ export interface PinnedAsset {
   bytes: number;
 }
 
-/** A verified copy of `pinned` in the cache, downloaded unless one is already there. */
 export async function fetchPinned(
   pinned: PinnedAsset,
   asset: { fileName: string; label: string; urlOverride?: string },
