@@ -16,29 +16,24 @@ import {
 } from "../analysis/providers/shared.js";
 
 /**
- * The stem separation service contract.
- *
- * Request: `POST /v3/audio/stems` on the HeyGen API with the CLI's HeyGen credential, or `POST
- * <HYPERFRAMES_AUDIO_STEMS_URL>` with `x-api-key: <HYPERFRAMES_AUDIO_API_KEY>`; a new `Idempotency-Key`, and
- * `{ version: 1, audio: { type: "asset_id", asset_id } }`. The recording is uploaded
- * first as 192 kb/s stereo MP3 through the same origin's asset direct-upload routes.
- *
- * Response: `{ data: StemsJob }`, or a bare `StemsJob`. While `status` is `pending` or `processing`,
- * `GET <that url>/<id>` returns the job again. A `completed` job lists one URL per stem;
- * the names are vocals, drums, bass, guitar, piano and other.
+ * Upload 192 kb/s stereo MP3 through the service origin's direct-upload routes, then POST
+ * `{ version: 1, audio: { type: "asset_id", asset_id } }` with one Idempotency-Key.
+ * A completed response wraps StemsJob in `data`. Retry 409 `request_in_progress` or a dropped
+ * connection with the same key and body; other HTTP errors carry `{ error: { code, message } }`.
+ * A complete separation contains vocals, drums, bass, guitar, piano and other.
  */
 interface StemsJob {
   id: string;
-  status: "pending" | "processing" | "completed" | "failed";
+  status: "pending" | "completed" | "failed";
   stems?: { name: string; url: string }[];
-  error?: { message?: string };
+  failure_message?: string;
 }
 
 const URL_ENV = "HYPERFRAMES_AUDIO_STEMS_URL";
 const KEY_ENV = "HYPERFRAMES_AUDIO_API_KEY";
 const TIMEOUT_ENV = "HYPERFRAMES_AUDIO_STEMS_TIMEOUT_MS";
 const DEFAULT_TIMEOUT_MS = 30 * 60_000;
-const POLL_MS = 5000;
+const RETRY_MS = 5000;
 const DONE = "stems.json";
 const STEM_NAMES = ["vocals", "drums", "bass", "guitar", "piano", "other"] as const;
 
@@ -63,7 +58,25 @@ export function cachedStems(dir: string): Record<string, string> | null {
   return Object.values(paths).every((p) => existsSync(p)) ? paths : null;
 }
 
+class StillRunning extends Error {}
+
+const DROPPED = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_SOCKET"]);
+
+const dropped = (error: unknown) =>
+  error instanceof TypeError &&
+  DROPPED.has((error.cause as { code?: string } | undefined)?.code ?? "");
+
+async function stillRunning(response: Response): Promise<boolean> {
+  if (response.status !== 409) return false;
+  const body = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { error?: { code?: string } } | null;
+  return body?.error?.code === "request_in_progress";
+}
+
 async function job(response: Response): Promise<StemsJob> {
+  if (await stillRunning(response)) throw new StillRunning();
   if (!response.ok) throw await serviceFailure(response, "the stems service");
   const body = (await response.json()) as { data?: StemsJob } | StemsJob | null;
   const value = (body && "data" in body ? body.data : body) as StemsJob | undefined;
@@ -81,6 +94,21 @@ async function encoded(path: string, dir: string, signal: AbortSignal): Promise<
     { windowsHide: true, maxBuffer: 8 * 1024 * 1024, signal },
   );
   return out;
+}
+
+async function separated(
+  url: string,
+  request: RequestInit,
+  signal: AbortSignal,
+): Promise<StemsJob> {
+  for (;;) {
+    try {
+      return await job(await fetch(url, { ...request, signal }));
+    } catch (error) {
+      if (!(error instanceof StillRunning || dropped(error))) throw error;
+      await sleep(RETRY_MS, undefined, { signal });
+    }
+  }
 }
 
 /** Separate the recording through the configured service and save each stem into `dir`. */
@@ -107,10 +135,10 @@ export async function fetchStems(
       idempotencyKey: randomUUID(),
       signal,
     });
-    let current = await job(
-      await fetch(url, {
+    const current = await separated(
+      url,
+      {
         method: "POST",
-        signal,
         redirect: "error",
         headers: {
           ...headers,
@@ -118,21 +146,12 @@ export async function fetchStems(
           "content-type": "application/json",
         },
         body: JSON.stringify({ version: 1, audio: { type: "asset_id", asset_id: asset.asset_id } }),
-      }),
+      },
+      signal,
     );
-    while (current.status === "pending" || current.status === "processing") {
-      await sleep(POLL_MS, undefined, { signal });
-      current = await job(
-        await fetch(`${url.replace(/\/$/, "")}/${encodeURIComponent(current.id)}`, {
-          redirect: "error",
-          headers,
-          signal,
-        }),
-      );
-    }
     if (current.status !== "completed")
       throw new Error(
-        `stem separation failed${current.error?.message ? `: ${current.error.message}` : ""}`,
+        `stem separation failed${current.failure_message ? `: ${current.failure_message}` : ""}`,
       );
     const stems = current.stems ?? [];
     const missing = STEM_NAMES.filter((name) => !stems.some((stem) => stem.name === name));

@@ -614,9 +614,10 @@ Effects and music are read from stems. At `--quality best` the
 recording is separated into vocals, drums, bass, guitar, piano and other by
 HeyGen's `/v3/audio/stems`, with your HeyGen credential (see
 [audio services](#audio-services)): it is uploaded as 192 kb/s MP3 through the
-same origin's direct-upload endpoints, `POST` starts a job, and `GET <url>/<id>`
-is polled until the stems are ready (`HYPERFRAMES_AUDIO_STEMS_TIMEOUT_MS`, 30
-minutes by default). Effects are read
+same origin's direct-upload endpoints. The separation request waits for the
+stems; an in-progress response or dropped connection retries the same request
+with the same idempotency key (`HYPERFRAMES_AUDIO_STEMS_TIMEOUT_MS`, 30 minutes
+by default). Effects are read
 from the drums stem and the music from the other four. Without stems, effects are
 read from the mix outside speech and the music is not read; with neither stems nor
 a transcript, voice and effects are not read either, because the mix alone does

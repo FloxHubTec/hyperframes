@@ -47,9 +47,9 @@ const bed = (t: number) =>
 let server: Server;
 let stalledPath: string | null = null;
 let onStalled = () => {};
-let polls = 0;
 let stemCalls = 0;
 let stemRequest: unknown = null;
+const stemKeys: unknown[] = [];
 const stemFiles: Record<string, string> = {};
 
 async function body(req: IncomingMessage) {
@@ -74,10 +74,9 @@ const routes = new Map<string, (reply: Reply, req: IncomingMessage, bytes: Buffe
       expect(req.headers["x-api-key"]).toBe("test-key");
       stemCalls++;
       stemRequest = JSON.parse(bytes.toString());
-      reply(202, { data: { id: "job-1", status: "processing" } });
-    },
-    "GET /v3/audio/stems/job-1": (reply) => {
-      polls++;
+      stemKeys.push(req.headers["idempotency-key"]);
+      if (stemCalls === 1)
+        return reply(409, { error: { code: "request_in_progress", message: "Retry shortly." } });
       reply(200, {
         data: {
           id: "job-1",
@@ -179,7 +178,8 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
       quality: "best",
     });
     expect(stemRequest).toEqual({ version: 1, audio: { type: "asset_id", asset_id: "episode" } });
-    expect(polls).toBe(1);
+    expect(stemKeys).toHaveLength(2);
+    expect(stemKeys[1]).toBe(stemKeys[0]);
     expect(analysis).toMatchObject({
       separation: "stems",
       stems: ["bass", "drums", "guitar", "other", "piano", "vocals"],
@@ -195,7 +195,7 @@ describe.skipIf(!ffmpeg)("readAudio", () => {
     expect(readFileSync(textPath, "utf8")).toContain("effect  boom (S1): low");
     expect(existsSync(join(cacheDir, "stems"))).toBe(true);
     await readAudio(path, "episode.wav", { cacheDir, quality: "best" });
-    expect(stemCalls).toBe(1);
+    expect(stemCalls).toBe(2);
   });
 
   it("falls back on partial stems and retries instead of caching unmeasured layers as silence", async () => {
