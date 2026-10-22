@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
   DEFAULT_HISTORY_ROOT,
@@ -276,20 +284,22 @@ const WRITE_CALLS = new Set([
   "fsync",
 ]);
 
-function absent(path: string): boolean {
+function openedForWriting(path: string): boolean {
   try {
-    lstatSync(path);
-    return false;
+    accessSync(path, constants.R_OK);
+    return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT";
   }
 }
 
-/** A write the history could not make, never a read it could not: `open` counts only when it was creating the file. */
+/** A write the history could not make, never a read: a denied `open` of a missing or readable file was a write. */
 function failedWrite(error: unknown): boolean {
   const { code = "", syscall = "", path } = error as NodeJS.ErrnoException;
   if (!CANNOT_WRITE.has(code)) return false;
-  return WRITE_CALLS.has(syscall) || (syscall === "open" && path !== undefined && absent(path));
+  return (
+    WRITE_CALLS.has(syscall) || (syscall === "open" && path !== undefined && openedForWriting(path))
+  );
 }
 
 export async function withReader<T>(

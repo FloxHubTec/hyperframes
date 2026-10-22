@@ -745,6 +745,25 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       expect(listed.err).toMatch(/could not write this project's history/i);
     });
 
+    it("lists the history when its log can be read but not appended to", async () => {
+      const { hf, write, turn } = project();
+      await hf();
+      const entry = await turn("claude", "Retitle", "index.html", "A2");
+      const [id] = readdirSync(historyDeps.historyRoot).filter((name) =>
+        existsSync(join(historyDeps.historyRoot, name, "log.jsonl")),
+      );
+      const log = join(historyDeps.historyRoot, id!, "log.jsonl");
+      chmodSync(log, 0o444);
+      onTestFinished(() => chmodSync(log, 0o644));
+      write("notes.html", "N2");
+      const listed = await hf("--json");
+      expect(listed.code).toBe(0);
+      expect(JSON.parse(listed.out).entries.map((item: { id: string }) => item.id)).toContain(
+        entry.id,
+      );
+      expect(listed.err).toMatch(/could not write this project's history/i);
+    });
+
     it("lists the history when only its stored file copies cannot be written", async () => {
       const { hf, write, turn } = project();
       await hf();
