@@ -24,7 +24,16 @@ export interface StackOutputs {
   /** Lambda memory MB used during deploy; carried so cost math doesn't have to re-derive it. */
   lambdaMemoryMb: number;
   reservedConcurrency?: number;
+  /** The arm64 video function that renders chunks, when deployed with `--video-arch arm64`. */
+  videoFunctionName?: string;
+  /** ECR repository holding the video function's image; kept until `destroy` deletes it. */
+  videoRepository?: string;
   deployedAt: string;
+}
+
+/** Architecture `getRenderProgress` prices chunk invocations at. */
+export function chunkArchitecture(stack: StackOutputs): "arm64" | undefined {
+  return stack.videoFunctionName ? "arm64" : undefined;
 }
 
 const STATE_DIR_NAME = ".hyperframes";

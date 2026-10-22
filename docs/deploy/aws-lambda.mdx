@@ -231,6 +231,8 @@ If progress doesn't advance for >10 minutes, check the Step Functions execution 
 
 The render bucket is created with CloudFormation `Retain` on delete — `hyperframes lambda destroy` (or `sam delete`) tears the function + state machine down but the bucket survives. This is intentional: it protects final-rendered MP4s from being lost when you re-deploy. To fully reclaim storage, empty + delete the bucket via the AWS console / `aws s3 rb`.
 
+A stack deployed with `--video-arch arm64` also has an ECR repository, `<stack>-video`, holding the video function's image. `hyperframes lambda destroy` deletes it after the stack.
+
 ### `STACK_TOO_OLD`
 
 The stack was deployed by an earlier version that cannot read this version's sites. Redeploy it (`hyperframes lambda deploy`), then render again. See [Upgrading](#upgrading-from-a-version-before-shared-content-storage).

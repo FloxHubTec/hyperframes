@@ -81,6 +81,21 @@ const REQUIRED_ACTIONS = {
     "cloudwatch:DescribeAlarms",
     "cloudwatch:PutMetricAlarm",
   ],
+  // `deploy --video-arch arm64` pushes the video image; Set/GetRepositoryPolicy let Lambda pull it.
+  ecr: [
+    "ecr:BatchCheckLayerAvailability",
+    "ecr:BatchGetImage",
+    "ecr:CompleteLayerUpload",
+    "ecr:CreateRepository",
+    "ecr:DeleteRepository",
+    "ecr:DescribeRepositories",
+    "ecr:GetDownloadUrlForLayer",
+    "ecr:GetRepositoryPolicy",
+    "ecr:InitiateLayerUpload",
+    "ecr:PutImage",
+    "ecr:SetRepositoryPolicy",
+    "ecr:UploadLayerPart",
+  ],
   iam: [
     "iam:AttachRolePolicy",
     "iam:CreateRole",

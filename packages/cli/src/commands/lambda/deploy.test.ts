@@ -11,16 +11,27 @@ vi.mock("./sam.js", async (importOriginal) => ({
   samDeploy: vi.fn(),
   fetchStackOutputs: vi.fn(() => ({ bucketName: "b", functionName: "f", stateMachineArn: "s" })),
 }));
-vi.mock("./state.js", () => ({ DEFAULT_STACK_NAME: "hf", writeStackOutputs: () => "state.json" }));
+const written = vi.hoisted(() => [] as Record<string, unknown>[]);
+vi.mock("./state.js", () => ({
+  DEFAULT_STACK_NAME: "hf",
+  readStackOutputs: () => null,
+  writeStackOutputs: (outputs: Record<string, unknown>) => written.push(outputs) && "state.json",
+}));
+vi.mock("./videoImage.js", () => ({
+  pushVideoImage: vi.fn(async () => ({ imageUri: "repo@sha256:a", repositoryName: "hf-video" })),
+}));
 
 const { runDeploy } = await import("./deploy.js");
 const { samDeploy } = await import("./sam.js");
+const { pushVideoImage } = await import("./videoImage.js");
 
 let dir: string | undefined;
 let quiet: { mockRestore(): void };
 
 beforeEach(() => {
   vi.mocked(samDeploy).mockClear();
+  vi.mocked(pushVideoImage).mockClear();
+  written.length = 0;
   quiet = vi.spyOn(console, "log").mockImplementation(() => {});
 });
 
@@ -57,5 +68,28 @@ describe("runDeploy", () => {
 
     await runDeploy({ skipBuild: true });
     expect(vi.mocked(samDeploy).mock.calls[0]?.[0]).toMatchObject({ samDir });
+    expect(vi.mocked(samDeploy).mock.calls[0]?.[0].videoImageUri).toBeUndefined();
+    expect(pushVideoImage).not.toHaveBeenCalled();
+  });
+
+  it("with --video-arch arm64, deploys the pushed image and records its repository", async () => {
+    dir = mkdtempSync(join(tmpdir(), "hf-deploy-arm64-"));
+    mkdirSync(join(dir, "examples", "aws-lambda"), { recursive: true });
+    writeFileSync(join(dir, "examples", "aws-lambda", "template.yaml"), "Resources: {}\n");
+    mkdirSync(join(dir, "packages", "aws-lambda", "dist"), { recursive: true });
+    writeFileSync(join(dir, "packages", "aws-lambda", "dist", "handler.zip"), "zip");
+    root.value = dir;
+
+    await runDeploy({ skipBuild: true, videoArch: "arm64", stackName: "hf" });
+    expect(vi.mocked(pushVideoImage).mock.calls[0]?.[0]).toMatchObject({ inCheckout: true });
+    expect(vi.mocked(samDeploy).mock.calls[0]?.[0].videoImageUri).toBe("repo@sha256:a");
+    expect(written[0]).toMatchObject({ videoRepository: "hf-video" });
+  });
+
+  it("refuses arm64 with a Chrome source the video image does not bundle", async () => {
+    await expect(
+      runDeploy({ videoArch: "arm64", chromeSource: "chrome-headless-shell" }),
+    ).rejects.toThrow("sparticuz Chrome only");
+    expect(pushVideoImage).not.toHaveBeenCalled();
   });
 });
