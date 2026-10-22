@@ -1258,26 +1258,29 @@ describe("handler dispatch", () => {
     },
   );
 
-  it("joins webm chunks with the audio task's track when the plan left its audio out", async () => {
-    const { s3, assembleMock, assemble, planned } = await planStitched(2, true, 4, "webm");
-    expect(planned.SeparateAudio).toBe(true);
-    const audioUri = "s3://bucket/renders/f/audio/audio.m4a";
-    s3.objects.set(audioUri, Buffer.from("AAC-FROM-AUDIO-TASK"));
-    let audio: string | null = null;
-    assembleMock.mockImplementationOnce(async (_p, _c, audioPath, outputPath) => {
-      audio = audioPath && readFileSync(audioPath, "utf-8");
-      writeFileSync(outputPath, "LOCAL-JOIN");
-      return { outputPath, durationMs: 1, framesEncoded: 60, fileSize: 10 };
-    });
-    const chunks = [0, 1].map((index) => {
-      const uri = `s3://bucket/renders/f/chunks/000${index}.webm`;
-      s3.objects.set(uri, Buffer.from("WEBM"));
-      return uri;
-    });
-    await assemble(chunks, audioUri);
-    expect(assembleMock).toHaveBeenCalledTimes(1);
-    expect(audio).toBe("AAC-FROM-AUDIO-TASK");
-  });
+  it.each(["webm", "mov"] as const)(
+    "joins %s chunks with the audio task's track when the plan left its audio out",
+    async (format) => {
+      const { s3, assembleMock, assemble, planned } = await planStitched(2, true, 4, format);
+      expect(planned.SeparateAudio).toBe(true);
+      const audioUri = "s3://bucket/renders/f/audio/audio.m4a";
+      s3.objects.set(audioUri, Buffer.from("AAC-FROM-AUDIO-TASK"));
+      let audio: string | null = null;
+      assembleMock.mockImplementationOnce(async (_p, _c, audioPath, outputPath) => {
+        audio = audioPath && readFileSync(audioPath, "utf-8");
+        writeFileSync(outputPath, "LOCAL-JOIN");
+        return { outputPath, durationMs: 1, framesEncoded: 60, fileSize: 10 };
+      });
+      const chunks = [0, 1].map((index) => {
+        const uri = `s3://bucket/renders/f/chunks/000${index}.${format}`;
+        s3.objects.set(uri, Buffer.from("CHUNK"));
+        return uri;
+      });
+      await assemble(chunks, audioUri);
+      expect(assembleMock).toHaveBeenCalledTimes(1);
+      expect(audio).toBe("AAC-FROM-AUDIO-TASK");
+    },
+  );
 
   it("refuses an audio URI for a v2 plan that ships its own audio", async () => {
     const { assemble } = await planStitched(1);
