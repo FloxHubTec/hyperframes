@@ -275,6 +275,39 @@ describe("getRenderProgress", () => {
     expect(progress.costs.breakdown.lambdaUsd).toBeCloseTo(0.001, 4);
   });
 
+  it("prices only the RenderChunk invocations at the chunk architecture", async () => {
+    const sfn = new FakeSFN();
+    sfn.historyPages = [
+      [
+        stateEntered("Plan"),
+        taskSucceeded({ Action: "plan", TotalFrames: 30, DurationMs: 1_000 }),
+        stateEntered("RenderChunk"),
+        taskSucceeded({ Action: "renderChunk", FramesEncoded: 30, DurationMs: 4_000 }),
+        stateEntered("Assemble"),
+        taskSucceeded({ Action: "assemble", DurationMs: 2_000 }),
+      ],
+    ];
+    const progress = await getRenderProgress({
+      executionArn: "arn",
+      defaultMemorySizeMb: 10_240,
+      chunkArchitecture: "arm64",
+      sfn: sfn as unknown as SFNClient,
+    });
+    const billed = (ms: number) => ({
+      billedDurationMs: ms,
+      memorySizeMb: 10_240,
+      estimated: false,
+    });
+    const expected = [
+      billed(1_000),
+      { ...billed(4_000), architecture: "arm64" as const },
+      billed(2_000),
+    ];
+    expect(progress.costs.breakdown.lambdaUsd).toBe(
+      computeRenderCost(expected, 0).breakdown.lambdaUsd,
+    );
+  });
+
   it("captures Lambda failures with the enclosing state name", async () => {
     const sfn = new FakeSFN();
     const failed: HistoryEvent = {
@@ -449,6 +482,42 @@ describe("getRenderProgress", () => {
         estimated: false,
       }));
       expect(p.costs.breakdown.lambdaUsd).toBe(computeRenderCost(billed, 0).breakdown.lambdaUsd);
+    });
+
+    it("prices chunks at the arm64 rate when an arm64 video function renders them", async () => {
+      const sfn = new FakeSFN();
+      const chunks = Array.from({ length: CHUNKS }, (_, i) => ({
+        ChunkIndex: i,
+        FramesEncoded: 16,
+        DurationMs: 4000,
+      }));
+      sfn.historyPages = [
+        [
+          ...parentUntilMapRun(3600),
+          {
+            type: "MapStateExited",
+            id: 1,
+            timestamp: new Date(),
+            stateExitedEventDetails: {
+              name: "RenderChunksV2",
+              output: JSON.stringify({ Chunks: chunks }),
+            },
+          } as HistoryEvent,
+        ],
+      ];
+      const p = await getRenderProgress({
+        executionArn: "arn:x",
+        chunkArchitecture: "arm64",
+        sfn: sfn as unknown as SFNClient,
+      });
+      const plan = { billedDurationMs: 1000, memorySizeMb: 10240, estimated: false };
+      const chunk = { billedDurationMs: 4000, memorySizeMb: 10240, estimated: false };
+      const arm64 = [plan, ...chunks.map(() => ({ ...chunk, architecture: "arm64" as const }))];
+      const allX86 = [plan, ...chunks.map(() => chunk)];
+      expect(p.costs.breakdown.lambdaUsd).toBe(computeRenderCost(arm64, 0).breakdown.lambdaUsd);
+      expect(p.costs.breakdown.lambdaUsd).toBeLessThan(
+        computeRenderCost(allX86, 0).breakdown.lambdaUsd,
+      );
     });
 
     it("surfaces a failed chunk's own error, reading only failed children", async () => {
