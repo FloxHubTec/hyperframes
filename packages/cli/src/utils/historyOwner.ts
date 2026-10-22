@@ -261,16 +261,27 @@ export async function withOwner<T>(
   }
 }
 
+const CANNOT_WRITE = new Set(["ENOSPC", "EDQUOT", "EACCES", "EPERM", "EROFS"]);
+
 export async function withReader<T>(
   dir: string | undefined,
   task: (reader: Reader) => Promise<T>,
 ): Promise<T> {
+  let ran = false;
   try {
-    return await withOwner(dir, (owner) => task(owner));
+    return await withOwner(dir, (owner) => {
+      ran = true;
+      return task(owner);
+    });
   } catch (error) {
-    if (!(error instanceof HistoryBusyError)) throw error;
+    const unwritable = CANNOT_WRITE.has((error as NodeJS.ErrnoException).code ?? "");
+    if (ran || !(error instanceof HistoryBusyError || unwritable)) throw error;
+    if (unwritable)
+      console.error(
+        `[hyperframes] Could not write this project's history (${(error as Error).message}); showing it as last recorded.`,
+      );
   }
-  // Busy is only thrown on opening, so the task has not run; an open turn's marker is left as it is.
+  // Opening failed, so the task has not run; an open turn's marker is left as it is.
   const view = readProjectHistory({
     projectDir: resolveProject(dir).dir,
     historyRoot: historyDeps.historyRoot,
