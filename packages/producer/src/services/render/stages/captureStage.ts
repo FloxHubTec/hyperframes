@@ -357,8 +357,6 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
 
   const captureOptions = buildCaptureOptions();
   const remedy = diskCaptureRemedy(cfg, job.config.format ?? "mp4", job.duration ?? 0, workerCount);
-  // No static preflight: raw-RGBA estimates refuse long sparse-alpha renders that fit by 100x, so the
-  // measured projection after the first frames is the only disk gate.
   const checkDiskProjection = createDiskCaptureProjection({
     framesDir,
     totalFrames,
