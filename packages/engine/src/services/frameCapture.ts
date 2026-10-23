@@ -1955,7 +1955,7 @@ export async function pollSubCompositionTimelines(
   return scriptFailureBail ? "script_failure" : "timeout";
 }
 
-async function pollVideosReady(
+export async function pollVideosReady(
   page: Page,
   skipIds: readonly string[],
   timeoutMs: number,
@@ -1965,7 +1965,9 @@ async function pollVideosReady(
     return Boolean(
       await page.evaluate((skipIdList: readonly string[]) => {
         const skip = new Set(skipIdList);
-        const vids = Array.from(document.querySelectorAll("video")).filter((v) => !skip.has(v.id));
+        const vids = Array.from(document.querySelectorAll("video"))
+          .filter((v) => !skip.has(v.id))
+          .filter((v) => !v.closest("[data-hidden]"));
         return (
           vids.length === 0 ||
           vids.every((v) => {
@@ -2568,6 +2570,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
         const skip = new Set(skipIdList);
         return Array.from(document.querySelectorAll("video"))
           .filter((v) => !skip.has(v.id))
+          .filter((v) => !v.closest("[data-hidden]"))
           .filter((v) => (v as HTMLVideoElement).readyState < 2 && !(v as HTMLVideoElement).error)
           .map((v) => (v as HTMLVideoElement).src || v.getAttribute("src") || "(no src)")
           .join(", ");
@@ -2709,6 +2712,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
         const skip = new Set(skipIdList);
         return Array.from(document.querySelectorAll("video"))
           .filter((v) => !skip.has(v.id))
+          .filter((v) => !v.closest("[data-hidden]"))
           .filter((v) => (v as HTMLVideoElement).readyState < 2 && !(v as HTMLVideoElement).error)
           .map((v) => (v as HTMLVideoElement).src || v.getAttribute("src") || "(no src)")
           .join(", ");
