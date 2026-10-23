@@ -1015,10 +1015,9 @@ async function mixGroupMembers(
     ignoreKeyframes = false,
   ): Promise<RunFfmpegResult> => {
     const inputFilters = buildInputFilters(ignoreKeyframes, !useNormalize);
+    const padUnitySumOnceToFilm = `[mixed];[mixed]apad,asetpts=N/SR/TB,atrim=0:${formatFilterNumber(totalDuration)}`;
     const mixFilter = useNormalize
-      ? // Unity sum: a finished member adds silence, so padding each one to the film length only
-        // costs time. Pad the sum once, as the main mix does.
-        `${mixInputs}amix=inputs=${memberTracks.length}:duration=longest:dropout_transition=0:normalize=0[mixed];[mixed]apad,asetpts=N/SR/TB,atrim=0:${formatFilterNumber(totalDuration)}[out]`
+      ? `${mixInputs}amix=inputs=${memberTracks.length}:duration=longest:dropout_transition=0:normalize=0${padUnitySumOnceToFilm}[out]`
       : // Every member is padded and trimmed to totalDuration above, and
         // dropout_transition=0 keeps all N inputs active for that whole span.
         // amix's default normalize therefore divides by exactly N throughout;
