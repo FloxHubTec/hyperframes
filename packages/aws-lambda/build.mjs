@@ -20,6 +20,7 @@
 import { build } from "esbuild";
 import { execSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
+import { writePrebuiltTemplate } from "./scripts/prebuilt-template.mjs";
 
 rmSync("dist", { recursive: true, force: true });
 mkdirSync("dist", { recursive: true });
@@ -31,6 +32,7 @@ const sharedOpts = {
   format: "esm",
   minify: false,
   external: [
+    "@aws-sdk/client-ecr",
     "@aws-sdk/client-lambda",
     "@aws-sdk/client-s3",
     "@aws-sdk/client-sfn",
@@ -69,5 +71,8 @@ execSync(
   "tsc -p tsconfig.build.json --emitDeclarationOnly && node ../../scripts/rewrite-relative-import-extensions.mjs dist",
   { stdio: "inherit" },
 );
+
+// The template ships in every build, so a PR packs and size-checks what a release publishes.
+writePrebuiltTemplate("../..", "prebuilt");
 
 console.log("[Build] Complete: dist/{index,handler,sdk/index,cdk/index}.js + dist/_chunks + .d.ts");

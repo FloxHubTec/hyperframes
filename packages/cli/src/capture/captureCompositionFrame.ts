@@ -106,6 +106,7 @@ export interface OpenSettledCompositionPageOptions {
   navigationTimeoutMs?: number;
   renderReadyTimeoutMs: number;
   renderReadyWarningSuffix: string;
+  lateSubresourceTimeoutMs?: number;
   browserGpuMode?: BrowserGpuMode;
   signal?: AbortSignal;
   onBrowser?: (browser: Browser) => void;
@@ -114,6 +115,7 @@ export interface OpenSettledCompositionPageOptions {
   // Runs after the page exists but before page.goto, so console/pageerror/
   // request listeners can attach without missing load-time events.
   beforeNavigate?: (page: Page) => void | Promise<void>;
+  onLoaded?: () => void;
   // Started before the project was bundled; used only if it was launched with the same arguments.
   prelaunched?: PrelaunchedBrowser;
 }
@@ -249,16 +251,23 @@ async function waitForCompositionSettle(
       console.warn(`   ${c.warn("⚠")} Shader transitions did not finish pre-rendering`);
     });
 
-  await waitForLateSubresources(page);
+  await waitForLateSubresources(page, options.lateSubresourceTimeoutMs ?? CAPTURE_SETTLE_MS);
+  const { resolveConfig, waitForImagesReady } = await import("@hyperframes/engine");
+  const imageTimeoutMs = resolveConfig().playerReadyTimeout;
+  await waitForImagesReady(page, imageTimeoutMs, (sources) =>
+    console.warn(
+      `   ${c.warn("⚠")} Some images did not load within ${imageTimeoutMs}ms: ${sources}. They may show blank.`,
+    ),
+  );
   return runtimeReady;
 }
 
-async function waitForLateSubresources(page: Page): Promise<void> {
+async function waitForLateSubresources(page: Page, timeoutMs: number): Promise<void> {
   let cap: ReturnType<typeof setTimeout> | undefined;
-  const deadline = Date.now() + CAPTURE_SETTLE_MS;
+  const deadline = Date.now() + timeoutMs;
   const ready = (async () => {
     await page.waitForFunction(() => document.readyState === "complete", {
-      timeout: CAPTURE_SETTLE_MS,
+      timeout: timeoutMs,
     });
     await page.waitForNetworkIdle({
       idleTime: NETWORK_IDLE_MS,
@@ -273,7 +282,7 @@ async function waitForLateSubresources(page: Page): Promise<void> {
     await Promise.race([
       ready,
       new Promise((resolveCap) => {
-        cap = setTimeout(resolveCap, CAPTURE_SETTLE_MS);
+        cap = setTimeout(resolveCap, timeoutMs);
       }),
     ]);
   } catch {
@@ -318,11 +327,14 @@ export async function openSettledCompositionPage(
     options.onBrowserReady?.();
     const page = await chromeBrowser.newPage();
     await installPageFunctionGuard(page);
+    const { installMediaRenderIdBridge } = await import("@hyperframes/engine");
+    await installMediaRenderIdBridge(page);
     await page.setViewport(viewport);
     if (answer) await answerPageInProcess(page, url, answer);
     await options.beforeNavigate?.(page);
     await gotoWhenSent(page, url, pageNavigationTimeoutMs(options.navigationTimeoutMs));
     await assertWebGpuAdapterAvailable(page, requiresWebGpu, softwareWebGpu);
+    options.onLoaded?.();
     const renderReadyTimedOut = !(await waitForCompositionSettle(page, options));
     return { browser: chromeBrowser, page, renderReadyTimedOut };
   } catch (err) {
@@ -503,6 +515,16 @@ export async function seekCompositionTimeline(
   timeSeconds: number,
   options: SeekCompositionTimelineOptions = {},
 ): Promise<void> {
+  await seekCompositionTimelineOnly(page, timeSeconds, options);
+  await settleCompositionSeek(page, options);
+}
+
+/** The seek alone; `settleCompositionSeek` must follow, which is what finishes a blurred frame. */
+export async function seekCompositionTimelineOnly(
+  page: CompositionSeekPage,
+  timeSeconds: number,
+  options: SeekCompositionTimelineOptions = {},
+): Promise<void> {
   if (options.waitForPreferredSeekTargetMs !== undefined) {
     await waitForPreferredSeekTarget(page, options.waitForPreferredSeekTargetMs);
   }
@@ -514,7 +536,12 @@ export async function seekCompositionTimeline(
     options.exactTime === true,
     options.skipWebglDraws === true,
   );
+}
 
+export async function settleCompositionSeek(
+  page: CompositionSeekPage,
+  options: SeekCompositionTimelineOptions = {},
+): Promise<void> {
   await page.evaluate(
     async (barrier: SeekBarrierOptions) => {
       const waitForCompletion = Reflect.get(window, "__hfWaitForSeekCompletion");

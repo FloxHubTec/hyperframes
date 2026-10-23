@@ -2,7 +2,7 @@
 // fallow-ignore-file code-duplication
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   openSettledCompositionPage,
@@ -19,6 +19,8 @@ import {
   dropFailedProxyEchoes,
   runBrowserCheck,
   collectSeekClock,
+  mergeHelperDrafts,
+  samplingBrowserCount,
 } from "./checkBrowser.js";
 import type { ProjectDir } from "./project.js";
 
@@ -26,8 +28,19 @@ const mocks = vi.hoisted(() => ({
   bundleWithLocalizedFonts: vi.fn(async () => "<html></html>"),
   serverClose: vi.fn(async () => undefined),
   resolveProxy:
-    vi.fn<(projectDir: string, absoluteSourcePath: string, variant?: string) => Promise<string>>(),
+    vi.fn<
+      (
+        projectDir: string,
+        absoluteSourcePath: string,
+        variant?: string,
+        box?: { width: number; height: number },
+      ) => Promise<string>
+    >(),
   FfmpegUnavailableError: class FfmpegUnavailableError extends Error {},
+  getProxyCachePath: vi.fn(
+    (projectDir: string, sourcePath: string, _variant?: string, _box?: unknown) =>
+      `${sourcePath}.proxy.mp4`,
+  ),
   scanProjectMediaCodecMap: vi.fn<
     (...args: unknown[]) => Promise<
       Record<
@@ -82,9 +95,23 @@ vi.mock("@hyperframes/studio-server/media-codec-map", async (importOriginal) => 
 }));
 vi.mock("@hyperframes/studio-server/proxy-transcoder", () => ({
   FfmpegUnavailableError: mocks.FfmpegUnavailableError,
-  resolveProxies: (projectDir: string, sources: Array<{ sourcePath: string; variant: string }>) =>
+  getProxyCachePath: mocks.getProxyCachePath,
+  resolveProxies: (
+    projectDir: string,
+    sources: Array<{
+      sourcePath: string;
+      variant: string;
+      box?: { width: number; height: number };
+    }>,
+    onSettled: () => void = () => {},
+  ) =>
     Promise.allSettled(
-      sources.map(({ sourcePath, variant }) => mocks.resolveProxy(projectDir, sourcePath, variant)),
+      sources.map(({ sourcePath, variant, box }) =>
+        (box
+          ? mocks.resolveProxy(projectDir, sourcePath, variant, box)
+          : mocks.resolveProxy(projectDir, sourcePath, variant)
+        ).finally(onSettled),
+      ),
     ),
 }));
 
@@ -94,9 +121,13 @@ const PROJECT: ProjectDir = {
   indexPath: "/project/index.html",
 };
 
-// The overlap grid logs one marker per sample; keep them out of test output.
+// The overlap grid logs one marker per sample; keep them out of test output. One core keeps
+// the browser pass on one page unless a test says otherwise.
 beforeEach(() => {
   vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  vi.spyOn(os, "availableParallelism").mockReturnValue(1);
+  vi.spyOn(os, "freemem").mockReturnValue(16 * 1024 ** 3);
+  vi.spyOn(process, "availableMemory").mockReturnValue(16 * 1024 ** 3);
 });
 
 afterEach(() => {
@@ -177,7 +208,84 @@ it("carries raw browser geometry through the page driver and pipeline", async ()
   expect(mocks.serverClose).toHaveBeenCalledOnce();
 });
 
-it("runs the dense overlap grid in one page task, keeping each sample's time on what it logs", async () => {
+it("splits the samples over a second Chrome and reports what one Chrome reports", async () => {
+  mountCanvasFixture(`<p id="copy" data-layout-name="copy">Hi</p>`);
+  type Message = ReturnType<typeof fakeConsoleMessage>;
+  const run = async (cores: number, helper: "works" | "crashes" | "never opens" = "works") => {
+    vi.mocked(os.availableParallelism).mockReturnValue(cores);
+    let helperSeeks = 0;
+    const pages: ReturnType<typeof fakePage>[] = [];
+    const helperPages = new Set<unknown>();
+    const handlers = new Map<unknown, ((message: Message) => void)[]>();
+    const log = (page: unknown, text: string) =>
+      handlers.get(page)?.forEach((handler) => handler(fakeConsoleMessage("error", text)));
+    const browser = Object.assign(Object.create(null), {
+      close: vi.fn(async () => undefined),
+      process: () => ({ exitCode: 0, signalCode: null }),
+    });
+    vi.mocked(openSettledCompositionPage).mockImplementation(
+      async (_html: string, _url: string, options: OpenSettledCompositionPageOptions) => {
+        const page = fakePage();
+        page.on = vi.fn((event: string, handler: (message: Message) => void) => {
+          if (event === "console") handlers.set(page, [...(handlers.get(page) ?? []), handler]);
+        });
+        const opened = pages.push(page);
+        // Only the first page's open takes prelaunched Chromes.
+        if (!("prelaunched" in options)) helperPages.add(page);
+        if (helperPages.has(page) && helper === "never opens")
+          await new Promise((_, reject) => options.signal?.addEventListener("abort", reject));
+        options.onBrowser?.(browser);
+        await options.beforeNavigate?.(page);
+        log(page, `logged at load on page ${opened}`);
+        return { page, browser, renderReadyTimedOut: false };
+      },
+    );
+    vi.mocked(seekCompositionTimeline).mockImplementation(async (page, time) => {
+      if (helperPages.has(page) && helper === "crashes" && ++helperSeeks === 2) {
+        log(page, "renderer crashed");
+        throw new Error("Target closed");
+      }
+      log(page, `seeked to ${time}`);
+    });
+    const result = await runBrowserCheck(
+      PROJECT,
+      { ...DEFAULT_CHECK_OPTIONS, contrast: false },
+      { kind: "none" },
+      runAuditGrid,
+    );
+    const seeks = vi.mocked(seekCompositionTimeline).mock.calls;
+    vi.mocked(seekCompositionTimeline).mockClear();
+    return {
+      pages,
+      seekingPages: new Set(seeks.map(([page]) => page)).size,
+      messages: result.runtimeFindings.map((finding) => `${finding.time} ${finding.message}`),
+    };
+  };
+
+  const serial = await run(1);
+  const split = await run(4);
+  expect(serial.pages).toHaveLength(1);
+  expect(split.pages).toHaveLength(2);
+  expect(split.seekingPages).toBe(2);
+  const loads = (messages: string[]) => messages.filter((line) => line.includes("at load"));
+  const sampled = (messages: string[]) => messages.filter((line) => !line.includes("at load"));
+  expect(loads(serial.messages)).toHaveLength(1);
+  expect(loads(split.messages)).toHaveLength(1);
+  expect(sampled(split.messages)).toEqual(sampled(serial.messages));
+  expect(serial.messages.length).toBeGreaterThan(3);
+
+  const crashed = await run(4, "crashes");
+  expect(crashed.seekingPages).toBe(2);
+  expect(loads(crashed.messages)).toHaveLength(1);
+  expect(sampled(crashed.messages)).toEqual(sampled(serial.messages));
+  const unopened = await run(4, "never opens");
+  expect(unopened.pages).toHaveLength(2);
+  expect(unopened.seekingPages).toBe(1);
+  expect(loads(unopened.messages)).toHaveLength(1);
+  expect(sampled(unopened.messages)).toEqual(sampled(serial.messages));
+});
+
+it("runs the dense overlap grid in page tasks of at most 8 samples, keeping each sample's time on what it logs", async () => {
   mountCanvasFixture(
     `<section data-composition-file="scenes/copy.html"><p id="copy" data-layout-name="copy">Hi</p></section>`,
   );
@@ -233,13 +341,20 @@ it("runs the dense overlap grid in one page task, keeping each sample's time on 
   );
 
   expect(denseAudits.length).toBeGreaterThan(10);
-  expect(new Set(denseAudits).size).toBe(1);
+  const tasks = new Map<number, number>();
+  for (const calls of denseAudits) tasks.set(calls, (tasks.get(calls) ?? 0) + 1);
+  const perTask = [...tasks.values()];
+  expect(Math.max(...perTask)).toBeLessThanOrEqual(8);
+  expect(perTask).toHaveLength(Math.ceil(denseAudits.length / 8));
   expect(result.runtimeFindings).toContainEqual(
     expect.objectContaining({ code: "console_error", message: "thrown at 2.5", time: 2.5 }),
   );
-  expect(result.runtimeFindings).toContainEqual(
-    expect.objectContaining({ message: "queued during the grid", time: 0, timeRange: [0, 10] }),
+  const queued = result.runtimeFindings.filter(
+    (finding) => finding.message === "queued during the grid",
   );
+  expect(queued).toHaveLength(perTask.length);
+  expect(queued[0]).toMatchObject({ time: 0, timeRange: [0, expect.any(Number)] });
+  expect(queued.at(-1)?.timeRange?.[1]).toBe(10);
   expect(
     result.runtimeFindings.find((finding) => finding.message === "thrown at 2.5"),
   ).not.toHaveProperty("timeRange");
@@ -836,6 +951,76 @@ describe("keepBrokenImageAborts", () => {
   });
 });
 
+describe("samplingBrowserCount", () => {
+  const GB = 1024 ** 3;
+  it("uses a second Chrome only with a spare core, 250 MB free each and more than one sample", () => {
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 8, 16 * GB)).toBe(2);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 3, 1 * GB)).toBe(2);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 2, 16 * GB)).toBe(1);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 1, 2 * GB)).toBe(1);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 8, 400 * 1024 ** 2)).toBe(1);
+    expect(samplingBrowserCount({ ...DEFAULT_CHECK_OPTIONS, at: [1] }, 8, 16 * GB)).toBe(1);
+  });
+
+  it("counts a container's memory limit, not the host's free memory", () => {
+    vi.mocked(os.freemem).mockReturnValue(100 * GB);
+    vi.mocked(process.availableMemory).mockReturnValue(400 * 1024 ** 2);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 8)).toBe(1);
+    vi.mocked(process.availableMemory).mockReturnValue(16 * GB);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 8)).toBe(2);
+  });
+});
+
+describe("mergeHelperDrafts", () => {
+  const draft = (message: string, time: number) =>
+    ({ code: "console_error", severity: "error", message, time }) as const;
+  it("orders the helper's sample-loop messages by time and drops its load and same-time repeats", () => {
+    const primary = {
+      drafts: [draft("load", 0), draft("at 0", 0), draft("at 2", 2), draft("dense", 0)],
+      start: 1,
+      end: 3,
+    };
+    const helper = {
+      drafts: [draft("load", 0), draft("at 1", 1), draft("at 2", 2), draft("at 3", 3)],
+      start: 1,
+      end: 4,
+    };
+    expect(mergeHelperDrafts(primary, helper).map((entry) => entry.message)).toEqual([
+      "load",
+      "at 0",
+      "at 1",
+      "at 2",
+      "at 3",
+      "dense",
+    ]);
+  });
+
+  it("orders samples the first page redid after its own later ones", () => {
+    const primary = {
+      drafts: [draft("load", 0), draft("at 0", 0), draft("at 2", 2), draft("at 1", 1)],
+      start: 1,
+      end: 4,
+    };
+    const dropped = { drafts: [draft("at 1", 1)], start: Infinity, end: Infinity };
+    expect(mergeHelperDrafts(primary, dropped).map((entry) => entry.message)).toEqual([
+      "load",
+      "at 0",
+      "at 1",
+      "at 2",
+    ]);
+  });
+
+  it("adds nothing from a helper that never sampled", () => {
+    const primary = { drafts: [draft("load", 0)], start: 1, end: 1 };
+    const helper = {
+      drafts: [draft("load", 0)],
+      start: Number.POSITIVE_INFINITY,
+      end: Number.POSITIVE_INFINITY,
+    };
+    expect(mergeHelperDrafts(primary, helper)).toEqual(primary.drafts);
+  });
+});
+
 describe("dropFailedProxyEchoes", () => {
   it("keeps one finding for a failed proxy and drops the preview's repeats of it", () => {
     const at = (code: string, message: string, url?: string) =>
@@ -938,6 +1123,38 @@ describe("preResolveHostileMediaProxies", () => {
     expect(settled).toBe(true);
   });
 
+  it("makes the copy at the size that fills the composition, not at the source size", async () => {
+    const projectDir = mkProjectDir();
+    mocks.scanProjectMediaCodecMap.mockResolvedValue({
+      "/clip.mp4": {
+        codecName: "hevc",
+        browserHostile: true,
+        representativeMime: null,
+        hasAlpha: false,
+      },
+    });
+    mocks.resolveProxy.mockResolvedValue("/cache/clip.mp4");
+    const html =
+      '<html><body><div data-composition-id="root" data-width="1920" data-height="1080"></div></body></html>';
+
+    await preResolveHostileMediaProxies(projectDir, html);
+
+    // The page asks for the quantized stage size, so the copy and its cache check use that box.
+    const box = { width: 2048, height: 1448 };
+    expect(mocks.resolveProxy).toHaveBeenCalledWith(
+      projectDir,
+      join(projectDir, "clip.mp4"),
+      "h264",
+      box,
+    );
+    expect(mocks.getProxyCachePath).toHaveBeenCalledWith(
+      projectDir,
+      join(projectDir, "clip.mp4"),
+      "h264",
+      box,
+    );
+  });
+
   it("does nothing (no scan, no resolveProxy) when autoProxy is off in hyperframes.json", async () => {
     const projectDir = mkProjectDir();
     writeFileSync(
@@ -973,6 +1190,7 @@ describe("preResolveHostileMediaProxies", () => {
         }),
       ],
       failedPaths: new Set(["/clip.mp4"]),
+      files: [{ file: "clip.mp4", state: "failed", reason: "ffmpeg exited with code 1" }],
     });
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("media proxy pre-resolve: 0/1 ready, 1 failed"),
@@ -1019,15 +1237,49 @@ describe("preResolveHostileMediaProxies", () => {
 
     await preResolveHostileMediaProxies(projectDir, "<html></html>");
 
-    expect(errorSpy).toHaveBeenCalledTimes(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(errorSpy.mock.calls.map(([line]) => line)).toEqual([
+      expect.stringMatching(/^\[hyperframes\] Making browser-playable copies of 1 video /),
+      "[hyperframes] browser-playable copies: 1/1",
       expect.stringMatching(
         /^\[hyperframes\] media proxy pre-resolve: 1\/1 ready, 0 failed \(\d+ms\)$/,
       ),
-    );
+    ]);
     expect(infoSpy).not.toHaveBeenCalled();
     expect(logSpy).not.toHaveBeenCalled();
     expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("says it is making copies, and counts them, only when some are not made yet", async () => {
+    const projectDir = mkProjectDir();
+    const codec = {
+      codecName: "hevc",
+      browserHostile: true,
+      representativeMime: null,
+      hasAlpha: false,
+    };
+    mocks.scanProjectMediaCodecMap.mockResolvedValue({ "/a.mov": codec, "/b.mov": codec });
+    mocks.resolveProxy.mockResolvedValue("/cache/copy.mp4");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    writeFileSync(join(projectDir, "a.mov.proxy.mp4"), "");
+    const { files } = await preResolveHostileMediaProxies(projectDir, "<html></html>");
+    expect(files).toEqual([
+      { file: "a.mov", state: "cached" },
+      { file: "b.mov", state: "ready" },
+    ]);
+    expect(errorSpy.mock.calls.map(([line]) => String(line).slice(0, 48))).toEqual([
+      "[hyperframes] Making browser-playable copies of ",
+      "[hyperframes] browser-playable copies: 1/2",
+      "[hyperframes] browser-playable copies: 2/2",
+      "[hyperframes] media proxy pre-resolve: 2/2 ready",
+    ]);
+    expect(errorSpy.mock.calls[0]![0]).toContain("copies of 1 video Chrome");
+
+    errorSpy.mockClear();
+    writeFileSync(join(projectDir, "b.mov.proxy.mp4"), "");
+    await preResolveHostileMediaProxies(projectDir, "<html></html>");
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]![0]).toMatch(/^\[hyperframes\] media proxy pre-resolve: 2\/2/);
   });
 
   it("writes a scan failure to stderr and leaves stdout untouched", async () => {
@@ -1040,6 +1292,7 @@ describe("preResolveHostileMediaProxies", () => {
     await expect(preResolveHostileMediaProxies(projectDir, "<html></html>")).resolves.toEqual({
       findings: [],
       failedPaths: new Set(),
+      files: [],
     });
 
     expect(errorSpy).toHaveBeenCalledWith(
@@ -1146,6 +1399,7 @@ function fakePage() {
   return Object.assign(Object.create(null), {
     on: vi.fn(),
     viewport: () => ({ width: 640, height: 360 }),
+    screenshot: vi.fn(async () => "c3R1Yg=="),
     addScriptTag: vi.fn(async ({ content }: { content: string }) => {
       window.eval(content);
     }),
@@ -1186,5 +1440,158 @@ describe("component output membership", () => {
     expect(() => matchComponentFindings({ components: ["#missing"], findings: [] })).toThrow(
       "matched nothing",
     );
+  });
+});
+
+describe("motion blur findings in the check output (T6)", () => {
+  type Handler = (message: ReturnType<typeof fakeConsoleMessage>) => void;
+  const ACCELERATED = {
+    state: "off",
+    reason: "a WebGL canvas cannot be captured",
+    reasonCode: "accelerated-canvas",
+    movers: 0,
+  };
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, "__hfMotionBlur");
+  });
+
+  async function checkWith(
+    report: object,
+    options: { cores?: number; echo?: [string, string][]; mount?: () => void } = {},
+  ) {
+    vi.mocked(os.availableParallelism).mockReturnValue(options.cores ?? 1);
+    mountCanvasFixture(`<p id="copy" data-layout-name="copy">Hi</p>`);
+    options.mount?.();
+    const handlers: Handler[] = [];
+    const log = (type: string, text: string) =>
+      handlers.forEach((handler) => handler(fakeConsoleMessage(type, text)));
+    Reflect.set(window, "__hfMotionBlur", {
+      probe: () => {
+        for (const [type, text] of options.echo ?? []) log(type, text);
+        return report;
+      },
+      suspend: vi.fn(),
+    });
+    const browser = Object.assign(Object.create(null), {
+      close: vi.fn(async () => undefined),
+      process: () => ({ exitCode: 0, signalCode: null }),
+    });
+    let opened = 0;
+    vi.mocked(openSettledCompositionPage).mockImplementation(
+      async (_html: string, _url: string, settle: OpenSettledCompositionPageOptions) => {
+        const page = fakePage();
+        const first = ++opened === 1;
+        page.on = vi.fn((event: string, handler: Handler) => {
+          if (event === "console" && first) handlers.push(handler);
+        });
+        settle.onBrowser?.(browser);
+        await settle.beforeNavigate?.(page);
+        return { page, browser, renderReadyTimedOut: false };
+      },
+    );
+    const result = await runBrowserCheck(
+      PROJECT,
+      { ...DEFAULT_CHECK_OPTIONS, contrast: false },
+      { kind: "none" },
+      runAuditGrid,
+    );
+    return { findings: result.runtimeFindings, pages: opened };
+  }
+  const blurCodes = (findings: { code: string }[]) =>
+    findings.map((finding) => finding.code).filter((code) => code.startsWith("motion_blur"));
+
+  it("carries a blur finding, its fix and its anchor into the output", async () => {
+    const { findings } = await checkWith(ACCELERATED);
+    const [finding, ...rest] = findings.filter(({ code }) => code === "motion_blur_off");
+    expect(rest).toEqual([]);
+    expect(finding).toMatchObject({
+      severity: "warning",
+      message: expect.stringContaining("a WebGL canvas cannot be captured"),
+      selector: expect.any(String),
+      fixHint: expect.stringMatching(/WebGL\/WebGPU.*sub-composition/),
+    });
+  });
+
+  it("anchors the finding on the root the runtime picks, not the first composition (W4)", async () => {
+    const mount = (): void => {
+      document.body.innerHTML = `
+        <div id="aux" data-composition-id="aux" data-duration="4"></div>
+        <div id="real" data-composition-id="main" data-root="true" data-duration="10"></div>`;
+      const rect = { x: 3, y: 4, width: 640, height: 360 } as DOMRect;
+      const real = document.getElementById("real");
+      if (real) real.getBoundingClientRect = () => rect;
+    };
+    const { findings } = await checkWith(ACCELERATED, { mount });
+    expect(findings.find(({ code }) => code === "motion_blur_off")).toMatchObject({
+      selector: '[data-composition-id][data-root="true"]',
+      dataAttributes: expect.objectContaining({
+        "data-root": "true",
+        "data-composition-id": "main",
+      }),
+      bbox: { x: 3, y: 4, width: 640, height: 360 },
+    });
+  });
+
+  it("still carries it, once, when a second Chrome shares the sampling", async () => {
+    const { findings, pages } = await checkWith(ACCELERATED, { cores: 4 });
+    expect(pages).toBe(2);
+    expect(blurCodes(findings)).toEqual(["motion_blur_off"]);
+  });
+
+  it("keeps an unrelated console warning and drops the runtime's duplicate of the finding", async () => {
+    const { findings } = await checkWith(ACCELERATED, {
+      echo: [
+        ["warn", "[motion-blur] off: a WebGL canvas cannot be captured"],
+        ["warn", "your own warning"],
+      ],
+    });
+    const warnings = findings.filter(({ code }) => code === "console_warning");
+    expect(warnings.map(({ message }) => message)).toEqual(["your own warning"]);
+    expect(blurCodes(findings)).toEqual(["motion_blur_off"]);
+  });
+
+  it("keeps the runtime's off-line when there is no finding to replace it", async () => {
+    const { findings } = await checkWith(
+      { state: "on", reason: null, reasonCode: null, movers: 2 },
+      { echo: [["warn", "[motion-blur] off: later, for a reason the probe did not see"]] },
+    );
+    expect(findings.map(({ code }) => code)).toContain("console_warning");
+    expect(blurCodes(findings)).toEqual([]);
+  });
+
+  it("does not drop an error that merely starts like the echo", async () => {
+    const { findings } = await checkWith(ACCELERATED, {
+      echo: [["error", "[motion-blur] off: thrown by the page itself"]],
+    });
+    expect(findings.map(({ code }) => code)).toContain("console_error");
+  });
+
+  it("says nothing moves only when the report says no mover, not when it says some", async () => {
+    const still = await checkWith({ state: "on", reason: null, reasonCode: null, movers: 0 });
+    expect(blurCodes(still.findings)).toEqual(["motion_blur_no_movers"]);
+    const moving = await checkWith({ state: "on", reason: null, reasonCode: null, movers: 3 });
+    expect(blurCodes(moving.findings)).toEqual([]);
+    const off = await checkWith(ACCELERATED);
+    expect(blurCodes(off.findings)).toEqual(["motion_blur_off"]);
+  });
+
+  it("treats a report without a mover count as no movers", async () => {
+    const { findings } = await checkWith({ state: "on", reason: null, reasonCode: null });
+    expect(blurCodes(findings)).toEqual(["motion_blur_no_movers"]);
+  });
+
+  it("adds nothing for a page that never opted in", async () => {
+    vi.mocked(os.availableParallelism).mockReturnValue(1);
+    mountCanvasFixture();
+    const page = fakePage();
+    installSessionMock(page);
+    const result = await runBrowserCheck(
+      PROJECT,
+      { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: false },
+      { kind: "none" },
+      runAuditGrid,
+    );
+    expect(blurCodes(result.runtimeFindings)).toEqual([]);
   });
 });

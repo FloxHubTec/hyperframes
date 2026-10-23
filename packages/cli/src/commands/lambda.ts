@@ -14,6 +14,7 @@ import type { DistributedFormat } from "@hyperframes/aws-lambda/sdk";
 import { type CanvasResolution, DISTRIBUTED_FPS, isDistributedFps } from "@hyperframes/core";
 import { parseOutputResolutionFlag } from "../utils/parseOutputResolution.js";
 import type { Example } from "./_examples.js";
+import type { VideoArch } from "./lambda/videoImage.js";
 import { c } from "../ui/colors.js";
 import { defaultCloudFps } from "../utils/compositionFps.js";
 import { isMissingPackageError, missingPackageMessage } from "../utils/missingPackage.js";
@@ -120,6 +121,11 @@ export default defineCommand({
       description: "sparticuz | chrome-headless-shell (default: sparticuz)",
     },
     memory: { type: "string", description: "Lambda memory MB (default: 10240)" },
+    "video-arch": {
+      type: "string",
+      description:
+        "arm64 | x86_64: where the plan and chunks run; arm64 adds a container-image function (default: arm64)",
+    },
     "skip-build": { type: "boolean", description: "Reuse existing handler.zip (deploy)" },
 
     // sites / render
@@ -230,16 +236,9 @@ export default defineCommand({
     // The lambda subverbs dynamic-import `@hyperframes/aws-lambda` at call
     // time. We keep aws-lambda as a workspace devDependency (not a runtime
     // dep) so the published CLI install stays small for users who don't
-    // deploy to Lambda. Subverbs other than `policies` need aws-lambda;
-    // catch the missing-module error here and turn it into a friendly hint.
-    const verbsNeedingSDK = new Set([
-      "deploy",
-      "sites",
-      "render",
-      "render-batch",
-      "progress",
-      "destroy",
-    ]);
+    // deploy to Lambda. These subverbs need it and get a friendly hint when it
+    // is missing; `deploy` reports that itself and `destroy` needs only SAM.
+    const verbsNeedingSDK = new Set(["sites", "render", "render-batch", "progress"]);
     if (verbsNeedingSDK.has(subcommand)) {
       try {
         await import("@hyperframes/aws-lambda/sdk");
@@ -265,6 +264,7 @@ export default defineCommand({
           reservedConcurrency: parseReservedConcurrency(args.concurrency),
           chromeSource: parseChromeSource(args["chrome-source"]),
           lambdaMemoryMb: parsePositiveInt(args.memory, "--memory"),
+          videoArch: parseVideoArch(args["video-arch"]),
           skipBuild: Boolean(args["skip-build"]),
         });
         return;
@@ -490,6 +490,9 @@ const parseQuality = (raw: unknown): (typeof QUALITIES)[number] | undefined =>
   parseEnum(raw, QUALITIES, "[lambda render] --quality", undefined);
 const parseChromeSource = (raw: unknown): (typeof CHROME_SOURCES)[number] =>
   parseEnum(raw, CHROME_SOURCES, "[lambda deploy] --chrome-source", "sparticuz")!;
+const VIDEO_ARCHS = ["x86_64", "arm64"] as const satisfies readonly VideoArch[];
+const parseVideoArch = (raw: unknown): (typeof VIDEO_ARCHS)[number] | undefined =>
+  parseEnum(raw, VIDEO_ARCHS, "[lambda deploy] --video-arch", undefined);
 
 /**
  * Lambda flavor of the shared {@link parseOutputResolutionFlag} — same wire

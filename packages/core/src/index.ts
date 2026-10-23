@@ -270,6 +270,7 @@ export {
   PREVIEW_PROXY_BOX_PARAM,
   formatPreviewProxyBox,
   parsePreviewProxyBox,
+  quantizePreviewProxyBox,
   type PreviewProxyBox,
 } from "./previewProxyBox";
 
@@ -437,3 +438,8 @@ export {
   type HfVfxParam,
   type HfVfxParamValues,
 } from "./vfx.js";
+export {
+  PAGE_DEVICE_SCALE_GLOBAL,
+  PAGE_MOTION_BLUR_OFF_GLOBAL,
+  acceleratedCanvasTrackerSource,
+} from "./pageMotionBlur.js";

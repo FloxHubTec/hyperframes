@@ -20,6 +20,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
   cpSync,
@@ -37,12 +38,18 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type CaptureOptions, extractVideoFramesRange } from "@hyperframes/engine";
+import {
+  type CaptureOptions,
+  extractVideoFramesRange,
+  VideoSourceExtractionError,
+} from "@hyperframes/engine";
 import { HOST_CHROME_FAILURE_PATTERNS } from "./__test_utils__/hostChromeFailures.js";
 import { defaultLogger } from "../../logger.js";
 import { RenderQualityError } from "../renderOrchestrator.js";
+import { assemble } from "./assemble.js";
 import { plan } from "./plan.js";
 import { materializePlanV2Target, planV2, readPlanV2Manifest } from "./planV2.js";
+import { resolvePlanAudioPath } from "./shared.js";
 import {
   CHUNK_INDEX_OUT_OF_RANGE,
   distributedCaptureSessionDependencies,
@@ -52,6 +59,7 @@ import {
   PLAN_HASH_MISMATCH,
   renderChunk,
   RenderChunkValidationError,
+  resolveChunkCaptureWorkers,
   resolveLockedVp9CpuUsed,
   resolvePresetForLockedEncoder,
 } from "./renderChunk.js";
@@ -677,6 +685,386 @@ describe("renderChunk() — a video the chunk does not show", () => {
   }, 120_000);
 });
 
+describe("renderChunk() — a video shown smaller than its source", () => {
+  it("measures the box each video is drawn in before extracting its frames", async () => {
+    if (!hasChrome) {
+      console.warn(
+        "[renderChunk.test] skipping shown-size test — chrome-headless-shell not available",
+      );
+      return;
+    }
+    const projectDir = join(runRoot, "project-shown-size");
+    mkdirSync(projectDir, { recursive: true });
+    const synth = spawnSync("ffmpeg", [
+      ...["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=128x72:r=30:d=2"],
+      ...["-c:v", "libx264", "-pix_fmt", "yuv420p", join(projectDir, "clip.mp4")],
+    ]);
+    if (synth.status !== 0) throw new Error(synth.stderr.toString());
+    writeFileSync(
+      join(projectDir, "index.html"),
+      // Clips over a second long, so the planner defers them to the chunks.
+      FIXTURE_HTML.replace('data-duration="0.16667"', 'data-duration="1.2"').replace(
+        "</div>",
+        '<video id="pip" src="clip.mp4" muted data-start="0" data-duration="1.2" style="position:absolute;right:0;bottom:0;width:32px;height:18px"></video>' +
+          '<video id="full" src="clip.mp4" muted data-start="0" data-duration="1.2" style="position:absolute;left:0;top:0;width:128px;height:72px"></video></div>',
+      ),
+      "utf-8",
+    );
+    const planDir = join(runRoot, "plan-shown-size");
+    await planV2(
+      projectDir,
+      { fps: 30, width: 160, height: 120, format: "png-sequence", chunkSize: 36 },
+      planDir,
+    );
+    const chunkDir = join(runRoot, "chunk0-shown-size");
+    materializePlanV2Target(planDir, { role: "chunk", chunkIndex: 0 }, chunkDir);
+    let result;
+    try {
+      result = await renderChunk(chunkDir, 0, join(runRoot, "chunk0-shown-size-out"));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!HOST_CHROME_FAILURE_PATTERNS.test(message)) throw err;
+      console.warn(
+        "[renderChunk.test] skipping shown-size test — host Chrome stack can't render:",
+        message.slice(0, 240),
+      );
+      return;
+    }
+    expect(JSON.parse(readFileSync(result.perfPath, "utf-8")).videoShownBoxes).toEqual({
+      pip: { width: 32, height: 18 },
+      full: { width: 128, height: 72 },
+    });
+  }, 120_000);
+});
+
+describe("renderChunk() — a video whose frames cannot be extracted", () => {
+  it("fails with the extraction's own error while the capture browsers start", async () => {
+    if (!hasChrome) {
+      console.warn(
+        "[renderChunk.test] skipping extraction-failure test — chrome-headless-shell not available",
+      );
+      return;
+    }
+    const projectDir = join(runRoot, "project-extract-fail");
+    mkdirSync(projectDir, { recursive: true });
+    const synth = spawnSync("ffmpeg", [
+      ...["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=128x72:r=30:d=2"],
+      ...["-c:v", "libx264", "-pix_fmt", "yuv420p", join(projectDir, "clip.mp4")],
+    ]);
+    if (synth.status !== 0) throw new Error(synth.stderr.toString());
+    writeFileSync(
+      join(projectDir, "index.html"),
+      // A clip over a second long, so the planner defers it to the chunks.
+      FIXTURE_HTML.replace('data-duration="0.16667"', 'data-duration="1.2"').replace(
+        "</div>",
+        '<video id="clip" src="clip.mp4" muted data-start="0" data-duration="1.2" style="width:128px;height:72px"></video></div>',
+      ),
+      "utf-8",
+    );
+    const planDir = join(runRoot, "plan-extract-fail");
+    await planV2(
+      projectDir,
+      { fps: 30, width: 160, height: 120, format: "png-sequence", chunkSize: 36 },
+      planDir,
+    );
+    const chunkDir = join(runRoot, "chunk0-extract-fail");
+    // The clip is read by URL, as cloud chunks read it, from a port nothing listens on.
+    materializePlanV2Target(planDir, { role: "chunk", chunkIndex: 0 }, chunkDir, {
+      remoteSources: { "compiled/clip.mp4": "http://127.0.0.1:1/clip.mp4" },
+    });
+
+    let caught: unknown;
+    try {
+      await renderChunk(chunkDir, 0, join(runRoot, "chunk0-extract-fail-out"));
+    } catch (error) {
+      caught = error;
+    }
+    const message = caught instanceof Error ? caught.message : String(caught);
+    if (HOST_CHROME_FAILURE_PATTERNS.test(message)) {
+      console.warn(
+        "[renderChunk.test] skipping extraction-failure test — host Chrome stack can't render:",
+        message.slice(0, 240),
+      );
+      return;
+    }
+    // The extraction's own error, not the capture stage that waited on it.
+    expect(caught).toBeInstanceOf(VideoSourceExtractionError);
+  }, 120_000);
+});
+
+describe("renderChunk() — an alpha format at a larger output resolution", () => {
+  it("supersamples a transparent composition and keeps its alpha", async () => {
+    if (!hasChrome) {
+      console.warn(
+        "[renderChunk.test] skipping alpha supersample test — chrome-headless-shell not available",
+      );
+      return;
+    }
+    const projectDir = join(runRoot, "project-alpha-supersample");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, "index.html"),
+      `<!doctype html><html><body style="margin:0;background:transparent">
+  <div data-composition-id="root" data-no-timeline data-width="320" data-height="180" data-duration="0.1">
+    <div style="position:absolute;left:80px;top:45px;width:160px;height:90px;background:#3a7"></div>
+  </div></body></html>`,
+      "utf-8",
+    );
+    const planDir = join(runRoot, "plan-alpha-supersample");
+    await planV2(
+      projectDir,
+      {
+        fps: 30,
+        width: 320,
+        height: 180,
+        format: "mov",
+        chunkSize: 30,
+        outputResolution: "landscape",
+      },
+      planDir,
+    );
+    const chunkDir = join(runRoot, "chunk0-alpha-supersample");
+    materializePlanV2Target(planDir, { role: "chunk", chunkIndex: 0 }, chunkDir);
+    const out = join(runRoot, "chunk0-alpha-supersample.mov");
+    try {
+      await renderChunk(chunkDir, 0, out);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!HOST_CHROME_FAILURE_PATTERNS.test(message)) throw err;
+      console.warn(
+        "[renderChunk.test] skipping alpha supersample test — host Chrome stack can't render:",
+        message.slice(0, 240),
+      );
+      return;
+    }
+    const probe = spawnSync("ffprobe", [
+      ...["-v", "error", "-select_streams", "v:0"],
+      ...["-show_entries", "stream=width,height,pix_fmt", "-of", "csv=p=0", "--", out],
+    ]);
+    expect(probe.stdout.toString().trim()).toMatch(/^1920,1080,yuva/);
+    const frame = spawnSync(
+      "ffmpeg",
+      [
+        ...["-v", "error", "-i", out, "-frames:v", "1"],
+        ...["-vf", "format=rgba", "-f", "rawvideo", "-"],
+      ],
+      { maxBuffer: 1920 * 1080 * 4 },
+    ).stdout;
+    const alphaAt = (x: number, y: number) => frame[(y * 1920 + x) * 4 + 3];
+    expect(alphaAt(10, 10)).toBe(0);
+    expect(alphaAt(960, 540)).toBe(255);
+  }, 120_000);
+});
+
+describe("renderChunk() — frameRange", () => {
+  // A box sliding across the frame, so every frame differs and a misplaced,
+  // dropped or repeated frame changes the assembled output.
+  const ANIMATED_HTML = (duration: number, audio: boolean) => `<!doctype html>
+<html>
+<head><meta charset="utf-8"><style>
+  @keyframes slide { from { transform: translateX(0px); } to { transform: translateX(120px); } }
+  #box { position:absolute; top:40px; width:40px; height:40px; background:#f97316;
+         animation: slide ${duration}s linear forwards; }
+</style></head>
+<body style="margin:0;background:#0f172a">
+  <div data-composition-id="root" data-no-timeline data-width="160" data-height="120" data-duration="${duration}">
+    <div id="box"></div>
+    ${audio ? '<audio data-composition-audio src="tone.wav"></audio>' : ""}
+  </div>
+</body>
+</html>`;
+
+  function run(cmd: string, args: string[]): string {
+    const result = spawnSync(cmd, args, { maxBuffer: 1 << 28, encoding: "latin1" });
+    if (result.status !== 0) throw new Error(`${cmd} ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout;
+  }
+  // Decoded video frame hashes in presentation order.
+  const frameHashes = (path: string) =>
+    run("ffmpeg", ["-nostdin", "-v", "error", "-i", path, "-map", "0:v", "-f", "framemd5", "-"])
+      .split("\n")
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => line.split(",").at(-1)!.trim());
+  const pcm = (path: string) =>
+    run("ffmpeg", ["-nostdin", "-v", "error", "-i", path, "-map", "0:a", "-f", "s16le", "-"]);
+  const videoPts = (path: string) =>
+    run("ffprobe", [
+      ...["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time"],
+      ...["-of", "csv=p=0", "--", path],
+    ])
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => Number.parseFloat(line))
+      .sort((x, y) => x - y);
+  const sha = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+  const minPsnr = (a: string, b: string) => {
+    const log = spawnSync(
+      "ffmpeg",
+      [
+        ...["-nostdin", "-i", a, "-i", b, "-lavfi"],
+        // Pair frames by index, not timestamp: webm's millisecond timestamps round differently.
+        "[0:v]setpts=N/(30*TB)[a];[1:v]setpts=N/(30*TB)[b];[a][b]psnr=stats_file=-",
+        ...["-f", "null", "-"],
+      ],
+      { maxBuffer: 1 << 28, encoding: "latin1" },
+    ).stdout;
+    const values = [...log.matchAll(/psnr_avg:(\S+)/g)].map((m) => Number(m[1]));
+    return Math.min(...values.map((v) => (Number.isFinite(v) ? v : 100)));
+  };
+
+  async function renderOrSkip<T>(label: string, render: () => Promise<T>): Promise<T | null> {
+    try {
+      return await render();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!HOST_CHROME_FAILURE_PATTERNS.test(message)) throw err;
+      console.warn(
+        `[renderChunk.test] skipping ${label} — host Chrome stack can't render. Diagnostic:`,
+        message.slice(0, 240),
+      );
+      return null;
+    }
+  }
+
+  it("renders png-sequence halves that assemble into the whole chunk's frames", async () => {
+    if (!hasChrome) return;
+    const dir = join(runRoot, "frame-range-png");
+    const project = join(dir, "project");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, "index.html"), ANIMATED_HTML(0.3, false), "utf-8");
+    const planPng = join(dir, "plan");
+    await plan(project, { fps: 30, width: 160, height: 120, format: "png-sequence" }, planPng);
+    const [slice] = JSON.parse(readFileSync(join(planPng, "meta", "chunks.json"), "utf-8"));
+    expect(slice).toMatchObject({ startFrame: 0, endFrame: 9 });
+
+    const whole = await renderOrSkip("png frameRange test", () =>
+      renderChunk(planPng, 0, join(dir, "whole")),
+    );
+    if (whole === null) return;
+    const full = await renderChunk(planPng, 0, join(dir, "full"), {
+      frameRange: { startFrame: 0, endFrame: 9 },
+    });
+    const first = await renderChunk(planPng, 0, join(dir, "part-a"), {
+      frameRange: { startFrame: 0, endFrame: 4 },
+    });
+    const second = await renderChunk(planPng, 0, join(dir, "part-b"), {
+      frameRange: { startFrame: 4, endFrame: 9 },
+    });
+
+    // The whole slice as an explicit range is today's output, byte for byte.
+    expect(whole.frameRange).toEqual({ startFrame: 0, endFrame: 9 });
+    expect(full.sha256).toBe(whole.sha256);
+    expect([first.framesEncoded, second.framesEncoded]).toEqual([4, 5]);
+    expect(second.frameRange).toEqual({ startFrame: 4, endFrame: 9 });
+    expect(JSON.parse(readFileSync(second.perfPath, "utf-8"))).toMatchObject({
+      startFrame: 4,
+      endFrame: 9,
+      framesEncoded: 5,
+    });
+
+    const fromWhole = join(dir, "out-whole");
+    const fromParts = join(dir, "out-parts");
+    await assemble(planPng, [whole.outputPath], null, fromWhole);
+    const result = await assemble(
+      planPng,
+      [[first.outputPath, second.outputPath]],
+      null,
+      fromParts,
+    );
+    expect(result.framesEncoded).toBe(9);
+    const names = readdirSync(fromWhole).sort();
+    expect(readdirSync(fromParts).sort()).toEqual(names);
+    for (const name of names) {
+      expect(readFileSync(join(fromParts, name)).equals(readFileSync(join(fromWhole, name)))).toBe(
+        true,
+      );
+    }
+    // The animation moves, so equal frames above are not equal by accident.
+    expect(new Set(names.map((name) => sha(join(fromWhole, name)))).size).toBe(names.length);
+  }, 120_000);
+
+  // Two chunks of 9 frames; chunk 0 also renders as [0, 4) + [4, 9).
+  it.each([
+    ["mp4, chunks carrying audio (stitched)", "mp4", true],
+    ["mp4, audio muxed at assemble (joined)", "mp4", false],
+    ["webm (joined)", "webm", false],
+  ] as const)(
+    "%s: halves assemble seamlessly into the whole chunk's frames and audio",
+    async (label, format, chunksCarryAudio) => {
+      if (!hasChrome) return;
+      const dir = join(
+        runRoot,
+        `frame-range-${format}-${chunksCarryAudio ? "stitched" : "joined"}`,
+      );
+      const project = join(dir, "project");
+      mkdirSync(project, { recursive: true });
+      run("ffmpeg", [
+        ...["-nostdin", "-v", "error", "-y", "-f", "lavfi"],
+        ...["-i", "aevalsrc=0.3*sin(2*PI*440*t):s=48000:d=0.6", "-c:a", "pcm_s16le"],
+        join(project, "tone.wav"),
+      ]);
+      writeFileSync(join(project, "index.html"), ANIMATED_HTML(0.6, true), "utf-8");
+      const planEnc = join(dir, "plan");
+      await plan(
+        project,
+        { fps: 30, width: 160, height: 120, format, chunkSize: 9 },
+        planEnc,
+        chunksCarryAudio ? { chunksCarryAudio: true } : {},
+      );
+      expect(JSON.parse(readFileSync(join(planEnc, "meta", "chunks.json"), "utf-8"))).toHaveLength(
+        2,
+      );
+
+      const out = (name: string) => join(dir, `${name}.${format}`);
+      const whole0 = await renderOrSkip(label, () => renderChunk(planEnc, 0, out("whole-0")));
+      if (whole0 === null) return;
+      const whole1 = await renderChunk(planEnc, 1, out("whole-1"));
+      const first = await renderChunk(planEnc, 0, out("part-0a"), {
+        frameRange: { startFrame: 0, endFrame: 4 },
+      });
+      const second = await renderChunk(planEnc, 0, out("part-0b"), {
+        frameRange: { startFrame: 4, endFrame: 9 },
+      });
+      expect([first.framesEncoded, second.framesEncoded]).toEqual([4, 5]);
+      // Each part starts on its own keyframe, as a chunk does.
+      for (const part of [first, second]) {
+        const keyframes = run("ffprobe", [
+          ...["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=flags"],
+          ...["-of", "csv=p=0", "--", part.outputPath],
+        ]);
+        expect(keyframes.trim().split("\n")[0]).toStartWith("K");
+      }
+
+      const audio = chunksCarryAudio ? null : resolvePlanAudioPath(planEnc);
+      expect(chunksCarryAudio || audio !== null).toBe(true);
+      const fromWhole = out("from-whole");
+      const fromParts = out("from-parts");
+      await assemble(planEnc, [whole0.outputPath, whole1.outputPath], audio, fromWhole);
+      await assemble(
+        planEnc,
+        [[first.outputPath, second.outputPath], whole1.outputPath],
+        audio,
+        fromParts,
+      );
+
+      // Same frame count, and exactly the parts' own frames in order: nothing
+      // dropped, repeated or reordered at the seams.
+      const partFrames = [first, second, whole1].flatMap((r) => frameHashes(r.outputPath));
+      expect(frameHashes(fromParts)).toEqual(partFrames);
+      expect(frameHashes(fromParts)).toHaveLength(18);
+      expect(frameHashes(fromWhole)).toHaveLength(18);
+      // Frames keep their slot on the timeline: mp4 timestamps are exact; webm's
+      // millisecond timebase truncates at every join, part seams as chunk seams.
+      if (format === "mp4") expect(videoPts(fromParts)).toEqual(videoPts(fromWhole));
+      videoPts(fromParts).forEach((pts, i) => expect(Math.abs(pts - i / 30)).toBeLessThan(0.002));
+      // The parts are separate encodes, so compare their pixels to the whole's.
+      expect(minPsnr(fromParts, fromWhole)).toBeGreaterThan(35);
+      expect(pcm(fromParts) === pcm(fromWhole)).toBe(true);
+    },
+    180_000,
+  );
+});
+
 describe("resolvePresetForLockedEncoder", () => {
   // Tiny fast tests for the codec-override helper. No Chrome, no ffmpeg —
   // exists so a refactor that moves the override (e.g. into
@@ -712,6 +1100,26 @@ describe("resolvePresetForLockedEncoder", () => {
     const base = { preset: "medium", quality: 18, codec: "h264" as const, pixelFormat: "yuv420p" };
     const out = resolvePresetForLockedEncoder(base, "png-sequence");
     expect(out).toBe(base);
+  });
+});
+
+describe("resolveChunkCaptureWorkers", () => {
+  it("keeps the machine-wide sizing when the runtime sets no budget", () => {
+    expect(resolveChunkCaptureWorkers(121, 3, undefined)).toBe(3);
+  });
+
+  it("raises a chunk to the runtime's budget", () => {
+    expect(resolveChunkCaptureWorkers(121, 3, 5)).toBe(5);
+  });
+
+  it("gives each browser at least 20 frames", () => {
+    expect(resolveChunkCaptureWorkers(121, 3, 8)).toBe(6);
+    expect(resolveChunkCaptureWorkers(99, 3, 5)).toBe(4);
+  });
+
+  it("never lowers the machine-wide sizing", () => {
+    expect(resolveChunkCaptureWorkers(121, 3, 1)).toBe(3);
+    expect(resolveChunkCaptureWorkers(30, 2, 5)).toBe(2);
   });
 });
 
@@ -816,6 +1224,30 @@ describe("extractDeferredVideoFramesForChunk", () => {
     for (const [index, path] of chunk!.framePaths) {
       expect(readFileSync(path).equals(readFileSync(full.framePaths.get(index)!))).toBe(true);
     }
+  });
+
+  it("extracts a video's frames at the size it is shown in when given its box", async () => {
+    const [chunk] = await extractDeferredVideoFramesForChunk({
+      planDir,
+      planVideos: planVideos(false),
+      frames: frameSpan(30, 32),
+      fps: { num: 30, den: 1 },
+      outputRoot: join(root, "chunk-shown"),
+      cfg: {},
+      shownBoxes: new Map([["clip", { width: 16, height: 9 }]]),
+    });
+    const [frame] = chunk!.framePaths.values();
+    const size = spawnSync("ffprobe", [
+      "-v",
+      "error",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "csv=p=0",
+      "--",
+      frame!,
+    ]);
+    expect(size.stdout.toString().trim()).toBe("16,10");
   });
 
   // Lossless keeps the file large next to what one seek reads.

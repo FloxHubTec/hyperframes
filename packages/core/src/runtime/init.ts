@@ -11,6 +11,7 @@ import {
   revealTimedClipsAfterFirstPass,
   SKIPPED_CLIP,
   showHiddenClips,
+  defersMedia,
   skipsHiddenImages,
 } from "./timedClipHide";
 import {
@@ -67,6 +68,7 @@ import {
 import {
   handleErrorForProxy,
   handleMetadataForProxy,
+  isRenderMode,
   maybeProxyProactively,
   setProxyDisplayScale,
 } from "./mediaProxy";
@@ -124,6 +126,12 @@ import { applyVariableBindings, unproxiedMediaSrc } from "./applyVariableBinding
 import { createColorGradingRuntime, type RuntimeColorGradingApi } from "./colorGrading";
 import { COLOR_GRADING_AUTHORED_OPACITY_ATTR } from "../colorGrading";
 import { initVfx, paintVfx } from "./vfx";
+import {
+  captureMotionBlurBusy,
+  initCaptureMotionBlur,
+  paintCaptureMotionBlur,
+  releaseCaptureMotionBlurFrame,
+} from "./captureMotionBlur";
 import { TransportClock } from "./clock";
 import { WebAudioTransport } from "./webAudioTransport";
 import {
@@ -1390,6 +1398,13 @@ export function initSandboxRuntimeModular(): void {
       invalidateCompositionTimingCaches();
   };
 
+  const withoutOwnCompositionRecords = (write: () => void) => {
+    const pending = compositionTimingObserver?.takeRecords() ?? [];
+    write();
+    compositionTimingObserver?.takeRecords();
+    if (pending.length > 0) invalidateCompositionTimingCaches();
+  };
+
   const watchCompositionTimingInputs = () => {
     if (compositionTimingObserver || typeof MutationObserver === "undefined") return;
     compositionTimingObserver = new MutationObserver(invalidateCompositionTimingCaches);
@@ -2532,6 +2547,13 @@ export function initSandboxRuntimeModular(): void {
       handleMetadataForProxy(event.currentTarget);
     }
   };
+  const onMediaLoadedMetadataForPlayhead = (event: Event) => {
+    const el = event.currentTarget;
+    if (state.tornDown || clock.isPlaying() || !isMediaElement(el) || isRenderMode(el)) return;
+    lastSyncedMediaTimeSeconds = null;
+    state.mediaForceSyncNextTick = true;
+    syncMediaForCurrentState();
+  };
   const onMediaErrorForProxy = (event: Event) => {
     if (isMediaElement(event.currentTarget)) {
       handleErrorForProxy(event.currentTarget);
@@ -2561,6 +2583,7 @@ export function initSandboxRuntimeModular(): void {
     mediaEl.removeEventListener("loadedmetadata", scheduleMetadataDurationHydration);
     mediaEl.removeEventListener("durationchange", scheduleMetadataDurationHydration);
     mediaEl.removeEventListener("loadedmetadata", onMediaLoadedMetadataForProxy);
+    mediaEl.removeEventListener("loadedmetadata", onMediaLoadedMetadataForPlayhead);
     mediaEl.removeEventListener("loadedmetadata", onMediaLoadedMetadataForRoute);
     mediaEl.removeEventListener("error", onMediaErrorForProxy);
     metadataBoundMedia.delete(mediaEl);
@@ -2614,6 +2637,7 @@ export function initSandboxRuntimeModular(): void {
       // triggers. Inert in render mode / when the codec map is absent /
       // for <audio> — all guarded inside mediaProxy.ts itself.
       mediaEl.addEventListener("loadedmetadata", onMediaLoadedMetadataForProxy);
+      mediaEl.addEventListener("loadedmetadata", onMediaLoadedMetadataForPlayhead);
       mediaEl.addEventListener("error", onMediaErrorForProxy);
 
       // Proactive proxy-fallback trigger: consult the codec map and swap
@@ -2799,6 +2823,7 @@ export function initSandboxRuntimeModular(): void {
   };
 
   const hiddenImagesSkipped = skipsHiddenImages();
+  const mediaDeferred = defersMedia();
   const LOOKAHEAD_SECONDS = 2;
   const RELEASE_LOOKAHEAD_SECONDS = 4;
   // Unskipped while within the window on either side of the playhead, so a step or shuttle back
@@ -2824,7 +2849,7 @@ export function initSandboxRuntimeModular(): void {
   // A clip with no authored length loads as in a render: a reload would drop the duration it is
   // timed by.
   const inPreloadWindow = (el: HTMLMediaElement) =>
-    hiddenImagesSkipped && el.hasAttribute("data-start") && lengthIsAuthored(el);
+    mediaDeferred && el.hasAttribute("data-start") && lengthIsAuthored(el);
 
   // Media on screen or due within the look-ahead loads; the rest stops holding a connection to
   // the origin that also serves Studio's thumbnails.
@@ -3018,7 +3043,9 @@ export function initSandboxRuntimeModular(): void {
       if (!isRuntimeStamped) rawNode.style.visibility = isVisibleNow ? "visible" : "hidden";
       rawNode.toggleAttribute(CLIP_HIDDEN_ATTR, !isRuntimeStamped && !isVisibleNow);
       const upcoming =
-        hiddenImagesSkipped && !isVisibleNow && dueSoon(rawNode, visibleAt, currentTime);
+        (hiddenImagesSkipped || mediaDeferred) &&
+        !isVisibleNow &&
+        dueSoon(rawNode, visibleAt, currentTime);
       if (upcoming && !rawNode.hasAttribute(STUDIO_PREVIEW_UPCOMING_ATTR))
         loadPreviewImagesIn(rawNode);
       rawNode.toggleAttribute(STUDIO_PREVIEW_UPCOMING_ATTR, upcoming);
@@ -3390,8 +3417,8 @@ export function initSandboxRuntimeModular(): void {
         cueAheadSeconds,
         getCompositionDuration: () =>
           getSafeTimelineDurationSeconds(state.capturedTimeline, 0, timingRevision),
-        onElementVolume: (el, _effectiveVolume, authorVolume) =>
-          webAudio.setElementVolume(el, authorVolume),
+        onElementVolume: (el, _effectiveVolume, authorVolume, clipGain) =>
+          webAudio.setElementVolume(el, authorVolume, clipGain),
         isWebAudioOwned: (el) => webAudio.ownsElement(el),
         isWebAudioRouted: (el) => webAudio.routesElement(el),
         onAutoplayBlocked: () => {
@@ -3649,6 +3676,26 @@ export function initSandboxRuntimeModular(): void {
 
   // Passes that must see scene DOM, which arrives after init: when scenes mount, or when one is
   // swapped. Resolves when caption overrides have landed.
+  // Capture motion blur (data-motion-blur="on" on the root). Its pose reads seek the timeline
+  // and adapters only: media and transport bookkeeping stay on the frame's seek.
+  function initMotionBlur(): void {
+    const root = resolveRootCompositionElement();
+    if (!root) return;
+    initCaptureMotionBlur({
+      root,
+      fps: state.canonicalFps,
+      durationSeconds: () =>
+        getSafeTimelineDurationSeconds(state.capturedTimeline, 0) ||
+        Number(root.getAttribute("data-duration")) ||
+        0,
+      timeline: () => state.capturedTimeline,
+      now: () => Math.max(0, state.currentTime || 0),
+      seek: (t, suppressEvents) => {
+        seekRootChildrenAndAdapters(state.capturedTimeline, t, { suppressEvents });
+      },
+      ignoreMutations: withoutOwnCompositionRecords,
+    });
+  }
   const settleSceneDom = (): Promise<void> => {
     bindMediaMetadataListeners();
     installAssetFailureDiagnostics();
@@ -3657,6 +3704,7 @@ export function initSandboxRuntimeModular(): void {
     applyVariableBindings(document);
     // An unregistered vfx chain paints nothing and logs nothing, so re-scan the new DOM.
     initVfx(document.body, state.canonicalFps);
+    initMotionBlur();
     return captionsApplied;
   };
   if (!externalCompositionsReady) {
@@ -4002,6 +4050,7 @@ export function initSandboxRuntimeModular(): void {
       }
     };
     initVfx(document.body, state.canonicalFps);
+    initMotionBlur();
     applyFetchedCaptionOverrides(captionOverrides, captionHosts, rewindCaptionTimelines);
     releaseDetachedMedia();
     childrenBound = false;
@@ -4054,6 +4103,7 @@ export function initSandboxRuntimeModular(): void {
   });
   // Per-pixel effect chains: compile once here, repaint on every seek below.
   initVfx(document.body, state.canonicalFps);
+  initMotionBlur();
 
   const applyPlaybackRate = (nextRate: number) => {
     const parsed = Number(nextRate);
@@ -4110,6 +4160,8 @@ export function initSandboxRuntimeModular(): void {
     }
     colorGrading.redraw();
     paintVfx(state.currentTime);
+    const blurred = paintCaptureMotionBlur(state.currentTime);
+    if (blurred) registerSeekCompletion(blurred);
     postState(true);
   };
 
@@ -4162,6 +4214,8 @@ export function initSandboxRuntimeModular(): void {
       runAdapters("pause");
       syncMediaForCurrentState();
       colorGrading.redraw();
+      // Paused: back to plain DOM so Studio can select inside the composition.
+      void paintCaptureMotionBlur(state.currentTime);
       postState(true);
     },
     seek: (timeSeconds, options) => {
@@ -4222,6 +4276,8 @@ export function initSandboxRuntimeModular(): void {
       syncMediaForCurrentState();
       colorGrading.redraw();
       paintVfx(state.currentTime, { engineMode: true });
+      const blurred = paintCaptureMotionBlur(state.currentTime, { engineMode: true });
+      if (blurred) registerSeekCompletion(blurred);
       postState(true);
     },
     getTime: () => heldSeek?.time ?? clock.now(),
@@ -4330,9 +4386,15 @@ export function initSandboxRuntimeModular(): void {
     window.__hfTypegpuTime = t;
     forceDispatchSeekEvent(t);
   };
-  window.__hfWaitForSeekCompletion = waitForSeekCompletion;
+  // Engine and CLI capture wait here once the page is final (the engine's injected video frames
+  // land after renderSeek), so a blurred engine frame is captured now, not at the seek.
+  const waitForFinalFrame: typeof waitForSeekCompletion = (options) => {
+    releaseCaptureMotionBlurFrame();
+    return waitForSeekCompletion(options);
+  };
+  window.__hfWaitForSeekCompletion = waitForFinalFrame;
   runtimeCleanupCallbacks.push(() => {
-    if (window.__hfWaitForSeekCompletion === waitForSeekCompletion) {
+    if (window.__hfWaitForSeekCompletion === waitForFinalFrame) {
       delete window.__hfWaitForSeekCompletion;
     }
   });
@@ -4628,6 +4690,14 @@ export function initSandboxRuntimeModular(): void {
         swallow("runtime.init.activateSiblings", err);
       }
     }
+    if (rearmed.length === 0) return rearmed;
+    // GSAP leaves paused scenes out of the root's length and play() keeps that stale length.
+    try {
+      masterTimeline.shiftChildren?.(0);
+      masterTimeline.totalDuration?.();
+    } catch (err) {
+      swallow("runtime.init.remeasureRoot", err);
+    }
     return rearmed;
   };
 
@@ -4726,8 +4796,7 @@ export function initSandboxRuntimeModular(): void {
     const revision = opts?.revision ?? readCompositionTimingRevision();
     if (revision !== tweensRenderedThrough.revision)
       tweensRenderedThrough = { revision, time: Number.NEGATIVE_INFINITY };
-    const jumped = !(Math.abs(t - lastTransportSeekTime) <= 1.5 / state.canonicalFps);
-    const firstRenders = jumped && t > tweensRenderedThrough.time;
+    const firstRenders = t > tweensRenderedThrough.time;
     const hideClipsAgain = firstRenders ? showHiddenClips() : null;
     if (tl) {
       // #10: when data-duration exceeds the timeline's intrinsic length the
@@ -5131,16 +5200,21 @@ export function initSandboxRuntimeModular(): void {
       // affected — the seek runs whenever the clock is playing.
       const isPlaying = clock.isPlaying();
       const manualEditOwnsPausedFrame = !isPlaying && hasActiveStudioManualEditGesture();
+      // Both captures of a blurred frame must see the same page: the next tick catches up.
+      const blurHoldsFrame = isPlaying && captureMotionBlurBusy();
       if (manualEditOwnsPausedFrame) {
         // Force one reconciliation after drop/cancel even though the playhead did not move.
         pausedSeekDeferredByManualGesture = true;
       } else if (
-        isPlaying ||
-        pausedSeekDeferredByManualGesture ||
-        t !== lastTransportSeekTime ||
-        state.capturedTimeline !== lastTransportSeekTimeline
+        !blurHoldsFrame &&
+        (isPlaying ||
+          pausedSeekDeferredByManualGesture ||
+          t !== lastTransportSeekTime ||
+          state.capturedTimeline !== lastTransportSeekTimeline)
       ) {
         seekTimelineAndAdapters(t, { revision: timingRevision });
+        // Playback: draw and move on; nothing waits on this frame's blur. Paused, it unwraps.
+        void paintCaptureMotionBlur(t, { playing: isPlaying });
         if (!isPlaying) pausedSeekDeferredByManualGesture = false;
       }
       if (isPlaying) {
@@ -5163,6 +5237,7 @@ export function initSandboxRuntimeModular(): void {
         }
         runAdapters("pause");
         syncMediaForCurrentState(timingRevision);
+        void paintCaptureMotionBlur(state.currentTime);
         postState(true);
         return;
       }

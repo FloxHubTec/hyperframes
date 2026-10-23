@@ -14,7 +14,12 @@ export {
   type SiteHandle,
   siteHandleFromId,
 } from "./deploySite.js";
-export { renderToLambda, type RenderHandle, type RenderToLambdaOptions } from "./renderToLambda.js";
+export {
+  assertStackReadsSites,
+  renderToLambda,
+  type RenderHandle,
+  type RenderToLambdaOptions,
+} from "./renderToLambda.js";
 export {
   getRenderProgress,
   type GetRenderProgressOptions,
@@ -34,5 +39,18 @@ export {
   validateStepFunctionsInputSize,
   validateVariablesPayload,
 } from "./validateConfig.js";
+export {
+  type PrebuiltHandler,
+  prebuiltHandler,
+  prebuiltVideoImage,
+  type ReleaseAssetManifest,
+} from "./prebuiltHandler.js";
+export {
+  ensureEcrRepository,
+  type EnsureEcrRepositoryOptions,
+  type PushedImage,
+  pushImageToEcr,
+  type PushImageToEcrOptions,
+} from "./pushImageToEcr.js";
 export type { SerializableDistributedRenderConfig } from "../events.js";
 export type { DistributedFormat } from "../formatExtension.js";

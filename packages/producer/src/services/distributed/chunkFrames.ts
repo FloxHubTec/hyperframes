@@ -13,6 +13,7 @@ import {
   extractVideoFramesRange,
   type FrameRange,
   type FrameLookupTable,
+  type ShownBox,
 } from "@hyperframes/engine";
 import { resolveVideoCaptureBeyondViewport } from "../render/captureBeyondViewport.js";
 import { resolveCaptureJpegQuality } from "../render/captureImageFormat.js";
@@ -27,6 +28,7 @@ export const FFMPEG_VERSION_MISMATCH = "FFMPEG_VERSION_MISMATCH";
 export const PLAN_HASH_MISMATCH = "PLAN_HASH_MISMATCH";
 export const MISSING_PLAN_ARTIFACT = "MISSING_PLAN_ARTIFACT";
 export const CHUNK_INDEX_OUT_OF_RANGE = "CHUNK_INDEX_OUT_OF_RANGE";
+export const CHUNK_FRAME_RANGE_INVALID = "CHUNK_FRAME_RANGE_INVALID";
 export const MISSING_RUNTIME_ENV_SNAPSHOT = "MISSING_RUNTIME_ENV_SNAPSHOT";
 export { INVALID_VIDEO_METADATA };
 
@@ -35,6 +37,7 @@ export type RenderChunkValidationCode =
   | typeof PLAN_HASH_MISMATCH
   | typeof MISSING_PLAN_ARTIFACT
   | typeof CHUNK_INDEX_OUT_OF_RANGE
+  | typeof CHUNK_FRAME_RANGE_INVALID
   | typeof MISSING_RUNTIME_ENV_SNAPSHOT
   | typeof INVALID_VIDEO_METADATA
   | typeof BROWSER_GPU_NOT_SOFTWARE;
@@ -51,9 +54,18 @@ export class RenderChunkValidationError extends Error {
 
 /** One injector per browser session: a hook reused on a fresh page can skip its first injection. */
 export function createChunkVideoFrameInjectorFactory(
-  frameLookup: FrameLookupTable | null,
+  frameLookup: FrameLookupTable | Promise<FrameLookupTable> | null,
+  options?: Parameters<typeof createVideoFrameInjector>[1],
 ): () => BeforeCaptureHook | null {
-  return () => createVideoFrameInjector(frameLookup);
+  if (!(frameLookup instanceof Promise))
+    return () => createVideoFrameInjector(frameLookup, options);
+  return () => {
+    let hook: BeforeCaptureHook | null | undefined;
+    return async (page, time, heldVideoTime) => {
+      hook ??= createVideoFrameInjector(await frameLookup, options);
+      await hook?.(page, time, heldVideoTime);
+    };
+  };
 }
 
 function frameNumberFromFileName(name: string): number | null {
@@ -135,7 +147,10 @@ export function buildChunkCaptureOptions(input: {
     fpsDen: number;
     format: DistributedFormat;
   };
-  encoder: Pick<LockedRenderConfig, "quality" | "deviceScaleFactor" | "variables">;
+  encoder: Pick<
+    LockedRenderConfig,
+    "quality" | "deviceScaleFactor" | "variables" | "pageMotionBlur"
+  >;
   videoCount: number;
   html: string;
   skipReadinessVideoIds?: string[];
@@ -158,6 +173,7 @@ export function buildChunkCaptureOptions(input: {
     ...(videoCaptureBeyondViewport !== undefined
       ? { captureBeyondViewport: videoCaptureBeyondViewport }
       : {}),
+    pageMotionBlur: encoder.pageMotionBlur ?? "distributed-render",
     // A fixed warmup count keeps `beginFrameTimeTicks` host-independent.
     lockWarmupTicks: true,
     requiresWebGpu: compositionRequiresWebGpu(input.html),
@@ -165,6 +181,34 @@ export function buildChunkCaptureOptions(input: {
 }
 
 /** Extracts the given frames of deferred videos under the names a full extraction gives them. */
+export function shownDeferredFrameIndexes(
+  planVideos: PlanVideosJson,
+  frames: Iterable<number>,
+  fps: { num: number; den: number },
+): Map<string, Set<number>> {
+  const shown = new Map<string, Set<number>>();
+  const deferred = planVideos.extracted.filter((video) => video.deferredRange);
+  if (deferred.length === 0) return shown;
+  const table = createFrameLookupTable(
+    planVideos.videos,
+    deferred.map((video) => ({
+      ...video,
+      outputDir: "",
+      framePaths: new Map(Array.from({ length: video.totalFrames }, (_, i) => [i, String(i)])),
+    })),
+    resolveRenderFpsConfig(fps).value,
+  );
+  for (const frame of frames) {
+    const globalTime = (frame * fps.den) / fps.num;
+    for (const [videoId, payload] of table.getActiveFramePayloads(globalTime)) {
+      const indexes = shown.get(videoId) ?? new Set<number>();
+      indexes.add(payload.frameIndex);
+      shown.set(videoId, indexes);
+    }
+  }
+  return shown;
+}
+
 export async function extractDeferredVideoFramesForChunk(input: {
   planDir: string;
   planVideos: PlanVideosJson;
@@ -173,6 +217,7 @@ export async function extractDeferredVideoFramesForChunk(input: {
   outputRoot: string;
   cfg: Pick<EngineConfig, "ffmpegProcessTimeout">;
   remoteSources?: PlanV2RemoteSources;
+  shownBoxes?: ReadonlyMap<string, ShownBox>;
 }): Promise<ExtractedFrames[]> {
   const deferred = input.planVideos.extracted.filter((video) => video.deferredRange);
   const remoteSources = input.remoteSources ?? {};
@@ -190,24 +235,7 @@ export async function extractDeferredVideoFramesForChunk(input: {
     });
   }
   if (deferred.length === 0) return [];
-  const table = createFrameLookupTable(
-    input.planVideos.videos,
-    deferred.map((video) => ({
-      ...video,
-      outputDir: input.outputRoot,
-      framePaths: new Map(Array.from({ length: video.totalFrames }, (_, i) => [i, String(i)])),
-    })),
-    resolveRenderFpsConfig(input.fps).value,
-  );
-  const shown = new Map<string, Set<number>>();
-  for (const frame of input.frames) {
-    const globalTime = (frame * input.fps.den) / input.fps.num;
-    for (const [videoId, payload] of table.getActiveFramePayloads(globalTime)) {
-      const indexes = shown.get(videoId) ?? new Set<number>();
-      indexes.add(payload.frameIndex);
-      shown.set(videoId, indexes);
-    }
-  }
+  const shown = shownDeferredFrameIndexes(input.planVideos, input.frames, input.fps);
   return Promise.all(
     deferred.map(async (video) => {
       const outputDir = join(input.outputRoot, video.videoId);
@@ -234,6 +262,7 @@ export async function extractDeferredVideoFramesForChunk(input: {
           outputDir: input.outputRoot,
           format: range.format,
           frameRanges: contiguousRuns(indexes),
+          shownBox: input.shownBoxes?.get(video.videoId),
         },
         undefined,
         input.cfg,
