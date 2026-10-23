@@ -1,4 +1,4 @@
-/** In-page, before any script: holds the render's replaced videos at preload none from parse, as Chrome ignores a later none. */
+/** In-page, before any script: holds replaced videos at preload none from parse (Chrome ignores a later none). */
 export function holdRenderFrameVideos(ids: readonly string[]): void {
   const held = new Set(ids);
   (
