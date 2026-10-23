@@ -442,12 +442,12 @@ const VOID_ELEMENTS = new Set([
   "wbr",
 ]);
 
-/** The first (outermost) timed (data-start) element that still encloses `media`, if any. */
-function findTimedWrapper(
+function innermostTimedWrapper(
   source: string,
   tags: OpenTag[],
   media: OpenTag,
-): { name: string; id?: string; start: string } | null {
+): { name: string; id?: string; start: string; duration: string | null } | null {
+  let found: ReturnType<typeof innermostTimedWrapper> = null;
   for (const parent of tags) {
     if (parent.index >= media.index) break;
     if (parent.name === "video" || parent.name === "audio" || VOID_ELEMENTS.has(parent.name))
@@ -456,12 +456,22 @@ function findTimedWrapper(
     if (readDecodedAttr(parent.raw, "data-composition-id")) continue;
     const start = readAttr(parent.raw, "data-start");
     if (!start) continue;
-    const closed = new RegExp(`</${parent.name}>`, "i").test(
-      source.substring(parent.index, media.index),
+    const closes = source
+      .substring(parent.index, media.index)
+      .match(new RegExp(`</${parent.name}>`, "gi"));
+    const opens = tags.filter(
+      (t) => t.name === parent.name && t.index > parent.index && t.index < media.index,
     );
-    if (!closed) return { name: parent.name, id: readAttr(parent.raw, "id") || undefined, start };
+    if ((closes?.length ?? 0) <= opens.length) {
+      found = {
+        name: parent.name,
+        id: readAttr(parent.raw, "id") || undefined,
+        start,
+        duration: readAttr(parent.raw, "data-duration"),
+      };
+    }
   }
-  return null;
+  return found;
 }
 
 export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
@@ -614,7 +624,7 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
     for (const tag of tags) {
       if (tag.name !== "video") continue;
       if (!readAttr(tag.raw, "data-start")) continue;
-      const parent = findTimedWrapper(source, tags, tag);
+      const parent = innermostTimedWrapper(source, tags, tag);
       if (!parent) continue;
       findings.push({
         code: "video_nested_in_timed_element",
@@ -708,14 +718,14 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
       const hasId = readAttr(tag.raw, "id");
       const hasSrc = mediaHasResolvableSrc(tag, tags);
       if (hasSrc && !hasDataStart) {
-        const wrapper = findTimedWrapper(source, tags, tag);
+        const wrapper = tag.name === "video" ? innermostTimedWrapper(source, tags, tag) : null;
         findings.push({
           code: "media_missing_data_start",
           severity: "error",
           message: `<${tag.name}${hasId ? ` id="${hasId}"` : ""}> has src but no data-start. HyperFrames cannot own playback for untimed media, so preview and render behavior can diverge.`,
           elementId: hasId || undefined,
           fixHint: wrapper
-            ? `This <${tag.name}> sits inside the timed <${wrapper.name}${wrapper.id ? ` id="${wrapper.id}"` : ""}> (data-start="${wrapper.start}"), and the wrapper's data-start would then clash. Move the <${tag.name}> out as a direct child of the stage and give it that wrapper's data-start="${wrapper.start}" and its data-duration.`
+            ? `This <${tag.name}> sits inside the timed <${wrapper.name}${wrapper.id ? ` id="${wrapper.id}"` : ""}> (data-start="${wrapper.start}"), and the wrapper's data-start would then clash. Move the <${tag.name}> out as a direct child of the stage and give it that wrapper's data-start="${wrapper.start}"${wrapper.duration ? ` and data-duration="${wrapper.duration}"` : ""}.`
             : `Add data-start="0" (or the intended start time) and data-duration if the clip should stop before the source ends.`,
           snippet: truncateSnippet(tag.raw),
         });

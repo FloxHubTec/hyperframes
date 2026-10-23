@@ -361,6 +361,38 @@ describe("media rules", () => {
     ).not.toContain("media_missing_data_start");
   });
 
+  it("hints the innermost timed wrapper, skips closed siblings, and leaves audio alone", async () => {
+    const hintFor = async (body: string) =>
+      (
+        await lintHyperframeHtml(`
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">${body}</div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["c1"] = gsap.timeline({ paused: true });</script>
+</body></html>`)
+      ).findings.find((f) => f.code === "media_missing_data_start")?.fixHint;
+
+    const scene = await hintFor(
+      `<div id="scene" data-start="0" data-duration="10"><div id="clip" data-start="3" data-duration="4"><video id="v" src="a.mp4" muted></video></div></div>`,
+    );
+    expect(scene).toContain('id="clip"');
+    expect(scene).toContain('data-start="3" and data-duration="4"');
+
+    const sibling = await hintFor(
+      `<div id="scene" data-start="0" data-duration="10"><div id="gone" data-start="1"></div><video id="v" src="a.mp4" muted></video></div>`,
+    );
+    expect(sibling).toContain('id="scene"');
+
+    const noDuration = await hintFor(
+      `<div id="w" data-start="2"><video id="v" src="a.mp4" muted></video></div>`,
+    );
+    expect(noDuration).toContain('data-start="2".');
+
+    const audio = await hintFor(
+      `<div id="w" data-start="2" data-duration="6"><audio id="a" src="a.mp3"></audio></div>`,
+    );
+    expect(audio).toContain('data-start="0"');
+  });
+
   it("allows audible video clips to omit muted when data-has-audio is true", async () => {
     const html = `
 <html><body>
