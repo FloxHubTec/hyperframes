@@ -255,29 +255,6 @@ export function diskCaptureShortfallError(
   );
 }
 
-export function assertDiskCaptureHeadroom(
-  framesDir: string,
-  totalFrames: number,
-  captureOptions: CaptureOptions,
-  remedy: string,
-  freeDiskBytes?: (path: string) => number | null,
-): void {
-  const headroom = inspectDiskCaptureHeadroom(
-    framesDir,
-    totalFrames,
-    captureOptions,
-    freeDiskBytes,
-  );
-  if (headroom.available) return;
-  throw diskCaptureShortfallError(
-    headroom.estimatedBytes,
-    headroom.freeBytes,
-    framesDir,
-    "estimate",
-    remedy,
-  );
-}
-
 /** Frame bytes written so far: the merged frames dir plus every capture attempt's worker dirs. */
 export function measureCaptureFrameBytes(workDir: string, framesDir: string): number {
   let total = sampleDirectoryBytes(framesDir);
@@ -380,7 +357,8 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
 
   const captureOptions = buildCaptureOptions();
   const remedy = diskCaptureRemedy(cfg, job.config.format ?? "mp4", job.duration ?? 0, workerCount);
-  assertDiskCaptureHeadroom(framesDir, totalFrames, captureOptions, remedy);
+  // No static preflight: raw-RGBA estimates refuse long sparse-alpha renders that fit by 100x, so the
+  // measured projection after the first frames is the only disk gate.
   const checkDiskProjection = createDiskCaptureProjection({
     framesDir,
     totalFrames,
