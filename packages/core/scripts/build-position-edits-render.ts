@@ -2,7 +2,7 @@
 
 import { buildInjectedArtifact } from "./buildInjectedArtifact.js";
 
-buildInjectedArtifact({
+await buildInjectedArtifact({
   scriptUrl: import.meta.url,
   entry: "stubs/position-edits-render-entry.ts",
   out: "position-edits-render-inline.ts",

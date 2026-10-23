@@ -2,7 +2,7 @@
 
 import { buildInjectedArtifact } from "./buildInjectedArtifact.js";
 
-buildInjectedArtifact({
+await buildInjectedArtifact({
   scriptUrl: import.meta.url,
   entry: "stubs/audio-fx-runtime-entry.ts",
   out: "audio-fx-runtime-inline.ts",

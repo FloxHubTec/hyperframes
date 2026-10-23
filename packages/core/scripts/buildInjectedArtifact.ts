@@ -30,7 +30,7 @@ export interface InjectedArtifact {
   event: string;
 }
 
-export function buildInjectedArtifact(spec: InjectedArtifact): void {
+export async function buildInjectedArtifact(spec: InjectedArtifact): Promise<void> {
   const scriptDir = dirname(fileURLToPath(spec.scriptUrl));
   const scriptName = spec.scriptUrl.split("/").pop() ?? "";
   const repoRoot = resolve(scriptDir, "..");
@@ -62,7 +62,7 @@ export function buildInjectedArtifact(spec: InjectedArtifact): void {
     "",
   ].join("\n");
 
-  writeGeneratedFile(outPath, formatGeneratedSource(source, outPath));
+  writeGeneratedFile(outPath, await formatGeneratedSource(source, outPath));
 
   console.log(JSON.stringify({ event: spec.event, outPath, bytes: iife.length }));
 }

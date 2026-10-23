@@ -2,7 +2,7 @@
 
 import { buildInjectedArtifact } from "./buildInjectedArtifact.js";
 
-buildInjectedArtifact({
+await buildInjectedArtifact({
   scriptUrl: import.meta.url,
   entry: "stubs/svg-selector-aliases-entry.ts",
   out: "svg-selector-aliases-inline.ts",
