@@ -1826,25 +1826,34 @@ function isScriptFailure(session: CaptureSession): boolean {
   return outcome === "script_failure" || (outcome === "timeout" && session.pageErrors.length > 0);
 }
 
-/** A nested composition whose script threw gets an empty timeline of its length; a root without one stays a failure. */
+/** A nested composition whose script threw gets an empty timeline, but only while another nested timeline is live. */
 async function isolateUnregisteredCompositions(page: Page): Promise<IsolatedComposition[]> {
   const isolated = await page.evaluate(`(function() {
     var timelines = (window.__timelines = window.__timelines || {});
     var out = [];
     if (!window.gsap) return out;
+    var broken = [];
+    var live = 0;
     var hosts = document.querySelectorAll("[data-composition-id]");
     for (var i = 0; i < hosts.length; i++) {
-      var top = hosts[i];
-      var topId = top.getAttribute("data-composition-id");
-      var isRoot = !top.parentElement || !top.parentElement.closest("[data-composition-id]");
-      if (isRoot && topId && !timelines[topId] && !top.hasAttribute("data-no-timeline")) return out;
-    }
-    hosts.forEach(function(host) {
+      var host = hosts[i];
       var id = host.getAttribute("data-composition-id");
-      if (!id || timelines[id] || host.hasAttribute("data-no-timeline")) return;
+      if (!id || host.hasAttribute("data-no-timeline")) continue;
+      var isRoot = !host.parentElement || !host.parentElement.closest("[data-composition-id]");
+      if (timelines[id]) {
+        if (!isRoot) live++;
+      } else if (isRoot) {
+        return out;
+      } else {
+        broken.push(host);
+      }
+    }
+    if (live === 0) return out;
+    broken.forEach(function(host) {
       var tl = window.gsap.timeline({ paused: true });
       var duration = parseFloat(host.getAttribute("data-duration"));
       if (duration > 0) tl.set({}, {}, duration);
+      var id = host.getAttribute("data-composition-id");
       timelines[id] = tl;
       out.push({ compositionId: id, elementId: host.id || host.getAttribute("data-hf-id") || null });
     });

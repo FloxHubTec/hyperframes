@@ -34,8 +34,9 @@ describe.skipIf(!hasBrowser)("a composition script that throws", () => {
   const NESTED = `<script>${FAKE_GSAP}</script>
        <div data-composition-id="root" data-duration="4">
          <div id="chart" data-composition-id="chart" data-duration="4"></div>
+         <div id="ok" data-composition-id="ok" data-duration="4"></div>
        </div>
-       <script>window.__timelines = { root: {} };</script>
+       <script>window.__timelines = { root: {}, ok: {} };</script>
        <script>document.getElementById("missing").appendChild(document.createElement("i"));</script>`;
   const THROWN = ["TypeError: Cannot read properties of null (reading 'appendChild')"];
 
@@ -58,6 +59,24 @@ describe.skipIf(!hasBrowser)("a composition script that throws", () => {
     expect(session.warnings[0]?.details?.isolatedElements).toEqual([
       { compositionId: "chart", elementId: "chart" },
     ]);
+    await page.close();
+  }, 30_000);
+
+  it("keeps the blocking failure when the only nested timeline is the one that threw", async () => {
+    const page = await browser.newPage();
+    await page.setContent(
+      `<script>${FAKE_GSAP}</script>
+       <div data-composition-id="root" data-duration="4">
+         <div id="chart" data-composition-id="chart" data-duration="4"></div>
+       </div>
+       <script>window.__timelines = { root: {} };</script>
+       <script>document.getElementById("missing").appendChild(document.createElement("i"));</script>`,
+    );
+    const session = sessionFor(page, THROWN);
+    await waitForSubCompositionTimelines(session, page, 60_000, { scriptErrorGraceMs: 100 });
+    expect(session.isolatedCompositions).toEqual([]);
+    recordSubTimelineWarning(session, 60_000);
+    expect(session.warnings.map((w) => w.code)).toEqual(["sub_timeline_script_failure"]);
     await page.close();
   }, 30_000);
 
