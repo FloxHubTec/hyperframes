@@ -285,7 +285,7 @@ it("splits the samples over a second Chrome and reports what one Chrome reports"
   expect(sampled(unopened.messages)).toEqual(sampled(serial.messages));
 });
 
-it("runs the dense overlap grid in one page task, keeping each sample's time on what it logs", async () => {
+it("runs the dense overlap grid in page tasks of at most 8 samples, keeping each sample's time on what it logs", async () => {
   mountCanvasFixture(
     `<section data-composition-file="scenes/copy.html"><p id="copy" data-layout-name="copy">Hi</p></section>`,
   );
@@ -341,13 +341,20 @@ it("runs the dense overlap grid in one page task, keeping each sample's time on 
   );
 
   expect(denseAudits.length).toBeGreaterThan(10);
-  expect(new Set(denseAudits).size).toBe(1);
+  const perTask = Object.values(Object.groupBy(denseAudits, (calls) => calls)).map(
+    (g) => g?.length,
+  );
+  expect(perTask.every((count) => (count ?? 0) <= 8)).toBe(true);
+  expect(perTask).toHaveLength(Math.ceil(denseAudits.length / 8));
   expect(result.runtimeFindings).toContainEqual(
     expect.objectContaining({ code: "console_error", message: "thrown at 2.5", time: 2.5 }),
   );
-  expect(result.runtimeFindings).toContainEqual(
-    expect.objectContaining({ message: "queued during the grid", time: 0, timeRange: [0, 10] }),
+  const queued = result.runtimeFindings.filter(
+    (finding) => finding.message === "queued during the grid",
   );
+  expect(queued).toHaveLength(perTask.length);
+  expect(queued[0]).toMatchObject({ time: 0, timeRange: [0, expect.any(Number)] });
+  expect(queued.at(-1)?.timeRange?.[1]).toBe(10);
   expect(
     result.runtimeFindings.find((finding) => finding.message === "thrown at 2.5"),
   ).not.toHaveProperty("timeRange");
