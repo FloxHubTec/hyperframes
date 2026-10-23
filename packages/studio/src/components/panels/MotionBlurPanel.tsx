@@ -34,6 +34,9 @@ const POLL_MS = 500;
 /** After a write the preview is reloading: keep what was just written instead of the old document. */
 const SETTLE_MS = 1500;
 
+/** Thrown from the edit when the file already holds the level, so nothing is written or recorded for undo. */
+class NothingToChange extends Error {}
+
 /** The preview's own root attributes, polled; `hold` pins an optimistic value until the preview catches up. */
 function useLivePreviewAttributes(
   previewIframeRef: { current: HTMLIFrameElement | null },
@@ -91,27 +94,33 @@ export const MotionBlurPanel = memo(function MotionBlurPanel({
 
   const apply = useCallback(
     async (patch: Partial<MotionBlurSettings>) => {
-      if (!root || !settings || !attributes) return;
-      const edits = changedEdits(attributes, { ...settings, ...patch });
-      if (edits.length === 0) return;
+      if (!attributes) return;
+      // The write lands on the file's own root, so the edits are worked out there, not from the preview.
+      let applied: Array<{ name: string; value: string | null }> = [];
       try {
         await persist("Edit motion blur", (session) => {
-          for (const e of edits) {
+          const target = findCompositionRoot(session.getRootElements());
+          if (!target) return;
+          const next = { ...settingsOf(target.attributes), ...patch };
+          applied = changedEdits(target.attributes, next);
+          if (applied.length === 0) throw new NothingToChange();
+          for (const e of applied) {
             session.dispatch({
               type: "setAttribute",
-              target: root.id,
+              target: target.id,
               name: e.name,
               value: e.value,
             });
           }
         });
-        hold((current) => withEdits(current ?? attributes, edits));
+        hold((current) => withEdits(current ?? attributes, applied));
         rerender();
       } catch (err) {
+        if (err instanceof NothingToChange) return;
         showToast(err instanceof Error ? err.message : String(err), "error");
       }
     },
-    [root, settings, attributes, persist, hold, showToast],
+    [attributes, persist, hold, showToast],
   );
 
   if (!settings) {
@@ -122,7 +131,8 @@ export const MotionBlurPanel = memo(function MotionBlurPanel({
     );
   }
   const locked = !isMain;
-  const current = levelOf(settings);
+  // A sub-composition's own root is not the setting being edited, so no level is shown while locked.
+  const current = locked ? null : levelOf(settings);
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-3 text-[11px] text-neutral-300">

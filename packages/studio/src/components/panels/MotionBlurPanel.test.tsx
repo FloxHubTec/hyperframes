@@ -156,10 +156,22 @@ describe("MotionBlurPanel", () => {
     expect(checked(await mount(' data-motion-blur="on"'))).toEqual(["Strong"]);
   });
 
+  it("writes the level picked even when the preview and the file disagree", async () => {
+    const doc = document.implementation.createHTMLDocument("preview");
+    doc.body.innerHTML =
+      '<div data-composition-id="main" data-motion-blur="on" data-motion-blur-shutter="720" data-motion-blur-samples="64"></div>';
+    shell.previewIframeRef.current = { contentDocument: doc } as unknown as HTMLIFrameElement;
+    const host = await mount();
+    await click(radio(host, "Subtle"));
+    expect(files["index.html"]).toContain('data-motion-blur="on"');
+    expect(files["index.html"]).not.toContain("data-motion-blur-samples");
+  });
+
   it("is read-only for a sub-composition, which blur does not read", async () => {
     shell.activeCompPath = "scene.html";
     const host = await mount();
     expect(host.textContent).toContain("read from the main composition");
     expect(radio(host, "Strong")?.hasAttribute("disabled")).toBe(true);
+    expect(checked(host)).toEqual([]);
   });
 });
