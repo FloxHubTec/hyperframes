@@ -1704,6 +1704,56 @@ describe("check pipeline", () => {
     );
   });
 
+  it("slow samples that each finish keep the check alive past 120 s", async () => {
+    vi.useFakeTimers();
+    try {
+      const collectLayout = vi.fn(async (_time: number, _tolerance: number) => {
+        await new Promise((resolve) => setTimeout(resolve, 30_000));
+        return [];
+      });
+      const driver = fakeDriver({ collectLayout });
+      const { deps } = dependencies(driver);
+      deps.runBrowserCheck = async (_project, options, motion, deadline) => {
+        deadline!.start();
+        return runAuditGrid(driver, options, motion, undefined, deadline!.enter);
+      };
+      const pending = runCheckPipeline(PROJECT, DEFAULT_CHECK_OPTIONS, deps);
+      await vi.advanceTimersByTimeAsync(2_000_000);
+      const report = await pending;
+      expect(report.runtime.findings.map((finding) => finding.code)).not.toContain(
+        "check_runtime_failure",
+      );
+      expect(collectLayout.mock.calls.length * 30).toBeGreaterThan(120);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a long overlap pass that keeps reporting progress finishes instead of hitting a wall clock", async () => {
+    vi.useFakeTimers();
+    try {
+      const collectOverlapGrid = vi.fn(async (times: number[]) => {
+        await new Promise((resolve) => setTimeout(resolve, 10_000 * times.length));
+        return times.map((): AnchoredLayoutIssue[] => []);
+      });
+      const driver = fakeDriver({ collectOverlapGrid });
+      const { deps } = dependencies(driver);
+      deps.runBrowserCheck = async (_project, options, motion, deadline) => {
+        deadline!.start();
+        return runAuditGrid(driver, options, motion, undefined, deadline!.enter);
+      };
+      const pending = runCheckPipeline(PROJECT, DEFAULT_CHECK_OPTIONS, deps);
+      await vi.advanceTimersByTimeAsync(2_000_000);
+      const report = await pending;
+      expect(report.runtime.findings.map((finding) => finding.code)).not.toContain(
+        "check_runtime_failure",
+      );
+      expect(collectOverlapGrid.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a deadline that fires in the overlap pass names that pass in its finding", async () => {
     vi.useFakeTimers();
     try {
