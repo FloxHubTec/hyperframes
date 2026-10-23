@@ -33,7 +33,6 @@ it("reads Windows executable metadata without executing the browser or interpola
       file: "powershell.exe",
       args: [
         "-NoProfile",
-        "-NonInteractive",
         "-Command",
         "(Get-Item -LiteralPath $env:HYPERFRAMES_CHROME_VERSION_PATH).VersionInfo.ProductVersion",
       ],

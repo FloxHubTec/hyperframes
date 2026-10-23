@@ -1,7 +1,7 @@
 // Shared Puppeteer browser management and thumbnail generation for Studio dev server.
 
 import { existsSync, readdirSync } from "node:fs";
-import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, win32 as pathWin32 } from "node:path";
 import {
@@ -86,29 +86,17 @@ function findPuppeteerCacheChrome(
 
 export function browserVersion(
   executable: string,
-  run: (file: string, args: string[], options: ExecFileSyncOptionsWithStringEncoding) => string = (
-    file,
-    args,
-    options,
-  ) => execFileSync(file, args, options),
+  run: typeof execFileSync = execFileSync,
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
+  const options = { encoding: "utf8" as const, timeout: 5_000, windowsHide: true };
+  const env = { ...process.env, HYPERFRAMES_CHROME_VERSION_PATH: executable };
+  const script =
+    "(Get-Item -LiteralPath $env:HYPERFRAMES_CHROME_VERSION_PATH).VersionInfo.ProductVersion";
   try {
-    const options = { encoding: "utf8" as const, timeout: 5_000, windowsHide: true };
-    if (platform === "win32") {
-      const version = run(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "(Get-Item -LiteralPath $env:HYPERFRAMES_CHROME_VERSION_PATH).VersionInfo.ProductVersion",
-        ],
-        { ...options, env: { ...process.env, HYPERFRAMES_CHROME_VERSION_PATH: executable } },
-      ).trim();
-      return /^\d+\.\d+\.\d+\.\d+$/.test(version) ? `Chrome/${version}` : undefined;
-    }
-    return run(executable, ["--version"], options).trim() || undefined;
+    if (platform !== "win32") return run(executable, ["--version"], options).trim() || undefined;
+    const v = run("powershell.exe", ["-NoProfile", "-Command", script], { ...options, env }).trim();
+    return /^\d+(\.\d+){3}$/.test(v) ? `Chrome/${v}` : undefined;
   } catch {
     return undefined;
   }
