@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -11,6 +11,21 @@ import { processCompositionAudio } from "./audioMixer.js";
 
 const HAS_FFMPEG = spawnSync(getFfmpegBinary(), ["-version"], { encoding: "utf-8" }).status === 0;
 const BYTES_PER_SECOND = 48_000 * 2 * 2;
+
+// Writes the body in pieces, counting the bytes served.
+async function streamBody(
+  res: ServerResponse,
+  body: Buffer,
+  start: number,
+  served?: { bytes: number },
+): Promise<void> {
+  for (let at = start; at < body.length && !res.destroyed; at += 65_536) {
+    const piece = body.subarray(at, at + 65_536);
+    if (served) served.bytes += piece.length;
+    if (!res.write(piece)) await once(res, "drain").catch(() => undefined);
+  }
+  res.end();
+}
 
 // A range server like S3's (ffmpeg asks for `bytes=<start>-`). With `cut`, the first read starting
 // at `cut.from` or later (past the probes' header reads) stops at `cut.at`, and every later request
@@ -31,14 +46,7 @@ function serve(
       "Content-Type": "audio/wav",
     });
     const cutHere = cut !== undefined && start >= cut.from && start < cut.at;
-    if (!cutHere) {
-      for (let at = start; at < body.length && !res.destroyed; at += 65_536) {
-        const piece = body.subarray(at, at + 65_536);
-        if (served) served.bytes += piece.length;
-        if (!res.write(piece)) await once(res, "drain").catch(() => undefined);
-      }
-      return void res.end();
-    }
+    if (!cutHere) return streamBody(res, body, start, served);
     refusing = true;
     res.write(body.subarray(start, cut.at), () => res.destroy());
   });

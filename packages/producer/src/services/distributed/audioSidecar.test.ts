@@ -40,6 +40,7 @@ describe.skipIf(!HAS_FFMPEG)("buildAudioSidecar", () => {
       "stream=codec_type",
       "-of",
       "csv=p=0",
+      "--",
       path,
     ])
       .stdout.toString()
@@ -58,11 +59,7 @@ describe.skipIf(!HAS_FFMPEG)("buildAudioSidecar", () => {
   ];
 
   it("builds none when the audio starts after the picture, as an input seek would land late", async () => {
-    const video = withAudio(
-      "late.mov",
-      [...["-itsoffset", "0.478"], ...sine(2)],
-      ["-map", "1:a"],
-    );
+    const video = withAudio("late.mov", [...["-itsoffset", "0.478"], ...sine(2)], ["-map", "1:a"]);
 
     expect(await buildAudioSidecar(video, join(dir, "late.m4a"))).toBe("none");
   });
@@ -72,7 +69,10 @@ describe.skipIf(!HAS_FFMPEG)("buildAudioSidecar", () => {
       ...["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=3"],
       ...["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3"],
       ...["-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=3"],
-      ...["-filter_complex", "[1:a]aformat=channel_layouts=stereo[a];[2:a]aformat=channel_layouts=5.1[b]"],
+      ...[
+        "-filter_complex",
+        "[1:a]aformat=channel_layouts=stereo[a];[2:a]aformat=channel_layouts=5.1[b]",
+      ],
       ...["-map", "0:v", "-map", "[a]", "-map", "[b]", "-c:v", "mpeg4", "-c:a", "aac"],
     ]);
 
