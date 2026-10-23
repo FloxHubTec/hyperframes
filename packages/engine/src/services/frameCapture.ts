@@ -1826,13 +1826,20 @@ function isScriptFailure(session: CaptureSession): boolean {
   return outcome === "script_failure" || (outcome === "timeout" && session.pageErrors.length > 0);
 }
 
-/** A composition whose script failed gets an empty paused timeline of its authored length, so the render goes on. */
+/** A nested composition whose script threw gets an empty timeline of its length; a root without one stays a failure. */
 async function isolateUnregisteredCompositions(page: Page): Promise<IsolatedComposition[]> {
   const isolated = await page.evaluate(`(function() {
     var timelines = (window.__timelines = window.__timelines || {});
     var out = [];
     if (!window.gsap) return out;
-    document.querySelectorAll("[data-composition-id]").forEach(function(host) {
+    var hosts = document.querySelectorAll("[data-composition-id]");
+    for (var i = 0; i < hosts.length; i++) {
+      var top = hosts[i];
+      var topId = top.getAttribute("data-composition-id");
+      var isRoot = !top.parentElement || !top.parentElement.closest("[data-composition-id]");
+      if (isRoot && topId && !timelines[topId] && !top.hasAttribute("data-no-timeline")) return out;
+    }
+    hosts.forEach(function(host) {
       var id = host.getAttribute("data-composition-id");
       if (!id || timelines[id] || host.hasAttribute("data-no-timeline")) return;
       var tl = window.gsap.timeline({ paused: true });
@@ -1864,7 +1871,7 @@ export async function waitForSubCompositionTimelines(
     shouldStop: () => session.vfxFailure !== undefined,
     knownUnregisteredIds: memo.unregisteredIds,
   });
-  if (isScriptFailure(session)) {
+  if (isScriptFailure(session) && session.scriptLoadFailures.length === 0) {
     session.isolatedCompositions = await isolateUnregisteredCompositions(page);
   }
   // Only a clean full-length timeout is replayed: a VFX stop ends early, and page or script
