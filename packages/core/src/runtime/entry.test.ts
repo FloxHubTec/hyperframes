@@ -488,6 +488,26 @@ describe("runtime entry", () => {
       expect(armed(slow, done)).toEqual([false, true]);
     });
 
+    it("keeps a passed clip released for the rest of the play instead of refetching it each pass", async () => {
+      spyLoad();
+      servePreview();
+      stubPlayback();
+      const [slow, next] = videos(mountRoot(), "0", "2");
+      // A fetch is running whenever preload asks for one.
+      Object.defineProperty(slow, "networkState", { get: () => (slow.preload === "auto" ? 2 : 1) });
+
+      await evaluateRuntime();
+      window.__player?.play();
+      window.__player?.seek(2.05, { keepPlaying: true });
+      expect(armed(slow, next)).toEqual([false, true]);
+      const loadsAfterRelease = loadsOf(slow)[0];
+      for (let t = 2.1; t <= 4.0; t += 0.05) {
+        window.__player?.seek(t, { keepPlaying: true });
+        expect(slow.preload).toBe("none");
+      }
+      expect(loadsOf(slow)[0]).toBe(loadsAfterRelease);
+    });
+
     // jsdom's media elements cannot play; the runtime only needs play() to settle.
     const stubPlayback = () => {
       vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);

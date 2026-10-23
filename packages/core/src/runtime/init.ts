@@ -2923,6 +2923,7 @@ export function initSandboxRuntimeModular(): void {
     visible: boolean,
     upcoming: boolean,
     time: number,
+    forLoop: boolean,
   ) => {
     const playing = clock.isPlaying();
     if (!(visible && playing)) armedFrom.delete(el);
@@ -2937,14 +2938,14 @@ export function initSandboxRuntimeModular(): void {
     const unslotted = !visible && !armed && decided !== true && prefetching.size >= PREFETCH_SLOTS;
     if (unslotted && upcoming) waitingForSlot.add(el);
     else waitingForSlot.delete(el);
-    // While playing, a clip that has passed and is still downloading only takes bandwidth from the next ones.
-    const spent =
+    // While playing, a clip that has passed is not fetched again, and one still downloading is released:
+    // either only takes bandwidth from the next ones. A loaded clip stays for a scrub back.
+    const passed =
       !visible &&
-      decided === true &&
-      clock.isPlaying() &&
-      el.networkState === 2 &&
-      el.readyState < 4 &&
+      !forLoop &&
+      playing &&
       resolveAbsoluteMediaStartSeconds(el) + (resolveDurationForElement(el) ?? Number.NaN) <= time;
+    const spent = passed && (decided !== true || (el.networkState === 2 && el.readyState < 4));
     const near = visible || armed || (upcoming && !unslotted && !spent);
     if ((visible || !near) && endPrefetch(el)) queueMicrotask(fillPrefetchSlots);
     if (decided === near) return;
@@ -2963,16 +2964,18 @@ export function initSandboxRuntimeModular(): void {
   };
   // Held past the look-ahead so a scrub across its edge does not refetch, and while playing when
   // due at the loop start.
+  const dueAtLoopStart = (el: HTMLMediaElement, visibleAt: ReturnType<typeof timedVisibilityAt>) =>
+    loopStartSeconds !== null &&
+    clock.isPlaying() &&
+    (visibleAt(el, loopStartSeconds) ||
+      dueSoon(el, visibleAt, loopStartSeconds, RELEASE_LOOKAHEAD_SECONDS));
   const mediaStaysDue = (
     el: HTMLMediaElement,
     visibleAt: ReturnType<typeof timedVisibilityAt>,
     t: number,
   ) =>
     (mediaNearPlayhead.get(el) === true && dueSoon(el, visibleAt, t, RELEASE_LOOKAHEAD_SECONDS)) ||
-    (loopStartSeconds !== null &&
-      clock.isPlaying() &&
-      (visibleAt(el, loopStartSeconds) ||
-        dueSoon(el, visibleAt, loopStartSeconds, RELEASE_LOOKAHEAD_SECONDS)));
+    dueAtLoopStart(el, visibleAt);
 
   const visibilityDecided = new WeakMap<Element, boolean>();
   // Every time at which an element's visibility, upcoming or preload decision can flip: its own window
@@ -3108,6 +3111,7 @@ export function initSandboxRuntimeModular(): void {
           isVisibleNow,
           upcoming || mediaStaysDue(rawNode, visibleAt, currentTime),
           currentTime,
+          dueAtLoopStart(rawNode, visibleAt),
         );
       if (!isMediaElement(rawNode) && !isImageElement(rawNode)) decidedTimedClip = true;
       if (isVideoElement(rawNode) || isImageElement(rawNode)) {
