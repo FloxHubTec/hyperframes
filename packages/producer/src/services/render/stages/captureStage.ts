@@ -26,13 +26,9 @@
  *   - `job.framesRendered` is updated at every per-frame / per-progress
  *     point; `Capturing frame N/M` goes through `reportFrameProgress`.
  *
- * Known follow-up: this stage imports `executeDiskCaptureWithAdaptiveRetry`
- * from `renderOrchestrator.ts`, which itself imports the stage — a runtime
- * cycle that resolves at module-init time because no stage function is
- * invoked during load. A subsequent PR will consolidate the capture
- * helpers (`executeDiskCaptureWithAdaptiveRetry`, `countFrameRanges`,
- * `safeCleanup`, `sampleDirectoryBytes`, etc.) into a shared module so
- * the stages can import them without reaching back into the orchestrator.
+ * Known follow-up: this stage imports `executeDiskCaptureWithAdaptiveRetry` from
+ * `renderOrchestrator.ts`, which imports the stage (a cycle that resolves at module init). The
+ * capture helpers should move to a shared module so stages stop reaching back into the orchestrator.
  */
 
 import { existsSync, readdirSync, statfsSync } from "node:fs";
@@ -150,7 +146,6 @@ export function shouldAllowAdaptiveCaptureRetry(
 const JPEG_RAW_RGBA_DIVISOR = 8;
 /** Above draft's quality 80; quality-100 jpeg of grainy 4K footage measures about 1/6 of raw RGBA. */
 const HIGH_QUALITY_JPEG_RAW_RGBA_DIVISOR = 4;
-/** Frames captured before the measured projection replaces the static estimate. */
 const DISK_PROJECTION_SAMPLE_FRAMES = 10;
 
 export function estimateDiskCaptureBytes(
