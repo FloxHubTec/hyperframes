@@ -319,6 +319,48 @@ describe("media rules", () => {
     expect(finding?.elementId).toBe("demo-video");
   });
 
+  it("names the timed wrapper in the hint, and following it lints clean", async () => {
+    const page = (body: string) => `
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">
+    ${body}
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["c1"] = gsap.timeline({ paused: true });</script>
+</body></html>`;
+    const codes = async (body: string) =>
+      (await lintHyperframeHtml(page(body))).findings.map((f) => f.code);
+
+    const nested = await lintHyperframeHtml(
+      page(
+        `<div id="wrap" class="clip" data-start="2" data-duration="6"><video id="nv" src="assets/clip.mp4" muted></video></div>`,
+      ),
+    );
+    const hint = nested.findings.find((f) => f.code === "media_missing_data_start")?.fixHint;
+    expect(hint).toContain('id="wrap"');
+    expect(hint).toContain('data-start="2"');
+    expect(hint).not.toContain('data-start="0"');
+
+    // The hint's one step: the video leaves the wrapper and takes its timing.
+    const followed = await codes(
+      `<div id="wrap" class="clip" data-start="2" data-duration="6"></div><video id="nv" src="assets/clip.mp4" data-start="2" data-duration="6" muted></video>`,
+    );
+    expect(followed).not.toContain("media_missing_data_start");
+    expect(followed).not.toContain("video_nested_in_timed_element");
+
+    // Direct case keeps the plain hint, and following it is clean too.
+    const direct = await lintHyperframeHtml(
+      page(`<video id="dv" src="assets/clip.mp4" muted></video>`),
+    );
+    expect(direct.findings.find((f) => f.code === "media_missing_data_start")?.fixHint).toContain(
+      'data-start="0"',
+    );
+    expect(
+      await codes(
+        `<video id="dv" src="assets/clip.mp4" data-start="0" data-duration="5" muted></video>`,
+      ),
+    ).not.toContain("media_missing_data_start");
+  });
+
   it("allows audible video clips to omit muted when data-has-audio is true", async () => {
     const html = `
 <html><body>
