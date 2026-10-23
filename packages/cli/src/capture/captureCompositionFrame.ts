@@ -35,7 +35,6 @@ export const AUDIT_SEEK_OPTIONS = {
   waitForFontsMs: 500,
 } as const;
 
-/** How long a seek waits for the image layers it reveals; time is only spent while one is still loading. */
 export const SCREENSHOT_IMAGE_WAIT_MS = 3_000;
 
 export const SCREENSHOT_SEEK_OPTIONS = {
@@ -43,7 +42,6 @@ export const SCREENSHOT_SEEK_OPTIONS = {
   waitForImagesMs: SCREENSHOT_IMAGE_WAIT_MS,
 } as const;
 
-/** Visible image layers that were not ready when the wait ended: still loading (`pending`) or broken (`failed`). */
 export interface UnsettledImages {
   pending: string[];
   failed: string[];
@@ -629,7 +627,6 @@ async function waitForCompositionImages(
   timeoutMs: number,
 ): Promise<UnsettledImages> {
   const unsettled = await page.evaluate(
-    // Serialized into the page: the layer scan and the decode wait cannot move into outer helpers.
     // fallow-ignore-next-line complexity
     async (ms: number) => {
       const layers = new Map<string, HTMLImageElement>();
