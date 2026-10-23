@@ -7,7 +7,6 @@ type PreloadableMedia = Pick<
   "id" | "tagName" | "preload" | "readyState" | "networkState" | "load"
 >;
 
-/** A video the render replaces with extracted frames: the page's decoder never supplies its pixels. */
 export function isRenderFrameVideo(media: Pick<HTMLMediaElement, "id" | "tagName">): boolean {
   const ids = (window as Window & { __HF_RENDER_FRAME_VIDEO_IDS?: readonly string[] })
     .__HF_RENDER_FRAME_VIDEO_IDS;

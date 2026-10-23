@@ -1,8 +1,4 @@
-/**
- * Runs in the page before any script. A video whose frames the render extracts is never decoded by
- * the page; held at preload none from the moment it is parsed (Chrome's default would start it, and
- * ignores a later none), a film cut into N pieces would otherwise mount N decoders at once.
- */
+/** In-page, before any script: holds the render's replaced videos at preload none from parse, as Chrome ignores a later none. */
 export function holdRenderFrameVideos(ids: readonly string[]): void {
   const held = new Set(ids);
   (
