@@ -44,4 +44,22 @@ describe("applyDotEnv", () => {
     applyDotEnv("GEMINI_API_KEY=project", env, []);
     expect(env).toEqual({});
   });
+
+  it("keeps a quoted multiline value whole instead of truncating it to its first line", () => {
+    const env: NodeJS.ProcessEnv = {};
+    applyDotEnv(
+      "HYPERFRAMES_VERTEX_PROJECT_ID=synthetic-project\n" +
+        "HYPERFRAMES_VERTEX_SERVICE_ACCOUNT='{\n" +
+        '  "type": "service_account",\n' +
+        '  "project_id": "synthetic-project"\n' +
+        "}'\n" +
+        "AFTER=still-parsed",
+      env,
+    );
+    expect(env.HYPERFRAMES_VERTEX_SERVICE_ACCOUNT).toBe(
+      '{\n  "type": "service_account",\n  "project_id": "synthetic-project"\n}',
+    );
+    expect(() => JSON.parse(env.HYPERFRAMES_VERTEX_SERVICE_ACCOUNT!)).not.toThrow();
+    expect(env.AFTER).toBe("still-parsed");
+  });
 });

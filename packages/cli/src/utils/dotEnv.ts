@@ -33,6 +33,40 @@ function entryOf(rawLine: string): [string, string] | null {
   return [line.slice(0, eq).trim(), valueOf(line.slice(eq + 1).trim())];
 }
 
+// The quote a line's value opens without closing, if any; `logicalLines` keeps
+// reading further lines for it until one closes the quote.
+function openQuoteOf(trimmedLine: string): string | null {
+  const eq = trimmedLine.indexOf("=");
+  if (eq < 1) return null;
+  const valueStart = trimmedLine.slice(eq + 1).trim();
+  const quote = valueStart.charAt(0);
+  if (quote !== '"' && quote !== "'") return null;
+  return valueStart.indexOf(quote, 1) < 0 ? quote : null;
+}
+
+// A quoted value left open at end of line continues on the lines that follow it;
+// join them into one logical line so `entryOf`/`valueOf` see the whole value.
+function logicalLines(content: string): string[] {
+  const rawLines = content.split("\n");
+  const lines: string[] = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i] ?? "";
+    const quote = openQuoteOf(line.trim());
+    if (quote === null) {
+      lines.push(line);
+      continue;
+    }
+    const continuation = [line];
+    while (++i < rawLines.length) {
+      const next = rawLines[i] ?? "";
+      continuation.push(next);
+      if (next.includes(quote)) break;
+    }
+    lines.push(continuation.join("\n"));
+  }
+  return lines;
+}
+
 // Never over a key already set, and never the feedback email in any letter case (Windows env names are case-blind):
 // only the launching app may attach it, and an agent can write a project `.env`.
 // An optional exact-name allowlist narrows callers that load less-trusted project settings.
@@ -42,7 +76,7 @@ export function applyDotEnv(
   allowedKeys?: readonly string[],
 ): void {
   const allowed = allowedKeys === undefined ? undefined : new Set(allowedKeys);
-  for (const entry of content.split("\n").map(entryOf)) {
+  for (const entry of logicalLines(content).map(entryOf)) {
     if (!entry) continue;
     const [key, value] = entry;
     if (
