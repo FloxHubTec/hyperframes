@@ -1958,7 +1958,7 @@ export async function pollSubCompositionTimelines(
         `[FrameCapture] Sub-composition timeline wait cut short after ${now - start}ms: ` +
           `script(s) failed (${failed.join(", ")}), so ` +
           `the timeline registration they carry can never arrive. ` +
-          `Fix the script; the render proceeds without those animations.`,
+          `Fix the script.`,
       );
       break;
     }
@@ -2190,7 +2190,8 @@ function recordCaptureWarnings(session: CaptureSession, warnings: readonly Captu
 export function recordSubTimelineWarning(session: CaptureSession, timeoutMs: number): void {
   const outcome = session.subTimelineWaitOutcome;
   if (outcome === "ready" || !outcome) return;
-  const threwThenTimedOut = outcome === "timeout" && session.pageErrors.length > 0;
+  const threwThenTimedOut =
+    session.pageErrors.length > 0 && session.scriptLoadFailures.length === 0;
   const scriptFailure = isScriptFailure(session);
   const sources = [...session.scriptLoadFailures, ...session.pageErrors];
   const pending = session.pendingTimelineIds ?? [];
@@ -2217,7 +2218,7 @@ export function recordSubTimelineWarning(session: CaptureSession, timeoutMs: num
     {
       code: scriptFailure ? "sub_timeline_script_failure" : "sub_timeline_readiness_timeout",
       message: threwThenTimedOut
-        ? `A composition script threw and a timeline did not register within ${timeoutMs}ms` +
+        ? `A composition script threw before its timeline registered` +
           `${pendingSuffix} (${sources.join(", ")}). Fix the error; a composition animated by ` +
           `CSS or rAF rather than a GSAP timeline must mark its host with data-no-timeline.`
         : scriptFailure
