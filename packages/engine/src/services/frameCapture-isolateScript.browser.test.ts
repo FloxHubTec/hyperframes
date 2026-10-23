@@ -39,7 +39,9 @@ describe.skipIf(!hasBrowser)("a composition script that throws", () => {
        <script>window.addEventListener("error", function (e) { window.__errors = (window.__errors || []).concat(String(e.message)); });</script>
        <script>document.getElementById("missing").appendChild(document.createElement("i"));</script>`,
     );
-    const session = sessionFor(page, ["TypeError: Cannot read properties of null (reading 'appendChild')"]);
+    const session = sessionFor(page, [
+      "TypeError: Cannot read properties of null (reading 'appendChild')",
+    ]);
     const started = Date.now();
     await waitForSubCompositionTimelines(session, page, 60_000, { scriptErrorGraceMs: 100 });
     expect(Date.now() - started).toBeLessThan(10_000);
