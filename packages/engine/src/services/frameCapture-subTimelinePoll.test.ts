@@ -96,6 +96,22 @@ describe("pollSubCompositionTimelines fail-fast", () => {
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
+  it("counts the error grace from the first error, not from the start of the wait", async () => {
+    const started = Date.now();
+    const errors: string[] = [];
+    const page = makeMockPage((expr) => {
+      if (expr.includes("__hfForceTimelineRebind")) return undefined;
+      if (Date.now() - started > 100 && errors.length === 0) errors.push("TypeError: late");
+      return false;
+    });
+    await pollSubCompositionTimelines(page, 60_000, {
+      intervalMs: 10,
+      getPageErrors: () => errors,
+      scriptErrorGraceMs: 150,
+    });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+  });
+
   it("still takes a late registration after a page error inside the grace", async () => {
     let calls = 0;
     const page = makeMockPage((expr) => {

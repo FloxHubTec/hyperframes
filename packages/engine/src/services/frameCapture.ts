@@ -1943,6 +1943,8 @@ export async function pollSubCompositionTimelines(
   const deadline = start + timeoutMs;
   let ready = false;
   let scriptFailureBail = false;
+  // A page error is given its grace from when it first appeared, not from when the poll began.
+  let errorSeenAt: number | undefined;
   for (;;) {
     ready = Boolean(await page.evaluate(expression));
     if (ready || shouldStop?.()) break;
@@ -1952,7 +1954,9 @@ export async function pollSubCompositionTimelines(
     const errors = getPageErrors?.() ?? [];
     const failed = failures.length > 0 ? failures : errors;
     const graceMs = failures.length > 0 ? scriptFailureGraceMs : scriptErrorGraceMs;
-    if (failed.length > 0 && now - start >= graceMs) {
+    if (failed.length > 0) errorSeenAt ??= now;
+    const sinceFailure = failures.length > 0 ? now - start : now - (errorSeenAt ?? now);
+    if (failed.length > 0 && sinceFailure >= graceMs) {
       scriptFailureBail = true;
       console.warn(
         `[FrameCapture] Sub-composition timeline wait cut short after ${now - start}ms: ` +
