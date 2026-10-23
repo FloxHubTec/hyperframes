@@ -2860,6 +2860,39 @@ export function initSandboxRuntimeModular(): void {
   const armedFrom = new WeakSet<HTMLMediaElement>();
   // An untracked clip (NaN) shares a track with nothing, as in the timeline payload.
   const hostOf = (el: Element) => el.parentElement?.closest("[data-composition-id]");
+  // Clips due soon fetch a few at a time, earliest first: a fast cut sequence has dozens inside the
+  // look-ahead, and fetching them all queues the clip that is due behind clips that are not.
+  const PREFETCH_SLOTS = 3;
+  const prefetching = new Set<HTMLMediaElement>();
+  const waitingForSlot = new Set<HTMLMediaElement>();
+  const PREFETCH_SETTLED_EVENTS = ["canplay", "suspend", "error"];
+  const endPrefetch = (el: HTMLMediaElement) => {
+    for (const type of PREFETCH_SETTLED_EVENTS) el.removeEventListener(type, onPrefetchSettled);
+    return prefetching.delete(el);
+  };
+  const onPrefetchSettled = (event: Event) => {
+    const el = event.currentTarget as HTMLMediaElement;
+    // A load() queues a suspend of the stopped fetch before the new one starts; only a playable clip is done.
+    if (event.type !== "error" && el.readyState < 3) return;
+    endPrefetch(el);
+    fillPrefetchSlots();
+  };
+  const fillPrefetchSlots = () => {
+    const earliestFirst = Array.from(waitingForSlot)
+      .filter((el) => el.isConnected)
+      .sort((a, b) => resolveAbsoluteMediaStartSeconds(a) - resolveAbsoluteMediaStartSeconds(b));
+    for (const el of earliestFirst) {
+      if (prefetching.size >= PREFETCH_SLOTS) break;
+      waitingForSlot.delete(el);
+      syncTimedElementVisibility(state.currentTime, [el]);
+    }
+  };
+  const startPrefetch = (el: HTMLMediaElement) => {
+    preloadMedia(el);
+    if (prefetching.has(el) || el.readyState >= 3) return;
+    prefetching.add(el);
+    for (const type of PREFETCH_SETTLED_EVENTS) el.addEventListener(type, onPrefetchSettled);
+  };
   const armNextOnTrack = (el: HTMLMediaElement) => {
     const track = parseAuthoredTrack(el, Number.NaN);
     const clips = buildRuntimeMediaCache(
@@ -2881,10 +2914,16 @@ export function initSandboxRuntimeModular(): void {
     armedBy.set(next.el, el);
     if (mediaNearPlayhead.get(next.el) !== true) {
       mediaNearPlayhead.set(next.el, true);
-      preloadMedia(next.el);
+      waitingForSlot.delete(next.el);
+      startPrefetch(next.el);
     }
   };
-  const preloadNearPlayhead = (el: HTMLMediaElement, visible: boolean, upcoming: boolean) => {
+  const preloadNearPlayhead = (
+    el: HTMLMediaElement,
+    visible: boolean,
+    upcoming: boolean,
+    time: number,
+  ) => {
     const playing = clock.isPlaying();
     if (!(visible && playing)) armedFrom.delete(el);
     else if (!armedFrom.has(el)) {
@@ -2893,8 +2932,21 @@ export function initSandboxRuntimeModular(): void {
     }
     // An arm lasts while the clip that set it plays on screen, so a jump away drops it.
     const armer = armedBy.get(el);
-    const near = visible || upcoming || (armer !== undefined && armedFrom.has(armer));
+    const armed = armer !== undefined && armedFrom.has(armer);
     const decided = mediaNearPlayhead.get(el);
+    const unslotted = !visible && !armed && decided !== true && prefetching.size >= PREFETCH_SLOTS;
+    if (unslotted && upcoming) waitingForSlot.add(el);
+    else waitingForSlot.delete(el);
+    // While playing, a clip that has passed and is still downloading only takes bandwidth from the next ones.
+    const spent =
+      !visible &&
+      decided === true &&
+      clock.isPlaying() &&
+      el.networkState === 2 &&
+      el.readyState < 4 &&
+      resolveAbsoluteMediaStartSeconds(el) + (resolveDurationForElement(el) ?? Number.NaN) <= time;
+    const near = visible || armed || (upcoming && !unslotted && !spent);
+    if ((visible || !near) && endPrefetch(el)) queueMicrotask(fillPrefetchSlots);
     if (decided === near) return;
     mediaNearPlayhead.set(el, near);
     if (!near) {
@@ -2905,7 +2957,8 @@ export function initSandboxRuntimeModular(): void {
       }
     } else if (!visible || decided === undefined) {
       // Not a clip a jump lands on: the media sync arms that one, and load() would undo its seek.
-      preloadMedia(el);
+      if (visible) preloadMedia(el);
+      else startPrefetch(el);
     }
   };
   // Held past the look-ahead so a scrub across its edge does not refetch, and while playing when
@@ -3054,6 +3107,7 @@ export function initSandboxRuntimeModular(): void {
           rawNode,
           isVisibleNow,
           upcoming || mediaStaysDue(rawNode, visibleAt, currentTime),
+          currentTime,
         );
       if (!isMediaElement(rawNode) && !isImageElement(rawNode)) decidedTimedClip = true;
       if (isVideoElement(rawNode) || isImageElement(rawNode)) {
