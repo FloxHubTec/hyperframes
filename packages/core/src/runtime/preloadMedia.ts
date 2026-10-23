@@ -4,10 +4,18 @@ import { defersMedia } from "./timedClipHide";
 
 type PreloadableMedia = Pick<
   HTMLMediaElement,
-  "tagName" | "preload" | "readyState" | "networkState" | "load"
+  "id" | "tagName" | "preload" | "readyState" | "networkState" | "load"
 >;
 
+/** A video the render replaces with extracted frames: the page's decoder never supplies its pixels. */
+export function isRenderFrameVideo(media: Pick<HTMLMediaElement, "id" | "tagName">): boolean {
+  const ids = (window as Window & { __HF_RENDER_FRAME_VIDEO_IDS?: readonly string[] })
+    .__HF_RENDER_FRAME_VIDEO_IDS;
+  return media.tagName === "VIDEO" && ids?.includes(media.id) === true;
+}
+
 export function preloadMedia(media: PreloadableMedia): void {
+  if (isRenderFrameVideo(media)) return;
   if (media.preload !== "auto") media.preload = "auto";
   // load() resets an in-flight video fetch, discarding its selected resource and buffered data.
   const videoAlreadyLoading = media.tagName === "VIDEO" && media.networkState === 2;
