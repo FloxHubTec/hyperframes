@@ -686,6 +686,11 @@ describe("resolveFrameFormat", () => {
     expect(resolveFrameFormat(metadata({ hasAlpha: true }), "jpg")).toBe("png");
     expect(resolveFrameFormat(metadata({ videoCodec: "vp9" }), "jpg")).toBe("png");
   });
+
+  it("keeps ProRes without an alpha plane on jpg and ProRes with one on png", () => {
+    expect(resolveFrameFormat(metadata({ videoCodec: "prores" }), undefined)).toBe("jpg");
+    expect(resolveFrameFormat(metadata({ videoCodec: "prores", hasAlpha: true }), "jpg")).toBe("png");
+  });
 });
 
 describe("parseVideoElements", () => {
