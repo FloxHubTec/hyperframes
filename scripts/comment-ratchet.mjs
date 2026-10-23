@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commentBlocks } from "./check-comment-citations.mjs";
+import { commentBlocks, generatedPaths } from "./check-comment-citations.mjs";
 
 const MAX_BLOCK_LINES = 12;
 
@@ -101,10 +101,10 @@ function atBase(ref, file) {
 
 // The bar for a new file: its package's share over files that existed at the base, so new files
 // never set their own bar. A package that is new as a whole is held to every package's share.
-function packageTotal(dir, isNew) {
+function packageTotal(dir, isNew, generated) {
   return git(["ls-files", dir])
     .split("\n")
-    .filter((file) => isSource(file) && !isNew.has(file))
+    .filter((file) => isSource(file) && !isNew.has(file) && !generated.has(file))
     .reduce(
       (sum, file) => {
         const entry = measure(readFileSync(file, "utf8"), extname(file));
@@ -114,16 +114,21 @@ function packageTotal(dir, isNew) {
     );
 }
 
-function packageShare(pkg, isNew) {
-  const own = packageTotal(`${pkg}/src`, isNew);
-  return share(own.lines > 0 ? own : packageTotal("packages", isNew));
+function packageShare(pkg, isNew, generated) {
+  const own = packageTotal(`${pkg}/src`, isNew, generated);
+  return share(own.lines > 0 ? own : packageTotal("packages", isNew, generated));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const ref = git(["merge-base", process.env.COMMENT_CHECK_BASE ?? "origin/main", "HEAD"]).trim();
+  const generated = generatedPaths(
+    process.cwd(),
+    ref,
+    git(["ls-files", "packages"]).split("\n").filter(Boolean),
+  );
   // Against the working tree, where contents are read from; in CI that is HEAD.
   const changed = changedPaths(git(["diff", "--name-status", "-M", ref, "--", "packages"]))
-    .filter(({ status, to }) => status !== "D" && isSource(to))
+    .filter(({ status, to }) => status !== "D" && isSource(to) && !generated.has(to))
     .sort((a, b) => a.to.localeCompare(b.to));
 
   const graded = changed.map(({ from, to }) => ({ to, onBase: atBase(ref, from) }));
@@ -133,7 +138,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   for (const { to, onBase } of graded) {
     const head = measure(readFileSync(to, "utf8"), extname(to));
     const pkg = packageOf(to);
-    if (onBase === null && !shares.has(pkg)) shares.set(pkg, packageShare(pkg, isNew));
+    if (onBase === null && !shares.has(pkg)) shares.set(pkg, packageShare(pkg, isNew, generated));
     const base = onBase === null ? null : measure(onBase, extname(to));
     problems.push(...judge(to, head, base, shares.get(pkg) ?? 0));
   }

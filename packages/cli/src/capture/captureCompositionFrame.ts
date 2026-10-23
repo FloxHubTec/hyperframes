@@ -115,6 +115,7 @@ export interface OpenSettledCompositionPageOptions {
   // Runs after the page exists but before page.goto, so console/pageerror/
   // request listeners can attach without missing load-time events.
   beforeNavigate?: (page: Page) => void | Promise<void>;
+  onLoaded?: () => void;
   // Started before the project was bundled; used only if it was launched with the same arguments.
   prelaunched?: PrelaunchedBrowser;
 }
@@ -326,11 +327,14 @@ export async function openSettledCompositionPage(
     options.onBrowserReady?.();
     const page = await chromeBrowser.newPage();
     await installPageFunctionGuard(page);
+    const { installMediaRenderIdBridge } = await import("@hyperframes/engine");
+    await installMediaRenderIdBridge(page);
     await page.setViewport(viewport);
     if (answer) await answerPageInProcess(page, url, answer);
     await options.beforeNavigate?.(page);
     await gotoWhenSent(page, url, pageNavigationTimeoutMs(options.navigationTimeoutMs));
     await assertWebGpuAdapterAvailable(page, requiresWebGpu, softwareWebGpu);
+    options.onLoaded?.();
     const renderReadyTimedOut = !(await waitForCompositionSettle(page, options));
     return { browser: chromeBrowser, page, renderReadyTimedOut };
   } catch (err) {
