@@ -12,7 +12,6 @@ import {
   readFileSync,
   readSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,8 +35,11 @@ async function fetchBytes(url: string): Promise<Uint8Array> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
-function run(cmd: string, args: string[]): void {
-  const result = spawnSync(cmd, args, { stdio: "inherit" });
+function run(cmd: string, args: string[], input?: Uint8Array): void {
+  const result = spawnSync(cmd, args, {
+    stdio: [input ? "pipe" : "inherit", "inherit", "inherit"],
+    input,
+  });
   if (result.status !== 0) {
     throw new Error(`[stage-arm64-image] ${cmd} ${args.join(" ")} exited ${result.status}`);
   }
@@ -61,23 +63,23 @@ async function stageChromiumArm64(chromiumDir: string, opts: StageOptions) {
   const { version } = JSON.parse(readFileSync(join(chromiumDir, "package.json"), "utf-8")) as {
     version: string;
   };
-  const pinned = (opts.packPins ?? CHROMIUM_ARM64_PACK_SHA256)[version];
-  if (!pinned) {
+  // The URL is built from the pin table's own key, never from the version read off disk.
+  const [pinnedVersion, pinned] =
+    Object.entries(opts.packPins ?? CHROMIUM_ARM64_PACK_SHA256).find(([v]) => v === version) ?? [];
+  if (!pinnedVersion || !pinned) {
     throw new Error(
       `[stage-arm64-image] no arm64 Chrome pack pinned for @sparticuz/chromium ${version}; ` +
         "add its sha256 to CHROMIUM_ARM64_PACK_SHA256",
     );
   }
-  const url = `https://github.com/Sparticuz/chromium/releases/download/v${version}/chromium-v${version}-pack.arm64.tar`;
+  const url = `https://github.com/Sparticuz/chromium/releases/download/v${pinnedVersion}/chromium-v${pinnedVersion}-pack.arm64.tar`;
   const pack = await (opts.fetchPack ?? fetchBytes)(url);
   const actual = createHash("sha256").update(pack).digest("hex");
   if (actual !== pinned) {
     throw new Error(`[stage-arm64-image] ${url} has sha256 ${actual}, pinned ${pinned}`);
   }
-  const tar = join(chromiumDir, "pack.arm64.tar");
-  writeFileSync(tar, pack);
-  run("tar", ["-xf", tar, "-C", join(chromiumDir, "bin")]);
-  rmSync(tar);
+  // Only bytes that matched the pin reach tar, over stdin; the pack is never written to a file.
+  run("tar", ["-xf", "-", "-C", join(chromiumDir, "bin")], pack);
 }
 
 export async function stageArm64Image(opts: StageOptions): Promise<string> {
