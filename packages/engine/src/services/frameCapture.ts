@@ -1826,7 +1826,7 @@ function isScriptFailure(session: CaptureSession): boolean {
   return outcome === "script_failure" || (outcome === "timeout" && session.pageErrors.length > 0);
 }
 
-/** A composition whose script failed gets an empty paused timeline of its authored length, so the render goes on without it. */
+/** A composition whose script failed gets an empty paused timeline of its authored length, so the render goes on. */
 async function isolateUnregisteredCompositions(page: Page): Promise<IsolatedComposition[]> {
   const isolated = await page.evaluate(`(function() {
     var timelines = (window.__timelines = window.__timelines || {});
