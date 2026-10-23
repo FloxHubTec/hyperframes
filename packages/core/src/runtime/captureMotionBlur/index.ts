@@ -1,6 +1,6 @@
 /**
  * Capture motion blur, in preview and render. Root attributes: data-motion-blur="on"|"off",
- * -shutter (0–720°, default 180), -samples (2–64; unset sizes the taps to the smear),
+ * -shutter (0–720°, default 240), -samples (2–64; unset: at least 32, more for a long smear),
  * -events="on" (run timeline callbacks at sub-frame samples). PAGE_MOTION_BLUR_OFF_GLOBAL (engine blur, or a preview that
  * could not blur) turns all off.
  *
@@ -102,7 +102,7 @@ function readConfig(root: HTMLElement): Config | null {
     return root.hasAttribute(name) && Number.isFinite(v) ? v : fallback;
   };
   return {
-    shutterDeg: clamp(num("data-motion-blur-shutter", 180), 0, 720),
+    shutterDeg: clamp(num("data-motion-blur-shutter", 240), 0, 720),
     samples: root.hasAttribute("data-motion-blur-samples")
       ? Math.round(clamp(num("data-motion-blur-samples", 16), 2, 64))
       : null,

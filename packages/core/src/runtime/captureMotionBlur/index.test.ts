@@ -1204,6 +1204,17 @@ describe("suspend (R13)", () => {
     expect(root.parentElement).toBe(document.body);
   });
 
+  it("opens the shutter 240 degrees unless the root says otherwise", () => {
+    installHtmlInCanvas();
+    initCaptureMotionBlur(host(makeRoot()));
+    expect(win.__hfMotionBlur?.report().shutterDeg).toBe(240);
+    resetCaptureMotionBlurForTests();
+    document.body.innerHTML = "";
+    const root = makeRoot({ "data-motion-blur": "on", "data-motion-blur-shutter": "360" });
+    initCaptureMotionBlur(host(root));
+    expect(win.__hfMotionBlur?.report().shutterDeg).toBe(360);
+  });
+
   it("exists, and does nothing, where blur is off", () => {
     const root = makeRoot();
     initCaptureMotionBlur(host(root));
