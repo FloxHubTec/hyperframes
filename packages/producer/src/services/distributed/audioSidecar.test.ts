@@ -46,6 +46,39 @@ describe.skipIf(!HAS_FFMPEG)("buildAudioSidecar", () => {
       .trim()
       .split("\n");
 
+  const withAudio = (name: string, audio: string[], map: string[] = []) =>
+    make(name, [
+      ...["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=3"],
+      ...audio,
+      ...["-map", "0:v", ...map, "-c:v", "mpeg4", "-c:a", "aac"],
+    ]);
+  const sine = (channels: number) => [
+    ...["-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=3`],
+    ...["-af", `aformat=channel_layouts=${channels === 6 ? "5.1" : "stereo"}`],
+  ];
+
+  it("builds none when the audio starts after the picture, as an input seek would land late", async () => {
+    const video = withAudio(
+      "late.mov",
+      [...["-itsoffset", "0.478"], ...sine(2)],
+      ["-map", "1:a"],
+    );
+
+    expect(await buildAudioSidecar(video, join(dir, "late.m4a"))).toBe("none");
+  });
+
+  it("builds none for several audio tracks, which the video read picks between by channel count", async () => {
+    const video = make("two.mov", [
+      ...["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=3"],
+      ...["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3"],
+      ...["-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=3"],
+      ...["-filter_complex", "[1:a]aformat=channel_layouts=stereo[a];[2:a]aformat=channel_layouts=5.1[b]"],
+      ...["-map", "0:v", "-map", "[a]", "-map", "[b]", "-c:v", "mpeg4", "-c:a", "aac"],
+    ]);
+
+    expect(await buildAudioSidecar(video, join(dir, "two.m4a"))).toBe("none");
+  });
+
   it("copies the audio out of a video, without the picture", async () => {
     const video = make("take.mp4", [
       ...["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=3"],
