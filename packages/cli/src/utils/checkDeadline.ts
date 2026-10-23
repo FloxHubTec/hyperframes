@@ -32,7 +32,7 @@ export class CheckDeadlineError extends Error {
   }
 }
 
-/** Ends a check that makes no progress for CHECK_IDLE_MS; every phase entered and every operation settled restarts it. */
+/** Ends a check that makes no progress for CHECK_IDLE_MS; each phase entered or operation settled restarts it. */
 export class CheckDeadline {
   private readonly abort = new AbortController();
   private readonly operations = new Set<Promise<unknown>>();
