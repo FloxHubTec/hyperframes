@@ -5,6 +5,11 @@ export type ExtractedFrameFormat = "jpg" | "png";
 
 export const FRAME_FILENAME_PREFIX = "frame_";
 
+/** An ffmpeg image2 pattern is a printf template, so a literal `%` in the directory must be `%%`. */
+export function frameSequencePath(dir: string, framePattern: string): string {
+  return join(dir.replaceAll("%", "%%"), framePattern);
+}
+
 export class ExtractedFrameSequenceError extends Error {
   constructor(message: string) {
     super(message);
