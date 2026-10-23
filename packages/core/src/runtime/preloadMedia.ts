@@ -1,16 +1,19 @@
 import { parseStrictFiniteTimingNumber } from "./playbackRate";
 import { createRuntimeStartTimeResolver } from "./startResolver";
+import { readMediaRenderId } from "./renderFrameSibling";
 import { defersMedia } from "./timedClipHide";
 
 type PreloadableMedia = Pick<
   HTMLMediaElement,
-  "id" | "tagName" | "preload" | "readyState" | "networkState" | "load"
+  "id" | "tagName" | "getAttribute" | "preload" | "readyState" | "networkState" | "load"
 >;
 
-export function isRenderFrameVideo(media: Pick<HTMLMediaElement, "id" | "tagName">): boolean {
+export function isRenderFrameVideo(
+  media: Pick<Element, "getAttribute" | "id" | "tagName">,
+): boolean {
   const ids = (window as Window & { __HF_RENDER_FRAME_VIDEO_IDS?: readonly string[] })
     .__HF_RENDER_FRAME_VIDEO_IDS;
-  return media.tagName === "VIDEO" && ids?.includes(media.id) === true;
+  return media.tagName === "VIDEO" && ids?.includes(readMediaRenderId(media) ?? "") === true;
 }
 
 export function preloadMedia(media: PreloadableMedia): void {

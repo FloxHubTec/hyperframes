@@ -20,7 +20,11 @@ describe.skipIf(!hasBrowser)("videos the render replaces with extracted frames",
   it("are parsed at preload none, so only the others start loading", async () => {
     const page = await browser.newPage();
     try {
-      await page.evaluateOnNewDocument(holdRenderFrameVideos, ["cut-1", "cut-2"]);
+      await page.evaluateOnNewDocument(
+        holdRenderFrameVideos,
+        ["cut-1", "cut-2"],
+        "data-hf-render-id",
+      );
       await page.goto(
         pageUrl(
           `<video id="cut-1" src="/a.mp4"></video><div><video id="cut-2" src="/b.mp4"></video></div><video id="live" src="/c.mp4"></video>`,
@@ -39,10 +43,28 @@ describe.skipIf(!hasBrowser)("videos the render replaces with extracted frames",
     }
   }, 60_000);
 
+  it("are told apart by render id when two scenes share an id", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.evaluateOnNewDocument(holdRenderFrameVideos, ["clip"], "data-hf-render-id");
+      await page.goto(
+        pageUrl(
+          `<video id="clip" data-hf-render-id="clip" src="/a.mp4"></video><video id="clip" data-hf-render-id="clip__hf2" src="/b.mp4"></video>`,
+        ),
+      );
+      const preloads = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("video")).map((v) => v.preload),
+      );
+      expect(preloads).toEqual(["none", "metadata"]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
   it("are held when a sub-composition adds them after load", async () => {
     const page = await browser.newPage();
     try {
-      await page.evaluateOnNewDocument(holdRenderFrameVideos, ["late"]);
+      await page.evaluateOnNewDocument(holdRenderFrameVideos, ["late"], "data-hf-render-id");
       await page.goto(pageUrl("<main></main>"));
       const preload = await page.evaluate(async () => {
         document.querySelector("main")!.innerHTML =
