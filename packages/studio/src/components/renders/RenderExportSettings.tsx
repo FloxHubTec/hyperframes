@@ -239,6 +239,10 @@ const FPS_OPTIONS: SelectOption[] = [
   { value: "60", label: "60 fps" },
 ];
 
+function missingFfmpegStatus(status: FfmpegStatus | null): FfmpegStatus | null {
+  return status && !status.ok ? status : null;
+}
+
 function formatEta(ms: number): string {
   const s = Math.round(ms / 1000);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
@@ -283,7 +287,7 @@ export function RenderExportSettings({
   // probe gave no answer, and refusing to export on no answer would break
   // setups that are perfectly fine. Holding the narrowed value rather than a
   // boolean keeps the notice from re-testing what this line already decided.
-  const missingFfmpeg = ffmpeg && !ffmpeg.ok ? ffmpeg : null;
+  const missingFfmpeg = missingFfmpegStatus(ffmpeg);
 
   // MOV (ProRes) is a fixed-quality codec — quality selector has no effect.
   const showQuality = format !== "mov";

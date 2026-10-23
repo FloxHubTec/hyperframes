@@ -1,6 +1,6 @@
 import { captureArtifactRevision } from "../utils/artifactCapture.js";
 import { recordRenderSuccess, registerRenderOutput } from "@hyperframes/studio-server/history";
-import { failCommand, requestCliExit } from "../utils/commandResult.js";
+import { failCommand, requestCliExit, scheduleCliExit } from "../utils/commandResult.js";
 import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
 import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
@@ -118,6 +118,7 @@ import {
 import { chromeLaunchRemediation } from "../browser/linuxDeps.js";
 import { macosOldChromeCrashRemediation } from "../browser/macosOldChromeCrash.js";
 import { windowsChromeCrashRemediation } from "../browser/windowsCrash.js";
+import { sandboxDeniedRemediation } from "../browser/sandboxDenied.js";
 import { killOrphanedProcessesForRender } from "../utils/orphanCleanup.js";
 import { createRenderCancellationScope } from "../utils/renderCancellation.js";
 import {
@@ -183,7 +184,7 @@ export default defineCommand({
     skill: {
       type: "string",
       description:
-        "Authoring workflow skill that initiated this render (e.g. product-launch-video). " +
+        "Authoring skill that initiated this render (e.g. hyperframes). " +
         "Recorded on anonymous render telemetry for per-skill usage breakdowns; ignored unless it is a slug.",
     },
     format: {
@@ -213,6 +214,11 @@ export default defineCommand({
         "Use png for UI recordings, screen captures, and color-sensitive source videos; " +
         "alpha-capable sources always extract as PNG.",
       default: "auto",
+    },
+    "page-motion-blur": {
+      type: "string",
+      description:
+        "Set off to disable authored page motion blur. Omit to keep the composition's setting.",
     },
     workers: {
       type: "string",
@@ -502,6 +508,7 @@ export interface RenderOptions {
   vp9CpuUsed?: number;
   videoBitrate?: string;
   videoFrameFormat?: VideoFrameFormat;
+  pageMotionBlur?: "off";
   quiet: boolean;
   debug?: boolean;
   /** Segmented capture: reuse a prior run's validated segments. */
@@ -831,6 +838,7 @@ async function renderDocker(
       vp9CpuUsed: options.vp9CpuUsed,
       videoBitrate: options.videoBitrate,
       videoFrameFormat: options.videoFrameFormat,
+      pageMotionBlur: options.pageMotionBlur,
       quiet: options.quiet,
       variables: options.variables,
       entryFile: options.entryFile,
@@ -920,7 +928,7 @@ async function renderDocker(
   runPostRenderStep("warnIfWebmAlphaDropped", () =>
     warnIfWebmAlphaDropped(outputPath, options.format, options.quiet),
   );
-  if (options.exitAfterComplete) scheduleRenderProcessExit();
+  if (options.exitAfterComplete) scheduleCliExit();
   return { renderTimeMs: elapsed };
 }
 
@@ -1007,21 +1015,22 @@ async function executeLocalRender(
   // HLS shares the H.264 encode path but cannot take the GPU fallback below:
   // its fixed-length segments need the software encoder's forced-keyframe lock.
   const isHls = options.format === "hls";
-  if (!options.gpu && (options.format === "mp4" || isHls) && preflight.ffmpegPath) {
-    let encoderMode: H264EncoderMode = "software";
+  if ((options.format === "mp4" || isHls) && preflight.ffmpegPath) {
+    const gpuRequested = options.gpu && !isHls;
+    let encoderMode: H264EncoderMode = gpuRequested ? "gpu" : "software";
     try {
       encoderMode = await detectH264EncoderModeForRender(
         preflight.ffmpegPath,
-        false,
+        gpuRequested,
         cancellation.signal,
       );
     } catch (error) {
       if (cancellation.signal.aborted) cancellation.signal.throwIfAborted();
-      // HDR MP4 uses HEVC; auto mode cannot resolve the codec until sources
-      // have been inspected. Forced SDR and HLS are definitely H.264 here.
+      // HDR MP4 uses HEVC; auto mode cannot resolve the codec until sources are
+      // inspected. Forced SDR, HLS, or no libx265 either: nothing here can encode.
       if (
         error instanceof H264EncoderUnavailableError &&
-        (options.hdrMode === "force-sdr" || isHls)
+        (options.hdrMode === "force-sdr" || isHls || !error.hevcEncoderAvailable)
       ) {
         errorBox(
           `${isHls ? "HLS" : "MP4"} H.264 encoder unavailable`,
@@ -1048,11 +1057,14 @@ async function executeLocalRender(
       );
       failCommand();
     }
-    if (encoderMode === "gpu") {
+    if (encoderMode === "gpu" && !gpuRequested) {
       console.warn(
-        c.warn("  FFmpeg does not include libx264; falling back to VideoToolbox H.264 encoding."),
+        c.warn("  FFmpeg does not include libx264; falling back to GPU H.264 encoding."),
       );
       options = { ...options, gpu: true };
+    }
+    if (encoderMode === "software" && gpuRequested && !options.quiet) {
+      console.warn(c.warn("  No GPU encoder works on this machine; encoding with libx264."));
     }
   }
 
@@ -1105,6 +1117,7 @@ async function executeLocalRender(
       crf: options.crf,
       videoBitrate: options.videoBitrate,
       videoFrameFormat: options.videoFrameFormat,
+      pageMotionBlur: options.pageMotionBlur,
       variables: options.variables,
       entryFile: options.entryFile,
       outputResolution: options.outputResolution,
@@ -1200,7 +1213,7 @@ async function executeLocalRender(
       }),
     );
   }
-  if (options.exitAfterComplete) scheduleRenderProcessExit();
+  if (options.exitAfterComplete) scheduleCliExit();
   const durationMs = job.perfSummary
     ? Math.round(job.perfSummary.compositionDurationSeconds * 1000)
     : undefined;
@@ -1212,26 +1225,6 @@ async function executeLocalRender(
     outcome,
     warnings: job.warnings.map((warning) => ({ code: warning.code, message: warning.message })),
   };
-}
-
-type UnrefableTimer = {
-  unref: () => void;
-};
-
-function isUnrefableTimer(
-  timer: ReturnType<typeof setTimeout>,
-): timer is ReturnType<typeof setTimeout> & UnrefableTimer {
-  return (
-    typeof timer === "object" &&
-    timer !== null &&
-    "unref" in timer &&
-    typeof timer.unref === "function"
-  );
-}
-
-function scheduleRenderProcessExit(): void {
-  const timer = setTimeout(() => requestCliExit(0), 100);
-  if (isUnrefableTimer(timer)) timer.unref();
 }
 
 function getMemorySnapshot() {
@@ -1759,6 +1752,11 @@ function handleRenderError(
   // failure on Linux/WSL is an environment problem, not a composition bug.
   // Replace the generic "Try --docker" hint with the exact per-distro
   // remediation and a pointer at `doctor`.
+  const sandboxRemediation = sandboxDeniedRemediation(message);
+  if (sandboxRemediation) {
+    errorBox("Render failed — Chrome could not launch", message, sandboxRemediation);
+    failCommand();
+  }
   const remediation = chromeLaunchRemediation(message);
   if (remediation) {
     errorBox("Render failed — Chrome could not launch", message, remediation);
@@ -1951,7 +1949,7 @@ function readOutputFootprint(outputPath: string): { fileSize: string; isDirector
   }
 }
 
-/** A render points to the desktop app; a batch row does not. Drafts do too: music-to-video delivers one. */
+/** A render points to the desktop app; a batch row does not. Drafts do too. */
 export function wantsDesktopHint(options: Pick<RenderOptions, "desktopHint">): boolean {
   return options.desktopHint !== false;
 }

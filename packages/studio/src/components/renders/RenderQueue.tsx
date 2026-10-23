@@ -52,6 +52,92 @@ export interface RenderQueueProps {
   onRecheckFfmpeg: () => void;
 }
 
+function RenderJobList({
+  jobs,
+  projectId,
+  onDelete,
+  onCancel,
+  onClearCompleted,
+  loadError,
+  onRetryLoad,
+}: Pick<
+  RenderQueueProps,
+  "jobs" | "projectId" | "onDelete" | "onCancel" | "onClearCompleted" | "loadError" | "onRetryLoad"
+>) {
+  if (loadError && jobs.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full px-4 gap-2" role="alert">
+        <p className="text-step-10 text-danger-ink text-center">{loadError}</p>
+        {onRetryLoad && (
+          <Button size="sm" variant="secondary" onClick={onRetryLoad}>
+            Retry
+          </Button>
+        )}
+      </div>
+    );
+  }
+  if (jobs.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full px-4 gap-2">
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          className="text-text-5"
+        >
+          <rect
+            x="2"
+            y="2"
+            width="20"
+            height="20"
+            rx="2.18"
+            ry="2.18"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        <p className="text-step-10 text-text-5 text-center">No renders yet</p>
+      </div>
+    );
+  }
+  const completedCount = jobs.filter((j) => j.status !== "rendering").length;
+  return (
+    <div>
+      {completedCount > 0 && (
+        <div className="flex items-center justify-between px-3 py-1.5 border-b border-border">
+          <span className="text-step-10 text-text-4">
+            {jobs.length} render{jobs.length === 1 ? "" : "s"}
+          </span>
+          {/* "Hide", not "Clear": files stay on disk (delete is per-row
+              and confirmed); hidden rows don't resurrect on reload. */}
+          <Tooltip label="Hide finished renders from this list (files stay on disk)">
+            <Button size="sm" variant="ghost" onClick={onClearCompleted}>
+              Hide finished
+            </Button>
+          </Tooltip>
+        </div>
+      )}
+      {jobs.map((job) => (
+        <RenderQueueItem
+          key={job.id}
+          job={job}
+          projectId={projectId}
+          onDelete={() => onDelete(job.id)}
+          onCancel={() => onCancel?.(job.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
 export const RenderQueue = memo(function RenderQueue({
   jobs,
   projectId,
@@ -79,7 +165,6 @@ export const RenderQueue = memo(function RenderQueue({
     }
   }, [jobs.length]);
 
-  const completedCount = jobs.filter((j) => j.status !== "rendering").length;
   const lastRenderDurationMs = [...jobs]
     .reverse()
     .find((j) => j.status === "complete" && j.durationMs !== undefined)?.durationMs;
@@ -131,71 +216,15 @@ export const RenderQueue = memo(function RenderQueue({
 
       {/* Job list */}
       <div ref={listRef} className="flex-1 overflow-y-auto">
-        {loadError && jobs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full px-4 gap-2" role="alert">
-            <p className="text-step-10 text-danger-ink text-center">{loadError}</p>
-            {onRetryLoad && (
-              <Button size="sm" variant="secondary" onClick={onRetryLoad}>
-                Retry
-              </Button>
-            )}
-          </div>
-        ) : jobs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full px-4 gap-2">
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              className="text-text-5"
-            >
-              <rect
-                x="2"
-                y="2"
-                width="20"
-                height="20"
-                rx="2.18"
-                ry="2.18"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <path
-                d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            <p className="text-step-10 text-text-5 text-center">No renders yet</p>
-          </div>
-        ) : (
-          <div>
-            {completedCount > 0 && (
-              <div className="flex items-center justify-between px-3 py-1.5 border-b border-border">
-                <span className="text-step-10 text-text-4">
-                  {jobs.length} render{jobs.length === 1 ? "" : "s"}
-                </span>
-                {/* "Hide", not "Clear": files stay on disk (delete is per-row
-                    and confirmed); hidden rows don't resurrect on reload. */}
-                <Tooltip label="Hide finished renders from this list (files stay on disk)">
-                  <Button size="sm" variant="ghost" onClick={onClearCompleted}>
-                    Hide finished
-                  </Button>
-                </Tooltip>
-              </div>
-            )}
-            {jobs.map((job) => (
-              <RenderQueueItem
-                key={job.id}
-                job={job}
-                projectId={projectId}
-                onDelete={() => onDelete(job.id)}
-                onCancel={() => onCancel?.(job.id)}
-              />
-            ))}
-          </div>
-        )}
+        <RenderJobList
+          jobs={jobs}
+          projectId={projectId}
+          onDelete={onDelete}
+          onCancel={onCancel}
+          onClearCompleted={onClearCompleted}
+          loadError={loadError}
+          onRetryLoad={onRetryLoad}
+        />
       </div>
     </div>
   );

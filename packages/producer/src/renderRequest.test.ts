@@ -50,6 +50,20 @@ function request() {
 }
 
 describe("RenderRequest", () => {
+  it("preserves explicit motion blur off through the distributed request round trip", () => {
+    const value = request();
+    value.options.pageMotionBlur = "off";
+    const config = distributedConfigFromRequest(value);
+    expect(config.pageMotionBlur).toBe("off");
+    expect(
+      renderRequestFromDistributedConfig({
+        projectDir: value.projectDir,
+        outputPath: value.outputPath,
+        config,
+      }).options.pageMotionBlur,
+    ).toBe("off");
+  });
+
   it("round-trips through JSON without dropping nested options", () => {
     const value = request();
     expect(parseRenderRequest(serializeRenderRequest(value))).toEqual(value);
@@ -118,6 +132,12 @@ describe("RenderRequest", () => {
 
     expect(value.options.engineConfig.forceScreenshot).toBe(true);
     expect(renderConfigFromRequest(value).producerConfig?.forceScreenshot).toBe(true);
+  });
+
+  it("accepts 25 fps for a distributed render", () => {
+    const value = request();
+    value.options.fps = { num: 25, den: 1 };
+    expect(distributedConfigFromRequest(value).fps).toBe(25);
   });
 
   it("rejects unsupported distributed fps before an adapter launch", () => {

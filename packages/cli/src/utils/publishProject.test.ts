@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import AdmZip from "adm-zip";
@@ -38,6 +38,8 @@ import {
   getPublishApiBaseUrl,
   localizeExternalAssets,
   publishProjectArchive,
+  readStaged,
+  stagePublishFiles,
   uploadTimeoutMs,
   zipPublishFileMap,
 } from "./publishProject.js";
@@ -687,6 +689,30 @@ describe("publishProjectArchive", () => {
 });
 
 describe("publishProjectArchive", () => {
+  it("keeps server-sent upload headers in any case without adding duplicates", async () => {
+    const dir = makeProjectDir();
+    const serverHeaders = {
+      "Content-Type": "application/zip",
+      "Content-Length": "123",
+      "X-Amz-Server-Side-Encryption": "AES256",
+    };
+    const fetchMock = stagedFetch(
+      { file_count: 1 },
+      { upload_url: signedStagedS3Url, upload_headers: serverHeaders },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await publishProjectArchive(dir);
+      expect(fetchMock.mock.calls[1]![1].headers).toEqual(serverHeaders);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("publishProjectArchive", () => {
   it("authenticates staged metadata requests but not the presigned S3 upload", async () => {
     const dir = makeProjectDir();
     const fetchMock = stagedFetch(OWNED);
@@ -1124,6 +1150,22 @@ describe("publishProjectArchive with a credential the server rejects", () => {
     await publishExpecting(fetchMock, EXPIRED);
   });
 
+  it("asks a signed-out publish to log in when the upload route answers 401, with no fallback", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(unauthorized());
+    vi.stubGlobal("fetch", fetchMock);
+    const dir = makeProjectDir();
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await expect(publishProjectArchive(dir)).rejects.toThrow(
+        "Publishing needs an account. Run hyperframes auth login to publish.",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toMatch(/\/publish\/upload$/);
+  });
+
   it("does not blame the login for a 401 from the storage upload, which carries no credential", async () => {
     const fetchMock = vi
       .fn()
@@ -1311,5 +1353,26 @@ describe("publishProjectArchive with an expired login and no refresh token", () 
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("readStaged", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "hf-staged-"));
+    writeFileSync(join(dir, "index.html"), "<html></html>");
+    writeFileSync(join(dir, "clip.bin"), "staged bytes");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("reads a file left on disk only while it is the file that was staged", () => {
+    const staged = stagePublishFiles(dir, 4).get("clip.bin")!;
+    expect(Buffer.isBuffer(staged)).toBe(false);
+    expect(readStaged(staged).toString()).toBe("staged bytes");
+
+    writeFileSync(join(dir, "swap.bin"), "other  bytes");
+    utimesSync(join(dir, "swap.bin"), 1, 1);
+    renameSync(join(dir, "swap.bin"), join(dir, "clip.bin"));
+    expect(() => readStaged(staged)).toThrow(/changed on disk/);
   });
 });

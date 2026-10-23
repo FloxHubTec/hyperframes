@@ -5,6 +5,8 @@ import { chunkCrc32 } from "./crc32.js";
 import { StringDecoder } from "node:string_decoder";
 import { basename } from "path";
 import { redactTelemetryString } from "@hyperframes/core";
+import { videoStreamHasAlpha } from "@hyperframes/parsers/media-alpha";
+import { urlInputArgs } from "./urlInput.js";
 import { FFPROBE_PATH_ENV, getFfprobeBinary } from "./ffmpegBinaries.js";
 import { ManagedChildProcess } from "./managedChildProcess.js";
 import { trackChildProcess } from "./processTracker.js";
@@ -65,7 +67,15 @@ async function runFfprobe(
   }
 
   const command = getFfprobeBinary();
-  const proc = spawn(command, ["-v", "error", ...argsWithoutInput, "--", filePath], {
+  const args = [
+    "-v",
+    "error",
+    ...urlInputArgs(filePath, { tool: "ffprobe" }),
+    ...argsWithoutInput,
+    "--",
+    filePath,
+  ];
+  const proc = spawn(command, args, {
     // Nothing is ever written to the child's stdin; leaving it as a pipe is
     // what lets a stdin-reading invocation block indefinitely.
     stdio: ["ignore", "pipe", "pipe"],
@@ -149,7 +159,7 @@ const finalVideoFrameTimestampSignalCaches = new WeakMap<
   Map<string, MediaProbeCacheEntry<number>>
 >();
 const audioMetadataCache = new Map<string, MediaProbeCacheEntry<AudioMetadata>>();
-interface MediaProbeCacheEntry<T = FFProbeOutput> {
+export interface MediaProbeCacheEntry<T = FFProbeOutput> {
   identity: string | null;
   promise: Promise<T>;
 }
@@ -332,7 +342,7 @@ function isPngImageProbe(output: FFProbeOutput): boolean {
   );
 }
 
-function mediaFileIdentity(filePath: string): string | null {
+export function mediaFileIdentity(filePath: string): string | null {
   try {
     const stat = statSync(filePath, { bigint: true });
     return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
@@ -341,7 +351,7 @@ function mediaFileIdentity(filePath: string): string | null {
   }
 }
 
-function readMetadataCache<T>(
+export function readMetadataCache<T>(
   cache: Map<string, MediaProbeCacheEntry<T>>,
   key: string,
   identity: string | null,
@@ -350,7 +360,7 @@ function readMetadataCache<T>(
   return cached?.identity === identity ? cached.promise : undefined;
 }
 
-function writeMetadataCache<T>(
+export function writeMetadataCache<T>(
   cache: Map<string, MediaProbeCacheEntry<T>>,
   key: string,
   identity: string | null,
@@ -595,23 +605,6 @@ export function extractPngMetadataFromBuffer(buf: Buffer): StillImageMetadata | 
   return width > 0 && height > 0 ? { width, height, colorSpace: colorSpaceFromCicp } : null;
 }
 
-/**
- * Does this pix_fmt carry an alpha channel?
- *
- * Exported so the test asserts the shipped predicate rather than a copy of
- * the pattern. Anchored at the start, matching studio-server's
- * mediaMetadata.ts: the previous inline pattern bound its `(^|[^a-z])` anchor
- * to the first alternative only — `|` is looser than concatenation — so the
- * guard was decorative for every other name. It also missed abgr, ya8/ya16
- * and ayuv64, and its `gray[a-z0-9]*a` branch matched only gray8a/gray16a,
- * names FFmpeg renamed to ya8/ya16 in 2013. A `ya8` grayscale-plus-alpha PNG
- * reported hasAlpha:false, resolveFrameFormat picked jpg, and the overlay
- * flattened to an opaque rectangle.
- */
-export function pixelFormatHasAlpha(pixelFormat: string): boolean {
-  return /^(?:yuva|rgba|argb|bgra|abgr|gbrap|ya|ayuv)/i.test(pixelFormat);
-}
-
 function extractStillImageMetadata(filePath: string): StillImageMetadata | null {
   try {
     return extractPngMetadataFromBuffer(readFileSync(filePath));
@@ -769,7 +762,11 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
     // ffprobe ran at all, which is exactly the build it exists to cover: one
     // that reports gbr but does not decode cICP. An HDR PQ PNG then resolved
     // colorTransfer "" and graded SDR.
-    const cicp = colorTransfer && colorPrimaries && colorSpaceVal ? null : stillImage()?.colorSpace;
+    const isPng = output !== null && isPngImageProbe(output);
+    const cicp =
+      !isPng || (colorTransfer && colorPrimaries && colorSpaceVal)
+        ? null
+        : stillImage()?.colorSpace;
     const merged = {
       colorTransfer: colorTransfer || cicp?.colorTransfer || "",
       colorPrimaries: colorPrimaries || cicp?.colorPrimaries || "",
@@ -778,16 +775,7 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
     const colorSpace =
       merged.colorTransfer || merged.colorPrimaries || merged.colorSpace ? merged : null;
     const pixelFormat = videoStream.pix_fmt || "";
-    const alphaMode = readTagCI(videoStream.tags, "alpha_mode");
-    const hasAlpha = pixelFormatHasAlpha(pixelFormat) || alphaMode === "1";
-    // Anchored at the start, matching studio-server's mediaMetadata.ts. The
-    // previous pattern bound its `(^|[^a-z])` anchor to the FIRST alternative
-    // only — `|` is looser than concatenation — so the guard was decorative
-    // for every other name. It also missed abgr, ya8/ya16 and ayuv64, and its
-    // `gray[a-z0-9]*a` branch matched only gray8a/gray16a, names FFmpeg
-    // renamed to ya8/ya16 in 2013. A `ya8` grayscale-plus-alpha PNG reported
-    // hasAlpha:false, resolveFrameFormat picked jpg, and the overlay
-    // flattened to an opaque rectangle.
+    const hasAlpha = videoStreamHasAlpha(videoStream);
 
     const containerDuration = output?.format.duration ? parseFloat(output.format.duration) : 0;
     const streamDuration = videoStream.duration ? parseFloat(videoStream.duration) : 0;

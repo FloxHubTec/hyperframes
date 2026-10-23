@@ -11,7 +11,10 @@ import {
   mediaTimeWindow,
   mediaWindowsOverlap,
 } from "../utils";
-import { validateColorGradingContract } from "@hyperframes/parsers/color-grading-contract";
+import {
+  COLOR_GRADING_SOURCE_TAGS,
+  validateColorGradingContract,
+} from "@hyperframes/parsers/color-grading-contract";
 import { extractMediaSrcMutations } from "@hyperframes/parsers/composition";
 import { parseHTML } from "linkedom";
 import { findLinkedClipFindings } from "./linkedClips";
@@ -494,11 +497,11 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
           snippet: truncateSnippet(tag.raw),
         });
       };
-      if (tag.name !== "video" && tag.name !== "img") {
+      if (!(COLOR_GRADING_SOURCE_TAGS as readonly string[]).includes(tag.name)) {
         report(
           "color_grading_non_media",
-          `data-color-grading on <${tag.name}> has no effect. The shader runtime only grades real <video> and <img> elements.`,
-          "Move the grading attribute to the real <video> or <img> media element. Do not attach it to a wrapper or CSS background.",
+          `data-color-grading on <${tag.name}> has no effect. The shader runtime only grades real <video>, <img> and <canvas> elements.`,
+          "Move the grading attribute to the real <video>, <img> or <canvas> element. Do not attach it to a wrapper or CSS background.",
         );
         continue;
       }
@@ -872,7 +875,7 @@ function findVolumeTweenOverridesGainFindings(ctx: LintContext): HyperframeLintF
     // the case it exists to bless.
     .map((tag) => ({ tag, volume: Number(readAttr(tag.raw, "data-volume") ?? "1") }))
     .filter((entry) => Number.isFinite(entry.volume) && entry.volume !== 1)
-    // A lane already has its own rule, and it wins over both of these.
+    // A lane silences the tween (its own rule says so) and scales by data-volume.
     .filter((entry) => !readDecodedAttr(entry.tag.raw, "data-automation"))
     .map((entry) => ({ ...entry, id: readAttr(entry.tag.raw, "id") }))
     .filter((entry): entry is typeof entry & { id: string } => Boolean(entry.id));

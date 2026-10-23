@@ -474,13 +474,52 @@ function writeConsumerFixture(packDir, packedWorkspaces) {
   return fixtureDir;
 }
 
+// npm lists a new version before every mirror serves its tarball, so resolving one published minutes ago
+// can 404 and fail the install. The consumer gets the third-party versions that were on npm a day ago.
+export const CONSUMER_MIN_RELEASE_AGE_SECONDS = 24 * 60 * 60;
+
+const BLOCKED_BY_AGE =
+  /No version matching "([^"]+)" found for specifier "([^"]+)" \(blocked by minimum-release-age/g;
+
+/** Packages bun refused as too new, or null when its output does not pair a name with a range. */
+export function ageBlockedPackages(stderr) {
+  const names = [...stderr.matchAll(BLOCKED_BY_AGE)].map(([, a, b]) =>
+    [a, b].find((name) => stderr.includes(`${name}@${name === a ? b : a} failed to resolve`)),
+  );
+  return names.length && names.every(Boolean) ? names : null;
+}
+
+export function installConsumer(dir, { args = [], env = process.env } = {}) {
+  const install = () =>
+    execFileSync(
+      "bun",
+      [
+        "install",
+        "--ignore-scripts",
+        `--minimum-release-age=${CONSUMER_MIN_RELEASE_AGE_SECONDS}`,
+        ...args,
+      ],
+      { cwd: dir, encoding: "utf8", stdio: "pipe", env },
+    );
+  try {
+    install();
+  } catch (error) {
+    // A same-day dependency bump: every version its range allows is younger than the age, and the repo
+    // installed it already, so its tarball is served. Only those packages skip the age.
+    const blocked = ageBlockedPackages(`${error.stderr ?? ""}`);
+    if (!blocked) throw error;
+    console.log(`Consumer install: newer than the release age, allowed: ${blocked.join(", ")}`);
+    writeFileSync(
+      join(dir, "bunfig.toml"),
+      `[install]\nminimumReleaseAgeExcludes = ${JSON.stringify(blocked)}\n`,
+    );
+    install();
+  }
+}
+
 function verifyPackedConsumer(packDir, packedWorkspaces) {
   const fixtureDir = writeConsumerFixture(packDir, packedWorkspaces);
-  execFileSync("bun", ["install", "--ignore-scripts"], {
-    cwd: fixtureDir,
-    encoding: "utf8",
-    stdio: "pipe",
-  });
+  installConsumer(fixtureDir);
   typecheckPackedConsumer(fixtureDir);
   const smokeOutput = execFileSync("node", ["consumer-smoke.mjs"], {
     cwd: fixtureDir,

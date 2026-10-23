@@ -14,13 +14,15 @@ const snapshotState = vi.hoisted(() => ({
   seek: vi.fn(async (_page: unknown, _time: number, _options?: unknown): Promise<void> => {
     throw new Error("seek reached");
   }),
+  settle: vi.fn(async (_page: unknown, _options?: unknown): Promise<void> => undefined),
   closeServer: vi.fn(async () => undefined),
 }));
 
 vi.mock("../capture/captureCompositionFrame.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../capture/captureCompositionFrame.js")>()),
   openSettledCompositionPage: snapshotState.openSettledPage,
-  seekCompositionTimeline: snapshotState.seek,
+  seekCompositionTimelineOnly: snapshotState.seek,
+  settleCompositionSeek: snapshotState.settle,
 }));
 
 vi.mock("../utils/staticProjectServer.js", () => ({
@@ -83,11 +85,11 @@ describe("transparent snapshot capture", () => {
     expect(source).toContain('page.screenshot({ type: "png", omitBackground: true })');
   });
 
-  it("exposes --proxy/--no-proxy and forwards the override to the static server", () => {
+  it("exposes --proxy and forwards it to the snapshot page server", () => {
     const source = readFileSync(new URL("./snapshot.ts", import.meta.url), "utf8");
     expect(source).toContain("proxy: {");
     expect(source).toContain("autoProxy: args.proxy as boolean | undefined");
-    expect(source).toContain("opts.autoProxy");
+    expect(source).toContain("serveCapturePage(projectDir, html, opts.autoProxy)");
   });
 
   it("pairs every frame with the frame-exact reference frame under --against", () => {
@@ -187,6 +189,57 @@ describe("snapshot --at seeks", () => {
       expect(close).toHaveBeenCalled();
     } finally {
       log.mockRestore();
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("snapshot video overlays and the blurred frame", () => {
+  // The runtime draws a blurred frame when the seek settles, so the video <img> overlays must
+  // be in by then (the engine injects before it waits, too).
+  it("settles the seek only after the video overlays were read and injected", async () => {
+    const project = mkdtempSync(join(tmpdir(), "hf-snapshot-blur-order-"));
+    writeFileSync(
+      join(project, "index.html"),
+      `<html><body><div data-composition-id="main" data-width="640" data-height="360" data-start="0" data-duration="3" data-motion-blur="on"><div class="clip" data-start="0" data-duration="3">Visible</div></div></body></html>`,
+    );
+    const log: string[] = [];
+    let calls = 0;
+    const evaluate = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return { loaded: [], errored: [], unused: [] };
+      if (calls === 2) return 3;
+      if (calls === 3) return true;
+      if (calls === 4) {
+        log.push("read videos");
+        return [];
+      }
+      return undefined;
+    });
+    snapshotState.openSettledPage.mockResolvedValueOnce({
+      browser: { close: vi.fn(async () => undefined) },
+      page: { evaluate },
+      renderReadyTimedOut: false,
+    });
+    snapshotState.seek.mockReset();
+    snapshotState.seek.mockImplementation(async () => {
+      log.push("seek");
+    });
+    snapshotState.settle.mockClear();
+    snapshotState.settle.mockImplementation(async () => {
+      log.push("settle");
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    try {
+      await expect(
+        snapshotCommand.run?.({
+          args: { dir: project, at: "1", end: false, output: join(project, "out") },
+        } as never),
+      ).rejects.toBeDefined();
+      expect(log).toEqual(["seek", "read videos", "settle"]);
+    } finally {
+      logSpy.mockRestore();
       rmSync(project, { recursive: true, force: true });
     }
   });
@@ -742,6 +795,40 @@ describe("extractVideoFrameToBuffer", () => {
       }
     },
   );
+
+  it.skipIf(noProbe)(
+    "extracts a frame at its displayed size, never larger than the source",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-displayed-"));
+      try {
+        const size = async (clip: string, displayedPixels: number) => {
+          const png = await extractVideoFrameToBuffer(clip, 0.5, false, false, displayedPixels);
+          if (!png) throw new Error(`no frame from ${clip}`);
+          return [png.readUInt32BE(16), png.readUInt32BE(20)];
+        };
+        for (const { name, width, height } of [
+          { name: "landscape", width: 160, height: 90 },
+          { name: "portrait", width: 90, height: 160 },
+        ]) {
+          const clip = join(dir, `${name}.mp4`);
+          const input = [
+            "-f",
+            "lavfi",
+            "-i",
+            `testsrc=d=1:r=24:s=${width}x${height}`,
+            "-pix_fmt",
+            "yuv420p",
+          ];
+          execFileSync(ffmpeg!, ["-hide_banner", "-loglevel", "error", ...input, clip]);
+          expect(await size(clip, 0)).toEqual([width, height]);
+          expect(await size(clip, 1000)).toEqual([width, height]);
+          expect(Math.min(...(await size(clip, 32)))).toBe(32);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("resolveSnapshotVideoClipStart", () => {
@@ -939,4 +1026,57 @@ describe("snapshot composite recapture", () => {
     expect(recapture).toBeGreaterThan(visibility);
     expect(finalCapture).toBeGreaterThan(recapture);
   });
+});
+
+it("addresses colliding scene videos by the capture page's render identity", async () => {
+  const project = mkdtempSync(join(tmpdir(), "hf-snapshot-media-id-"));
+  writeFileSync(
+    join(project, "index.html"),
+    '<html><body><div data-composition-id="main" data-width="320" data-height="180" data-duration="20"></div></body></html>',
+  );
+  const videos = ["clip", "clip__hf2"].map((renderId) => ({
+    id: "clip",
+    renderId,
+    dataset: { start: "0", duration: "10" },
+    duration: 20,
+    currentSrc: "http://127.0.0.1/source.mov",
+    src: "",
+    defaultPlaybackRate: 1,
+    loop: false,
+    getBoundingClientRect: () => ({ width: 320, height: 180 }),
+  }));
+  let ids: string[] = [];
+  let calls = 0;
+  const evaluate = vi.fn(async (fn: () => unknown) => {
+    calls++;
+    if (calls === 1) return { loaded: [], errored: [], unused: [] };
+    if (calls === 2) return 20;
+    if (calls === 3) return true;
+    ids = (fn() as Array<{ id: string }>).map((video) => video.id);
+    throw new Error("candidate witness captured");
+  });
+  snapshotState.openSettledPage.mockResolvedValueOnce({
+    browser: { close: vi.fn(async () => undefined) },
+    page: { evaluate },
+    renderReadyTimedOut: false,
+  });
+  snapshotState.seek.mockResolvedValue(undefined);
+  vi.stubGlobal("window", {
+    devicePixelRatio: 1,
+    __hfMediaId: (video: { renderId: string }) => video.renderId,
+  });
+  vi.stubGlobal("document", { querySelectorAll: () => videos });
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  try {
+    await expect(
+      snapshotCommand.run?.({
+        args: { dir: project, at: "1", end: false, output: join(project, "out") },
+      } as never),
+    ).rejects.toBeDefined();
+    expect(ids).toEqual(["clip", "clip__hf2"]);
+  } finally {
+    log.mockRestore();
+    vi.unstubAllGlobals();
+    rmSync(project, { recursive: true, force: true });
+  }
 });

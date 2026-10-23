@@ -86,6 +86,7 @@ const ffmpegEncoderState = vi.hoisted(() => ({
   mode: "software" as "software" | "gpu",
   error: null as Error | null,
   encoders: null as string | null,
+  usableGpu: false,
 }));
 const orphanCleanupState = vi.hoisted(() => ({
   calls: 0,
@@ -210,10 +211,14 @@ vi.mock("../browser/ffmpeg.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../browser/ffmpeg.js")>();
   return {
     ...actual,
-    detectH264EncoderModeForRender: vi.fn(async () => {
+    detectH264EncoderModeForRender: vi.fn(async (_path: string, gpuRequested: boolean) => {
       if (ffmpegEncoderState.error) throw ffmpegEncoderState.error;
       if (ffmpegEncoderState.encoders !== null)
-        return actual.resolveH264EncoderMode(ffmpegEncoderState.encoders, false);
+        return actual.resolveH264EncoderMode(
+          ffmpegEncoderState.encoders,
+          gpuRequested,
+          ffmpegEncoderState.usableGpu,
+        );
       return ffmpegEncoderState.mode;
     }),
     findFFmpeg: vi.fn(() => "/usr/bin/ffmpeg"),
@@ -222,6 +227,7 @@ vi.mock("../browser/ffmpeg.js", async (importOriginal) => {
 });
 
 vi.mock("../browser/preflight.js", () => ({
+  checkDisk: vi.fn(() => ({ name: "Disk", ok: true, level: "ok", detail: "mock" })),
   runEnvironmentChecks: vi.fn(async () => {
     preflightState.onRun?.();
     return preflightState.result;
@@ -236,6 +242,7 @@ vi.mock("../browser/preflight.js", () => ({
 // the shared `~/.cache/hyperframes/chrome`, racing other packages' browser
 // tests in CI.
 vi.mock("../browser/manager.js", () => ({
+  sweepKilledInstalls: vi.fn(async () => {}),
   ensureBrowser: vi.fn(async (options?: { signal?: AbortSignal }) => {
     await browserManagerState.onEnsure?.(options?.signal);
     return { executablePath: "/mock/chrome", source: "cache" };
@@ -474,6 +481,7 @@ describe("renderLocal browser GPU config", () => {
     ffmpegEncoderState.mode = "software";
     ffmpegEncoderState.error = null;
     ffmpegEncoderState.encoders = null;
+    ffmpegEncoderState.usableGpu = false;
     orphanCleanupState.calls = 0;
     orphanCleanupState.killed = 0;
     orphanCleanupState.parentPid = () => null;
@@ -950,6 +958,26 @@ describe("renderLocal browser GPU config", () => {
     expect(stderr.mock.calls.flat().join(" ")).toContain("libx264");
   });
 
+  it("refuses a --gpu MP4 before capture when no GPU encoder works and FFmpeg lacks libx264", async () => {
+    ffmpegEncoderState.encoders = " V....D libopenh264 OpenH264\n V....D h264_videotoolbox H.264\n";
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
+        fps: { num: 30, den: 1 },
+        quality: "high",
+        format: "mp4",
+        gpu: true,
+        browserGpuMode: "software",
+        hdrMode: "auto",
+        quiet: true,
+      }),
+    ).rejects.toMatchObject({ name: "CliRuntimeError" });
+
+    expect(producerState.createdJobs).toHaveLength(0);
+    expect(stderr.mock.calls.flat().join(" ")).toContain("libx264");
+  });
+
   it.each(["webm", "mov", "png-sequence"] as const)(
     "does not require H.264 for %s",
     async (format) => {
@@ -1084,6 +1112,7 @@ describe("renderLocal browser GPU config", () => {
   // the software encoder's forced-keyframe lock.
   it("fails an HLS render instead of falling back to GPU H.264", async () => {
     ffmpegEncoderState.encoders = " V....D h264_videotoolbox H.264 (VideoToolbox)\n";
+    ffmpegEncoderState.usableGpu = true;
     const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     await expect(
@@ -1190,6 +1219,23 @@ describe("renderLocal browser GPU config", () => {
 
     expect(producerState.createdJobs[0]?.variables).toBeUndefined();
   });
+
+  it.each([undefined, "off"] as const)(
+    "preserves page motion blur %s in the producer request",
+    async (pageMotionBlur) => {
+      await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
+        fps: { num: 30, den: 1 },
+        quality: "standard",
+        format: "mp4",
+        gpu: false,
+        browserGpuMode: "software",
+        hdrMode: "auto",
+        quiet: true,
+        pageMotionBlur,
+      });
+      expect(producerState.createdJobs[0]?.pageMotionBlur).toBe(pageMotionBlur);
+    },
+  );
 
   it("forwards entryFile to createRenderJob when --composition is set", async () => {
     await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
@@ -1871,10 +1917,10 @@ describe("checkRenderResolutionPreflight", () => {
     expect(result?.kind).toBe("hdr-incompatible");
   });
 
-  it("classifies a preset smaller than the composition as downsampling", async () => {
-    // 3840×2160 comp + landscape (1920×1080): same 16:9 aspect, target smaller.
+  it("passes a preset smaller than the composition", async () => {
+    // 3840×2160 comp + landscape (1920×1080): same 16:9 aspect, rendered at 0.5× DPR.
     const result = await checkRenderResolutionPreflight(comp(3840, 2160), "landscape", noModes);
-    expect(result?.kind).toBe("downsampling");
+    expect(result).toBeUndefined();
   });
 
   it("classifies a non-integer upscale as non-integer-scale", async () => {
@@ -1944,12 +1990,18 @@ describe("checkRenderResolutionPreflight", () => {
       expect(result?.kind).toBe("hdr-incompatible");
     });
 
-    it("still flags downsampling + aspect-agnostic (same-orientation, smaller preset)", async () => {
-      // 3840×2160 comp with `--resolution 1080p` → `landscape` (1920×1080).
-      // Same orientation, but tier smaller than comp — user asked for a
-      // downsample. That's a real incompatibility, not an orientation swap.
+    it("passes `--resolution 1080p` on a 4K composition (a smaller, same-orientation preset)", async () => {
       const result = await checkRenderResolutionPreflight(comp(3840, 2160), "landscape", agnostic);
-      expect(result?.kind).toBe("downsampling");
+      expect(result).toBeUndefined();
+    });
+
+    it("never adapts `--resolution 4k` to another tier: a 1922×1080 composition is refused, not rendered at 480p", async () => {
+      const result = await checkRenderResolutionPreflight(
+        comp(1922, 1080),
+        "landscape-4k",
+        agnostic,
+      );
+      expect(result?.kind).toBeDefined();
     });
 
     it("does NOT auto-clear when the flag was explicit (orientation-locked preset stays strict)", async () => {
@@ -1983,14 +2035,10 @@ describe("checkRenderResolutionPreflight", () => {
       expect(result?.message).toMatch(/preset whose orientation matches|omit --resolution/i);
     });
 
-    it("blocks a portrait-4K comp + `1080p` downsample early (orientation-flip masks the tier gap)", async () => {
-      // 2160×3840 (portrait 4K) + `--resolution 1080p` — the compile stage
-      // remaps `landscape` → `portrait` (1080×1920), and *then* the preset
-      // is smaller than the composition. The un-remapped preflight let this
-      // slip through as an aspect-mismatch downgrade; the remap-then-check
-      // catches the real failure — downsampling — early.
+    it("passes a portrait-4K comp + `1080p` once remapped to portrait (a smaller preset)", async () => {
+      // 2160×3840 + `--resolution 1080p` remaps `landscape` → `portrait` (1080×1920), rendered at 0.5× DPR.
       const result = await checkRenderResolutionPreflight(comp(2160, 3840), "landscape", agnostic);
-      expect(result?.kind).toBe("downsampling");
+      expect(result).toBeUndefined();
     });
 
     it("blocks a portrait 720p comp + `1080p` non-integer upscale early (orientation-flip masks the fractional DPR)", async () => {

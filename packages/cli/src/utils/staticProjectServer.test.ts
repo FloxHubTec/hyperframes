@@ -8,6 +8,7 @@ import {
   serveStaticProjectHtml,
   type StaticProjectServer,
 } from "./staticProjectServer.js";
+import { injectMediaCodecMapIntoHtml } from "@hyperframes/studio-server/media-proxy-preview";
 
 // `serveStaticProjectHtml` reaches these two studio-server helpers via a
 // absolute module regardless of which file's relative specifier reaches it).
@@ -34,7 +35,15 @@ const mocks = vi.hoisted(() => {
     }
   }
   return {
-    resolveProxy: vi.fn<(projectDir: string, absoluteSourcePath: string) => Promise<string>>(
+    resolveProxy: vi.fn<
+      (
+        projectDir: string,
+        absoluteSourcePath: string,
+        variant?: string,
+        box?: unknown,
+        options?: { signal?: AbortSignal },
+      ) => Promise<string>
+    >(
       // Benign default so `injectMediaCodecMap`'s fire-and-forget pre-warm
       // (called for every hostile map entry) always gets a promise to
       // `.catch()`, even in tests that don't care about the proxy path.
@@ -229,6 +238,17 @@ describe("serveStaticProjectHtml asset roots", () => {
     expect(await res.text()).toBe("PIXELS");
   });
 
+  it("labels the page and its scripts UTF-8 so text without a meta charset is not misread", async () => {
+    const projectDir = mk();
+    writeFileSync(join(projectDir, "scene.js"), 'document.title = "太阳系";');
+    server = await serveStaticProjectHtml(projectDir, "<h1>太阳系科普动画</h1>");
+
+    const page = await fetch(server.url);
+    const script = await fetch(`${server.url}scene.js`);
+    expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(script.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
+  });
+
   it("prefers the project dir over an asset root for the same path", async () => {
     const projectDir = mk();
     const assetDir = mk();
@@ -338,6 +358,8 @@ describe("serveStaticProjectHtml transparent media proxies", () => {
       projectDir,
       join(projectDir, "clip.mp4"),
       "h264",
+      undefined,
+      { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -355,7 +377,9 @@ describe("serveStaticProjectHtml transparent media proxies", () => {
       const res = await fetch(`${server.url}clip.${extension}?hf-proxy=h264`);
       expect(res.status).toBe(200);
       expect(await res.text()).toBe("transcoded-h264-bytes");
-      expect(mocks.resolveProxy).toHaveBeenCalledWith(projectDir, sourcePath, "h264");
+      expect(mocks.resolveProxy).toHaveBeenCalledWith(projectDir, sourcePath, "h264", undefined, {
+        signal: expect.any(AbortSignal),
+      });
     },
   );
 
@@ -382,6 +406,8 @@ describe("serveStaticProjectHtml transparent media proxies", () => {
       projectDir,
       join(projectDir, "clip.mov"),
       "vp8",
+      undefined,
+      { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -416,6 +442,33 @@ describe("serveStaticProjectHtml transparent media proxies", () => {
     const res = await fetch(`${server.url}image.png?hf-proxy=h264`);
     expect(res.status).toBe(404);
     expect(mocks.resolveProxy).not.toHaveBeenCalled();
+  });
+
+  it("stops the copies it started, pre-warmed or asked for, when it closes", async () => {
+    mocks.scanProjectMediaCodecMap.mockResolvedValue({
+      "/clip.mp4": { codecName: "hevc", browserHostile: true, representativeMime: null },
+    });
+    const projectDir = mk();
+    writeFileSync(join(projectDir, "clip.mp4"), "original-hevc-bytes");
+    let asked: AbortSignal | undefined;
+    mocks.resolveProxy.mockImplementation(
+      (_dir, _path, _variant, _box, options) =>
+        new Promise((_resolve, reject) => {
+          asked = options?.signal;
+          asked?.addEventListener("abort", () => reject(asked?.reason));
+        }),
+    );
+    const closing = await serveStaticProjectHtml(projectDir, "<html><head></head></html>");
+    const held = fetch(`${closing.url}clip.mp4?hf-proxy=h264`);
+    await vi.waitFor(() => expect(asked).toBeDefined());
+    const injected = vi.mocked(injectMediaCodecMapIntoHtml).mock.calls.at(-1) as unknown[];
+    const prewarms = injected[5] as AbortSignal | undefined;
+
+    await closing.close();
+
+    expect(prewarms?.aborted).toBe(true);
+    expect(asked?.aborted).toBe(true);
+    expect((await held).status).toBe(500);
   });
 });
 

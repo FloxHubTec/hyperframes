@@ -1,5 +1,14 @@
+import { htmlInCanvasForm } from "@hyperframes/core/html-in-canvas";
 import { buildProjectApiPath } from "../../utils/projectRouting";
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import type { CanvasResolution } from "@hyperframes/parsers";
 import { trackStudioRenderStart } from "../../telemetry/events";
 import { getAnonymousId } from "../../telemetry/config";
@@ -15,6 +24,11 @@ import {
   serializeEncoderOptions,
   type EncoderOptionsBody,
 } from "./renderOptions";
+
+// WYSIWYG: the preview iframe runs in this browser, so a render blurs only if this one can.
+function canPreviewMotionBlur(): boolean {
+  return typeof document !== "undefined" && htmlInCanvasForm() !== null;
+}
 
 export interface RenderJob {
   id: string;
@@ -79,6 +93,82 @@ function writeHiddenIds(projectId: string, ids: Set<string>): void {
   }
 }
 
+function useRenderSession(
+  jobs: RenderJob[],
+  setJobs: Dispatch<SetStateAction<RenderJob[]>>,
+  projectId: string | null,
+) {
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const activeJobRef = useRef<string | null>(null);
+  // Renders started in THIS tab, mapped to the settings they ran with.
+  // `loadRenders` also injects finished jobs from disk history, and those must
+  // never trigger a feedback prompt — the user did not just watch them happen.
+  const sessionJobs = useRef(new Map<string, FeedbackContext>());
+  const promptedJobIds = useRef(new Set<string>());
+
+  /**
+   * The one way a render started here enters the list. Every start path — the
+   * happy one and all three failure shortcuts — goes through here, so both
+   * "this render belongs to this session" and "these are the settings it ran
+   * with" have a single owner. A report about a render is only actionable if
+   * it arrives with the settings that produced it.
+   */
+  const addSessionJob = useCallback(
+    (job: RenderJob, settings: FeedbackContext) => {
+      sessionJobs.current.set(job.id, settings);
+      setJobs((prev) => [...prev, job]);
+    },
+    [setJobs],
+  );
+
+  const closeActiveEventSource = useCallback((jobId?: string) => {
+    if (jobId && activeJobRef.current !== jobId) return;
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    activeJobRef.current = null;
+  }, []);
+
+  // Ask for feedback the moment a render this tab started reaches its outcome.
+  // Watching the list (rather than each of the four places a job can finish)
+  // keeps one trigger for every path, including SSE drops and cancels-that-
+  // finished-anyway. `requestStudioFeedback` decides whether to actually ask.
+  useEffect(() => {
+    for (const job of jobs) {
+      if (job.status === "rendering" || job.status === "cancelled") continue;
+      const settings = sessionJobs.current.get(job.id);
+      if (!settings || promptedJobIds.current.has(job.id)) continue;
+      promptedJobIds.current.add(job.id);
+      requestStudioFeedback({
+        reason: job.status === "complete" ? "render_complete" : "render_failed",
+        renderId: job.id,
+        detail: job.error,
+        context: {
+          ...settings,
+          // How far it got and how long it took separate "died on frame one"
+          // from "died during encode", which need different fixes.
+          render_progress: job.progress,
+          render_duration_ms: job.durationMs ?? Date.now() - job.createdAt,
+          render_stage: job.stage,
+          render_error: job.error,
+          // Earlier renders this session: a first-render failure and a
+          // failure after nine successes are different bugs.
+          renders_this_session: sessionJobs.current.size,
+        },
+      });
+    }
+  }, [jobs]);
+
+  // Clean up EventSource on unmount or projectId change
+  useEffect(() => {
+    return () => {
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+    };
+  }, [projectId]);
+
+  return { eventSourceRef, activeJobRef, closeActiveEventSource, addSessionJob };
+}
+
 export function useRenderQueue(
   projectId: string | null,
   // A ref, not the value: the render target has to be read at click time, and
@@ -103,33 +193,12 @@ export function useRenderQueue(
   // A null status means the probe gave no answer (older server, failed
   // request), which is not evidence of a missing encoder. Unknown fails open.
   const ffmpegMissing = ffmpeg !== null && !ffmpeg.ok;
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const activeJobRef = useRef<string | null>(null);
+  const { eventSourceRef, activeJobRef, closeActiveEventSource, addSessionJob } = useRenderSession(
+    jobs,
+    setJobs,
+    projectId,
+  );
   const startRequestPendingRef = useRef(false);
-  // Renders started in THIS tab, mapped to the settings they ran with.
-  // `loadRenders` also injects finished jobs from disk history, and those must
-  // never trigger a feedback prompt — the user did not just watch them happen.
-  const sessionJobs = useRef(new Map<string, FeedbackContext>());
-  const promptedJobIds = useRef(new Set<string>());
-
-  /**
-   * The one way a render started here enters the list. Every start path — the
-   * happy one and all three failure shortcuts — goes through here, so both
-   * "this render belongs to this session" and "these are the settings it ran
-   * with" have a single owner. A report about a render is only actionable if
-   * it arrives with the settings that produced it.
-   */
-  const addSessionJob = useCallback((job: RenderJob, settings: FeedbackContext) => {
-    sessionJobs.current.set(job.id, settings);
-    setJobs((prev) => [...prev, job]);
-  }, []);
-
-  const closeActiveEventSource = useCallback((jobId?: string) => {
-    if (jobId && activeJobRef.current !== jobId) return;
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
-    activeJobRef.current = null;
-  }, []);
 
   // Load completed renders from the server
   const loadRenders = useCallback(async () => {
@@ -258,11 +327,13 @@ export function useRenderQueue(
         gpu?: boolean;
         telemetryDistinctId?: string;
         telemetryOptOut?: boolean;
+        previewMotionBlur: boolean;
       } & EncoderOptionsBody = {
         fps,
         quality,
         format,
         ...serializeEncoderOptions(resolved.settings),
+        previewMotionBlur: canPreviewMotionBlur(),
       };
       // The id is MINTED by getAnonymousId(), so calling it unconditionally
       // created a telemetry identity for a profile that had opted out — and
@@ -394,7 +465,16 @@ export function useRenderQueue(
 
       return jobId;
     },
-    [projectId, activeCompPathRef, closeActiveEventSource, addSessionJob, ffmpeg, ffmpegMissing],
+    [
+      projectId,
+      activeCompPathRef,
+      closeActiveEventSource,
+      addSessionJob,
+      ffmpeg,
+      ffmpegMissing,
+      eventSourceRef,
+      activeJobRef,
+    ],
   );
 
   // Cancel an in-flight render. The job row stays (as "cancelled") so the
@@ -466,44 +546,6 @@ export function useRenderQueue(
   }, [projectId]);
 
   const dismissActionError = useCallback(() => setActionError(null), []);
-
-  // Ask for feedback the moment a render this tab started reaches its outcome.
-  // Watching the list (rather than each of the four places a job can finish)
-  // keeps one trigger for every path, including SSE drops and cancels-that-
-  // finished-anyway. `requestStudioFeedback` decides whether to actually ask.
-  useEffect(() => {
-    for (const job of jobs) {
-      if (job.status === "rendering" || job.status === "cancelled") continue;
-      const settings = sessionJobs.current.get(job.id);
-      if (!settings || promptedJobIds.current.has(job.id)) continue;
-      promptedJobIds.current.add(job.id);
-      requestStudioFeedback({
-        reason: job.status === "complete" ? "render_complete" : "render_failed",
-        renderId: job.id,
-        detail: job.error,
-        context: {
-          ...settings,
-          // How far it got and how long it took separate "died on frame one"
-          // from "died during encode", which need different fixes.
-          render_progress: job.progress,
-          render_duration_ms: job.durationMs ?? Date.now() - job.createdAt,
-          render_stage: job.stage,
-          render_error: job.error,
-          // Earlier renders this session: a first-render failure and a
-          // failure after nine successes are different bugs.
-          renders_this_session: sessionJobs.current.size,
-        },
-      });
-    }
-  }, [jobs]);
-
-  // Clean up EventSource on unmount or projectId change
-  useEffect(() => {
-    return () => {
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
-    };
-  }, [projectId]);
 
   const isRendering = jobs.some((j) => j.status === "rendering");
   return useMemo(

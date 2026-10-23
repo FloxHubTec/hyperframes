@@ -64,7 +64,10 @@ Two more ways an SVG "line draws itself" effect (animated `strokeDasharray` / `s
 `hyperframes check` flags a text block covered by another element as `text_occluded`, and
 two attributes waive it: `data-layout-allow-overlap` for intentional layering, and
 `data-layout-allow-occlusion` for something deliberately painted over type. Both are
-legitimate — a caption designed to sit behind a matted subject needs one.
+legitimate. A caption behind a transparent `<video>` cutout needs neither: `check` reads the
+cutout's decoded alpha at each sample, reports how much of each word the subject covers as
+info, and fails only a word that is 80% hidden or two neighbouring words that are each half
+hidden.
 
 Two things about them are worth knowing before you reach for either:
 
@@ -109,10 +112,6 @@ Each one causes friction or wrong output for a specific engine reason — with t
 **Don't assume the agent knows your assets.** It will look, but a path skips the search.
 - ❌ `use my logo`
 - ✅ `use assets/logo.svg`
-
-**Don't override a workflow's designed style.** Each workflow skill carries an art-directed preset; fighting it produces a compromise, not your theme.
-- ❌ `/pr-to-video ... dark theme`
-- ✅ let the preset carry the look, or use a freeform build when you need full style control
 
 **Don't hard-time a verbatim script.** With supplied narration text, duration follows the spoken words.
 - ❌ `a 60-second explainer from this script: ...`
