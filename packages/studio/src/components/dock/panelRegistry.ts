@@ -58,7 +58,7 @@ export const PANEL_DEFINITIONS = {
   variables: { title: "Variables", zone: "right", reopen: { near: "design", direction: "within" } },
   slideshow: { title: "Slideshow", zone: "right", reopen: { near: "design", direction: "within" } },
   motionBlur: {
-    title: "Motion blur",
+    title: "Blur",
     zone: "right",
     reopen: { near: "design", direction: "within" },
   },
