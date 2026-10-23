@@ -341,10 +341,10 @@ it("runs the dense overlap grid in page tasks of at most 8 samples, keeping each
   );
 
   expect(denseAudits.length).toBeGreaterThan(10);
-  const perTask = Object.values(Object.groupBy(denseAudits, (calls) => calls)).map(
-    (g) => g?.length,
-  );
-  expect(perTask.every((count) => (count ?? 0) <= 8)).toBe(true);
+  const tasks = new Map<number, number>();
+  for (const calls of denseAudits) tasks.set(calls, (tasks.get(calls) ?? 0) + 1);
+  const perTask = [...tasks.values()];
+  expect(Math.max(...perTask)).toBeLessThanOrEqual(8);
   expect(perTask).toHaveLength(Math.ceil(denseAudits.length / 8));
   expect(result.runtimeFindings).toContainEqual(
     expect.objectContaining({ code: "console_error", message: "thrown at 2.5", time: 2.5 }),
