@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decodePng } from "../utils/alphaBlit.js";
 import { resolveHeadlessShellPath } from "./browserManager.js";
 import { closeTestChrome } from "./__fixtures__/loopback.js";
+import { acceleratedCanvasTrackerSource } from "@hyperframes/core";
 import { waitForPendingSeekCompletion } from "./frameCapture.js";
 
 const RUNTIME = resolve(import.meta.dirname, "../../../core/dist/hyperframe.runtime.iife.js");
@@ -30,7 +31,9 @@ type Win = Window & {
   __hf_page_composite_pending?: boolean;
   __hf_page_composite_prepare?: () => Promise<boolean>;
   __hf_page_composite_resolve?: () => boolean;
-  __hfMotionBlur?: { report: () => { state: string; reasonCode: string | null; movers: number } };
+  __hfMotionBlur?: {
+    report: () => { state: string; tier: string | null; reasonCode: string | null; movers: number };
+  };
 };
 
 /** 40 px box moving 60 px per frame (1800 px over the 1 s composition). */
@@ -104,6 +107,7 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
   async function open(body: string, blur: boolean): Promise<Page> {
     const page = await browser.newPage();
     await page.setViewport({ width: W, height: H, deviceScaleFactor: 1 });
+    await page.evaluate(acceleratedCanvasTrackerSource());
     await page.setContent(composition(body, blur));
     await page.addScriptTag({ content: `window.__HF_EXPORT_RENDER_SEEK_CONFIG={fps:${FPS}};` });
     await page.addScriptTag({ content: readFileSync(RUNTIME, "utf8") });
@@ -249,6 +253,24 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
     expect(glow(blurred.frame)).toBeGreaterThan(glow(sharp.frame) * 0.5);
   });
 
+  it("blurs with filters where capture cannot run, over a page that has a WebGL canvas", async (ctx) => {
+    if (!supported) ctx.skip();
+    const gl = `<canvas id="gl" width="64" height="36" style="position:absolute;left:0;top:0;width:${W}px;height:${H}px"></canvas><script>document.getElementById("gl").getContext("webgl")</script>`;
+    const blurred = await frameOf(gl + BOX, true, FRAME);
+    const sharp = await frameOf(gl + BOX, false, FRAME);
+    expect(blurred.report).toMatchObject({
+      state: "on",
+      tier: "filter",
+      reasonCode: "accelerated-canvas",
+      movers: 1,
+    });
+    const trail = row(blurred.frame, 40);
+    expect(intermediate(trail).length).toBeGreaterThanOrEqual(40);
+    expect(Math.abs(centroid(trail) - centroid(row(sharp.frame, 40)))).toBeLessThan(2);
+    expect(ink(trail) / ink(row(sharp.frame, 40))).toBeGreaterThan(0.9);
+    expect(ink(trail) / ink(row(sharp.frame, 40))).toBeLessThan(1.1);
+  });
+
   it("blurs a box centred with translate around where it really is", async (ctx) => {
     if (!supported) ctx.skip();
     const blurred = await frameOf(CENTERED, true, 1 / FPS);
@@ -276,7 +298,14 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
     for (const body of [BOX + card("animation: hide 1s both"), BOX + card("") + WAAPI]) {
       const blurred = await frameOf(body, true, 0.4);
       expect(blurred.report).toMatchObject({ tier: "filter", reasonCode: "backface-visibility" });
-      expect(same(blurred.frame, sharp.frame)).toBe(true);
+      // The 3D card is not a mover for either tier: it is drawn as the sharp frame has it.
+      let differing = 0;
+      for (let y = 40; y < 140; y++) {
+        for (let x = 100; x < 200; x++) {
+          if (px(blurred.frame, x, y).join() !== px(sharp.frame, x, y).join()) differing++;
+        }
+      }
+      expect(differing).toBe(0);
     }
   });
 
