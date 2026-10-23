@@ -382,6 +382,16 @@ describe("media rules", () => {
     );
     expect(sibling).toContain('id="scene"');
 
+    const afterClosed = await lintHyperframeHtml(`
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">
+    <div id="title" data-start="0" data-duration="3"></div>
+    <div id="frame"><video id="v" src="a.mp4" data-start="4" data-duration="5" muted></video></div>
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["c1"] = gsap.timeline({ paused: true });</script>
+</body></html>`);
+    expect(afterClosed.findings.map((f) => f.code)).not.toContain("video_nested_in_timed_element");
+
     const noDuration = await hintFor(
       `<div id="w" data-start="2"><video id="v" src="a.mp4" muted></video></div>`,
     );

@@ -442,6 +442,8 @@ const VOID_ELEMENTS = new Set([
   "wbr",
 ]);
 
+const closeTag = (name: string) => new RegExp(`</${name}>`, "gi");
+
 function innermostTimedWrapper(
   source: string,
   tags: OpenTag[],
@@ -456,13 +458,20 @@ function innermostTimedWrapper(
     if (readDecodedAttr(parent.raw, "data-composition-id")) continue;
     const start = readAttr(parent.raw, "data-start");
     if (!start) continue;
-    const closes = source
-      .substring(parent.index, media.index)
-      .match(new RegExp(`</${parent.name}>`, "gi"));
-    const opens = tags.filter(
-      (t) => t.name === parent.name && t.index > parent.index && t.index < media.index,
-    );
-    if ((closes?.length ?? 0) <= opens.length) {
+    const events: Array<[at: number, delta: 1 | -1]> = [
+      ...tags
+        .filter((t) => t.name === parent.name && t.index > parent.index && t.index < media.index)
+        .map((t): [number, 1] => [t.index, 1]),
+      ...[...source.substring(parent.index, media.index).matchAll(closeTag(parent.name))].map(
+        (m): [number, -1] => [parent.index + m.index, -1],
+      ),
+    ];
+    let depth = 1;
+    for (const [, delta] of events.sort((x, y) => x[0] - y[0])) {
+      depth += delta;
+      if (depth === 0) break;
+    }
+    if (depth > 0) {
       found = {
         name: parent.name,
         id: readAttr(parent.raw, "id") || undefined,
