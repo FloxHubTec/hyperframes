@@ -32,6 +32,8 @@ describe("a stored delete a script looks up", () => {
     expect(out).toContain('id="narration"');
     expect(out).not.toMatch(/id="narration"[^>]*data-start|data-start[^>]*id="narration"/);
     expect(out).not.toContain('data-duration="9"');
+    // The audio mixer and the runtime skip [data-hidden]; display:none alone would still play the track.
+    expect(out).toMatch(/<audio[^>]*data-hidden/);
   });
 
   it("is still absent from the session model", async () => {

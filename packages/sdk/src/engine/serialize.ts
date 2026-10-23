@@ -20,6 +20,7 @@ function hiddenCopy(doc: Document, kept: KeptDelete): Element | null {
     for (const name of CLIP_ATTRIBUTES) el.removeAttribute(name);
   }
   setElementStyles(node, { display: "none" });
+  node.setAttribute("data-hidden", "");
   return node;
 }
 
