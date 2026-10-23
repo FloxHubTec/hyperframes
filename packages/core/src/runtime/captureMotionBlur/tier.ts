@@ -1,3 +1,5 @@
+import type { CaptureDefect } from "../../htmlInCanvasDefects";
+
 /** What the runtime drives: capture blur or the filter fallback, the same way. */
 
 export interface CaptureMotionBlurHost {
@@ -16,6 +18,8 @@ export interface Config {
   shutterDeg: number;
   samples: number | null;
   events: boolean;
+  /** Which tier draws: `auto` takes the cheaper filter tier when every mover only translates. */
+  tier: "auto" | "capture" | "filter";
 }
 
 export interface Report {
@@ -47,4 +51,20 @@ export interface Tier {
   report: () => Report;
   busy: () => boolean;
   rediscover: () => void;
+}
+
+export interface TierChoice {
+  tier: Config["tier"];
+  form: boolean;
+  /** Why capture cannot run here, if it cannot; `renderer-off` means blur must not run at all. */
+  defect: CaptureDefect | null;
+  fallback: boolean;
+}
+
+/** Capture where it can run; the filter tier where it cannot or the page asked for it; off if told to be. */
+export function chooseTier(c: TierChoice): "capture" | "filter" | "off" {
+  if (c.defect?.code === "renderer-off") return "off";
+  const capturable = c.form && !c.defect;
+  if (c.fallback && (c.tier === "filter" || !capturable)) return "filter";
+  return capturable ? "capture" : "off";
 }

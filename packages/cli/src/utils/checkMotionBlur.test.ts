@@ -67,6 +67,8 @@ describe("motionBlurDrafts", () => {
     expect(motionBlurDrafts(filter("accelerated-canvas", 0))[0]?.code).toBe(
       "motion_blur_no_movers",
     );
+    expect(motionBlurDrafts(filter("translation-only"))).toEqual([]);
+    expect(motionBlurDrafts(filter("tier-attribute"))).toEqual([]);
   });
 
   it("only informs, once, when the browser cannot run html-in-canvas", () => {

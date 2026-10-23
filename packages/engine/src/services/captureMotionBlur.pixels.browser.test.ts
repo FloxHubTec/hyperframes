@@ -55,8 +55,12 @@ const card = (animation: string, perspective = "perspective:400px") =>
 const WAAPI = `<script>document.getElementById("card").animate([{backfaceVisibility:"hidden"},{backfaceVisibility:"hidden"}],1000)</script>`;
 const same = (a: Frame, b: Frame): boolean => Buffer.from(a.data).equals(Buffer.from(b.data));
 
-function composition(body: string, blur: boolean): string {
-  const attrs = blur ? ' data-motion-blur="on" data-motion-blur-shutter="360"' : "";
+type Tier = "capture" | "filter";
+
+function composition(body: string, blur: boolean, tier?: Tier): string {
+  const attrs = blur
+    ? ` data-motion-blur="on" data-motion-blur-shutter="360"${tier ? ` data-motion-blur-tier="${tier}"` : ""}`
+    : "";
   return `<!doctype html><html><head><style>html,body{margin:0}${STYLE}</style></head><body>
     <div id="root" data-composition-id="root" data-start="0" data-duration="1" data-width="${W}" data-height="${H}"${attrs}
       style="position:relative;width:${W}px;height:${H}px;background:#fff;overflow:hidden">${body}</div></body></html>`;
@@ -104,11 +108,11 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
   }, 30_000);
   afterAll(() => closeTestChrome(browser));
 
-  async function open(body: string, blur: boolean): Promise<Page> {
+  async function open(body: string, blur: boolean, tier?: Tier): Promise<Page> {
     const page = await browser.newPage();
     await page.setViewport({ width: W, height: H, deviceScaleFactor: 1 });
     await page.evaluate(acceleratedCanvasTrackerSource());
-    await page.setContent(composition(body, blur));
+    await page.setContent(composition(body, blur, tier));
     await page.addScriptTag({ content: `window.__HF_EXPORT_RENDER_SEEK_CONFIG={fps:${FPS}};` });
     await page.addScriptTag({ content: readFileSync(RUNTIME, "utf8") });
     await page.waitForFunction(() => {
@@ -145,8 +149,8 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
     return { width, data };
   }
 
-  async function frameOf(body: string, blur: boolean, t: number) {
-    const page = await open(body, blur);
+  async function frameOf(body: string, blur: boolean, t: number, tier?: Tier) {
+    const page = await open(body, blur, tier);
     try {
       const frame = await capture(page, t);
       const report = await page.evaluate(() => (window as Win).__hfMotionBlur?.report() ?? null);
@@ -169,7 +173,7 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
       return n;
     };
     for (const animation of ["spin", "grow"]) {
-      const blurred = await frameOf(tile(animation), true, 0.3);
+      const blurred = await frameOf(tile(animation), true, 0.3, "capture");
       const sharp = await frameOf(tile(animation), false, 0.3);
       expect(blurred.report).toMatchObject({ state: "on", movers: 1, failedFrames: 0 });
       expect(same(blurred.frame, sharp.frame)).toBe(false);
@@ -179,11 +183,13 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
     }
   });
 
-  it("leaves a trail along the motion line where the sharp frame has hard edges", async (ctx) => {
+  const TIERS: Tier[] = ["capture", "filter"];
+
+  it.each(TIERS)("leaves a trail along the motion line, in the %s tier", async (tier, ctx) => {
     if (!supported) ctx.skip();
-    const blurred = await frameOf(BOX, true, FRAME);
+    const blurred = await frameOf(BOX, true, FRAME, tier);
     const sharp = await frameOf(BOX, false, FRAME);
-    expect(blurred.report).toMatchObject({ state: "on", movers: 1 });
+    expect(blurred.report).toMatchObject({ state: "on", tier, movers: 1 });
 
     const sharpRow = row(sharp.frame, 40);
     expect(sharpRow.filter((v) => v === 255)).toHaveLength(40);
@@ -206,52 +212,61 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
     expect(ink(trail) / ink(sharpRow)).toBeLessThan(1.03);
   });
 
-  it("leaves what does not move exactly as the sharp frame has it", async (ctx) => {
-    if (!supported) ctx.skip();
-    const blurred = await frameOf(BOX + STRIPES, true, FRAME);
-    const sharp = await frameOf(BOX + STRIPES, false, FRAME);
-    expect(blurred.report).toMatchObject({ state: "on" });
-    let differing = 0;
-    for (let y = 100; y < 140; y++) {
-      for (let x = 200; x < 240; x++) {
-        if (px(blurred.frame, x, y).join() !== px(sharp.frame, x, y).join()) differing++;
+  it.each(TIERS)(
+    "leaves what does not move exactly as the sharp frame has it, in the %s tier",
+    async (tier, ctx) => {
+      if (!supported) ctx.skip();
+      const blurred = await frameOf(BOX + STRIPES, true, FRAME, tier);
+      const sharp = await frameOf(BOX + STRIPES, false, FRAME);
+      expect(blurred.report).toMatchObject({ state: "on" });
+      let differing = 0;
+      for (let y = 100; y < 140; y++) {
+        for (let x = 200; x < 240; x++) {
+          if (px(blurred.frame, x, y).join() !== px(sharp.frame, x, y).join()) differing++;
+        }
       }
-    }
-    expect(differing).toBe(0);
-    expect(new Set(Array.from({ length: 40 }, (_, x) => px(sharp.frame, 200 + x, 110)[0]))).toEqual(
-      new Set([0, 255]),
-    );
-  });
+      expect(differing).toBe(0);
+      expect(
+        new Set(Array.from({ length: 40 }, (_, x) => px(sharp.frame, 200 + x, 110)[0])),
+      ).toEqual(new Set([0, 255]));
+    },
+  );
 
-  it("leaves the backdrop under a see-through mover where it is", async (ctx) => {
-    if (!supported) ctx.skip();
-    const body = `<div style="position:absolute;left:0;top:0;width:${W}px;height:100px;background:repeating-linear-gradient(90deg,#000 0 2px,#fff 2px 4px)"></div>
+  it.each(TIERS)(
+    "leaves the backdrop under a see-through mover where it is, in the %s tier",
+    async (tier, ctx) => {
+      if (!supported) ctx.skip();
+      const body = `<div style="position:absolute;left:0;top:0;width:${W}px;height:100px;background:repeating-linear-gradient(90deg,#000 0 2px,#fff 2px 4px)"></div>
       <div class="box" style="left:20px;top:30px;background:transparent">
         <div style="position:absolute;left:16px;top:16px;width:8px;height:8px;background:#f00"></div>
       </div>`;
-    const blurred = await frameOf(body, true, FRAME);
-    const sharp = await frameOf(body, false, FRAME);
-    expect(blurred.report).toMatchObject({ state: "on", movers: 1 });
-    // Row 34 is inside the mover's box but clear of the dot it carries: its backdrop must not move.
-    let moved = 0;
-    for (let x = 0; x < W; x++) {
-      if (px(blurred.frame, x, 34).join() !== px(sharp.frame, x, 34).join()) moved++;
-    }
-    expect(moved).toBe(0);
-    expect(Math.max(...row(blurred.frame, 50))).toBeGreaterThan(120);
-  });
+      const blurred = await frameOf(body, true, FRAME, tier);
+      const sharp = await frameOf(body, false, FRAME);
+      expect(blurred.report).toMatchObject({ state: "on", tier, movers: 1 });
+      // Row 34 is inside the mover's box but clear of the dot it carries: its backdrop must not move.
+      let moved = 0;
+      for (let x = 0; x < W; x++) {
+        if (px(blurred.frame, x, 34).join() !== px(sharp.frame, x, 34).join()) moved++;
+      }
+      expect(moved).toBe(0);
+      expect(Math.max(...row(blurred.frame, 50))).toBeGreaterThan(120);
+    },
+  );
 
-  it("carries a glow that paints outside the mover's box along with it", async (ctx) => {
-    if (!supported) ctx.skip();
-    const body = `<div class="box" style="left:20px;top:80px;box-shadow:0 0 24px 0 #f00"></div>`;
-    const blurred = await frameOf(body, true, FRAME);
-    const sharp = await frameOf(body, false, FRAME);
-    expect(blurred.report).toMatchObject({ state: "on", movers: 1 });
-    // 10 px above the box, mid-trail: the glow is there in the sharp frame, so it must be here too.
-    const glow = (f: Frame): number => Math.max(...row(f, 70).slice(120, 200));
-    expect(glow(sharp.frame)).toBeGreaterThan(40);
-    expect(glow(blurred.frame)).toBeGreaterThan(glow(sharp.frame) * 0.5);
-  });
+  it.each(TIERS)(
+    "carries a glow that paints outside the mover's box along with it, in the %s tier",
+    async (tier, ctx) => {
+      if (!supported) ctx.skip();
+      const body = `<div class="box" style="left:20px;top:80px;box-shadow:0 0 24px 0 #f00"></div>`;
+      const blurred = await frameOf(body, true, FRAME, tier);
+      const sharp = await frameOf(body, false, FRAME);
+      expect(blurred.report).toMatchObject({ state: "on", tier, movers: 1 });
+      // 10 px above the box, mid-trail: the glow is there in the sharp frame, so it must be here too.
+      const glow = (f: Frame): number => Math.max(...row(f, 70).slice(120, 200));
+      expect(glow(sharp.frame)).toBeGreaterThan(40);
+      expect(glow(blurred.frame)).toBeGreaterThan(glow(sharp.frame) * 0.5);
+    },
+  );
 
   it("blurs with filters where capture cannot run, over a page that has a WebGL canvas", async (ctx) => {
     if (!supported) ctx.skip();
@@ -271,18 +286,21 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
     expect(ink(trail) / ink(row(sharp.frame, 40))).toBeLessThan(1.1);
   });
 
-  it("blurs a box centred with translate around where it really is", async (ctx) => {
-    if (!supported) ctx.skip();
-    const blurred = await frameOf(CENTERED, true, 1 / FPS);
-    const sharp = await frameOf(CENTERED, false, 1 / FPS);
-    const trail = row(blurred.frame, 90);
-    expect(intermediate(trail).length).toBeGreaterThanOrEqual(40);
-    const trueCentre = centroid(row(sharp.frame, 90));
-    expect(trueCentre).toBeCloseTo(220, 0);
-    expect(Math.abs(centroid(trail) - trueCentre)).toBeLessThan(0.5);
-    const column = Array.from({ length: H }, (_, y) => redness(blurred.frame, 220, y));
-    expect(Math.abs(centroid(column) - 90)).toBeLessThan(0.5);
-  });
+  it.each(TIERS)(
+    "blurs a box centred with translate around where it really is, in the %s tier",
+    async (tier, ctx) => {
+      if (!supported) ctx.skip();
+      const blurred = await frameOf(CENTERED, true, 1 / FPS, tier);
+      const sharp = await frameOf(CENTERED, false, 1 / FPS);
+      const trail = row(blurred.frame, 90);
+      expect(intermediate(trail).length).toBeGreaterThanOrEqual(40);
+      const trueCentre = centroid(row(sharp.frame, 90));
+      expect(trueCentre).toBeCloseTo(220, 0);
+      expect(Math.abs(centroid(trail) - trueCentre)).toBeLessThan(0.5);
+      const column = Array.from({ length: H }, (_, y) => redness(blurred.frame, 220, y));
+      expect(Math.abs(centroid(column) - 90)).toBeLessThan(0.5);
+    },
+  );
 
   it("blocks a backface-hidden card in a 3D flip and renders the plain frame", async (ctx) => {
     if (!supported) ctx.skip();
@@ -318,7 +336,10 @@ describe.skipIf(!hasBrowser)("capture motion blur pixels in Chrome", () => {
       [5, false],
     ] as const) {
       const t = frame / FPS;
-      const [blurred, sharp] = [await frameOf(body, true, t), await frameOf(body, false, t)];
+      const [blurred, sharp] = [
+        await frameOf(body, true, t, "capture"),
+        await frameOf(body, false, t),
+      ];
       expect(blurred.report).toMatchObject({ state: "on" });
       expect(same(blurred.frame, sharp.frame)).toBe(plain);
     }
