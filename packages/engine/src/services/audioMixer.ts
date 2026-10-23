@@ -1406,12 +1406,7 @@ export async function processCompositionAudio(
             return;
           }
 
-          // STUDIO-5433: an audio src that resolved to a text document (an
-          // unresolved nested-composition preview URL, or a 403/404 body served
-          // with a 200) never reaches the probe below when the element carries an
-          // authored duration or `loop`. It then fails inside ffmpeg as
-          // `prepare/ffmpeg_failed` with owner "system" — an authoring bug paged
-          // as a platform fault, after every frame has already been captured.
+          // A src that resolved to a text document is an authoring error, not an ffmpeg failure.
           if (await isNotMediaPayload(srcPath)) {
             failures.push({
               stage: "source",
@@ -1508,25 +1503,15 @@ export async function processCompositionAudio(
             audioSrcPath = trimmedPath;
           }
 
-          // Apply the track's FX chain to the dry, trimmed audio, before volume
-          // automation is baked in: effects should see the raw signal, and the
-          // envelope belongs on their output. A missing or broken chain is fatal
-          // for the whole mix rather than a per-track warning — quietly rendering
-          // the dry signal ships a mix that sounds plausible and is wrong.
+          // The FX chain runs on the dry trimmed audio, before the envelope. A broken chain fails the mix.
           const chain = element.fxChain ? parseAudioFxChain(element.fxChain) : undefined;
           const automation = element.automation
             ? resolveAutomation(parseAutomation(element.automation), chain)
             : null;
 
-          // Computed before the chain runs, not after: the FX pass bakes the
-          // envelope into its float output so the duck lands before the ±1 clamp
-          // in writeWav, instead of after it.
-          //
-          // A volume lane supersedes keyframes probed from the timeline: the two
-          // would fight, and the lane is the explicit one. `lint` warns when a
-          // track carries both.
-          //
-          // With clip gain ahead of the chain, the lane carries its share of the capped product.
+          // Computed before the chain so the FX pass bakes the envelope in ahead of the ±1 clamp.
+          // A volume lane supersedes probed keyframes. With clip gain ahead of the chain, the lane
+          // carries its share of the capped product.
           const gainBeforeFx = chain !== undefined && enabledAudioFxNodes(chain).length > 0;
           const laneKeyframes = automation
             ? volumeLaneKeyframes(
@@ -1551,11 +1536,7 @@ export async function processCompositionAudio(
           let bakedEnvelope = false;
           let tailSeconds = 0;
           if (chain) {
-            // The chain is serialised into the attribute, the same way colour
-            // grading carries its config, so there is no side-car file to find,
-            // resolve or lose.
-            // The rendered WAV is longer than the input by exactly this much, so
-            // the mix has to be told to let it through.
+            // The rendered WAV is longer than the input by the chain's tail; the mix lets it through.
             tailSeconds = chainTailSeconds(chain, automation ?? undefined);
             const fxResult = await applyAudioFxChain(
               audioSrcPath,
@@ -1573,11 +1554,7 @@ export async function processCompositionAudio(
             bakedEnvelope = fxResult.envelopeBaked;
           }
 
-          // Primary volume-automation path for a track the FX pass did not bake:
-          // multiply the envelope into the PCM samples (sample-accurate, no
-          // keyframe ceiling). If the WAV isn't the expected 16-bit PCM, fall
-          // back to the ffmpeg expression path by leaving the keyframes on the
-          // track for buildVolumeExpression to handle.
+          // Bake the envelope into the PCM samples; a non-16-bit WAV falls back to the ffmpeg expression.
           if (envelope && !bakedEnvelope) {
             bakedEnvelope = applyVolumeEnvelopeToWav(
               audioSrcPath,
