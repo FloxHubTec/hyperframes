@@ -1583,7 +1583,8 @@ export function resolveFrameFormat(
   metadata: VideoMetadata,
   requested?: VideoFrameFormat,
 ): CacheFrameFormat {
-  if (metadata.hasAlpha || SIDECAR_ALPHA_CODECS.has((metadata.videoCodec ?? "").toLowerCase())) return "png";
+  if (metadata.hasAlpha || SIDECAR_ALPHA_CODECS.has((metadata.videoCodec ?? "").toLowerCase()))
+    return "png";
   if (requested === "png" || requested === "jpg") return requested;
   return "jpg";
 }

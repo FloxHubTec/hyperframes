@@ -689,7 +689,9 @@ describe("resolveFrameFormat", () => {
 
   it("keeps ProRes without an alpha plane on jpg and ProRes with one on png", () => {
     expect(resolveFrameFormat(metadata({ videoCodec: "prores" }), undefined)).toBe("jpg");
-    expect(resolveFrameFormat(metadata({ videoCodec: "prores", hasAlpha: true }), "jpg")).toBe("png");
+    expect(resolveFrameFormat(metadata({ videoCodec: "prores", hasAlpha: true }), "jpg")).toBe(
+      "png",
+    );
   });
 });
 
@@ -1463,8 +1465,15 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
   async function proresFrame(name: string, pixFmt: string, profile: string, source: string) {
     const clip = join(FIXTURE_DIR, `${name}.mov`);
     const synth = await runFfmpeg(
-      ["-y", "-loglevel", "error", "-f", "lavfi", "-i", source]
-        .concat(["-c:v", "prores_ks", "-profile:v", profile, "-pix_fmt", pixFmt, clip]),
+      ["-y", "-loglevel", "error", "-f", "lavfi", "-i", source].concat([
+        "-c:v",
+        "prores_ks",
+        "-profile:v",
+        profile,
+        "-pix_fmt",
+        pixFmt,
+        clip,
+      ]),
     );
     expect(synth.success).toBe(true);
     const outDir = join(FIXTURE_DIR, `out-${name}`);
@@ -1491,7 +1500,17 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
       "color=c=0x00ff00@0.5:s=320x180:d=1:r=1,format=yuva444p10le",
     );
     expect(frame.endsWith(".png")).toBe(true);
-    const alpha = spawnSync("ffmpeg", ["-v", "error", "-i", frame, "-vf", "alphaextract,crop=1:1:10:10", "-f", "rawvideo", "-"]);
+    const alpha = spawnSync("ffmpeg", [
+      "-v",
+      "error",
+      "-i",
+      frame,
+      "-vf",
+      "alphaextract,crop=1:1:10:10",
+      "-f",
+      "rawvideo",
+      "-",
+    ]);
     expect(Math.abs(alpha.stdout[0]! - 128)).toBeLessThanOrEqual(1);
   }, 60_000);
 
