@@ -7,9 +7,8 @@ import sharp from "sharp";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import snapshotCommand from "./snapshot.js";
 
-// A layer the seek reveals, fetched over a slow connection: an <img>, a CSS background or an SVG <image>, one per test so that
-// each kind has to be waited for on its own. It lands well past the first settle, so a snapshot that screenshots as soon as the
-// seek settles shows it blank.
+// One layer per test (an img, a CSS background or an SVG image), revealed by the seek and served slowly.
+// Each kind must be waited for on its own, so a screenshot taken right after the seek settles shows it blank.
 const LATE_MS = 800;
 const COLORS = { red: [255, 0, 0], green: [0, 255, 0], blue: [0, 0, 255] } as const;
 
