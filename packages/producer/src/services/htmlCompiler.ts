@@ -99,7 +99,7 @@ import { createStudioPositionSeekReapplyScript } from "@hyperframes/studio-serve
 import { getPositionEditsRenderScript } from "@hyperframes/core/runtime/position-edits-render";
 import { defaultLogger, type ProducerLogger } from "../logger.js";
 import { assertAssetMediaTypeProfile } from "./assetMediaType.js";
-import { withMediaProbeSlot } from "../utils/mediaProbeConcurrency.js";
+import { withAdvisoryMediaProbeSlot, withMediaProbeSlot } from "../utils/mediaProbeConcurrency.js";
 
 function logRemoteDownloadTelemetry(event: UrlDownloadTelemetry): void {
   defaultLogger.info("[Compiler] Remote asset download integrity", { ...event });
@@ -2196,29 +2196,37 @@ export async function compileForRender(
   // ffprobe subprocesses and should not block compilation since they only produce warnings.
   // The two probes run in sequence rather than in parallel: the keyframe analysis needs
   // the video stream's own duration to classify a single-keyframe (single-GOP) file.
+  const advisoryProbeTargetsBySourcePath = new Map<string, { src: string; ids: string[] }>();
   for (const video of videos) {
     if (isHttpUrl(video.src)) continue;
     const videoPath = resolve(projectDir, video.src);
-    const reencode = `ffmpeg -i "${video.src}" -c:v libx264 -r 30 -g 30 -keyint_min 30 -movflags +faststart -c:a copy output.mp4`;
+    const group = advisoryProbeTargetsBySourcePath.get(videoPath);
+    if (group) group.ids.push(video.id);
+    else advisoryProbeTargetsBySourcePath.set(videoPath, { src: video.src, ids: [video.id] });
+  }
+  for (const [videoPath, { src, ids }] of advisoryProbeTargetsBySourcePath) {
+    const reencode = `ffmpeg -i "${src}" -c:v libx264 -r 30 -g 30 -keyint_min 30 -movflags +faststart -c:a copy output.mp4`;
     (async () => {
-      const metadata = await withMediaProbeSlot(() => extractMediaMetadata(videoPath));
-      const analysis = await withMediaProbeSlot(() =>
+      const metadata = await withAdvisoryMediaProbeSlot(() => extractMediaMetadata(videoPath));
+      const analysis = await withAdvisoryMediaProbeSlot(() =>
         analyzeKeyframeIntervals(videoPath, metadata),
       );
-      if (analysis.isProblematic) {
-        defaultLogger.warn(
-          `[Compiler] WARNING: Video "${video.id}" has sparse keyframes (max interval: ${analysis.maxIntervalSeconds}s). ` +
-            `This causes seek failures and frame freezing. Re-encode with: ${reencode}`,
-        );
-      }
-      if (metadata.isVFR) {
-        // defaultLogger (stderr), not console.info (stdout) — matches the sibling
-        // warning above; a stdout line here corrupts `check --json` / `validate --json`.
-        defaultLogger.warn(
-          `[Compiler] Video "${video.id}" is variable frame rate (VFR); ` +
-            `the engine will normalize it to CFR before frame extraction. ` +
-            `If rendering feels slow on this video, pre-encode once with: ${reencode}`,
-        );
+      for (const id of ids) {
+        if (analysis.isProblematic) {
+          defaultLogger.warn(
+            `[Compiler] WARNING: Video "${id}" has sparse keyframes (max interval: ${analysis.maxIntervalSeconds}s). ` +
+              `This causes seek failures and frame freezing. Re-encode with: ${reencode}`,
+          );
+        }
+        if (metadata.isVFR) {
+          // defaultLogger (stderr), not console.info (stdout) — matches the sibling
+          // warning above; a stdout line here corrupts `check --json` / `validate --json`.
+          defaultLogger.warn(
+            `[Compiler] Video "${id}" is variable frame rate (VFR); ` +
+              `the engine will normalize it to CFR before frame extraction. ` +
+              `If rendering feels slow on this video, pre-encode once with: ${reencode}`,
+          );
+        }
       }
     })().catch(() => {});
   }
