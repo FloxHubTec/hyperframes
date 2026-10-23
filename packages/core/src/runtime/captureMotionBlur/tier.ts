@@ -18,7 +18,6 @@ export interface Config {
   shutterDeg: number;
   samples: number | null;
   events: boolean;
-  /** Which tier draws: `auto` takes the cheaper filter tier when every mover only translates. */
   tier: "auto" | "capture" | "filter";
 }
 
@@ -56,7 +55,6 @@ export interface Tier {
 export interface TierChoice {
   tier: Config["tier"];
   form: boolean;
-  /** Why capture cannot run here, if it cannot; `renderer-off` means blur must not run at all. */
   defect: CaptureDefect | null;
   fallback: boolean;
 }
