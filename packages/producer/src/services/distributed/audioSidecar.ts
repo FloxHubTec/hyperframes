@@ -1,0 +1,42 @@
+/**
+ * A video's audio on its own, stored beside it: the packets copied out of the container, nothing re-encoded.
+ * A video's audio is interleaved with its pictures, so reading it from the cloud moves the whole file; the
+ * sidecar is a few MB. The mix reads it with the same cut, so the samples it decodes are the same.
+ */
+
+import { runFfmpeg } from "@hyperframes/engine";
+import { extname } from "node:path";
+
+/** Smaller files are cheap to read whole. */
+export const AUDIO_SIDECAR_MIN_BYTES = 32 * 1024 * 1024;
+const AUDIO_SIDECAR_SOURCE_EXTENSIONS = new Set([".mp4", ".mov", ".m4v"]);
+
+export function wantsAudioSidecar(path: string, sizeBytes: number): boolean {
+  return (
+    sizeBytes >= AUDIO_SIDECAR_MIN_BYTES &&
+    AUDIO_SIDECAR_SOURCE_EXTENSIONS.has(extname(path).toLowerCase())
+  );
+}
+
+/** `unavailable`: no ffmpeg on this machine. `none`: the video has no audio, or it cannot be copied as is. */
+export type AudioSidecarOutcome = "built" | "none" | "unavailable";
+
+export async function buildAudioSidecar(
+  inputPath: string,
+  outputPath: string,
+  signal?: AbortSignal,
+): Promise<AudioSidecarOutcome> {
+  const result = await runFfmpeg(
+    ["-v", "error", "-y", "-i", inputPath, "-map", "0:a:0", "-vn", "-c:a", "copy"].concat([
+      "-movflags",
+      "+faststart",
+      "-f",
+      "mp4",
+      outputPath,
+    ]),
+    { signal },
+  );
+  if (result.success) return "built";
+  const missing = (result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+  return missing ? "unavailable" : "none";
+}
