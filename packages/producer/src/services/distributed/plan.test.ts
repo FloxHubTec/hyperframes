@@ -1112,6 +1112,25 @@ describe.skipIf(spawnSync(getFfmpegBinary(), ["-version"]).status !== 0)(
       expect(existsSync(join(withCfr, "audio.m4a"))).toBe(true);
     }, 60_000);
 
+    it("leaves webm and mov audio to buildPlanAudio too; png-sequence keeps its own", async () => {
+      const project = audioProject("project-separate-audio-formats");
+      const config = { fps: 30, width: 320, height: 240 } as const;
+      for (const [format, separate] of [
+        ["webm", true],
+        ["mov", true],
+        ["png-sequence", false],
+      ] as const) {
+        const dir = join(runRoot, `plan-separate-audio-${format}`);
+        await buildLocalExecutionPlan(project, { ...config, format }, dir, { deferAudio: true });
+        const encoder = JSON.parse(readFileSync(join(dir, "meta", "encoder.json"), "utf-8"));
+        expect({ format, separate: encoder.separateAudio === true }).toEqual({ format, separate });
+        expect({ format, mixed: existsSync(join(dir, "audio.m4a")) }).toEqual({
+          format,
+          mixed: !separate,
+        });
+      }
+    }, 60_000);
+
     it("gives buildPlanAudio the sound of a video whose src the scene script sets", async () => {
       const project = join(runRoot, "project-script-src");
       mkdirSync(project, { recursive: true });
@@ -1359,6 +1378,23 @@ describe("plan() — codec knob", () => {
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toMatch(/codec must be "h264" or "h265"/);
   });
+});
+
+describe("plan() motion blur intent", () => {
+  it("freezes explicit off into the plan identity while omission preserves the old plan", async () => {
+    const base = { fps: 30 as const, width: 320, height: 240, format: "mp4" as const };
+    const ordinaryDir = join(runRoot, "motion-blur-omitted");
+    const offDir = join(runRoot, "motion-blur-off");
+    mkdirSync(ordinaryDir, { recursive: true });
+    mkdirSync(offDir, { recursive: true });
+    const ordinary = await plan(projectDir, base, ordinaryDir);
+    const off = await plan(projectDir, { ...base, pageMotionBlur: "off" }, offDir);
+    const encoder = (dir: string) =>
+      JSON.parse(readFileSync(join(dir, "meta", "encoder.json"), "utf-8"));
+    expect(encoder(ordinaryDir)).not.toHaveProperty("pageMotionBlur");
+    expect(encoder(offDir).pageMotionBlur).toBe("off");
+    expect(off.planHash).not.toBe(ordinary.planHash);
+  }, 30_000);
 });
 
 describe("plan() — variables", () => {

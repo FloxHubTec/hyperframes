@@ -2086,6 +2086,7 @@ Render parameters mirror local `hyperframes render` where they overlap:
 | `--fps`                | `30`                        | Integer, 1–240                                                                                                                                  |
 | `--quality`            | `standard`                  | `draft`, `standard`, or `high`                                                                                                                  |
 | `--format`             | `mp4`                       | `mp4`, `webm`, or `mov`                                                                                                                         |
+| `--page-motion-blur`   | current cloud behavior      | Pass `off` to disable authored page motion blur. Omit to preserve current behavior. Sends the public API field `page_motion_blur: "off"`. |
 | `--resolution`         | `1080p`                     | `1080p` or `4k`. 4k bills at 1.5×.                                                                       |
 | `--aspect-ratio`       | auto                        | `16:9`, `9:16`, or `1:1`. Auto-detected from a local project's `data-width` and `data-height`, so you rarely need it. The renderer cannot reshape a composition — a value that disagrees with the authored ratio is an error. With `--asset-id` or `--url` the server defaults to `16:9`. |
 | `--composition` / `-c` | `index.html`                | Entry HTML file inside the zip                                                                                                                   |
@@ -2213,6 +2214,7 @@ deploy:
 | `--concurrency`   | none                                 | Lambda reserved concurrency. Without it, a new stack reserves none and each render runs up to 90% of the account's unreserved concurrency; a redeploy keeps the stack's current reservation; `none` removes it |
 | `--memory`        | `10240`                              | Lambda memory in MB                                      |
 | `--chrome-source` | `sparticuz`                          | `sparticuz` or `chrome-headless-shell`                   |
+| `--video-arch`    | `arm64`                              | `arm64` runs the plan and the chunks on an arm64 container-image function, pushed to an ECR repository named `<stack>-video`; audio and assemble stay on x86. Needs `sparticuz`. `x86_64` runs everything on the x86 function |
 | `--skip-build`    | off                                  | Reuse the existing `handler.zip`                         |
 
 And these drive `render` and `render-batch`:

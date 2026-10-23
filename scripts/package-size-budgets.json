@@ -1,7 +1,7 @@
 {
   "@hyperframes/aws-lambda": {
-    "packed": 70874,
-    "unpacked": 258166
+    "packed": 73369,
+    "unpacked": 266805
   },
   "@hyperframes/cli": {
     "packed": 7902966,
@@ -9,7 +9,7 @@
   },
   "@hyperframes/core": {
     "packed": 1636442,
-    "unpacked": 3942463
+    "unpacked": 3950000
   },
   "@hyperframes/engine": {
     "packed": 428347,
