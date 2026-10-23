@@ -1,7 +1,6 @@
 /**
- * A video's audio on its own, stored beside it: the packets copied out of the container, nothing re-encoded.
- * A video's audio is interleaved with its pictures, so reading it from the cloud moves the whole file; the
- * sidecar is a few MB. The mix reads it with the same cut, so the samples it decodes are the same.
+ * A video's audio copied out of its container, nothing re-encoded, stored beside it. Reading audio from the
+ * cloud file moves the whole interleaved file; the sidecar is a few MB.
  */
 
 import { runFfmpeg } from "@hyperframes/engine";
