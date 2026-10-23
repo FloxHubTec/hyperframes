@@ -125,7 +125,10 @@ describe("discoverMediaFromBrowser", () => {
       `<video id="empty" src="" data-start="0" data-end="1"></video>
        <video id="real" src="clip.mp4" data-start="0" data-end="1"></video>`,
     );
-    const resolved = { empty: "http://localhost:4000/index.html", real: "http://localhost:4000/clip.mp4" };
+    const resolved = {
+      empty: "http://localhost:4000/index.html",
+      real: "http://localhost:4000/clip.mp4",
+    };
     for (const [id, value] of Object.entries(resolved)) {
       const element = document.getElementById(id);
       if (element) Object.defineProperty(element, "src", { value });
@@ -133,7 +136,9 @@ describe("discoverMediaFromBrowser", () => {
     const previousDocument = Reflect.get(globalThis, "document");
     Reflect.set(globalThis, "document", document);
     try {
-      const media = await discoverMediaFromBrowser({ evaluate: async (collect) => collect() } as never);
+      const media = await discoverMediaFromBrowser({
+        evaluate: async (collect) => collect(),
+      } as never);
       expect(media.find((item) => item.id === "empty")?.src).toBe("");
       expect(media.find((item) => item.id === "real")?.src).toBe("http://localhost:4000/clip.mp4");
     } finally {

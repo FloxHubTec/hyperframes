@@ -2342,7 +2342,8 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
 
       // currentSrc is authoritative for <video>/<audio><source> and responsive images.
       const ownSrc = htmlEl.getAttribute("src");
-      const blankSrc = ownSrc !== null && ownSrc.trim() === "" && !htmlEl.querySelector("source[src]");
+      const blankSrc =
+        ownSrc !== null && ownSrc.trim() === "" && !htmlEl.querySelector("source[src]");
       const src = blankSrc ? "" : htmlEl.currentSrc || htmlEl.src || ownSrc || "";
       const start = parseFloat(htmlEl.getAttribute("data-start") || "0");
       const endRaw = htmlEl.getAttribute("data-end");
