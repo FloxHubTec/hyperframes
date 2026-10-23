@@ -1,5 +1,5 @@
 import { BrowserCleanupError } from "../browser/launch.js";
-import { logCheckProgress } from "./checkProgress.js";
+import type { CheckProgress } from "./checkProgress.js";
 import { CheckDeadline, CheckDeadlineError, type CheckPhase } from "./checkDeadline.js";
 import {
   checkSnapshotDirectory,
@@ -516,6 +516,7 @@ async function collectGridSamples(
   motion: MotionPlan,
   helpers: Promise<CheckAuditDriver[]>,
   enter: (phase: CheckPhase) => void,
+  report: CheckProgress,
 ): Promise<GridSamples> {
   const geometryEnabled = grid.captionSamples.length > 0 || grid.frameSamples.length > 0;
   const sets: SampleSets = {
@@ -534,7 +535,7 @@ async function collectGridSamples(
       const time = times[index] ?? 0;
       perTime[index] = await collectSampleAt(worker, options, grid, motion, sets, time);
       enter("samples");
-      logCheckProgress("samples", ++finished, times.length);
+      report("samples", ++finished, times.length);
     }
   };
   const helpWith = async (helper: CheckAuditDriver) => {
@@ -572,6 +573,7 @@ async function collectGridSamples(
     options.range,
     craftEnabled(driver, options),
     () => enter("overlap"),
+    report,
   );
   enter("samples");
   return collected;
@@ -686,13 +688,14 @@ async function collectOverlapGridInBatches(
   driver: CheckAuditDriver,
   times: number[],
   progress: () => void,
+  report: CheckProgress,
 ): Promise<AnchoredLayoutIssue[][]> {
   const issues: AnchoredLayoutIssue[][] = [];
   const batches = Math.ceil(times.length / OVERLAP_BATCH);
   for (let from = 0; from < times.length; from += OVERLAP_BATCH) {
     issues.push(...(await driver.collectOverlapGrid(times.slice(from, from + OVERLAP_BATCH))));
     progress();
-    logCheckProgress("overlap", from / OVERLAP_BATCH + 1, batches);
+    report("overlap", from / OVERLAP_BATCH + 1, batches);
   }
   return issues;
 }
@@ -704,6 +707,7 @@ async function collectMotionOverlapSamples(
   range: [number, number] | undefined,
   craft: boolean,
   progress: () => void,
+  report: CheckProgress,
 ): Promise<void> {
   const baseTimes = new Set(grid.layoutSamples);
   const shiftedTimes = await denseOverlapTimes(driver, grid, range);
@@ -715,12 +719,12 @@ async function collectMotionOverlapSamples(
       await driver.seekGeometry(time);
       collected.craftFrames.push(...(await collectCraftFrame(driver, time)));
       progress();
-      logCheckProgress("craft", index + 1, craftTimes.length);
+      report("craft", index + 1, craftTimes.length);
     }
   }
   const probeHold = holdProber(driver, collected, range ? range[1] : grid.duration);
   const gridTimes = shiftedTimes.filter((t) => !baseTimes.has(t));
-  const gridIssues = await collectOverlapGridInBatches(driver, gridTimes, progress);
+  const gridIssues = await collectOverlapGridInBatches(driver, gridTimes, progress, report);
   let sample = 0;
   for (const [index, time] of shiftedTimes.entries()) {
     if (baseTimes.has(time)) continue;
@@ -1461,6 +1465,7 @@ export async function runAuditGrid(
   motion: MotionSpecResolution,
   helpers: Promise<CheckAuditDriver[]> = Promise.resolve([]),
   enter: (phase: CheckPhase) => void = () => {},
+  report: CheckProgress = () => {},
 ): Promise<CheckBrowserResult> {
   enter("samples");
   await driver.initialize(options.contrast);
@@ -1471,7 +1476,7 @@ export async function runAuditGrid(
     grid.duration,
   );
   const seekLoopStart = Date.now();
-  const collected = await collectGridSamples(driver, options, grid, plan, helpers, enter);
+  const collected = await collectGridSamples(driver, options, grid, plan, helpers, enter, report);
   const seekLoopMs = Date.now() - seekLoopStart;
 
   let motionIssues = plan.preflightIssues;

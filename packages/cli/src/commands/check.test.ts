@@ -2846,8 +2846,6 @@ describe("check report telemetry", () => {
   });
 
   it("measures contrast work inside the overall seek loop", async () => {
-    // Vitest's console reads Date.now, which would spend a mocked reading below.
-    vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(Date, "now")
       .mockReturnValueOnce(100)
       .mockReturnValueOnce(105)
