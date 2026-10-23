@@ -1,7 +1,7 @@
 // Shared Puppeteer browser management and thumbnail generation for Studio dev server.
 
 import { existsSync, readdirSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { homedir } from "node:os";
 import { join, win32 as pathWin32 } from "node:path";
 import {
@@ -86,10 +86,29 @@ function findPuppeteerCacheChrome(
 
 export function browserVersion(
   executable: string,
-  run: (file: string) => string = (file) => execFileSync(file, ["--version"], { encoding: "utf8" }),
+  run: (file: string, args: string[], options: ExecFileSyncOptionsWithStringEncoding) => string = (
+    file,
+    args,
+    options,
+  ) => execFileSync(file, args, options),
+  platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   try {
-    return run(executable).trim() || undefined;
+    const options = { encoding: "utf8" as const, timeout: 5_000, windowsHide: true };
+    if (platform === "win32") {
+      const version = run(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "(Get-Item -LiteralPath $env:HYPERFRAMES_CHROME_VERSION_PATH).VersionInfo.ProductVersion",
+        ],
+        { ...options, env: { ...process.env, HYPERFRAMES_CHROME_VERSION_PATH: executable } },
+      ).trim();
+      return /^\d+\.\d+\.\d+\.\d+$/.test(version) ? `Chrome/${version}` : undefined;
+    }
+    return run(executable, ["--version"], options).trim() || undefined;
   } catch {
     return undefined;
   }
@@ -110,7 +129,8 @@ export function findSystemChrome(
   env: NodeJS.ProcessEnv = process.env,
   pathExists: (path: string) => boolean = existsSync,
   platform: NodeJS.Platform = process.platform,
-  versionOf: (path: string) => string | undefined = browserVersion,
+  versionOf: (path: string) => string | undefined = (path) =>
+    browserVersion(path, undefined, platform),
   readDirectories: (path: string) => string[] = readdirSync,
 ): string | undefined {
   const override = [
