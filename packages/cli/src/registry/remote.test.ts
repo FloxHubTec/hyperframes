@@ -196,6 +196,37 @@ describe("fetchItemManifest", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it.each([0, ONE_DAY_MS + 60_000])(
+    "keeps refresh requests offline in cache-only mode with cache age %d",
+    async (age) => {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(ok(ITEM));
+      await fetchItemManifest("count-up", "hyperframes:component");
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(Date.now() + age));
+      fetchSpy.mockRejectedValue(new Error("offline")).mockClear();
+
+      await expect(
+        fetchItemManifest("count-up", "hyperframes:component", DEFAULT_REGISTRY_URL, {
+          skipCache: true,
+          cacheOnly: true,
+        }),
+      ).resolves.toEqual(ITEM);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not refresh an uncached item in cache-only mode", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(ok(ITEM));
+
+    await expect(
+      fetchItemManifest("count-up", "hyperframes:component", DEFAULT_REGISTRY_URL, {
+        skipCache: true,
+        cacheOnly: true,
+      }),
+    ).rejects.toThrow("not fetched after an earlier registry timeout");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("serves the cached item when a forced refresh fails", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(ok(ITEM));
     await fetchItemManifest("count-up", "hyperframes:component");

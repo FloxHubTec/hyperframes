@@ -174,6 +174,27 @@ describe("registry resolver", () => {
         'skipped 100 items ("item-0", "item-1", "item-2", ...): TimeoutError: The operation was aborted due to timeout',
       ]);
     });
+    it("uses cached remaining items after a forced refresh times out", async () => {
+      const baseUrl = uniqueBaseUrl();
+      const cached = await loadAllItems(entries.slice(32), { baseUrl });
+      expect(cached).toHaveLength(68);
+      const fetchMock = vi.fn(async () => {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const warnings: string[] = [];
+
+      const items = await loadAllItems(entries, {
+        baseUrl,
+        skipCache: true,
+        onWarn: (m) => warnings.push(m),
+      });
+      expect(items).toEqual(cached);
+      expect(fetchMock).toHaveBeenCalledTimes(32);
+      expect(warnings).toEqual([
+        'skipped 32 items ("item-0", "item-1", "item-2", ...): TimeoutError: The operation was aborted due to timeout',
+      ]);
+    });
   });
 
   describe("resolveItem", () => {
