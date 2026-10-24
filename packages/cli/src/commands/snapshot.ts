@@ -120,7 +120,6 @@ export function formatSnapshotTimestamp(time: number): string {
   return `${Number(time.toFixed(3))}s`;
 }
 
-/** Every image name a snapshot run writes into its folder; a run clears only these. */
 export const SNAPSHOT_IMAGE_NAME =
   /^(?:(?:frame-\d+-|ref-(?:\d+-)?)?at-[\d.]+s\.png|pair-(?:\d+-)?at-[\d.]+s\.jpg|(?:beat-\d+|seam-\d+-\d+)-at-[\d.]+s\.png|(?:contact-sheet|review-beats|review-phone)(?:-\d+)?\.jpg|review-seam-\d+\.jpg)$/;
 
