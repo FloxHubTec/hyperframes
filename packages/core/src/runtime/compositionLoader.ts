@@ -4,8 +4,9 @@ import {
   refreshSvgSelectorAliases,
 } from "../compiler/svgSelectorAliases";
 import {
+  countPageRoot,
   planCompositionAssembly,
-  EXTRACTED_COMPOSITION_ASSET_SELECTOR,
+  extractedCompositionAssets,
 } from "../compiler/compositionAssembly";
 import {
   scopeCssToComposition,
@@ -225,7 +226,7 @@ function resetCompositionHost(host: Element) {
  * inline-template path, and mutating it would leave a remount with no styles.
  */
 function stripExtractedCompositionAssets(node: ParentNode): void {
-  for (const el of Array.from(node.querySelectorAll(EXTRACTED_COMPOSITION_ASSET_SELECTOR))) {
+  for (const el of extractedCompositionAssets(node)) {
     el.remove();
   }
 }
@@ -300,6 +301,7 @@ function countAuthoredCompositionIds(hosts: Element[]): Map<string, number> {
     if (!compId) continue;
     hostCountsByCompositionId.set(compId, (hostCountsByCompositionId.get(compId) || 0) + 1);
   }
+  countPageRoot(hostCountsByCompositionId, hosts);
   return hostCountsByCompositionId;
 }
 
@@ -579,6 +581,8 @@ async function mountCompositionContent(params: {
     params.host.innerHTML = params.fallbackBodyInnerHtml;
     stripExtractedCompositionAssets(params.host);
   }
+  for (const el of plan.inertScriptsOutsideRoot)
+    params.host.appendChild(document.importNode(el, true));
 
   // Stash the per-instance variables BEFORE running scripts. The scoped
   // `getVariables()` injected by `compositionScoping.ts` reads from

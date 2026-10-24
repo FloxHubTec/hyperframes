@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { isAudibleVideoElement } from "@hyperframes/core/audible-video";
 import { formatAudioGain, MAX_AUDIO_GAIN_DB } from "@hyperframes/core/audio-gain";
+import { decodeAuthoredAttribute } from "@hyperframes/parsers";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { readMediaOffsetSeconds } from "@hyperframes/parsers/media-duration";
 import { requestedProjectPath } from "./requestSubPath.js";
@@ -101,7 +102,14 @@ function attributeFromMatch(
   const whole = match[0];
   const localValueStart = attributeValueStart(whole);
   const valueStart = absoluteOffset + match.index + localValueStart;
-  return [name, { value, valueStart, valueEnd: valueStart + value.length }];
+  return [
+    name,
+    {
+      value: decodeAuthoredAttribute(value),
+      valueStart,
+      valueEnd: valueStart + value.length,
+    },
+  ];
 }
 
 function matchedAttributeValue(match: RegExpMatchArray): string | undefined {
@@ -386,7 +394,7 @@ export function audioNormalizationPlan(
   if (wantedGainDb > MAX_AUDIO_GAIN_DB + 1e-9) {
     throw new Error(
       `Matching #${targetTrack.id} needs ${wantedGainDb.toFixed(1)} dB, beyond the +${MAX_AUDIO_GAIN_DB} dB authoring ceiling. ` +
-        `A gap this large belongs in the source file, not the mixer — mixer gain raises the noise floor with the signal. ` +
+        `A gap this large belongs in the source file, not the mixer: mixer gain raises the noise floor with the signal. ` +
         `Normalize ${targetTrack.id}'s asset offline (e.g. ffmpeg loudnorm), or lower #${referenceTrack.id} instead.`,
     );
   }

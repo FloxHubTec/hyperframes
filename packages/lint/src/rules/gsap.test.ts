@@ -138,6 +138,79 @@ describe("GSAP rules", () => {
     expect(finding).toBeUndefined();
   });
 
+  it.each([
+    ["bracket / load", 'window.__timelines["c1"]', 'document.fonts.load("16px Inter")'],
+    ["dot / ready", "window.__timelines.c1", "document.fonts.ready"],
+    ["dot / load", "window.__timelines.c1", 'document.fonts.load("16px Inter")'],
+    ["spaced dot / load", "window . __timelines . c1", 'document . fonts . load("16px Inter")'],
+  ])("flags early registration with %s", async (_label, registry, fontWait) => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"><h1 id="title">Text</h1></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    ${registry} = tl;
+    ${fontWait}.then(() => {
+      tl.to("#title", { x: 20, duration: 1 });
+    });
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.filter(
+        (finding) => finding.code === "gsap_timeline_registered_before_async_build",
+      ),
+    ).toEqual([expect.objectContaining({ severity: "error" })]);
+  });
+
+  it.each([
+    ['window.__timelines["c1"]', "document.fonts.ready"],
+    ['window.__timelines["c1"]', 'document.fonts.load("16px Inter")'],
+    ["window.__timelines.c1", "document.fonts.ready"],
+    ["window.__timelines.c1", 'document.fonts.load("16px Inter")'],
+  ])("accepts %s registered after %s builds the timeline", async (registry, fontWait) => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"><h1 id="title">Text</h1></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    const existing = ${registry};
+    ${fontWait}.then(() => {
+      tl.to("#title", { x: 20, duration: 1 });
+      ${registry} = tl;
+    });
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.find(
+        (finding) => finding.code === "gsap_timeline_registered_before_async_build",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("accepts a fonts.load callback that adds no deferred animation", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"><h1 id="title">Text</h1></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#title", { x: 20, duration: 1 });
+    window.__timelines.c1 = tl;
+    document.fonts.load("16px Inter").then(() => console.log("fonts loaded"));
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.find(
+        (finding) => finding.code === "gsap_timeline_registered_before_async_build",
+      ),
+    ).toBeUndefined();
+  });
+
   it("does NOT error when GSAP animates opacity on a clip element (by id)", async () => {
     const html = `
 <html><body>
@@ -1132,6 +1205,24 @@ describe("GSAP rules", () => {
     expect(finding).toBeUndefined();
   });
 
+  it("does NOT report overlapping_gsap_tweens for two inline object proxies with the same values", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"></div>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.to({ _: 0 }, { _: 1, duration: 5, ease: "none" }, 0);
+    tl.to({ _: 0 }, { _: 1, duration: 5, ease: "none" }, 1);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "overlapping_gsap_tweens");
+    expect(finding).toBeUndefined();
+  });
+
   it("does NOT report overlapping_gsap_tweens for same-named constants in separate IIFEs", async () => {
     const html = `
 <html><body>
@@ -1174,6 +1265,47 @@ describe("GSAP rules", () => {
     const result = await lintHyperframeHtml(html);
     const finding = result.findings.find((f) => f.code === "overlapping_gsap_tweens");
     expect(finding).toBeDefined();
+  });
+
+  it("does not report overlapping_gsap_tweens when tweens only meet at an endpoint", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <div id="w-weeks"></div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#w-weeks", { scaleY: 0.18, scaleX: 1.25, duration: 0.22 }, 2.35);
+    tl.to("#w-weeks", { scaleX: 0, scaleY: 0, duration: 0.14 }, 2.57);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "overlapping_gsap_tweens");
+    expect(finding).toBeUndefined();
+  });
+
+  it("reports overlapping_gsap_tweens when shared properties overlap for real", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <div id="w-weeks"></div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.to("#w-weeks", { scaleX: 1.25, duration: 0.5 }, 2.35);
+    tl.to("#w-weeks", { scaleX: 0, duration: 0.14 }, 2.57);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "overlapping_gsap_tweens");
+    expect(finding).toBeDefined();
+    expect(finding?.message).toContain("scaleX");
   });
 
   it("reports motionPath usage without MotionPathPlugin", async () => {
@@ -3085,6 +3217,26 @@ describe("SVG draw-on rules", () => {
     expect(finding?.fixHint).toContain("gsap_timeline_set_initial_hide");
   });
 
+  it("does not warn when two fromTo calls on one element animate different properties", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="main" data-width="1920" data-height="1080"><div id="card"></div></div>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo("#card", { y: 80, rotation: 8 }, { y: 0, rotation: 0, duration: 0.8 }, 0.3);
+    tl.fromTo("#card", { scale: 0 }, { scale: 1, duration: 0.65 }, 0.3);
+    window.__timelines.main = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find(
+      (candidate) => candidate.code === "gsap_repeated_fromto_without_baseline",
+    );
+    expect(finding).toBeUndefined();
+  });
+
   it("gsap_repeated_fromto_without_baseline: accepts the hinted shape when the later tween is authored first", async () => {
     const html = `
 <html><body>
@@ -3615,5 +3767,115 @@ describe("SVG draw-on rules", () => {
         result.findings.find((f) => f.code === "gsap_timeline_return_used_as_tween"),
       ).toBeUndefined();
     });
+  });
+});
+
+describe("audio_reactive_single_tween_per_group", () => {
+  it("warns when an audio-reactive caption uses a single peak tween per group", async () => {
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <style>.caption, .caption-group, .caption-line, .cg-1 { color: white; }</style>
+</head>
+<body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <div class="caption">Test</div>
+  </div>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    window.__timelines["c1"] = tl;
+
+    const AUDIO = getAudioData();
+    captions.forEach(group => {
+      // Missing inner loop, only tweens once at group.start
+      gsap.to(group.element, { scale: peakBass, duration: 0.1 }, group.start);
+    });
+  </script>
+</body>
+</html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "audio_reactive_single_tween_per_group");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("warning");
+  });
+
+  it("does not warn when the group contains an inner sampling loop", async () => {
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <style>.caption, .caption-group, .caption-line, .cg-1 { color: white; }</style>
+</head>
+<body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <div class="caption">Test</div>
+  </div>
+  <script>
+    window.__timelines = window.__timelines || {};
+    const tl = gsap.timeline({ paused: true });
+    window.__timelines["c1"] = tl;
+
+    const AUDIO = getAudioData();
+    captions.forEach(group => {
+      // Inner sampling loop prevents the warning
+      for (var at = group.start; at < group.end; at += 0.1) {
+        gsap.to(group.element, { scale: peakBass, duration: 0.1 }, at);
+      }
+    });
+  </script>
+</body>
+</html>`;
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.some((f) => f.code === "audio_reactive_single_tween_per_group")).toBe(
+      false,
+    );
+  });
+});
+
+describe("gsap_group_selector_keyframes", () => {
+  it("warns when a tween uses a group selector and keyframes", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    // Selector has a comma, and config has keyframes
+    tl.to(".box1, .box2", { keyframes: [{ x: 100 }, { x: 200 }] });
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "gsap_group_selector_keyframes");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("warning");
+    expect(finding?.message).toContain("shared keyframes");
+  });
+
+  it("does not warn when a tween uses a single selector with keyframes", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    // No comma in selector
+    tl.to(".box1", { keyframes: [{ x: 100 }, { x: 200 }] });
+    tl.to(".box2", { keyframes: [{ x: 100 }, { x: 200 }] });
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.some((f) => f.code === "gsap_group_selector_keyframes")).toBe(false);
+  });
+
+  it("does not warn when a tween uses a group selector without keyframes", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"></div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    // Group selector, but standard properties instead of keyframes
+    tl.to(".box1, .box2", { x: 100, y: 100 });
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.some((f) => f.code === "gsap_group_selector_keyframes")).toBe(false);
   });
 });

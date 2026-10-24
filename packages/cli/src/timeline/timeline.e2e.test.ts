@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +23,31 @@ function project(): string {
     `<div data-composition-id="main" data-duration="12"><div id="clip" data-hf-id="clip" data-start="1" data-duration="2" data-track-index="0"></div><div id="neighbour" data-hf-id="neighbour" data-start="5" data-duration="2" data-track-index="0"></div></div>`,
   );
   return dir;
+}
+
+function batchProject() {
+  const dir = project();
+  mkdirSync(join(dir, "compositions"));
+  writeFileSync(
+    join(dir, "index.html"),
+    `<div data-composition-id="main" data-duration="12"><div id="clip" data-hf-id="clip" data-start="1" data-duration="2" data-track-index="0"></div><div id="scene" data-composition-id="scene" data-composition-src="compositions/scene.html" data-start="0" data-duration="4" data-track-index="1"></div></div>`,
+  );
+  writeFileSync(
+    join(dir, "compositions/scene.html"),
+    `<div data-composition-id="scene"><div id="nested" data-hf-id="nested" data-start="0" data-duration="2" data-track-index="0"></div></div>`,
+  );
+  const files = ["index.html", "compositions/scene.html"];
+  const sources = () => files.map((file) => readFileSync(join(dir, file), "utf8"));
+  const before = sources();
+  const planPath = join(dir, "edits.json");
+  writeFileSync(
+    planPath,
+    JSON.stringify([
+      { verb: "set", ref: "#clip", volume: "0.25" },
+      { verb: "set", ref: "#nested", volume: "0.5" },
+    ]),
+  );
+  return { dir, files, sources, before, planPath };
 }
 
 function run(dir: string, ...args: string[]) {
@@ -165,6 +198,102 @@ describe("timeline edit command", () => {
     }
   });
 
+  it("keeps a sub-composition's place in both halves of a split", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-timeline-split-host-"));
+    try {
+      writeFileSync(
+        join(dir, "index.html"),
+        `<div data-composition-id="main" data-duration="12"><div id="host" data-composition-src="sub.html" data-start="1" data-duration="4" data-track-index="0"></div></div>`,
+      );
+      writeFileSync(
+        join(dir, "sub.html"),
+        `<div data-composition-id="sub" data-duration="4"><div id="inner" data-start="0" data-duration="4"></div></div>`,
+      );
+      const result = run(dir, "split", "#host", "3");
+      expect(result.status, result.stderr).toBe(0);
+      const html = readFileSync(join(dir, "index.html"), "utf8");
+      const tag = (id: string) => html.match(new RegExp(`<[^>]*\\sid="${id}"[^>]*>`))?.[0];
+      expect(tag("host")).toContain('data-playback-start="0"');
+      expect(tag("host-2")).toContain('data-playback-start="2"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("deletes only the --start/--end range of a video clip, keeping both sides", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-timeline-range-delete-"));
+    try {
+      const indexPath = join(dir, "index.html");
+      writeFileSync(
+        indexPath,
+        `<div data-composition-id="main" data-duration="12"><video id="clip" src="a.mp4" data-start="1" data-duration="4" data-track-index="0"></video></div>`,
+      );
+      const planned = run(dir, "delete", "#clip", "--start", "2", "--end", "3", "--plan");
+      expect(planned.status, planned.stderr).toBe(0);
+      const kept = [
+        expect.objectContaining({ ref: "#clip", start: 1, end: 2 }),
+        expect.objectContaining({ ref: "#clip-2", start: 3, end: 5 }),
+      ];
+      expect(JSON.parse(planned.stdout).after).toEqual(kept);
+      const applied = run(dir, "delete", "#clip", "--start", "2", "--end", "3");
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(JSON.parse(applied.stdout).after).toEqual(kept);
+      const html = readFileSync(indexPath, "utf8");
+      const tag = (id: string) => html.match(new RegExp(`<[^>]*\\sid="${id}"[^>]*>`))?.[0];
+      expect(tag("clip-2")).toContain('data-media-start="2"');
+      expect(html).not.toContain('id="clip-3"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a delete range that reaches outside the clip, without writing", () => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const result = run(dir, "delete", "#clip", "--start", "2", "--end", "4");
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("is not inside #clip");
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["--at", ["delete", "#clip", "--at", "2"]],
+    ["--start", ["split", "#clip", "2", "--start", "1"]],
+    ["--duration", ["move", "#clip", "+1", "--duration", "1"]],
+    ["--overwrite", ["duplicate", "#clip", "--overwrite"]],
+    ["--end", ["set", "#clip", "volume=0.5", "--end", "2"]],
+  ])("refuses a flag its verb does not use (%s), without writing", (flag, args) => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const result = run(dir, ...args);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(`Unknown flag: ${flag}`);
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an apply edit with a key its verb does not use, without writing", () => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const planPath = join(dir, "edits.json");
+      writeFileSync(planPath, JSON.stringify([{ verb: "delete", ref: "#clip", at: "2" }]));
+      const result = run(dir, "apply", planPath);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("delete does not use at");
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses the next free numeric split suffix on repeat", () => {
     const dir = project();
     try {
@@ -201,6 +330,27 @@ describe("timeline edit command", () => {
   };
   const endOf = (html: string, id: string) =>
     Number(clip(html, id).start) + Number(clip(html, id).duration);
+
+  it.each([
+    ["moves a hidden clip into its wrapper's window", ["move", "#lost", "8"], "lost", "8"],
+    ["moves a wrapper without colliding with its own clips", ["move", "#shot2", "4"], "shot2", "4"],
+    ["duplicates a clip inside its wrapper", ["duplicate", "#seen"], "seen", "6"],
+  ])("%s", (_name, args, id, start) => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-timeline-nested-"));
+    writeFileSync(
+      join(dir, "index.html"),
+      `<div data-composition-id="main" data-duration="12"><div id="shot2" data-hf-id="shot2" data-start="5" data-duration="5" data-track-index="0"><div id="seen" data-hf-id="seen" data-start="6" data-duration="2">In</div><div id="lost" data-hf-id="lost" data-start="0" data-duration="2">Out</div></div></div>`,
+    );
+    try {
+      const result = run(dir, ...args);
+      expect(result.stderr).not.toContain("overlap");
+      expect(result.status).toBe(0);
+      expect(clip(readFileSync(join(dir, "index.html"), "utf8"), id).start).toBe(start);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   const visibleAt = (html: string, time: number, ids: string[]) =>
     ids.filter((id) => isClipVisibleAt(time, Number(clip(html, id).start), endOf(html, id), 40));
 
@@ -569,4 +719,235 @@ describe("timeline edit command", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it.each(["response", "array", "file"])(
+    "undoes all files in an apply receipt passed as a %s and returns a redo receipt",
+    (format) => {
+      const { dir, files, sources, before, planPath } = batchProject();
+      try {
+        const applied = run(dir, "apply", planPath);
+        expect(applied.status, applied.stderr).toBe(0);
+        const appliedJson: { receipt: Array<Record<string, unknown>> } = JSON.parse(applied.stdout);
+        expect(appliedJson.receipt).toHaveLength(2);
+        const after = sources();
+        expect(after[0]).toContain('data-volume="0.25"');
+        expect(after[1]).toContain('data-volume="0.5"');
+        let input = format === "array" ? JSON.stringify(appliedJson.receipt) : applied.stdout;
+        if (format === "file") {
+          input = join(dir, "receipt.json");
+          writeFileSync(input, applied.stdout);
+        }
+
+        const undone = run(dir, "undo", input);
+        expect(undone.status, undone.stderr).toBe(0);
+        expect(JSON.parse(undone.stdout)).toMatchObject({ ok: true, file: files });
+        expect(sources()).toEqual(before);
+
+        const redone = run(dir, "undo", undone.stdout);
+        expect(redone.status, redone.stderr).toBe(0);
+        expect(sources()).toEqual(after);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["stale", "invalid"])(
+    "leaves the whole undo batch untouched when a later receipt is %s",
+    (failure) => {
+      const { dir, sources, planPath } = batchProject();
+      try {
+        const applied = run(dir, "apply", planPath);
+        expect(applied.status, applied.stderr).toBe(0);
+        const appliedJson: { receipt: Array<Record<string, unknown>> } = JSON.parse(applied.stdout);
+        if (failure === "stale") {
+          const childPath = join(dir, "compositions/scene.html");
+          writeFileSync(childPath, readFileSync(childPath, "utf8") + "<!-- newer edit -->");
+        }
+        const current = sources();
+        const input =
+          failure === "stale"
+            ? applied.stdout
+            : JSON.stringify([appliedJson.receipt[0], { file: "bad" }]);
+
+        const undone = run(dir, "undo", input);
+        expect(undone.status).toBe(2);
+        expect(JSON.parse(undone.stderr)).toMatchObject({
+          ok: false,
+          reason:
+            failure === "stale"
+              ? "file changed since the timeline was read"
+              : "timeline undo: undo receipt is missing file, version, or backupPath",
+        });
+        expect(sources()).toEqual(current);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    { format: "single", missing: "target", index: 1 },
+    { format: "single", missing: "backup", index: 1 },
+    { format: "batch", missing: "target", index: 1 },
+    { format: "batch", missing: "backup", index: 1 },
+    { format: "single", missing: "target", index: 0 },
+    { format: "batch", missing: "target", index: 0 },
+  ])(
+    "refuses a $format undo when its $missing at index $index is missing",
+    ({ format, missing, index }) => {
+      const { dir, files, planPath } = batchProject();
+      try {
+        const applied = run(dir, "apply", planPath);
+        expect(applied.status, applied.stderr).toBe(0);
+        const receipt: { file: string; backupPath: string } = JSON.parse(applied.stdout).receipt[
+          index
+        ];
+        const missingFile = missing === "target" ? receipt.file : receipt.backupPath;
+        const missingPath = join(dir, missingFile);
+        rmSync(missingPath);
+        const remainingFiles = files.filter((file) => join(dir, file) !== missingPath);
+        const sources = () => remainingFiles.map((file) => readFileSync(join(dir, file), "utf8"));
+        const current = sources();
+        const backupDir = join(dir, ".hyperframes", "backup");
+        const backups = () =>
+          readdirSync(backupDir)
+            .sort()
+            .map((file) => [file, readFileSync(join(backupDir, file), "utf8")]);
+        const currentBackups = backups();
+        const input = format === "single" ? JSON.stringify(receipt) : applied.stdout;
+
+        const undone = run(dir, "undo", input);
+
+        expect(undone.status, undone.stderr).toBe(2);
+        expect(undone.stdout).toBe("");
+        expect(JSON.parse(undone.stderr)).toEqual({
+          ok: false,
+          reason: `timeline undo: undo file is missing: ${missingFile}`,
+          fix: "restore the missing target or backup file before retrying undo",
+        });
+        expect(sources()).toEqual(current);
+        expect(backups()).toEqual(currentBackups);
+        expect(existsSync(missingPath)).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("undoes a complete timeline ids response", () => {
+    const dir = project();
+    try {
+      const indexPath = join(dir, "index.html");
+      const before = readFileSync(indexPath, "utf8").replace(/ data-hf-id="[^"]*"/g, "");
+      writeFileSync(indexPath, before);
+      const stamped = run(dir, "ids");
+      expect(stamped.status, stamped.stderr).toBe(0);
+      expect(readFileSync(indexPath, "utf8")).toContain("data-hf-id=");
+
+      const undone = run(dir, "undo", stamped.stdout);
+      expect(undone.status, undone.stderr).toBe(0);
+      expect(readFileSync(indexPath, "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an empty receipt from an unchanged apply", () => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const planPath = join(dir, "edits.json");
+      writeFileSync(planPath, "[]");
+      const applied = run(dir, "apply", planPath);
+      expect(applied.status, applied.stderr).toBe(0);
+
+      const undone = run(dir, "undo", applied.stdout);
+      expect(undone.status, undone.stderr).toBe(0);
+      expect(JSON.parse(undone.stdout)).toMatchObject({ ok: true, receipt: [], file: [] });
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("timeline move preserves clip length", () => {
+  const cases = [
+    {
+      name: "end-authored clip moving forward",
+      clip: '<div id="clip" data-hf-id="clip" data-start="1" data-end="3" data-track-index="0"></div>',
+      start: 2,
+      duration: 2,
+    },
+    {
+      name: "end-authored clip moving backward",
+      clip: '<div id="clip" data-hf-id="clip" data-start="4" data-end="6" data-track-index="0"></div>',
+      start: 1,
+      duration: 2,
+    },
+    {
+      name: "duration-authored clip",
+      clip: '<div id="clip" data-hf-id="clip" data-start="1" data-duration="2" data-track-index="0"></div>',
+      start: 2,
+      duration: 2,
+    },
+    {
+      name: "image with its default duration",
+      clip: '<img id="clip" data-hf-id="clip" data-start="1" data-track-index="0">',
+      start: 2,
+      duration: 3,
+    },
+  ];
+  for (const planned of [false, true]) {
+    it.each(cases)(
+      `moves $name without changing its length (plan=${planned})`,
+      ({ clip, start, duration }) => {
+        const dir = mkdtempSync(join(tmpdir(), "hf-timeline-move-length-"));
+        const indexPath = join(dir, "index.html");
+        const source = `<div data-composition-id="main" data-duration="12">${clip}</div>`;
+        writeFileSync(indexPath, source);
+        try {
+          const result = run(dir, "move", "#clip", String(start), ...(planned ? ["--plan"] : []));
+          expect(result.status, result.stderr).toBe(0);
+          const output: unknown = JSON.parse(result.stdout);
+          expect(output).toMatchObject({
+            planned,
+            before: expect.arrayContaining([expect.objectContaining({ ref: "#clip", duration })]),
+            after: expect.arrayContaining([
+              expect.objectContaining({ ref: "#clip", start, duration, end: start + duration }),
+            ]),
+          });
+          if (planned) expect(readFileSync(indexPath, "utf8")).toBe(source);
+          else {
+            const inspected = spawnSync("bun", ["run", cliEntry, "timeline", dir, "--json"], {
+              cwd: dir,
+              encoding: "utf8",
+              timeout: 30_000,
+              env: { ...process.env, HYPERFRAMES_SKIP_UPDATE_CHECK: "1" },
+            });
+            expect(inspected.status, inspected.stderr).toBe(0);
+            expect(JSON.parse(inspected.stdout)).toMatchObject({
+              timeline: {
+                tracks: expect.arrayContaining([
+                  expect.objectContaining({
+                    rows: expect.arrayContaining([
+                      expect.objectContaining({
+                        ref: "#clip",
+                        start,
+                        duration,
+                        end: start + duration,
+                      }),
+                    ]),
+                  }),
+                ]),
+              },
+            });
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+    );
+  }
 });
