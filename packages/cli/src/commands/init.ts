@@ -669,14 +669,8 @@ async function scaffoldProject(
   }
 }
 
-/**
- * Install the core set when it is missing. An installed skill is never
- * refreshed or removed here; that is `hyperframes skills update`, run by the
- * user. Best-effort: offline it only checks presence and never breaks init.
- * The install itself lands once GLOBALLY (~/.claude/skills + ~/.agents/skills)
- * and mirrors into every other installed agent, so it is project-independent —
- * the check is global-first to match.
- */
+// Installs the core set when missing, globally; an installed skill is never refreshed or removed
+// here (that is `hyperframes skills update`). Offline it only checks presence.
 async function keepSkillsCurrent(destDir: string): Promise<void> {
   const { updateSkills } = await import("./skills.js");
 
