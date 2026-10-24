@@ -49,6 +49,7 @@ export type {
 // ── Configuration ──────────────────────────────────────────────────────────────
 export {
   resolveConfig,
+  resolvePageNavigationTimeout,
   validateEngineConfigSnapshot,
   DEFAULT_CONFIG,
   scaleProtocolTimeoutForComposition,
@@ -142,6 +143,7 @@ export {
   type DiscardWarmupInnerCapture,
   type StaticVerificationOutcome,
   VfxFailureError,
+  waitForImagesReady,
 } from "./services/frameCapture.js";
 export {
   CaptureFailure,
@@ -156,6 +158,7 @@ export {
 } from "./services/chromeMemorySampler.js";
 
 // ── Screenshot (BeginFrame) ─────────────────────────────────────────────────────
+export { installMediaRenderIdBridge } from "./services/mediaRenderIdBridge.js";
 export {
   beginFrameCapture,
   pageScreenshotCapture,
@@ -263,12 +266,15 @@ export {
   parseMasterFxChain,
   processCompositionAudio,
 } from "./services/audioMixer.js";
+export { audioFailureDiagnostics } from "./services/audioFailureDiagnostic.js";
 export { cloneCaptureWarning, cloneCaptureWarnings } from "./services/captureWarning.js";
 export type {
   AudioElement,
   AudioFailureReason,
   AudioFailureStage,
   AudioProcessingFailure,
+  AudioFailureDiagnostic,
+  AudioSubprocessEvidence,
   AudioTrack,
   AudioVolumeKeyframe,
   MixResult,
@@ -290,6 +296,7 @@ export {
   type WorkerResult,
   type WorkerSizing,
   type WorkerSizingBound,
+  type LandedFrame,
   type ParallelProgress,
 } from "./services/parallelCoordinator.js";
 
@@ -303,7 +310,10 @@ export {
 // ── Utilities ──────────────────────────────────────────────────────────────────
 export { quantizeTimeToFrame, MEDIA_VISUAL_STYLE_PROPERTIES } from "@hyperframes/core";
 export { frameFileExtension } from "./services/frameCapture.js";
+export { appendSoftwareEncoderThreadsArg } from "./services/softwareEncoderThreads.js";
+export { frameSequencePath } from "./services/extractedFrameIndex.js";
 export type { MotionBlurOptions, MotionBlurBlendSpace } from "./services/motionBlur.js";
+export type { PageMotionBlurOff } from "./types.js";
 
 export {
   assertSwiftShader,
@@ -319,6 +329,7 @@ export {
   extractVideoMetadata,
   extractFinalVideoFrameTimestamp,
   extractAudioMetadata,
+  declareContentAddressedUrl,
   probeMediaProfile,
   analyzeKeyframeIntervals,
   type VideoMetadata,
@@ -356,6 +367,7 @@ export {
   type RunFfmpegOptions,
   type RunFfmpegResult,
 } from "./utils/runFfmpeg.js";
+export { aacSegmentCount, encodeAac } from "./services/aacEncode.js";
 export {
   ManagedChildProcess,
   type ManagedChildProcessOptions,
@@ -428,6 +440,8 @@ export {
   showVideoElements,
   queryVideoElementBounds,
   queryElementStacking,
+  measureVideoShownBoxes,
+  type ShownBox,
   type VideoElementBounds,
   type ElementStackingInfo,
 } from "./services/videoFrameInjector.js";

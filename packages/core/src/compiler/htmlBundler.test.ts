@@ -1080,6 +1080,30 @@ describe("bundleToSingleHtml", () => {
     expect(bundled).toContain('var __hfTimelineCompId = "scene__hf2"');
   });
 
+  it("gives a mount that shares the page root's id its own runtime id", async () => {
+    const cliRoot = (title: string) =>
+      `<div id="root" data-composition-id="main" data-width="1920" data-height="1080"><h1>${title}</h1>`;
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><head></head><body>
+  ${cliRoot("Host")}
+    <div id="main_2" data-composition-id="main" data-composition-src="compositions/scene.html"></div>
+  </div>
+  <script>window.__timelines={};</script>
+</body></html>`,
+      "compositions/scene.html": `<!doctype html><html><body>${cliRoot("Scene")}</div>
+  <script>window.__timelines["main"] = "scene";</script>
+</body></html>`,
+    });
+
+    const bundled = await bundleToSingleHtml(dir);
+    const host = parseHTML(bundled).document.querySelector("#main_2");
+
+    expect(host?.getAttribute("data-composition-id")).toBe("main__hf1");
+    expect(host?.getAttribute("data-hf-original-composition-id")).toBe("main");
+    expect(bundled).toContain('var __hfTimelineCompId = "main__hf1"');
+  });
+
   it("uniquifies duplicate sub-compositions across inline-template and external hosts", async () => {
     const dir = makeTempProject({
       "index.html": `<!doctype html>
@@ -3158,7 +3182,7 @@ describe("bundleToSingleHtml sceneParts", () => {
   const partsOf = (doc: Document, scene: string) =>
     [...doc.querySelectorAll(`[data-hf-scene="${scene}"]`)].map((el) => el.tagName.toLowerCase());
 
-  it("keeps each scene's own copy of a shared @font-face, so one scene still swaps alone", async () => {
+  it("puts a @font-face two scenes share in one style outside the scenes, once", async () => {
     const face = `@font-face { font-family: "Brand"; src: url('assets/fonts/brand.woff2'); }`;
     const dir = makeTempProject({
       "index.html": `<!doctype html>
@@ -3178,8 +3202,14 @@ describe("bundleToSingleHtml sceneParts", () => {
       const css = [...doc.querySelectorAll(`style[data-hf-scene="${scene}"]`)]
         .map((el) => el.textContent ?? "")
         .join("\n");
-      expect(css).toContain("@font-face");
+      expect(css).not.toContain("@font-face");
     }
+    const fonts = doc.querySelector("style[data-hf-scene-fonts]");
+    expect(fonts?.hasAttribute("data-hf-scene")).toBe(false);
+    const faces = (css: string) => css.match(/@font-face/g)?.length ?? 0;
+    expect(faces(fonts?.textContent ?? "")).toBe(1);
+    const allCss = [...doc.querySelectorAll("style")].map((el) => el.textContent ?? "").join("\n");
+    expect(faces(allCss)).toBe(1);
   });
 
   it("tags each top-level scene's host, styles and scripts, with nested scenes in their parent's parts", async () => {
@@ -3614,5 +3644,36 @@ describe("stampHfIds", () => {
     const html = await bundleToSingleHtml(project(), { inlineAssets: false });
     expect(logo(html)).toContain("compositions/logo.png");
     expect(logo(html)).not.toContain("data-hf-id");
+  });
+});
+
+describe("emitRootCompositionVariableStyles — authored definitions", () => {
+  function emitted(authoredCss: string): string {
+    const { document } = parseHTML(
+      `<!doctype html><html><head><style>${authoredCss}</style></head>` +
+        `<body><div data-composition-id="card"></div></body></html>`,
+    );
+    emitRootCompositionVariableStyles(document, {
+      card: { accent: "blue", "accent-dark": "navy" },
+    });
+    return document.querySelector("style[data-hf-composition-variables]")?.textContent ?? "";
+  }
+
+  it("leaves a variable the stylesheet defines, whatever space sits before its colon", () => {
+    for (const authored of [
+      ":root{--accent:red}",
+      ":root { --accent : red }",
+      ":root {\n  --accent\n  : red }",
+    ]) {
+      const css = emitted(authored);
+      expect(css).not.toContain("--accent:");
+      expect(css).toContain("--accent-dark: navy");
+    }
+  });
+
+  it("still emits a variable whose name only begins a longer authored one, or is only read", () => {
+    const css = emitted(":root { --accent-dark: black; } .badge { color: var(--accent); }");
+    expect(css).toContain("--accent: blue");
+    expect(css).not.toContain("--accent-dark");
   });
 });
