@@ -1,9 +1,8 @@
 // Whether an inline script could look the element up. A replayed delete of such a node is hidden,
 // not removed: a missing node makes the script throw before the timeline registers.
 
-// A literal handed to a lookup; a template's ${...} stands for any text.
 const LITERAL_LOOKUP =
-  /(getElementById|getElementsByClassName|getElementsByTagName|querySelector(?:All)?)\s*\(\s*(["'`])([\s\S]*?)\2/g;
+  /(getElementById|getElementsByClassName|getElementsByTagName|querySelector(?:All)?)\s*\(\s*(["'`])([\s\S]*?)\2\s*(\S?)/g;
 // A lookup whose argument is a variable or an expression: it can name any node.
 const DYNAMIC_LOOKUP =
   /(?:getElementById|getElementsByClassName|getElementsByTagName|querySelector(?:All)?)\s*\(\s*(?!["'`)\s])/;
@@ -25,6 +24,7 @@ function matchesSelector(el: Element, selector: string): boolean {
 }
 
 function lookupReaches(el: Element, method: string, argument: string): boolean {
+  if (PLACEHOLDER.test(argument)) return true;
   const nodes = [el, ...Array.from(el.querySelectorAll("*"))];
   if (method === "getElementById") {
     const pattern = idPattern(argument);
@@ -46,8 +46,8 @@ export function scriptLooksUp(document: Document, el: Element): boolean {
     (s) => s.textContent ?? "",
   ).join("\n");
   if (DYNAMIC_LOOKUP.test(scripts)) return true;
-  for (const [, method, , argument] of scripts.matchAll(LITERAL_LOOKUP)) {
-    if (lookupReaches(el, method ?? "", argument ?? "")) return true;
+  for (const [, method, , argument, next] of scripts.matchAll(LITERAL_LOOKUP)) {
+    if (next !== ")" || lookupReaches(el, method ?? "", argument ?? "")) return true;
   }
   return false;
 }

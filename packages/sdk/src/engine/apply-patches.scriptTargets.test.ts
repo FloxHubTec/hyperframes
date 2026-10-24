@@ -101,6 +101,8 @@ describe("a kept delete carries no media source", () => {
 
   it("leaves the sources of nodes that were not deleted", () => {
     expect(out()).toContain("live.png");
+  });
+});
 
 const lookupDoc = (script: string) => `<!DOCTYPE html><html><body>
 <div data-composition-id="c" data-width="1920" data-height="1080">
@@ -135,6 +137,19 @@ describe("a stored delete any script lookup could reach", () => {
     expect(
       kept("var id = 'fiber-1'; document.getElementById(id).getTotalLength();", "hf-fiber"),
     ).toBe(true);
+  });
+
+  it("is hidden when the argument is a literal continued by an expression", () => {
+    const loop = (call: string) => `for (var n = 1; n < 4; n++) ${call}.getTotalLength();`;
+    expect(kept(loop("document.getElementById('fiber-' + n)"), "hf-fiber")).toBe(true);
+    expect(kept(loop("document.querySelector('#fiber-' + n)"), "hf-fiber")).toBe(true);
+    expect(kept(loop("document.getElementById('fiber-'.concat(n))"), "hf-fiber")).toBe(true);
+  });
+
+  it("is hidden when a class or tag lookup carries a template placeholder", () => {
+    const call = (lookup: string) => `${lookup}[0].getBBox();`;
+    expect(kept(call("document.getElementsByClassName(`item-${n}`)"), "hf-halftone")).toBe(true);
+    expect(kept(call("document.getElementsByTagName(`${t}`)"), "hf-halftone")).toBe(true);
   });
 
   it("is still removed when no lookup can reach it", () => {
