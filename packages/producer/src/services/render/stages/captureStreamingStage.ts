@@ -73,7 +73,11 @@ import type { FileServerHandle } from "../../fileServer.js";
 import type { ProducerLogger } from "../../../logger.js";
 import type { ProgressCallback, RenderJob } from "../../renderOrchestrator.js";
 import { wrapCaptureStageError } from "../captureStageError.js";
-import { pushWorkerDedupPerfs } from "../perfSummary.js";
+import {
+  pushWorkerDedupPerfs,
+  pushWorkerPageErrors,
+  withWorkerPageErrors,
+} from "../perfSummary.js";
 import { ensureFrameWritten } from "./captureHdrFrameShared.js";
 import { reportEncodeProgress, reportFrameProgress, reportWorkerStartup } from "../shared.js";
 import { encoderFailureError } from "../encoderInterruption.js";
@@ -890,6 +894,8 @@ export async function runCaptureStreamingStage(
       }
       if (parallelDrainError) throw parallelDrainError;
       pushWorkerDedupPerfs(workerResults, dedupPerfs);
+      const workerPageErrors: string[] = [];
+      pushWorkerPageErrors(workerResults, workerPageErrors);
       if (parallelGuardRan) {
         deDrainStats = parallelStats;
       }
@@ -900,6 +906,7 @@ export async function runCaptureStreamingStage(
         await closeCaptureSession(probeSession);
         probeSession = null;
       }
+      lastBrowserConsole = withWorkerPageErrors(lastBrowserConsole, workerPageErrors);
     } else {
       // Sequential capture → streaming encode
 

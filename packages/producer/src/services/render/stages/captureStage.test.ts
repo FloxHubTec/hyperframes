@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { DEFAULT_CONFIG, classifyCaptureFailure } from "@hyperframes/engine";
 import { createRenderJob, isTransientCaptureRetryEligible } from "../../renderOrchestrator.js";
 import { formatCaptureFrameName } from "../../../utils/paths.js";
+import { summarizeBrowserDiagnostics } from "../observability.js";
 
 // Mock only the engine session primitives; `classifyCaptureFailure` stays
 // real so the retry decision is exercised.
@@ -315,6 +316,24 @@ describe("runCaptureStage measured disk projection (both branches)", () => {
     expect(isTransientCaptureRetryEligible(kind, [{ startFrame: 10, endFrame: 20 }], 0)).toBe(
       false,
     );
+  });
+
+  it("parallel: page errors seen only by worker sessions reach the diagnostics count", async () => {
+    const { workDir, framesDir } = makeDirs();
+    freeBytes.mockReturnValue({ bavail: 10_000_000_000, bsize: 1 });
+    executeParallelCapture.mockImplementation(async () => {
+      for (let i = 0; i < 20; i++) {
+        writeFileSync(join(framesDir, formatCaptureFrameName(i, "jpg")), oneMb);
+      }
+      return [
+        { pageErrorLines: ["[Browser:PAGEERROR] Identifier 'dup' has already been declared"] },
+        { pageErrorLines: ["[Browser:PAGEERROR] Identifier 'dup' has already been declared"] },
+      ];
+    });
+
+    const result = await runCaptureStage(makeInput(2, workDir, framesDir));
+
+    expect(summarizeBrowserDiagnostics(result.lastBrowserConsole).pageErrors).toBe(1);
   });
 
   it("parallel: the progress callback raises the same shortfall from worker dirs", async () => {
