@@ -88,7 +88,9 @@ export function sceneSwapFor(
       () => deadline.abort(new Error("the preview took too long to swap")),
       SCENE_SWAP_MS,
     );
-    cancel?.addEventListener("abort", () => deadline.abort(cancel.reason), { once: true });
+    // The caller's signal outlives this swap: a listener left on it would keep this film's window alive.
+    const onCancel = () => deadline.abort(cancel?.reason);
+    cancel?.addEventListener("abort", onCancel, { once: true });
     const swapping = (async () => {
       const response = await studioApiFetch(url, { signal: deadline.signal });
       if (!response.ok) throw new Error(`preview request failed with ${response.status}`);
@@ -104,6 +106,7 @@ export function sceneSwapFor(
       await Promise.race([swapping, expired]);
     } finally {
       clearTimeout(timer);
+      cancel?.removeEventListener("abort", onCancel);
     }
     iframe.dispatchEvent(new Event(SCENES_SWAPPED));
   };
