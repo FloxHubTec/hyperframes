@@ -1376,7 +1376,9 @@ export async function processCompositionAudio(
 
   await Promise.all(
     elements.map((element, index) =>
-      (isRemoteElement(element, baseDir, compiledDir, config) ? inRemotePrepareSlot : inPrepareSlot)(async () => {
+      (isRemoteElement(element, baseDir, compiledDir, config)
+        ? inRemotePrepareSlot
+        : inPrepareSlot)(async () => {
         if (effectiveSignal.aborted) {
           failures.push({
             stage: "cancelled",
