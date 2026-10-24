@@ -1,7 +1,16 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { openBlobStore } from "./blobStore";
 import { openProjectHistory, type ProjectHistory } from "./projectHistory";
 import type { HistoryWho } from "./historyLog";
 
@@ -129,5 +138,46 @@ describe("undoing a change that made or replaced media", () => {
     expect(redone).toMatchObject({ ok: true });
     expect(readFileSync(media).equals(bytes)).toBe(true);
     expect(history.list().length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("the set-aside store beside the blobs", () => {
+  async function stores() {
+    const home = tempDir("hf-aside-home-");
+    const source = join(home, "join.mp4");
+    writeFileSync(source, Buffer.alloc(2 * MiB, 6));
+    const blobs = await openBlobStore(join(home, "blobs"));
+    const hash = await blobs.reference(source);
+    return { home, source, blobs, hash };
+  }
+
+  it("keeps a copied blob of the same bytes when the set-aside copy is released", async () => {
+    const { home, source, blobs, hash } = await stores();
+    await blobs.keep(source, false);
+    const copy = join(home, "backup.txt");
+    writeFileSync(copy, readFileSync(source));
+
+    expect(await blobs.put(copy)).toBe(hash);
+    await blobs.release([hash]);
+
+    expect(blobs.has(hash)).toBe(true);
+    expect((await blobs.read(hash)).length).toBe(2 * MiB);
+  });
+
+  it("counts for no bytes and no size until it is released", async () => {
+    const { source, blobs, hash } = await stores();
+    await blobs.keep(source, true);
+
+    expect([blobs.has(hash), blobs.bytes(), blobs.size(hash)]).toEqual([true, 0, 0]);
+    expect(existsSync(source)).toBe(false);
+  });
+
+  it("leaves only the finished copy in the set-aside folder", async () => {
+    const { home, source, blobs, hash } = await stores();
+    await blobs.keep(source, false);
+
+    const aside = join(home, "aside");
+    expect(readdirSync(aside)).toEqual([hash.slice(0, 2)]);
+    expect(readdirSync(join(aside, hash.slice(0, 2)))).toEqual([hash]);
   });
 });
