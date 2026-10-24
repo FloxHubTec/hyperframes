@@ -192,6 +192,29 @@ Source: `packages/lint/src/rules/composition.ts`.
 
 **Fix:** Set the sub-composition's `data-duration` to fill the host window, or cover the gap with another clip.
 
+### `subcomposition_dimensions_mismatch`
+
+**Warning.** A sub-composition mount directly inside the root has explicit positive `data-width` and `data-height` with the same aspect ratio as the root, but a different canvas size. Mounted content does not automatically scale to fill the root. Nested mounts are not checked.
+
+**Fix:** To fill a 3840×2160 root with a 1920×1080 block, keep the mount at its native size and scale it from the top-left corner. Percentage width and height or `inset: 0` alone do not scale the block's canvas.
+
+```html index.html
+<div
+  id="title"
+  class="clip"
+  data-composition-id="lt-side-rule"
+  data-composition-src="compositions/lt-side-rule.html"
+  data-start="0"
+  data-duration="4.8"
+  data-track-index="1"
+  data-width="1920"
+  data-height="1080"
+  style="position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform: scale(2); transform-origin: 0 0"
+></div>
+```
+
+The rule conservatively skips custom positioning, fixed-size overrides, scales and recognised script layout writes. Script targets use literal selectors or direct DOM lookups; dynamically resolved targets are not inferred. Keep the smaller size for an intentional picture-in-picture placement. This finding is diagnostic only and does not change runtime scaling.
+
 ### `subcomposition_root_styled_by_class`
 
 **Error.** A sub-composition's root element is styled through class selectors, but at render every rule is scoped to `[data-composition-id=...]`, so the class-keyed styles stop applying.
