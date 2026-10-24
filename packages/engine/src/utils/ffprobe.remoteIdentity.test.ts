@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { getFfmpegBinary } from "./ffmpegBinaries.js";
+import { getFfmpegBinary, getFfprobeBinary } from "./ffmpegBinaries.js";
 import {
   buildProbeFactsText,
   declareContentAddressedUrl,
@@ -137,8 +137,10 @@ describe.skipIf(!HAS_FFMPEG)("probing a file held at a URL", { timeout: 60_000 }
     expect(await readStoredFinalFrame(url, metadata)).toBeUndefined();
   });
 
-  it("records the ffprobe major version beside the facts", () => {
-    expect(JSON.parse(factsJson).ffprobeMajor).toBeGreaterThan(0);
+  it("records the ffprobe major version beside the facts, when the build reports one", () => {
+    const banner = spawnSync(getFfprobeBinary(), ["-version"], { encoding: "utf-8" }).stdout;
+    const major = Number(/version n?(\d+)/.exec(banner)?.[1]) || undefined;
+    expect(JSON.parse(factsJson).ffprobeMajor).toBe(major);
   });
 
   it("probes the media itself when its stored JSON cannot be read", async () => {
