@@ -33,8 +33,6 @@ function entryOf(rawLine: string): [string, string] | null {
   return [line.slice(0, eq).trim(), valueOf(line.slice(eq + 1).trim())];
 }
 
-// The quote a line's value opens without closing, if any; `logicalLines` keeps
-// reading further lines for it until one closes the quote.
 function openQuoteOf(trimmedLine: string): string | null {
   const eq = trimmedLine.indexOf("=");
   if (eq < 1) return null;
@@ -44,8 +42,6 @@ function openQuoteOf(trimmedLine: string): string | null {
   return valueStart.indexOf(quote, 1) < 0 ? quote : null;
 }
 
-// The index of the next line at or after `from` that contains `quote`, or -1 if
-// none closes it before EOF.
 function closingLineIndex(rawLines: string[], from: number, quote: string): number {
   for (let j = from; j < rawLines.length; j++) {
     if ((rawLines[j] ?? "").includes(quote)) return j;
@@ -53,11 +49,8 @@ function closingLineIndex(rawLines: string[], from: number, quote: string): numb
   return -1;
 }
 
-// A quoted value left open at end of line continues on the lines that follow it;
-// join them into one logical line so `entryOf`/`valueOf` see the whole value.
-// Blank/comment lines never open a continuation (matches `entryOf`'s own skip),
-// and a quote that never closes before EOF falls back to its own line rather
-// than swallowing the rest of the file as one value.
+// A quoted value left open at end of line continues on later lines until one closes it;
+// blank/comment lines and an EOF with no closing quote never open or complete a continuation.
 function logicalLines(content: string): string[] {
   const rawLines = content.split("\n").map((line) => line.replace(/\r$/, ""));
   const lines: string[] = [];
