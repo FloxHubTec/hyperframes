@@ -62,7 +62,6 @@ function resolveMusicTarget(project: ProjectDir): { rel: string; audioPath: stri
   const rel = audioRelPathForSrc(src); // same derivation the Studio uses
   if (!rel) fail(`Cannot derive a beat-file path for music src: ${src}`);
   const audioPath = resolve(project.dir, rel);
-  // An encoded `../` in the src decodes to a parent path; never read outside the project.
   if (!isPathInside(audioPath, project.dir)) fail(`Music src resolves outside the project: ${src}`);
   if (!existsSync(audioPath)) fail(`Audio file not found: ${rel}`);
   return { rel, audioPath };
