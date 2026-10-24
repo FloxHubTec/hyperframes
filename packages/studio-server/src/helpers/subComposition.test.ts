@@ -29,6 +29,16 @@ describe("buildSubCompositionHtml", () => {
     expect(html).toContain(`<script src="${gsapCdnDist()}gsap.min.js"></script>`);
   });
 
+  it("loads GSAP core when the project head has only a GSAP plugin", () => {
+    const plugin = "https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/MotionPathPlugin.min.js";
+    const dir = makeTempProject({
+      "index.html": `<!doctype html><html><head><script src="${plugin}"></script></head><body></body></html>`,
+      "compositions/scene.html": `<div data-composition-id="scene" data-width="320" data-height="180"></div>`,
+    });
+    const html = buildSubCompositionHtml(dir, "compositions/scene.html", "/api/runtime.js");
+    expect(html).toContain(`<script src="${gsapCdnDist()}gsap.min.js"></script>`);
+  });
+
   it("adds the preview runtime even when the project head's script mentions a runtime file", () => {
     const dir = makeTempProject({
       "index.html": `<!doctype html><html><head><script>console.log("hyperframe.runtime.iife.js");</script></head><body></body></html>`,
