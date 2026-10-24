@@ -68,7 +68,6 @@ const listDir = (path: string) =>
 
 export async function openBlobStore(dir: string): Promise<BlobStore> {
   const sizes = new Map<string, number>();
-  // Bytes history moved out of the project live apart from the blobs, so reclaiming old media copies never takes them.
   const asideDir = join(dirname(dir), "aside");
   const asideSizes = new Map<string, number>();
   // The project paths still counting on each set-aside copy; it goes when the last one has its file back.
