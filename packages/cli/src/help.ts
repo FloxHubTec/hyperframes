@@ -41,12 +41,13 @@ const GROUPS: Group[] = [
         "Runtime-validate a composition in headless Chrome (JS errors, missing assets, contrast)",
       ],
       ["beats", "Detect beats in the music track and write beats/<audio>.json"],
+      ["audio", "Measure where sounds land: onsets, hits, loudness, silence, in film time"],
       ["inspect", "Inspect rendered visual layout across the timeline"],
       ["keyframes", "Inspect keyframes and render onion-shot diagnostics"],
       ["snapshot", "Capture key frames as PNG screenshots for visual verification"],
       [
         "media-treatment",
-        "Discover, apply, or clear deterministic media treatments on one media element",
+        "Discover, apply, or clear deterministic media treatments on media elements",
       ],
       [
         "normalize-audio",
