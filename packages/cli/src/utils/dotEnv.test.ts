@@ -44,7 +44,9 @@ describe("applyDotEnv", () => {
     applyDotEnv("GEMINI_API_KEY=project", env, []);
     expect(env).toEqual({});
   });
+});
 
+describe("applyDotEnv quoted multiline values", () => {
   it("keeps a quoted multiline value whole instead of truncating it to its first line", () => {
     const env: NodeJS.ProcessEnv = {};
     applyDotEnv(
@@ -61,5 +63,24 @@ describe("applyDotEnv", () => {
     );
     expect(() => JSON.parse(env.HYPERFRAMES_VERTEX_SERVICE_ACCOUNT!)).not.toThrow();
     expect(env.AFTER).toBe("still-parsed");
+  });
+
+  it("a commented-out example with an unclosed quote does not swallow the real keys below it", () => {
+    const env: NodeJS.ProcessEnv = {};
+    applyDotEnv('# OPENROUTER_API_KEY="sk-old\nGEMINI_API_KEY=real1\nGOOGLE_API_KEY=real2', env);
+    expect(env).toEqual({ GEMINI_API_KEY: "real1", GOOGLE_API_KEY: "real2" });
+  });
+
+  it("a stray unclosed quote with no later closing line does not swallow the rest of the file", () => {
+    const env: NodeJS.ProcessEnv = {};
+    applyDotEnv("A='x\nB=2", env);
+    expect(env).toEqual({ A: "x", B: "2" });
+  });
+
+  it("strips the trailing \\r from a CRLF multiline value", () => {
+    const env: NodeJS.ProcessEnv = {};
+    applyDotEnv("KEY='line1\r\nline2'\r\nAFTER=2", env);
+    expect(env.KEY).toBe("line1\nline2");
+    expect(env.AFTER).toBe("2");
   });
 });
