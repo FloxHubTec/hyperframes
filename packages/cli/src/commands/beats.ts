@@ -1,7 +1,7 @@
 import { failCommand } from "../utils/commandResult.js";
 import { defineCommand } from "citty";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { resolve, join, dirname } from "node:path";
+import { join, dirname } from "node:path";
 import {
   analyzeMusicFromSignal,
   audioRelPathForSrc,
@@ -11,7 +11,7 @@ import {
 } from "@hyperframes/core/beats";
 import { parseHTMLContent } from "@hyperframes/core/compiler";
 import { walkCompositionDescendants } from "@hyperframes/parsers";
-import { isPathInside } from "@hyperframes/core";
+import { isSafePath, resolveWithinProject } from "@hyperframes/core";
 import type { Example } from "./_examples.js";
 import { resolveProject, type ProjectDir } from "../utils/project.js";
 import type { AudioSignal } from "@hyperframes/core/audio-analysis";
@@ -61,8 +61,8 @@ function resolveMusicTarget(project: ProjectDir): { rel: string; audioPath: stri
   }
   const rel = audioRelPathForSrc(src); // same derivation the Studio uses
   if (!rel) fail(`Cannot derive a beat-file path for music src: ${src}`);
-  const audioPath = resolve(project.dir, rel);
-  if (!isPathInside(audioPath, project.dir)) fail(`Music src resolves outside the project: ${src}`);
+  const audioPath = resolveWithinProject(project.dir, rel);
+  if (!audioPath) fail(`Music src resolves outside the project: ${src}`);
   if (!existsSync(audioPath)) fail(`Audio file not found: ${rel}`);
   return { rel, audioPath };
 }
@@ -111,9 +111,9 @@ export default defineCommand({
       fail(`No beats detected in ${rel} — nothing written. (Track may be silent/ambient.)`);
     }
 
-    const beatsDir = join(project.dir, "beats");
-    const outPath = join(beatsDir, `${rel}.json`);
-    if (!isPathInside(outPath, beatsDir)) fail(`Beat file path resolves outside beats/: ${rel}`);
+    const outPath = join(project.dir, "beats", `${rel}.json`);
+    if (!isSafePath(project.dir, outPath))
+      fail(`Beat file path resolves outside the project: ${rel}`);
     mkdirSync(dirname(outPath), { recursive: true });
     writeFileSync(outPath, serializeBeats(result.beatTimes, result.beatStrengths, rel));
     report(`beats/${rel}.json`, result, Boolean(args.json));
