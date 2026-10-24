@@ -5352,7 +5352,6 @@ export function initSandboxRuntimeModular(): void {
     if (state.nativeMediaSyncDisabled || state.webAudioMediaDisabled) return;
     const gen = webAudio.startGeneration();
     const clips = webAudioMediaIn(document);
-    // This pass is the only decoder, so a source it no longer visits (edited, swapped out) is done.
     webAudio.releaseDecodedExcept(clips);
     for (const rawEl of clips) {
       if (isSilencedByHidden(rawEl)) continue;
