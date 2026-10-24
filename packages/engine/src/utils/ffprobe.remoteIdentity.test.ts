@@ -40,6 +40,10 @@ describe.skipIf(!HAS_FFMPEG)("probing a file held at a URL", { timeout: 60_000 }
     server = createServer((req, res) => {
       requests++;
       if (req.url?.startsWith("/facts/")) return void res.writeHead(200).end(factsJson);
+      if (req.url?.startsWith("/facts-other-major/")) {
+        const other = { ...JSON.parse(factsJson), ffprobeMajor: 99 };
+        return void res.writeHead(200).end(JSON.stringify(other));
+      }
       if (req.url?.startsWith("/gone/")) return void res.writeHead(404).end("gone");
       const start = Number(/bytes=(\d+)-/.exec(req.headers.range ?? "")?.[1] ?? 0);
       res.writeHead(206, {
@@ -123,6 +127,18 @@ describe.skipIf(!HAS_FFMPEG)("probing a file held at a URL", { timeout: 60_000 }
     const stored = await readStoredFinalFrame(url, metadata);
 
     expect(stored?.lastPacketSeconds).toBeCloseTo(0.04, 3);
+  });
+
+  it("ignores the stored final frame when another ffprobe major version stored it", async () => {
+    const url = `${base}/gone/major.mp4`;
+    declareProbeFactsUrl(url, `${base}/facts-other-major/major.json`);
+    const metadata = await extractMediaMetadata(url);
+
+    expect(await readStoredFinalFrame(url, metadata)).toBeUndefined();
+  });
+
+  it("records the ffprobe major version beside the facts", () => {
+    expect(JSON.parse(factsJson).ffprobeMajor).toBeGreaterThan(0);
   });
 
   it("probes the media itself when its stored JSON cannot be read", async () => {

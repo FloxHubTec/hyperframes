@@ -410,6 +410,8 @@ const PROBE_JSON_ARGS = ["-print_format", "json", "-show_format", "-show_streams
 
 interface StoredProbeFacts {
   ffprobe: FFProbeOutput;
+  /** Major version of the ffprobe that read the facts; absent in facts stored before it was recorded. */
+  ffprobeMajor?: number;
   /** What `extractFinalVideoFrameTimestamp` answers for the stream window it names. */
   finalFrame?: {
     streamStart: number;
@@ -453,10 +455,25 @@ export function readProbeJson(filePath: string, signal?: AbortSignal): Promise<s
   );
 }
 
+let runtimeFfprobeMajor: Promise<number | undefined> | undefined;
+
+/** The major version of the ffprobe this process runs; undefined when it cannot be read. */
+function ffprobeMajor(): Promise<number | undefined> {
+  runtimeFfprobeMajor ??= new Promise((resolve) => {
+    let out = "";
+    const proc = spawn(getFfprobeBinary(), ["-version"], { stdio: ["ignore", "pipe", "ignore"] });
+    proc.stdout.on("data", (chunk) => (out += String(chunk)));
+    proc.on("error", () => resolve(undefined));
+    proc.on("close", () => resolve(Number(/version n?(\d+)/.exec(out)?.[1]) || undefined));
+  });
+  return runtimeFfprobeMajor;
+}
+
 /** What a site stores beside a video: its ffprobe JSON and the final-frame facts a plan would otherwise probe for. */
 export async function buildProbeFactsText(filePath: string, signal?: AbortSignal): Promise<string> {
   const facts: StoredProbeFacts = {
     ffprobe: parseProbeJson(await runFfprobe(filePath, PROBE_JSON_ARGS, signal)),
+    ffprobeMajor: await ffprobeMajor(),
   };
   try {
     const metadata = await extractMediaMetadata(filePath);
@@ -958,8 +975,11 @@ export function readStoredFinalFrame(
     filePath,
     metadata,
   );
-  return readStoredFacts(filePath)?.then((facts) => {
+  return readStoredFacts(filePath)?.then(async (facts) => {
     const stored = facts?.finalFrame;
+    // Another major version may place the final frame or stream start differently: probe instead.
+    if (facts?.ffprobeMajor !== undefined && facts.ffprobeMajor !== (await ffprobeMajor()))
+      return undefined;
     return stored &&
       stored.streamStart === videoStreamStartSeconds &&
       stored.streamDuration === videoStreamDurationSeconds
