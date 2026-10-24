@@ -1363,6 +1363,7 @@ function mixPlanAudio(c: PlanComposition, compiledDir: string) {
     masterFxChain: c.composition.masterFxChain,
     abortSignal: c.abortSignal,
     assertNotAborted: c.assertNotAborted,
+    log: c.log,
   });
 }
 
