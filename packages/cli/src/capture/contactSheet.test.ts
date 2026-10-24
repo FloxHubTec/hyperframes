@@ -12,7 +12,6 @@ import { join } from "node:path";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import {
-  createAssetContactSheet,
   createContactSheet,
   createAssetContactSheet,
   createScrollContactSheet,
