@@ -1401,7 +1401,6 @@ export const gsapRules: LintRule<LintContext>[] = [
     const usesGsap = allScriptTexts.some((t) =>
       /gsap\.(to|from|fromTo|timeline|set|registerPlugin)\b/.test(t),
     );
-    // GSAP core only: a plugin such as MotionPathPlugin.min.js does nothing without it.
     const isGsapCoreSrc = (src: string) =>
       /(^|\/)gsap(-\d+(\.\d+)*)?(\.min)?\.js$/i.test(src.split(/[?#]/)[0] ?? "");
     const hasGsapScript = allScriptSrcs.some(isGsapCoreSrc);
