@@ -782,7 +782,7 @@ describe("capture download security boundaries", () => {
 });
 
 describe("captured font URL rewrites", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => vi.mocked(publicRequest).mockReset());
 
   it.each([
     ["", "demo.woff2?v=1", "demo.woff2?v=10"],
@@ -809,7 +809,7 @@ describe("captured font URL rewrites", () => {
         if (url === secondUrl) return new Response(new Uint8Array(secondBytes));
         throw new Error(`Unexpected font URL: ${url}`);
       });
-      vi.stubGlobal("fetch", fetch);
+      mockRequest(fetch);
       const firstRule = `@font-face{font-family:Mono;src:url(${quote}${firstUrl}${quote})}`;
       const secondRule = `@font-face{font-family:Marker;src:url(${quote}${secondUrl}${quote})}`;
 
@@ -831,8 +831,7 @@ describe("captured font URL rewrites", () => {
       const bytes = readFileSync(
         new URL("../../../../docs/public/catalog/assets/a634cb9e7783af7e.woff2", import.meta.url),
       );
-      vi.stubGlobal(
-        "fetch",
+      mockRequest(
         vi.fn(async (url: string) =>
           url.endsWith("?v=1")
             ? new Response(new Uint8Array(bytes))
@@ -860,7 +859,7 @@ describe("captured font URL rewrites", () => {
         new URL("../../../../docs/public/catalog/assets/a634cb9e7783af7e.woff2", import.meta.url),
       );
       const fetch = vi.fn(async () => new Response(new Uint8Array(bytes)));
-      vi.stubGlobal("fetch", fetch);
+      mockRequest(fetch);
       const source =
         '@font-face{font-family:Mono;src:url("https://fonts.example/demo.woff2?v=1")}\n' +
         "@font-face{font-family:Alias;src:url('https://fonts.example/demo.woff2?v=1')}";
