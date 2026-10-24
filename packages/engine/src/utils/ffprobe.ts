@@ -159,6 +159,10 @@ const finalVideoFrameTimestampSignalCaches = new WeakMap<
   Map<string, MediaProbeCacheEntry<number>>
 >();
 const audioMetadataCache = new Map<string, MediaProbeCacheEntry<AudioMetadata>>();
+const audioMetadataSignalCaches = new WeakMap<
+  AbortSignal,
+  Map<string, MediaProbeCacheEntry<AudioMetadata>>
+>();
 export interface MediaProbeCacheEntry<T = FFProbeOutput> {
   identity: string | null;
   promise: Promise<T>;
@@ -344,7 +348,19 @@ function isPngImageProbe(output: FFProbeOutput): boolean {
   );
 }
 
+const contentAddressedUrls = new Map<string, string>();
+const withoutQuery = (url: string) => url.split(/[?#]/, 1)[0] ?? url;
+
+/** A URL whose bytes can never change (its path holds their hash), so probes of it are cacheable. */
+export function declareContentAddressedUrl(url: string, sha256: string): void {
+  contentAddressedUrls.set(withoutQuery(url), sha256);
+}
+
 export function mediaFileIdentity(filePath: string): string | null {
+  if (/^https?:\/\//i.test(filePath)) {
+    const sha256 = contentAddressedUrls.get(withoutQuery(filePath));
+    return sha256 ? `sha256:${sha256}` : null;
+  }
   try {
     const stat = statSync(filePath, { bigint: true });
     return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
@@ -944,17 +960,25 @@ export async function extractAudioMetadata(
   filePath: string,
   options?: { signal?: AbortSignal },
 ): Promise<AudioMetadata> {
-  // A caller-owned abort signal cannot safely share a cached in-flight probe:
-  // cancelling one consumer would also cancel unrelated consumers. Signal-bound
-  // probes therefore bypass the process-promise cache.
+  // A probe bound to a caller's abort signal is shared only among callers of that same signal,
+  // and only when the file has an identity to key it by.
   const identity = mediaFileIdentity(filePath);
-  const cached = options?.signal
-    ? undefined
-    : readMetadataCache(audioMetadataCache, filePath, identity);
+  const signal = options?.signal;
+  if (signal && identity === null) return probeAudioMetadata(filePath, signal);
+  let cache = audioMetadataCache;
+  if (signal) {
+    cache = audioMetadataSignalCaches.get(signal) ?? new Map();
+    audioMetadataSignalCaches.set(signal, cache);
+  }
+  const cached = readMetadataCache(cache, filePath, identity);
   if (cached) return cached;
+  const probePromise = probeAudioMetadata(filePath, signal);
+  writeMetadataCache(cache, filePath, identity, probePromise);
+  return probePromise;
+}
 
-  const probePromise = (async (): Promise<AudioMetadata> => {
-    const output = await probeMediaOutput(filePath, options?.signal);
+async function probeAudioMetadata(filePath: string, signal?: AbortSignal): Promise<AudioMetadata> {
+    const output = await probeMediaOutput(filePath, signal);
     const audioStream = output.streams.find((s) => s.codec_type === "audio");
     if (!audioStream) throw new Error("[FFmpeg] No audio stream found");
 
@@ -970,7 +994,7 @@ export async function extractAudioMetadata(
         sampleRate,
         audioStartSeconds(audioStream, output.format),
         durationSeconds,
-        options?.signal,
+        signal,
       );
       if (decoded !== null) {
         durationSeconds = reconcileAudioDuration(durationSeconds, decoded, output.format);
@@ -988,11 +1012,6 @@ export async function extractAudioMetadata(
       audioStreamLeadSeconds: streamLeadSeconds(output, audioStream),
       audioStreamCount: output.streams.filter((s) => s.codec_type === "audio").length,
     };
-  })();
-
-  if (options?.signal) return probePromise;
-  writeMetadataCache(audioMetadataCache, filePath, identity, probePromise);
-  return probePromise;
 }
 
 /** Chrome's media time 0 is the earliest of these; a stream starting later plays that much in. */
