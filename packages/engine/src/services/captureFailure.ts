@@ -150,20 +150,20 @@ function ioError(error: unknown, message: string): boolean {
   );
 }
 
-// Ordered: the first matching rule names the kind.
-const KIND_RULES: readonly (readonly [CaptureFailureKind, (message: string) => boolean])[] = [
+const ORDERED_KIND_RULES: readonly (readonly [CaptureFailureKind, (message: string) => boolean])[] =
   [
-    "memory_exhaustion",
-    (message) =>
-      BUN_MEMORY_EXHAUSTION_EXACT_MESSAGE.test(message.trim()) ||
-      BUN_MEMORY_EXHAUSTION_WRAPPED_WORKER_MESSAGE.test(message) ||
-      matchesAny(message, MEMORY_EXHAUSTION_ERROR_PATTERNS),
-  ],
-  ["verification", (message) => matchesAny(message, VERIFICATION_ERROR_PATTERNS)],
-  ["protocol_timeout", (message) => matchesAny(message, PROTOCOL_TIMEOUT_PATTERNS)],
-  ["transient_browser", (message) => matchesAny(message, TRANSIENT_BROWSER_ERROR_PATTERNS)],
-  ["authoring", (message) => matchesAny(message, AUTHORING_ERROR_PATTERNS)],
-];
+    [
+      "memory_exhaustion",
+      (message) =>
+        BUN_MEMORY_EXHAUSTION_EXACT_MESSAGE.test(message.trim()) ||
+        BUN_MEMORY_EXHAUSTION_WRAPPED_WORKER_MESSAGE.test(message) ||
+        matchesAny(message, MEMORY_EXHAUSTION_ERROR_PATTERNS),
+    ],
+    ["verification", (message) => matchesAny(message, VERIFICATION_ERROR_PATTERNS)],
+    ["protocol_timeout", (message) => matchesAny(message, PROTOCOL_TIMEOUT_PATTERNS)],
+    ["transient_browser", (message) => matchesAny(message, TRANSIENT_BROWSER_ERROR_PATTERNS)],
+    ["authoring", (message) => matchesAny(message, AUTHORING_ERROR_PATTERNS)],
+  ];
 
 function classifyKind(
   error: unknown,
@@ -173,7 +173,7 @@ function classifyKind(
   if (signal?.aborted || /(?:render|capture)?_?cancelled|AbortError/i.test(message)) {
     return "cancelled";
   }
-  const rule = KIND_RULES.find(([, matches]) => matches(message));
+  const rule = ORDERED_KIND_RULES.find(([, matches]) => matches(message));
   if (rule) return rule[0];
   return ioError(error, message) ? "io" : "authoring";
 }
