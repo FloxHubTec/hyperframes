@@ -17,6 +17,8 @@ async function runFixture(onConnection: (socket: Socket) => void) {
   const sockets: Socket[] = [];
   const server = createServer((socket) => {
     sockets.push(socket);
+    // Windows resets the held socket when the child is killed; that is expected.
+    socket.on("error", () => {});
     onConnection(socket);
   });
   await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
@@ -60,7 +62,6 @@ it("exits with code 1 when the download host accepts the connection and never an
 
 it("does not call a download that keeps sending bytes a stall", async () => {
   const run = await runFixture((socket) => {
-    socket.on("error", () => {});
     socket.once("data", () => {
       socket.write("HTTP/1.1 200 OK\r\ncontent-length: 100000\r\n\r\n");
       const trickle = setInterval(() => socket.write("x"), 80);
