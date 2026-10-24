@@ -5,7 +5,7 @@ import {
 } from "@hyperframes/studio-server";
 import { ensureHfIds } from "@hyperframes/parsers/hf-ids";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { describeProject, type ProjectTimeline, type TimelineRow } from "./describeProject.js";
 import { resolveRef } from "./resolveRef.js";
 import { parseTimeExpression } from "./timeExpr.js";
@@ -18,6 +18,7 @@ import {
   diff,
   fpsFor,
   isRecord,
+  FIELDS_READ_BY_VERB,
   mutationConflict,
   positional,
   publicReceipt,
@@ -102,6 +103,17 @@ function preparePlanEdit(
       ok: false,
       reason: `unsupported edit verb ${edit.verb}`,
       fix: "use move, trim, split, delete, set, or duplicate",
+    };
+  }
+  const fields = FIELDS_READ_BY_VERB[edit.verb as MutationVerb];
+  const unused = Object.keys(edit).find(
+    (key) => key !== "verb" && key !== "ref" && !fields.includes(key),
+  );
+  if (unused) {
+    return {
+      ok: false,
+      reason: `${edit.verb} does not use ${unused}`,
+      fix: `remove ${unused}; ${edit.verb} takes ${fields.join(", ")}`,
     };
   }
   const resolved = resolveRef(timeline, edit.ref);
@@ -253,16 +265,22 @@ export async function runApply(args: Record<string, unknown>): Promise<void> {
     );
 }
 
-export async function runUndo(args: Record<string, unknown>): Promise<void> {
-  const project = resolveProject(typeof args.dir === "string" ? args.dir : undefined);
-  const json = args.json === true;
-  const input = typeof args.receipt === "string" ? args.receipt : positional(args)[1];
-  if (!input)
-    return refuse(
-      "timeline undo",
-      { reason: "an undo receipt is required", fix: "pass the receipt JSON or its file" },
-      json,
-    );
+type UndoReceipt = { file: string; version: string; backupPath: string };
+
+function isUndoReceipt(value: unknown): value is UndoReceipt {
+  return (
+    isRecord(value) &&
+    typeof value.file === "string" &&
+    typeof value.version === "string" &&
+    typeof value.backupPath === "string"
+  );
+}
+
+type UndoInput =
+  | { ok: true; receipts: UndoReceipt[]; batch: boolean }
+  | { ok: false; reason: string; fix: string };
+
+function readUndoInput(input: string): UndoInput {
   let raw: string;
   try {
     raw = readFileSync(input, "utf-8");
@@ -273,40 +291,79 @@ export async function runUndo(args: Record<string, unknown>): Promise<void> {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return refuse(
-      "timeline undo",
-      { reason: "undo receipt is not valid JSON", fix: "pass the applied JSON receipt" },
-      json,
-    );
+    return {
+      ok: false,
+      reason: "undo receipt is not valid JSON",
+      fix: "pass the applied JSON receipt",
+    };
   }
-  const value = isRecord(parsed) && isRecord(parsed.receipt) ? parsed.receipt : parsed;
-  if (
-    !isRecord(value) ||
-    typeof value.file !== "string" ||
-    typeof value.version !== "string" ||
-    typeof value.backupPath !== "string"
-  ) {
+  const value = isRecord(parsed) && "receipt" in parsed ? parsed.receipt : parsed;
+  const values: unknown[] = Array.isArray(value) ? value : [value];
+  if (!values.every(isUndoReceipt)) {
+    return {
+      ok: false,
+      reason: "undo receipt is missing file, version, or backupPath",
+      fix: "pass an applied timeline receipt",
+    };
+  }
+  return { ok: true, receipts: values, batch: Array.isArray(value) };
+}
+
+function refuseUndoError(error: unknown, projectDir: string, json: boolean): void {
+  if (isRecord(error) && error.code === "ENOENT" && typeof error.path === "string")
     return refuse(
       "timeline undo",
       {
-        reason: "undo receipt is missing file, version, or backupPath",
-        fix: "pass an applied timeline receipt",
+        reason: `undo file is missing: ${relative(projectDir, error.path).split("\\").join("/")}`,
+        fix: "restore the missing target or backup file before retrying undo",
       },
       json,
     );
+  if (isFileChanged(error))
+    return refusal(error.message, "read the latest timeline before retrying undo", json);
+  throw error;
+}
+
+export async function runUndo(args: Record<string, unknown>): Promise<void> {
+  const project = resolveProject(typeof args.dir === "string" ? args.dir : undefined, {
+    requireIndex: false,
+  });
+  const json = args.json === true;
+  const input = typeof args.receipt === "string" ? args.receipt : positional(args)[1];
+  if (!input)
+    return refuse(
+      "timeline undo",
+      { reason: "an undo receipt is required", fix: "pass the receipt JSON or its file" },
+      json,
+    );
+  const undo = readUndoInput(input);
+  if (!undo.ok) return refuse("timeline undo", undo, json);
+  let receipts: AppliedFileMutation[];
+  try {
+    const inputs = undo.receipts.map((receipt) => {
+      const target = join(project.dir, receipt.file);
+      return {
+        sourceFile: receipt.file,
+        absPath: target,
+        before: readFileSync(target, "utf-8"),
+        after: readFileSync(join(project.dir, receipt.backupPath), "utf-8"),
+        expectedVersion: receipt.version,
+      };
+    });
+    receipts = applyFileMutations(project.dir, inputs);
+  } catch (error) {
+    return refuseUndoError(error, project.dir, json);
   }
-  const backup = join(project.dir, value.backupPath);
-  const target = join(project.dir, value.file);
-  const before = readFileSync(target, "utf-8");
-  const after = readFileSync(backup, "utf-8");
-  const receipts = applyFileMutations(project.dir, [
-    { sourceFile: value.file, absPath: target, before, after, expectedVersion: value.version },
-  ]);
   const result = {
     ok: true,
     receipt: receipts.map((receipt) => publicReceipt(receipt)),
-    file: value.file,
+    file: undo.batch ? undo.receipts.map((receipt) => receipt.file) : undo.receipts[0]!.file,
   };
   if (json) console.log(JSON.stringify(withMeta(result), null, 2));
-  else console.log(`undid ${value.file}`);
+  else
+    console.log(
+      undo.batch
+        ? `undid ${receipts.length} file${receipts.length === 1 ? "" : "s"}`
+        : `undid ${undo.receipts[0]!.file}`,
+    );
 }
