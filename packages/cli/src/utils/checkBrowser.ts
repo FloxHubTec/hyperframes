@@ -1,4 +1,5 @@
 import type { CheckDeadline } from "./checkDeadline.js";
+import { logCheckProgress } from "./checkProgress.js";
 import { BrowserCleanupError, closeManagedBrowser } from "../browser/launch.js";
 import { collectMotionBlurDrafts, dropMotionBlurConsoleEcho } from "./checkMotionBlur.js";
 import { checkSnapshotDirectory } from "./checkSnapshotDirectory.js";
@@ -33,6 +34,8 @@ import type { LayoutIssue, LayoutIssueCode, LayoutRect } from "./layoutAudit.js"
 import { serveStaticProjectHtml } from "./staticProjectServer.js";
 import { collectTweenRecords, findTweenTails, tweenTailMessage } from "./gsapTweenTails.js";
 import { resolveAutoProxy } from "./projectConfig.js";
+import { findStageProxyBox } from "./compositionViewport.js";
+import type { PreviewProxyBox } from "@hyperframes/core";
 import {
   decideMediaProxyEligibility,
   proxyVariantFor,
@@ -145,7 +148,7 @@ export async function preResolveHostileMediaProxies(
   html: string,
   autoProxyOverride?: boolean,
 ): Promise<ProxyPreResolution> {
-  const none: ProxyPreResolution = { findings: [], failedPaths: new Set() };
+  const none: ProxyPreResolution = { findings: [], failedPaths: new Set(), files: [] };
   if (!resolveAutoProxy(projectDir, autoProxyOverride)) return none;
   let codecMap: Awaited<ReturnType<typeof scanProjectMediaCodecMap>>;
   try {
@@ -162,6 +165,7 @@ export async function preResolveHostileMediaProxies(
   if (hostileEntries.length === 0) return none;
 
   const startedAt = Date.now();
+  const stageBox = findStageProxyBox(html);
   const sources = hostileEntries.map(([pathname, facts]) => {
     const file = pathname.replace(/^\/+/, "");
     return {
@@ -169,10 +173,12 @@ export async function preResolveHostileMediaProxies(
       file,
       sourcePath: resolve(projectDir, file),
       variant: proxyVariantFor(facts),
+      box: stageBox,
     };
   });
   const total = hostileEntries.length;
-  const toMake = sources.filter((source) => !proxyCached(projectDir, source)).length;
+  const cached = sources.map((source) => proxyCached(projectDir, source));
+  const toMake = cached.filter((isCached) => !isCached).length;
   if (toMake > 0) {
     console.error(
       `[hyperframes] Making browser-playable copies of ${toMake} video${toMake === 1 ? "" : "s"} Chrome cannot decode. Only the first check of these files waits for this; later checks reuse the copies.`,
@@ -205,24 +211,43 @@ export async function preResolveHostileMediaProxies(
       ),
     );
   }
-  return { findings, failedPaths: new Set(failures.map(({ pathname }) => pathname)) };
+  const files = sources.map(({ file }, index): PreparedMediaFile => {
+    const result = results[index]!;
+    if (result.status === "rejected") {
+      return { file, state: "failed", reason: normalizeErrorMessage(result.reason) };
+    }
+    return { file, state: cached[index] ? "cached" : "ready" };
+  });
+  return { findings, failedPaths: new Set(failures.map(({ pathname }) => pathname)), files };
 }
 
 function proxyCached(
   projectDir: string,
-  source: { sourcePath: string; variant: ReturnType<typeof proxyVariantFor> },
+  source: {
+    sourcePath: string;
+    variant: ReturnType<typeof proxyVariantFor>;
+    box?: PreviewProxyBox;
+  },
 ): boolean {
   try {
-    return existsSync(getProxyCachePath(projectDir, source.sourcePath, source.variant));
+    return existsSync(getProxyCachePath(projectDir, source.sourcePath, source.variant, source.box));
   } catch {
     return false;
   }
+}
+
+export interface PreparedMediaFile {
+  file: string;
+  state: "ready" | "cached" | "failed";
+  reason?: string;
 }
 
 interface ProxyPreResolution {
   findings: RuntimeDraft[];
   /** Root-relative paths of the videos whose copy failed. */
   failedPaths: Set<string>;
+  /** One entry per browser-hostile video, in project order. */
+  files: PreparedMediaFile[];
 }
 
 function proxyFailedDraft(message: string): RuntimeDraft {
@@ -306,7 +331,14 @@ export async function runBrowserCheck(
     drafts.push(...blur);
     const sampleLog = sampleWindow(drafts);
     const driver = createPageDriver(page, clock, sampleLog);
-    const result = await runGrid(driver, options, motion, helpers, deadline?.enter);
+    const result = await runGrid(
+      driver,
+      options,
+      motion,
+      helpers,
+      deadline?.enter,
+      logCheckProgress,
+    );
     helperSession?.stop();
     const helper = await helperOpen?.catch(() => undefined);
     const merged = helper ? mergeHelperDrafts(sampleLog, helper.sampleLog) : drafts;

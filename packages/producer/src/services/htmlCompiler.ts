@@ -2208,7 +2208,7 @@ export async function compileForRender(
       if (analysis.isProblematic) {
         defaultLogger.warn(
           `[Compiler] WARNING: Video "${video.id}" has sparse keyframes (max interval: ${analysis.maxIntervalSeconds}s). ` +
-            `This causes seek failures and frame freezing. Re-encode with: ${reencode}`,
+            `Long GOPs can make preview seeking slower; rendering is unaffected. If preview seeking is slow, re-encode with: ${reencode}`,
         );
       }
       if (metadata.isVFR) {
@@ -2341,7 +2341,10 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
       if (!id) return;
 
       // currentSrc is authoritative for <video>/<audio><source> and responsive images.
-      const src = htmlEl.currentSrc || htmlEl.src || htmlEl.getAttribute("src") || "";
+      const ownSrc = htmlEl.getAttribute("src");
+      const blankSrc =
+        ownSrc !== null && ownSrc.trim() === "" && !htmlEl.querySelector("source[src]");
+      const src = blankSrc ? "" : htmlEl.currentSrc || htmlEl.src || ownSrc || "";
       const start = parseFloat(htmlEl.getAttribute("data-start") || "0");
       const endRaw = htmlEl.getAttribute("data-end");
       const durationRaw = htmlEl.getAttribute("data-duration");

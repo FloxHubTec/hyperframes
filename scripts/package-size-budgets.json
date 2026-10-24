@@ -1,18 +1,18 @@
 {
   "@hyperframes/aws-lambda": {
-    "packed": 70874,
-    "unpacked": 258166
+    "packed": 73369,
+    "unpacked": 266805
   },
   "@hyperframes/cli": {
     "packed": 7902966,
     "unpacked": 23722874
   },
   "@hyperframes/core": {
-    "packed": 1636442,
-    "unpacked": 3942463
+    "packed": 1645000,
+    "unpacked": 3965000
   },
   "@hyperframes/engine": {
-    "packed": 428347,
+    "packed": 428562,
     "unpacked": 1436293
   },
   "@hyperframes/gcp-cloud-run": {
@@ -52,7 +52,7 @@
     "unpacked": 24360208
   },
   "@hyperframes/studio-server": {
-    "packed": 141718,
+    "packed": 142100,
     "unpacked": 559199
   }
 }

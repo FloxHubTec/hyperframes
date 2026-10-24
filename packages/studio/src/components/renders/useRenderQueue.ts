@@ -1,4 +1,3 @@
-import { htmlInCanvasForm } from "@hyperframes/core/html-in-canvas";
 import { buildProjectApiPath } from "../../utils/projectRouting";
 import {
   useState,
@@ -24,11 +23,6 @@ import {
   serializeEncoderOptions,
   type EncoderOptionsBody,
 } from "./renderOptions";
-
-// WYSIWYG: the preview iframe runs in this browser, so a render blurs only if this one can.
-function canPreviewMotionBlur(): boolean {
-  return typeof document !== "undefined" && htmlInCanvasForm() !== null;
-}
 
 export interface RenderJob {
   id: string;
@@ -327,13 +321,11 @@ export function useRenderQueue(
         gpu?: boolean;
         telemetryDistinctId?: string;
         telemetryOptOut?: boolean;
-        previewMotionBlur: boolean;
       } & EncoderOptionsBody = {
         fps,
         quality,
         format,
         ...serializeEncoderOptions(resolved.settings),
-        previewMotionBlur: canPreviewMotionBlur(),
       };
       // The id is MINTED by getAnonymousId(), so calling it unconditionally
       // created a telemetry identity for a profile that had opted out — and

@@ -140,6 +140,11 @@ export function AdvancedRenderSettings({
       >
         Advanced
       </button>
+      {error && (
+        <p id={`${id}-rate-error`} role="alert" className="pt-2 text-step-9 text-danger-ink">
+          {error}
+        </p>
+      )}
       {open && (
         <div id={`${id}-advanced`} className="flex flex-col gap-3 pt-2">
           <div className="flex flex-col gap-1" role="group" aria-describedby={`${id}-rate-help`}>
@@ -165,11 +170,6 @@ export function AdvancedRenderSettings({
                 disabled={disabled || isMov}
                 onEdit={editRate}
               />
-            )}
-            {error && (
-              <p id={`${id}-rate-error`} role="alert" className="text-step-9 text-danger-ink">
-                {error}
-              </p>
             )}
             <p id={`${id}-rate-help`} className="text-step-9 text-text-5">
               {rateHelp(mode, settings.format, maxCrf)}

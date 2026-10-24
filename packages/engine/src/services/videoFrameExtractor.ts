@@ -81,7 +81,7 @@ import {
   type CacheEntry,
   type CacheFrameFormat,
 } from "./extractionCache.js";
-import { framePathsFromDirectory } from "./extractedFrameIndex.js";
+import { framePathsFromDirectory, frameSequencePath } from "./extractedFrameIndex.js";
 
 export { resolveProjectRelativeSrc };
 
@@ -1023,7 +1023,7 @@ async function extractVideoFramesRangeUnredacted(
   }
   const format = resolveFrameFormat(metadata, options.format);
   const framePattern = `${FRAME_FILENAME_PREFIX}%05d.${format}`;
-  const outputPattern = join(videoOutputDir, framePattern);
+  const outputPattern = frameSequencePath(videoOutputDir, framePattern);
 
   // Forced-SDR extraction tone-maps HDR with zscale, the Studio proxy policy. A macOS ffmpeg
   // without zscale falls back to VideoToolbox, whose frames stay HDR and are tone-mapped by
@@ -1566,15 +1566,10 @@ export function resolveVideoExtractionDuration(
   return resolveVideoExtractionWindow(video, metadata, timelineEnd).durationSeconds;
 }
 
-/**
- * Codecs whose bitstream is allowed to carry an alpha channel. Default the
- * extraction path to PNG output for these regardless of `metadata.hasAlpha`
- * so a missed sidecar tag doesn't silently strip transparency. Opaque content
- * encoded in one of these codecs pays a small file-size cost on the cached
- * frames but stays correct on the rare case where alpha IS present and the
- * tag was missed.
- */
+/** Codecs whose bitstream can carry alpha: decoded with the alpha-aware decoder whether or not a tag says so. */
 const ALPHA_CAPABLE_CODECS = new Set(["vp9", "vp8", "prores"]);
+/** Their alpha rides a side channel ffprobe can miss, so frames stay PNG; ProRes alpha shows in its pixel format. */
+const SIDECAR_ALPHA_CODECS = new Set(["vp9", "vp8"]);
 
 export function codecMayHaveAlpha(codec: string | undefined): boolean {
   return ALPHA_CAPABLE_CODECS.has((codec ?? "").toLowerCase());
@@ -1588,7 +1583,8 @@ export function resolveFrameFormat(
   metadata: VideoMetadata,
   requested?: VideoFrameFormat,
 ): CacheFrameFormat {
-  if (metadata.hasAlpha || codecMayHaveAlpha(metadata.videoCodec)) return "png";
+  if (metadata.hasAlpha || SIDECAR_ALPHA_CODECS.has((metadata.videoCodec ?? "").toLowerCase()))
+    return "png";
   if (requested === "png" || requested === "jpg") return requested;
   return "jpg";
 }

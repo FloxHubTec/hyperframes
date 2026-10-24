@@ -1,4 +1,5 @@
 import { BrowserCleanupError } from "../browser/launch.js";
+import type { CheckProgress } from "./checkProgress.js";
 import { CheckDeadline, CheckDeadlineError, type CheckPhase } from "./checkDeadline.js";
 import {
   checkSnapshotDirectory,
@@ -515,6 +516,7 @@ async function collectGridSamples(
   motion: MotionPlan,
   helpers: Promise<CheckAuditDriver[]>,
   enter: (phase: CheckPhase) => void,
+  report: CheckProgress,
 ): Promise<GridSamples> {
   const geometryEnabled = grid.captionSamples.length > 0 || grid.frameSamples.length > 0;
   const sets: SampleSets = {
@@ -526,11 +528,14 @@ async function collectGridSamples(
   const times = mergeSampleTimes(grid.layoutSamples, motion.times);
   const pending = times.map((_, index) => index);
   const perTime: GridSamples[] = [];
+  let finished = 0;
   const work = async (worker: CheckAuditDriver, taken: number[] = []) => {
     for (let index = pending.shift(); index !== undefined; index = pending.shift()) {
       taken.push(index);
       const time = times[index] ?? 0;
       perTime[index] = await collectSampleAt(worker, options, grid, motion, sets, time);
+      enter("samples");
+      report("samples", ++finished, times.length);
     }
   };
   const helpWith = async (helper: CheckAuditDriver) => {
@@ -567,6 +572,8 @@ async function collectGridSamples(
     collected,
     options.range,
     craftEnabled(driver, options),
+    () => enter("overlap"),
+    report,
   );
   enter("samples");
   return collected;
@@ -598,6 +605,7 @@ const OVERLAP_SAMPLE_FPS = 8;
 const OVERLAP_MAX_SAMPLES = 240;
 // Part of it re-looks at an overlap half a second on where the grid is too sparse to show it held.
 const OVERLAP_HOLD_PROBES = 60;
+const OVERLAP_BATCH = 8;
 
 function evenlyPicked(times: number[], count: number): number[] {
   if (times.length <= count) return times;
@@ -676,32 +684,54 @@ async function denseOverlapTimes(
 }
 
 /** Reruns content_overlap on a fine grid, unconditionally rather than gated on fingerprint change, since an animation aliased to the sparse grid collides between identical-fingerprint samples. */
+async function collectOverlapGridInBatches(
+  driver: CheckAuditDriver,
+  times: number[],
+  progress: () => void,
+  report: CheckProgress,
+): Promise<AnchoredLayoutIssue[][]> {
+  const issues: AnchoredLayoutIssue[][] = [];
+  const batches = Math.ceil(times.length / OVERLAP_BATCH);
+  for (let from = 0; from < times.length; from += OVERLAP_BATCH) {
+    issues.push(...(await driver.collectOverlapGrid(times.slice(from, from + OVERLAP_BATCH))));
+    progress();
+    report("overlap", from / OVERLAP_BATCH + 1, batches);
+  }
+  return issues;
+}
+
 async function collectMotionOverlapSamples(
   driver: CheckAuditDriver,
   grid: SampleGrid,
   collected: GridSamples,
   range: [number, number] | undefined,
   craft: boolean,
+  progress: () => void,
+  report: CheckProgress,
 ): Promise<void> {
   const baseTimes = new Set(grid.layoutSamples);
   const shiftedTimes = await denseOverlapTimes(driver, grid, range);
   // Before the grid: a seek after it would overwrite the span the grid stamps on what its samples queue.
   if (craft) {
-    for (const time of buildCraftSampleTimes(grid.duration)) {
-      // The render's last frame lands before the duration, where the runtime has already unmounted clips.
-      if (time >= grid.duration) continue;
+    // The render's last frame lands before the duration, where the runtime has already unmounted clips.
+    const craftTimes = buildCraftSampleTimes(grid.duration).filter((time) => time < grid.duration);
+    for (const [index, time] of craftTimes.entries()) {
       await driver.seekGeometry(time);
       collected.craftFrames.push(...(await collectCraftFrame(driver, time)));
+      progress();
+      report("craft", index + 1, craftTimes.length);
     }
   }
   const probeHold = holdProber(driver, collected, range ? range[1] : grid.duration);
-  const gridIssues = await driver.collectOverlapGrid(shiftedTimes.filter((t) => !baseTimes.has(t)));
+  const gridTimes = shiftedTimes.filter((t) => !baseTimes.has(t));
+  const gridIssues = await collectOverlapGridInBatches(driver, gridTimes, progress, report);
   let sample = 0;
   for (const [index, time] of shiftedTimes.entries()) {
     if (baseTimes.has(time)) continue;
     const issues = gridIssues[sample++] ?? [];
     collected.layoutIssues.push(...issues);
     await probeHold(time, shiftedTimes[index + 1] ?? Number.POSITIVE_INFINITY, issues);
+    progress();
   }
 }
 
@@ -1435,6 +1465,7 @@ export async function runAuditGrid(
   motion: MotionSpecResolution,
   helpers: Promise<CheckAuditDriver[]> = Promise.resolve([]),
   enter: (phase: CheckPhase) => void = () => {},
+  report: CheckProgress = () => {},
 ): Promise<CheckBrowserResult> {
   enter("samples");
   await driver.initialize(options.contrast);
@@ -1445,7 +1476,7 @@ export async function runAuditGrid(
     grid.duration,
   );
   const seekLoopStart = Date.now();
-  const collected = await collectGridSamples(driver, options, grid, plan, helpers, enter);
+  const collected = await collectGridSamples(driver, options, grid, plan, helpers, enter, report);
   const seekLoopMs = Date.now() - seekLoopStart;
 
   let motionIssues = plan.preflightIssues;

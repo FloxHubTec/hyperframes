@@ -98,7 +98,6 @@ describe("saved settings at every export entry", () => {
         hdrMode: "force-sdr",
         composition: opts?.composition ?? "parts/active.html",
         telemetryOptOut: true,
-        previewMotionBlur: false,
       });
     },
   );
@@ -123,7 +122,6 @@ describe("saved settings at every export entry", () => {
       quality: "standard",
       fps: 12,
       telemetryOptOut: true,
-      previewMotionBlur: false,
     });
   });
 
@@ -140,7 +138,6 @@ describe("saved settings at every export entry", () => {
       videoFrameFormat: "jpg",
       hdrMode: "force-hdr",
       telemetryOptOut: true,
-      previewMotionBlur: false,
     });
   });
 

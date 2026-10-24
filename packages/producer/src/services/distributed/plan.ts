@@ -51,6 +51,7 @@ import {
   normalizeVp9CpuUsed,
   resolveConfig,
   type AudioProcessingFailure,
+  declareContentAddressedUrl,
 } from "@hyperframes/engine";
 import { defaultLogger, type ProducerLogger } from "../../logger.js";
 import {
@@ -326,6 +327,8 @@ export interface BuildLocalExecutionPlanOptions {
 
 export interface RemoteProjectFile {
   readonly url: string;
+  /** A file of only this video's audio, when one was stored: the audio mix reads it, not the video. */
+  readonly audioSidecarUrl?: string;
   readonly sha256: string;
   readonly sizeBytes: number;
 }
@@ -1202,12 +1205,18 @@ async function compilePlanComposition(
   // ── Compile ──
   const remoteFiles = Object.entries(options.remoteFiles ?? {});
   const remoteLocalPath = (rel: string) => join(projectDir, ...rel.split("/"));
+  for (const [, file] of remoteFiles) declareContentAddressedUrl(file.url, file.sha256);
   // Keyed by the path each file would have had, which is what every media resolver computes.
   const urlByAbsentLocalPath = new Map(
     remoteFiles.map(([rel, file]) => [remoteLocalPath(rel), file.url]),
   );
   const localPathByUrl = new Map(
     remoteFiles.map(([rel, file]) => [file.url, remoteLocalPath(rel)]),
+  );
+  const audioSidecarUrlByLocalPath = new Map(
+    remoteFiles.flatMap(([rel, file]) =>
+      file.audioSidecarUrl ? [[remoteLocalPath(rel), file.audioSidecarUrl] as const] : [],
+    ),
   );
 
   stageStarted = Date.now();
@@ -1316,6 +1325,7 @@ async function compilePlanComposition(
     finalCompiledDir,
     remoteFiles,
     urlByAbsentLocalPath,
+    audioSidecarUrlByLocalPath,
     localPathByUrl,
     compileResult,
     compiled,
@@ -1337,6 +1347,7 @@ function mixPlanAudio(c: PlanComposition, compiledDir: string) {
     workDir: c.workDir,
     compiledDir,
     urlByAbsentLocalPath: c.urlByAbsentLocalPath,
+    audioSidecarUrlByLocalPath: c.audioSidecarUrlByLocalPath,
     totalFrames: c.totalFrames,
     fps: c.job.config.fps,
     ffmpegProcessTimeout: c.cfg.ffmpegProcessTimeout,

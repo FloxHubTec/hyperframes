@@ -388,6 +388,33 @@ describe("RenderQueue advanced export settings", () => {
     },
   );
 
+  it.each([
+    ["CRF", "52", "18"],
+    ["Target bitrate", "10MB", "1.5M"],
+  ])(
+    "keeps invalid %s feedback visible when Advanced is collapsed",
+    async (label, invalid, valid) => {
+      const onStartRender: Mock<StartRenderHandler> = vi.fn();
+      const host = mountRenderQueue(onStartRender);
+      expandAdvanced(host);
+      await chooseOption(host, "Rate control", label);
+      editInput(host, label, invalid);
+      const message = host.querySelector('[role="alert"]')?.textContent;
+      expect(message).toBeTruthy();
+      expandAdvanced(host);
+      expect(host.querySelector(`[aria-label="${label}"]`)).toBeNull();
+      expect(host.querySelector('[role="alert"]')?.textContent).toBe(message);
+      expect(exportButtonIn(host).disabled).toBe(true);
+      act(() => exportButtonIn(host).click());
+      expect(onStartRender).not.toHaveBeenCalled();
+      expandAdvanced(host);
+      expect(host.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)?.value).toBe(invalid);
+      editInput(host, label, valid);
+      expect(host.querySelector('[role="alert"]')).toBeNull();
+      expect(exportButtonIn(host).disabled).toBe(false);
+    },
+  );
+
   it("clears a CRF override on blank and keeps the legacy default callback", async () => {
     const onStartRender: Mock<StartRenderHandler> = vi.fn();
     const host = mountRenderQueue(onStartRender);

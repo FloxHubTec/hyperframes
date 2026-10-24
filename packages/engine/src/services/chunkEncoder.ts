@@ -6,6 +6,7 @@
  * Supports CPU (libx264) and GPU encoding.
  */
 
+import { frameSequencePath } from "./extractedFrameIndex.js";
 import {
   closeSync,
   copyFileSync,
@@ -46,6 +47,7 @@ import { extractAudioMetadata } from "../utils/ffprobe.js";
 import { type Fps, fpsToFfmpegArg, fpsToNumber } from "@hyperframes/core";
 import type { EncoderOptions, EncodeResult, MuxResult } from "./chunkEncoder.types.js";
 import { appendVp9CpuUsedArg } from "./vp9Options.js";
+import { appendSoftwareEncoderThreadsArg } from "./softwareEncoderThreads.js";
 import { appendRenderProvenanceArgs } from "../utils/renderProvenance.js";
 
 export type { EncoderOptions, EncodeResult, MuxResult } from "./chunkEncoder.types.js";
@@ -325,6 +327,7 @@ export function buildEncoderArgs(
     } else {
       const encoderName = codec === "h264" ? "libx264" : "libx265";
       args.push("-c:v", encoderName, "-preset", preset);
+      appendSoftwareEncoderThreadsArg(args);
       if (bitrate) args.push("-b:v", bitrate);
       else args.push("-crf", String(quality));
 
@@ -566,7 +569,7 @@ export async function encodeFramesFromDir(
     gpuEncoder = await getCachedGpuEncoder();
   }
 
-  const inputPath = join(framesDir, framePattern);
+  const inputPath = frameSequencePath(framesDir, framePattern);
   const inputArgs = ["-framerate", fpsToFfmpegArg(options.fps), "-i", inputPath];
   const args = buildEncoderArgs(options, inputArgs, outputPath, gpuEncoder);
   const encodeTimeout = config?.ffmpegEncodeTimeout ?? DEFAULT_CONFIG.ffmpegEncodeTimeout;
@@ -731,7 +734,7 @@ export async function encodeFramesChunkedConcat(
         ? ".mov"
         : ".mp4";
     const chunkPath = join(chunkDir, `chunk_${String(i).padStart(4, "0")}${ext}`);
-    const inputPath = join(framesDir, framePattern);
+    const inputPath = frameSequencePath(framesDir, framePattern);
     const inputArgs = [
       "-framerate",
       fpsToFfmpegArg(options.fps),
