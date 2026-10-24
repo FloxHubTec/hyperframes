@@ -2899,6 +2899,9 @@ async function executeRenderPipeline(input: {
   const artifactTransaction = new ArtifactTransaction(
     outputPath,
     isPngSequence || isHls ? "directory" : "file",
+    undefined,
+    undefined,
+    log,
   );
   const stagedOutputPath = artifactTransaction.stagingPath;
   const needsAlpha = outputNeedsAlpha(outputFormat);
