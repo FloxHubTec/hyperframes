@@ -64,7 +64,7 @@ const EXPECTED_STATE_NAMES = [
   "AssertChunkCount",
   "SelectWorkerProtocol",
   "RenderChunks",
-  "RenderChunksV2",
+  "RenderV2",
   "Assemble",
   "AssembleV2",
   "PlanProducedZeroChunks",
@@ -161,6 +161,24 @@ describe("HyperframesRenderStack — snapshot", () => {
     expect(actualStates.sort()).toEqual([...EXPECTED_STATE_NAMES].sort());
   });
 
+  it("warms the render function before a v2 plan only on a stack with a video function, and a failed warm-up is caught", () => {
+    const states = readSamDefinition().States;
+    const warm = requireRecord(states.WarmRender, "WarmRender state");
+    expect(sentPayload(warm)).toEqual({ Action: "warm" });
+    expect(requireRecordProperty(warm, "Parameters", "parameters").InvocationType).toBe("Event");
+    expect(warm.Next).toBe("PlanV2");
+    expect(JSON.stringify(warm.Catch)).toContain('"Next":"PlanV2"');
+    const choices = requireRecord(states.SelectPlanProtocol, "SelectPlanProtocol")
+      .Choices as Record<string, unknown>[];
+    const toWarm = choices.filter((choice) => choice.Next === "WarmRender");
+    expect(toWarm).toHaveLength(1);
+    expect(toWarm[0]).toEqual({
+      Variable: "$.PlanProtocol",
+      StringEquals: ["HasVideoFunction", "v2", "v2-without-video-function"],
+      Next: "WarmRender",
+    });
+  });
+
   it("defaults omitted plan protocol to v2 and preserves the explicit v1 branch", () => {
     for (const definition of [SYNTHED.definition, readSamDefinition()]) {
       const selection = requireRecord(
@@ -190,15 +208,7 @@ describe("HyperframesRenderStack — snapshot", () => {
       | undefined;
     const innerStates = renderChunks?.Iterator?.States ?? renderChunks?.ItemProcessor?.States ?? {};
     collectNonRetryableErrors(innerStates.RenderChunk, collected);
-    const renderChunksV2 = definition.States.RenderChunksV2 as
-      | {
-          Iterator?: { States?: Record<string, unknown> };
-          ItemProcessor?: { States?: Record<string, unknown> };
-        }
-      | undefined;
-    const innerStatesV2 =
-      renderChunksV2?.Iterator?.States ?? renderChunksV2?.ItemProcessor?.States ?? {};
-    collectNonRetryableErrors(innerStatesV2.RenderChunkV2, collected);
+    collectNonRetryableErrors(getV2TaskStates(definition).RenderChunkV2, collected);
 
     for (const expected of EXPECTED_NON_RETRYABLE_ERRORS) {
       expect({ error: expected, present: collected.has(expected) }).toEqual({
@@ -234,7 +244,7 @@ describe("HyperframesRenderStack — snapshot", () => {
     const cdkTasks = getV2TaskStates(SYNTHED.definition);
     const samTasks = getV2TaskStates(readSamDefinition());
 
-    for (const taskName of ["PlanV2", "RenderChunkV2", "AssembleV2"] as const) {
+    for (const taskName of ["PlanV2", "Audio", "RenderChunkV2", "AssembleV2"] as const) {
       const cdkErrors = new Set<string>();
       const samErrors = new Set<string>();
       collectNonRetryableErrors(cdkTasks[taskName], cdkErrors);
@@ -265,6 +275,40 @@ describe("HyperframesRenderStack — snapshot", () => {
     }
   });
 
+  it("renders v2 chunks beside the audio task and stitches both into AssembleV2, in CDK and SAM", () => {
+    for (const definition of [SYNTHED.definition, readSamDefinition()]) {
+      const renderV2 = requireRecord(definition.States.RenderV2, "RenderV2 state");
+      expect([renderV2.Type, renderV2.Next, renderV2.ResultPath]).toEqual([
+        "Parallel",
+        "AssembleV2",
+        "$.Render",
+      ]);
+      expect(renderV2.ResultSelector).toEqual({
+        "Chunks.$": "$[0].Chunks",
+        "Audio.$": "$[1].Audio",
+      });
+      expect(sentPayload(renderV2Branch(definition, "Audio"))).toMatchObject({ Action: "audio" });
+      // Only a plan that left its audio out runs the task; any other skips its Lambda.
+      expect(renderV2Branch(definition, "AudioNeeded")).toMatchObject({
+        Type: "Choice",
+        Choices: [{ Variable: "$.Plan.SeparateAudio", BooleanEquals: true, Next: "Audio" }],
+        Default: "NoAudio",
+      });
+      expect(renderV2Branch(definition, "NoAudio")).toMatchObject({
+        Type: "Pass",
+        Result: { HasAudio: false, AudioS3Uri: null },
+        ResultPath: "$.Audio",
+        End: true,
+      });
+      expect(requireRecord(definition.States.PlanV2, "PlanV2").ResultSelector).toMatchObject({
+        "SeparateAudio.$": "$.Payload.SeparateAudio",
+      });
+      expect(sentPayload(definition.States.AssembleV2)).toMatchObject({
+        "ChunkS3Uris.$": "$.Render.Chunks[*].ChunkS3Uri",
+      });
+    }
+  });
+
   it("keeps v1 and v2 locators disjoint across orchestration branches", () => {
     const { definition } = SYNTHED;
     const v1 = JSON.stringify({
@@ -274,7 +318,7 @@ describe("HyperframesRenderStack — snapshot", () => {
     });
     const v2 = JSON.stringify({
       plan: definition.States.PlanV2,
-      chunks: definition.States.RenderChunksV2,
+      chunks: renderV2Branch(definition, "RenderChunksV2"),
       assemble: definition.States.AssembleV2,
     });
     expect(v1).toContain("PlanS3Uri");
@@ -308,7 +352,7 @@ describe("HyperframesRenderStack — snapshot", () => {
     // CDK drops null-valued payload fields when it renders the definition (#5259), so compare
     // what each deployed task sends rather than the construct source.
     const cdkTasks = lambdaTasks(SYNTHED.definition.States);
-    const samTasks = lambdaTasks(readSamDefinition().States);
+    const { WarmRender: _warm, ...samTasks } = lambdaTasks(readSamDefinition().States);
     expect(Object.keys(cdkTasks).sort()).toEqual(Object.keys(samTasks).sort());
     expect(Object.keys(cdkTasks).length).toBeGreaterThanOrEqual(6);
     for (const [taskName, cdkTask] of Object.entries(cdkTasks)) {
@@ -317,6 +361,46 @@ describe("HyperframesRenderStack — snapshot", () => {
         payload: sentPayload(samTasks[taskName]),
       });
     }
+  });
+
+  it("runs plan and renderChunk on the SAM template's optional arm64 video function", () => {
+    // A chunk refuses a plan made with another ffmpeg build; warm-up, audio and assemble stay on x86.
+    const targets = Object.values(lambdaTasks(readSamDefinition().States)).map((task) => ({
+      action: sentPayload(task).Action,
+      functionName: requireRecordProperty(requireRecord(task, "task"), "Parameters", "task params")
+        .FunctionName,
+    }));
+    expect(new Set(targets.map((target) => target.action))).toEqual(
+      new Set(["warm", "plan", "renderChunk", "audio", "assemble"]),
+    );
+    for (const { action, functionName } of targets) {
+      expect({ action, functionName }).toEqual({
+        action,
+        functionName:
+          action === "plan" || action === "renderChunk"
+            ? ["HasVideoFunction", "VideoFunctionStack.Outputs.FunctionArn", "RenderFunction.Arn"]
+            : "RenderFunction.Arn",
+      });
+    }
+    const samRole = requireRecord(readSamResources().RenderStateMachineRole, "SAM role");
+    const invoke = JSON.stringify(
+      requireRecordProperty(samRole, "Properties", "SAM role properties").Policies,
+    );
+    expect(invoke).toContain(
+      '["RenderFunction.Arn",["HasVideoFunction","VideoFunctionStack.Outputs.FunctionArn"',
+    );
+  });
+
+  it("gives the nested arm64 video function every environment variable the render function gets", () => {
+    const sam = readExampleTemplate("template.yaml");
+    const render = [
+      ...envNames(sam, "Globals", "Function", "Environment", "Variables"),
+      ...envNames(sam, "Resources", "RenderFunction", "Properties", "Environment", "Variables"),
+    ];
+    const video = readExampleTemplate("video-function.yaml");
+    expect(
+      envNames(video, "Resources", "Function", "Properties", "Environment", "Variables").sort(),
+    ).toEqual([...new Set(render)].sort());
   });
 
   it("lets the render function abort the multipart uploads its S3 stitch starts", () => {
@@ -351,7 +435,9 @@ describe("HyperframesRenderStack — snapshot", () => {
   it("runs every chunk in a Distributed Map with STANDARD children in CDK and SAM", () => {
     for (const definition of [SYNTHED.definition, readSamDefinition()]) {
       for (const name of ["RenderChunks", "RenderChunksV2"]) {
-        const map = requireRecord(definition.States[name], `${name} state`);
+        const state =
+          name === "RenderChunksV2" ? renderV2Branch(definition, name) : definition.States[name];
+        const map = requireRecord(state, `${name} state`);
         const processor = requireRecordProperty(map, "ItemProcessor", `${name} processor`);
         expect({ name, config: processor.ProcessorConfig }).toEqual({
           name,
@@ -423,6 +509,7 @@ describe("HyperframesRenderStack — snapshot", () => {
   it("gives Lambda throttles a minutes-long backoff ahead of the catch-all, in CDK and SAM", () => {
     for (const definition of [SYNTHED.definition, readSamDefinition()]) {
       for (const [taskName, task] of Object.entries(lambdaTasks(definition.States))) {
+        if (taskName === "WarmRender") continue;
         expect({ taskName, ...throttleRetry(task) }).toEqual({
           taskName,
           beforeCatchAll: true,
@@ -468,23 +555,23 @@ describe("HyperframesRenderStack — snapshot", () => {
     );
   });
 
-  it("materializes null audio in the synthesized CDK v2 assembly payload", () => {
+  it("takes the audio task's track in the synthesized CDK v2 assembly payload", () => {
     const state = requireRecord(SYNTHED.definition.States.AssembleV2, "AssembleV2 state");
     const parameters = requireRecordProperty(state, "Parameters", "AssembleV2 parameters");
     const payload = requireRecordProperty(parameters, "Payload", "AssembleV2 payload");
 
-    expect(payload["AudioS3Uri.$"]).toBe("States.StringToJson('null')");
+    expect(payload["AudioS3Uri.$"]).toBe("$.Render.Audio.AudioS3Uri");
     expect(Object.hasOwn(payload, "AudioS3Uri")).toBe(false);
     expect(payload.PlanProtocol).toBe("v2");
     expect(payload["PlanV2ManifestS3Uri.$"]).toBe("$.Plan.PlanV2ManifestS3Uri");
   });
 
-  it("keeps SAM v2 assembly audio null and both v1 audio result paths", () => {
+  it("takes SAM v2 assembly audio from the audio task and keeps both v1 audio result paths", () => {
     const sam = readSamDefinition();
     const assemble = requireRecord(sam.States.AssembleV2, "SAM AssembleV2 state");
     const parameters = requireRecordProperty(assemble, "Parameters", "SAM AssembleV2 parameters");
     const payload = requireRecordProperty(parameters, "Payload", "SAM AssembleV2 payload");
-    expect(payload.AudioS3Uri).toBeNull();
+    expect(payload["AudioS3Uri.$"]).toBe("$.Render.Audio.AudioS3Uri");
 
     for (const definition of [SYNTHED.definition, sam]) {
       const v1 = requireRecord(definition.States.Assemble, "Assemble state");
@@ -588,16 +675,27 @@ function sentPayload(state: unknown): Record<string, unknown> {
   );
 }
 
+/** The state named `name` in one of the v2 Parallel's branches. */
+function renderV2Branch(definition: { States: Record<string, unknown> }, name: string): unknown {
+  const renderV2 = requireRecord(definition.States.RenderV2, "RenderV2 state");
+  const branches: unknown[] = Array.isArray(renderV2.Branches) ? renderV2.Branches : [];
+  const found = branches
+    .map((branch) => requireRecordProperty(requireRecord(branch, "branch"), "States", "states"))
+    .find((states) => name in states);
+  return requireRecord(found?.[name], `RenderV2 branch state ${name}`);
+}
+
 function getV2TaskStates(definition: {
   States: Record<string, unknown>;
-}): Record<"PlanV2" | "RenderChunkV2" | "AssembleV2", unknown> {
-  const renderChunksV2 = requireRecord(definition.States.RenderChunksV2, "RenderChunksV2 state");
+}): Record<"PlanV2" | "Audio" | "RenderChunkV2" | "AssembleV2", unknown> {
+  const renderChunksV2 = requireRecord(renderV2Branch(definition, "RenderChunksV2"), "map");
   const processor = isRecord(renderChunksV2.Iterator)
     ? renderChunksV2.Iterator
     : requireRecord(renderChunksV2.ItemProcessor, "RenderChunksV2 processor");
   const innerStates = requireRecord(processor.States, "RenderChunksV2 processor states");
   return {
     PlanV2: definition.States.PlanV2,
+    Audio: renderV2Branch(definition, "Audio"),
     RenderChunkV2: innerStates.RenderChunkV2,
     AssembleV2: definition.States.AssembleV2,
   };
@@ -624,17 +722,28 @@ function policyStatements(policy: unknown): Record<string, unknown>[] {
   return document.Statement as Record<string, unknown>[];
 }
 
-function readSamResources(): Record<string, unknown> {
+function readExampleTemplate(file: string): Record<string, unknown> {
   const source = readFileSync(
-    new URL("../../../../examples/aws-lambda/template.yaml", import.meta.url),
+    new URL(`../../../../examples/aws-lambda/${file}`, import.meta.url),
     "utf8",
   );
   // CloudFormation intrinsic tags are irrelevant to classifier parity. The
   // YAML parser preserves their scalar values while this option suppresses
   // warnings for the intentionally unresolved `!Ref`/`!GetAtt` tags.
   const parsed: unknown = parseYaml(source, { logLevel: "silent" });
-  const root = requireRecord(parsed, "SAM template");
-  return requireRecordProperty(root, "Resources", "SAM resources");
+  return requireRecord(parsed, file);
+}
+
+function readSamResources(): Record<string, unknown> {
+  return requireRecordProperty(readExampleTemplate("template.yaml"), "Resources", "SAM resources");
+}
+
+function envNames(root: Record<string, unknown>, ...path: string[]): string[] {
+  const variables = path.reduce<Record<string, unknown>>(
+    (node, key) => requireRecordProperty(node, key, key),
+    root,
+  );
+  return Object.keys(variables);
 }
 
 function readSamDefinition(): { States: Record<string, unknown> } {

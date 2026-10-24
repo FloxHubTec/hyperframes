@@ -373,6 +373,8 @@ export async function padOrTrimAudioToVideoFrameCount(
  */
 export async function constrainAacTruePeak(input: {
   audioPath: string;
+  /** The PCM `audioPath` was encoded from: a correction re-encodes it instead of decoding the AAC. */
+  sourcePath?: string;
   targetDurationSeconds: number;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -388,7 +390,7 @@ export async function constrainAacTruePeak(input: {
     targetDurationSeconds: input.targetDurationSeconds,
     signal: input.signal,
     probeTruePeak: (audioPath, signal) => measureTruePeakDbfs(audioPath, { timeoutMs, signal }),
-    encode: defaultAacEncoder(timeoutMs, input.signal),
+    encode: defaultAacEncoder(timeoutMs, input.signal, input.sourcePath),
   });
 }
 
@@ -410,7 +412,6 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
   try {
     scratchDir = mkdtempSync(join(dirname(input.audioPath), ".true-peak-"));
     const correctedPath = join(scratchDir, "audio.m4a");
-    const correctionTargetDbfs = AAC_DELIVERY_TRUE_PEAK_DBFS - AAC_TRUE_PEAK_CORRECTION_HEADROOM_DB;
     const measurements: string[] = [];
     let attenuationDb = 0;
     let measuredPath = input.audioPath;
@@ -429,9 +430,10 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
       }
       if (pass === MAX_TRUE_PEAK_CORRECTION_PASSES) break;
 
-      // Aim below the acceptance ceiling because this correction itself is
-      // another lossy AAC encode and can regenerate content-dependent peaks.
-      attenuationDb += correctionTargetDbfs - truePeakDbfs;
+      // Aim below the ceiling, twice as far each pass: the correction is another lossy AAC encode,
+      // whose peak can stall or rise over a few dB of attenuation instead of falling dB for dB.
+      const headroomDb = AAC_TRUE_PEAK_CORRECTION_HEADROOM_DB * 2 ** pass;
+      attenuationDb += AAC_DELIVERY_TRUE_PEAK_DBFS - headroomDb - truePeakDbfs;
       const result = await input.encode(
         input.audioPath,
         correctedPath,
@@ -581,12 +583,18 @@ async function defaultRunFfmpeg(
   return toStepResult(await runFfmpeg(args, { signal, timeout: timeoutMs }), timeoutMs);
 }
 
-function defaultAacEncoder(timeoutMs: number, signal?: AbortSignal): AacEncoder {
+function defaultAacEncoder(
+  timeoutMs: number,
+  signal?: AbortSignal,
+  pcmSourcePath?: string,
+): AacEncoder {
   return async (inputPath, outputPath, durationSeconds, filter) => {
-    // One encoder, as before this went through encodeAac: splitting it is a separate change.
-    const options = { signal, timeout: timeoutMs, filter, segments: 1 };
+    // Each segment decodes its input from the start: cheap from PCM, a second lossy pass from AAC.
+    const options = pcmSourcePath
+      ? { signal, timeout: timeoutMs, filter }
+      : { signal, timeout: timeoutMs, filter, segments: 1 };
     return toStepResult(
-      await encodeAac(inputPath, outputPath, durationSeconds, options),
+      await encodeAac(pcmSourcePath ?? inputPath, outputPath, durationSeconds, options),
       timeoutMs,
     );
   };

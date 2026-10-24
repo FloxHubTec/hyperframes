@@ -5,6 +5,7 @@ import { chunkCrc32 } from "./crc32.js";
 import { StringDecoder } from "node:string_decoder";
 import { basename } from "path";
 import { redactTelemetryString } from "@hyperframes/core";
+import { videoStreamHasAlpha } from "@hyperframes/parsers/media-alpha";
 import { urlInputArgs } from "./urlInput.js";
 import { FFPROBE_PATH_ENV, getFfprobeBinary } from "./ffmpegBinaries.js";
 import { ManagedChildProcess } from "./managedChildProcess.js";
@@ -227,6 +228,8 @@ export interface AudioMetadata {
   bitrate?: number;
   /** Seconds after the file's media time 0 at which its last audio or video stream starts. */
   latestStreamLeadSeconds?: number;
+  audioStreamLeadSeconds?: number;
+  audioStreamCount?: number;
 }
 
 interface FFProbeStream {
@@ -604,23 +607,6 @@ export function extractPngMetadataFromBuffer(buf: Buffer): StillImageMetadata | 
   return width > 0 && height > 0 ? { width, height, colorSpace: colorSpaceFromCicp } : null;
 }
 
-/**
- * Does this pix_fmt carry an alpha channel?
- *
- * Exported so the test asserts the shipped predicate rather than a copy of
- * the pattern. Anchored at the start, matching studio-server's
- * mediaMetadata.ts: the previous inline pattern bound its `(^|[^a-z])` anchor
- * to the first alternative only — `|` is looser than concatenation — so the
- * guard was decorative for every other name. It also missed abgr, ya8/ya16
- * and ayuv64, and its `gray[a-z0-9]*a` branch matched only gray8a/gray16a,
- * names FFmpeg renamed to ya8/ya16 in 2013. A `ya8` grayscale-plus-alpha PNG
- * reported hasAlpha:false, resolveFrameFormat picked jpg, and the overlay
- * flattened to an opaque rectangle.
- */
-export function pixelFormatHasAlpha(pixelFormat: string): boolean {
-  return /^(?:yuva|rgba|argb|bgra|abgr|gbrap|ya|ayuv)/i.test(pixelFormat);
-}
-
 function extractStillImageMetadata(filePath: string): StillImageMetadata | null {
   try {
     return extractPngMetadataFromBuffer(readFileSync(filePath));
@@ -791,16 +777,7 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
     const colorSpace =
       merged.colorTransfer || merged.colorPrimaries || merged.colorSpace ? merged : null;
     const pixelFormat = videoStream.pix_fmt || "";
-    const alphaMode = readTagCI(videoStream.tags, "alpha_mode");
-    const hasAlpha = pixelFormatHasAlpha(pixelFormat) || alphaMode === "1";
-    // Anchored at the start, matching studio-server's mediaMetadata.ts. The
-    // previous pattern bound its `(^|[^a-z])` anchor to the FIRST alternative
-    // only — `|` is looser than concatenation — so the guard was decorative
-    // for every other name. It also missed abgr, ya8/ya16 and ayuv64, and its
-    // `gray[a-z0-9]*a` branch matched only gray8a/gray16a, names FFmpeg
-    // renamed to ya8/ya16 in 2013. A `ya8` grayscale-plus-alpha PNG reported
-    // hasAlpha:false, resolveFrameFormat picked jpg, and the overlay
-    // flattened to an opaque rectangle.
+    const hasAlpha = videoStreamHasAlpha(videoStream);
 
     const containerDuration = output?.format.duration ? parseFloat(output.format.duration) : 0;
     const streamDuration = videoStream.duration ? parseFloat(videoStream.duration) : 0;
@@ -1008,6 +985,8 @@ export async function extractAudioMetadata(
       audioCodec,
       bitrate: output.format.bit_rate ? parseInt(output.format.bit_rate) : undefined,
       latestStreamLeadSeconds: latestStreamLeadSeconds(output),
+      audioStreamLeadSeconds: streamLeadSeconds(output, audioStream),
+      audioStreamCount: output.streams.filter((s) => s.codec_type === "audio").length,
     };
   })();
 
@@ -1125,8 +1104,7 @@ export interface KeyframeAnalysis {
 
 const keyframeCache = new Map<string, Promise<KeyframeAnalysis>>();
 
-/** Intervals beyond this cause seeking issues in the headless renderer and
- *  audio/video desync — the sole threshold for `isProblematic` below. */
+/** Advisory threshold for seeking cost; GOP length alone does not establish incorrect output. */
 const PROBLEMATIC_KEYFRAME_INTERVAL_SECONDS = 2;
 
 /**

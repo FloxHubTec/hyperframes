@@ -53,13 +53,16 @@ import {
   type EngineConfig,
   getEncoderPreset,
   initializeSession,
+  measureVideoShownBoxes,
   probeBeginFrameLiveness,
   readWebGlVendorInfoFromCanvas,
   resolveConfig,
+  type ShownBox,
 } from "@hyperframes/engine";
 import { defaultLogger } from "../../logger.js";
 import { applyRenderWarningPolicy, collectVideoMetadataHints } from "../renderOrchestrator.js";
 import { runEncodeStage } from "../render/stages/encodeStage.js";
+import { frameCacheOptions } from "../render/frameCacheBudget.js";
 import { runCaptureStage } from "../render/stages/captureStage.js";
 import { createCapturePlan } from "../render/capturePlan.js";
 import {
@@ -100,6 +103,7 @@ import {
   MISSING_RUNTIME_ENV_SNAPSHOT,
   rebuildExtractedFramesFromPlanDir,
   RenderChunkValidationError,
+  shownDeferredFrameIndexes,
 } from "./chunkFrames.js";
 
 export {
@@ -164,7 +168,7 @@ export interface ChunkResult {
   sessionBootMs: number;
   captureStageMs: number;
   encodeStageMs: number;
-  /** Capture workers used for this chunk (`calculateOptimalWorkers` result). */
+  /** Capture workers used for this chunk (`resolveChunkCaptureWorkers` result). */
   workers: number;
   /**
    * Effective engine mode used by every worker, after any browser fallback.
@@ -204,6 +208,25 @@ export interface RenderChunkOptions {
    * whole slice.
    */
   frameRange?: ChunkFrameRange;
+  /**
+   * Capture browsers the runtime can host. Raises the machine-wide sizing up to
+   * this many, one browser per 20 frames; never lowers it.
+   */
+  maxCaptureWorkers?: number;
+}
+
+/** A browser starts in about 3 s, a small share of 20 frames' capture. */
+const MIN_FRAMES_PER_CHUNK_BROWSER = 20;
+
+/** Capture browsers for a chunk: the machine-wide sizing, raised by the runtime's budget. */
+export function resolveChunkCaptureWorkers(
+  framesInChunk: number,
+  machineSized: number,
+  maxCaptureWorkers: number | undefined,
+): number {
+  if (maxCaptureWorkers === undefined) return machineSized;
+  const byFrames = Math.floor(framesInChunk / MIN_FRAMES_PER_CHUNK_BROWSER);
+  return Math.max(machineSized, Math.floor(Math.min(maxCaptureWorkers, byFrames)));
 }
 
 /** The frames a chunk renders: its slice, or a validated sub-range of it. */
@@ -235,6 +258,7 @@ export type ChunkRenderer = (
   planDir: string,
   chunkIndex: number,
   outputChunkPath: string,
+  options?: RenderChunkOptions,
 ) => Promise<ChunkResult>;
 
 interface DistributedCaptureSessionDependencies {
@@ -284,6 +308,26 @@ export async function createVerifiedDistributedCaptureSession(
 
 function isCaptureMode(value: string): value is CaptureMode {
   return value === "beginframe" || value === "screenshot" || value === "drawelement";
+}
+
+/** Workers of one chunk launched in different modes: one worker's BeginFrame check failed and it fell back alone. */
+export class MixedCaptureModesError extends Error {
+  constructor(readonly modes: readonly string[]) {
+    super(`[renderChunk] capture workers reported inconsistent modes: ${modes.join(",")}`);
+    this.name = "MixedCaptureModesError";
+  }
+}
+
+export function observedChunkCaptureMode(
+  perfs: readonly Pick<CapturePerfSummary, "captureMode">[],
+): CaptureMode {
+  const modes = [...new Set(perfs.map((perf) => perf.captureMode))];
+  if (modes.length > 1) throw new MixedCaptureModesError(modes);
+  const [mode] = modes;
+  if (!mode || !isCaptureMode(mode)) {
+    throw new Error(`[renderChunk] capture workers reported an invalid mode: ${mode ?? "<none>"}`);
+  }
+  return mode;
 }
 
 /**
@@ -623,21 +667,12 @@ export async function renderChunk(
     // Beside workDir, not in it: a screenshot retry wipes workDir.
     const videoFramesDir = `${workDir}.video-frames`;
 
-    // Build the immutable frame lookup once. Each browser session/worker gets
-    // its own injector hook because the hook remembers the last injected frame
-    // per video; sharing that state across a fresh retry page can suppress the
-    // first injection and produce a blank/stale frame.
-    const deferredVideoFrames = planVideos
-      ? await extractDeferredVideoFramesForChunk({
-          planDir,
-          planVideos,
-          frames: Array.from({ length: framesInChunk }, (_, i) => range.startFrame + i),
-          fps: { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen },
-          outputRoot: videoFramesDir,
-          cfg,
-          remoteSources,
-        })
-      : [];
+    const chunkFrameNumbers = Array.from({ length: framesInChunk }, (_, i) => range.startFrame + i);
+    const chunkFps = { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen };
+    const deferredVideos = planVideos?.extracted.filter((video) => video.deferredRange) ?? [];
+    const shownFrames = planVideos
+      ? shownDeferredFrameIndexes(planVideos, chunkFrameNumbers, chunkFps)
+      : new Map<string, Set<number>>();
     // The browser cannot load a source read by URL; size its <video> from the plan instead.
     const remoteVideoIds = new Set(
       planVideos?.extracted
@@ -647,23 +682,6 @@ export async function renderChunk(
         )
         .map((video) => video.videoId),
     );
-    const remoteVideos = deferredVideoFrames.filter((video) => remoteVideoIds.has(video.videoId));
-    const videoFrameLookup =
-      planVideos && planVideos.extracted.length > 0
-        ? createFrameLookupTable(
-            planVideos.videos,
-            [
-              ...rebuildExtractedFramesFromPlanDir(
-                planDir,
-                planVideos.extracted.filter((video) => !video.deferredRange),
-                v2Manifest === null ? "dense-v1" : "sparse-v2",
-              ),
-              ...deferredVideoFrames,
-            ],
-            resolveRenderFpsConfig(job.config.fps).value,
-          )
-        : null;
-    const createChunkVideoFrameInjector = createChunkVideoFrameInjectorFactory(videoFrameLookup);
 
     // ── File server with the seeded-random shim ──
     // `Math.random` / `crypto.getRandomValues` are seeded from virtual
@@ -684,10 +702,14 @@ export async function renderChunk(
       videoCount: planVideos?.videos.length ?? 0,
       html: readFileSync(join(compiledDir, "index.html"), "utf-8"),
       // The plan ships a deferred source only to chunks that show it; don't wait on the rest.
-      skipReadinessVideoIds: deferredVideoFrames
-        .filter((video) => video.framePaths.size === 0 || remoteVideoIds.has(video.videoId))
+      skipReadinessVideoIds: deferredVideos
+        .filter(
+          (video) => !shownFrames.get(video.videoId)?.size || remoteVideoIds.has(video.videoId),
+        )
         .map((video) => video.videoId),
-      videoMetadataHints: collectVideoMetadataHints(remoteVideos),
+      videoMetadataHints: collectVideoMetadataHints(
+        deferredVideos.filter((video) => remoteVideoIds.has(video.videoId)),
+      ),
     });
 
     // Resolve worker count up-front. Sequential capture reuses the initialized
@@ -701,7 +723,11 @@ export async function renderChunk(
     // `PlanJson` doesn't carry the compiled hints needed to call it
     // directly. The existing adaptive-retry path reduces workers if
     // compositor contention surfaces as CDP timeouts.
-    const chunkWorkerCount = calculateOptimalWorkers(framesInChunk, undefined, cfg);
+    const chunkWorkerCount = resolveChunkCaptureWorkers(
+      framesInChunk,
+      calculateOptimalWorkers(framesInChunk, undefined, cfg),
+      options?.maxCaptureWorkers,
+    );
 
     // ── Browser + warmup ──
     let session: CaptureSession | null = null;
@@ -717,6 +743,8 @@ export async function renderChunk(
     const capturePerfs: CapturePerfSummary[] = [];
     const captureAttempts: Parameters<typeof runCaptureStage>[0]["captureAttempts"] = [];
     let forceScreenshotForChunk = encoder.forceScreenshot;
+    let shownBoxes: Map<string, ShownBox> | undefined;
+    let extraction: Promise<unknown> | undefined;
     try {
       if (chunkWorkerCount === 1 || !forceScreenshotForChunk) {
         // Sequential capture reuses this session. Parallel BeginFrame capture
@@ -738,6 +766,12 @@ export async function renderChunk(
           cfg,
         );
         sessionBootMs = Date.now() - bootStarted;
+        // Measured before extraction so each video is extracted at the size it is drawn.
+        shownBoxes = await measureVideoShownBoxes(
+          session.page,
+          [...shownFrames.keys()],
+          chunkFrameNumbers.map((frame) => (frame * chunkFps.den) / chunkFps.num),
+        );
         // `discardWarmupCapture` is intentionally NOT called: every frame
         // seeks fresh DOM, so `lastFrameCache` is never read; priming it
         // would deadlock Chrome's compositor by issuing a second beginFrame
@@ -783,6 +817,47 @@ export async function renderChunk(
           session = null;
         }
       }
+
+      // Build the immutable frame lookup once. Each browser session/worker gets
+      // its own injector hook because the hook remembers the last injected frame
+      // per video; sharing that state across a fresh retry page can suppress the
+      // first injection and produce a blank/stale frame.
+      const deferredVideoFrames = planVideos
+        ? extractDeferredVideoFramesForChunk({
+            planDir,
+            planVideos,
+            frames: chunkFrameNumbers,
+            fps: chunkFps,
+            outputRoot: videoFramesDir,
+            cfg,
+            remoteSources,
+            shownBoxes,
+          })
+        : Promise.resolve([]);
+      extraction = deferredVideoFrames;
+      const videoFrameLookup =
+        planVideos && planVideos.extracted.length > 0
+          ? deferredVideoFrames.then((deferred) =>
+              createFrameLookupTable(
+                planVideos.videos,
+                [
+                  ...rebuildExtractedFramesFromPlanDir(
+                    planDir,
+                    planVideos.extracted.filter((video) => !video.deferredRange),
+                    v2Manifest === null ? "dense-v1" : "sparse-v2",
+                  ),
+                  ...deferred,
+                ],
+                resolveRenderFpsConfig(job.config.fps).value,
+              ),
+            )
+          : null;
+      // A capture can fail before any session reads it; the failure is rethrown below.
+      videoFrameLookup?.catch(() => {});
+      const createChunkVideoFrameInjector = createChunkVideoFrameInjectorFactory(
+        videoFrameLookup,
+        frameCacheOptions(cfg, chunkWorkerCount),
+      );
 
       const captureStarted = Date.now();
       captureMode = await runCaptureWithScreenshotFallback({
@@ -843,18 +918,7 @@ export async function renderChunk(
             frameRange: range,
           });
 
-          const observedModes = new Set(capturePerfs.map((perf) => perf.captureMode));
-          if (observedModes.size !== 1 || ![...observedModes].every(isCaptureMode)) {
-            throw new Error(
-              `[renderChunk] capture workers reported invalid or inconsistent modes: ` +
-                `${[...observedModes].join(",") || "<none>"}`,
-            );
-          }
-          const [observedMode] = observedModes;
-          if (!observedMode || !isCaptureMode(observedMode)) {
-            throw new Error("[renderChunk] capture completed without an observed mode");
-          }
-          return observedMode;
+          return observedChunkCaptureMode(capturePerfs);
         },
         resetForScreenshotRetry: () => {
           // A mode switch is a whole-chunk retry. Do not allow successfully
@@ -875,7 +939,11 @@ export async function renderChunk(
             },
           );
         },
+      }).catch(async (captureError: unknown) => {
+        await deferredVideoFrames;
+        throw captureError;
       });
+      await deferredVideoFrames;
       captureStageMs = Date.now() - captureStarted;
       applyRenderWarningPolicy(
         job,
@@ -973,6 +1041,8 @@ export async function renderChunk(
       }
       encodeStageMs = Date.now() - encodeStarted;
     } finally {
+      // No ffmpeg left writing into a work dir the caller removes; its error surfaced above.
+      await extraction?.catch(() => {});
       // Cleanest path: captureStage closed the session for us. The defensive
       // close handles error paths where we threw before delegating.
       if (session) {
@@ -1009,6 +1079,8 @@ export async function renderChunk(
       encodeStageMs,
       workers: chunkWorkerCount,
       captureMode,
+      // Device-pixel box each video's frames were extracted to cover; a video not listed kept full size.
+      videoShownBoxes: Object.fromEntries(shownBoxes ?? []),
       sha256,
       outputKind,
       producerVersion: plan.producerVersion,

@@ -14,6 +14,7 @@ import { createConcurrencyLimit } from "../utils/concurrencyLimit.js";
 import { parseHTML } from "linkedom";
 import { isPathInside } from "@hyperframes/parsers/asset-paths";
 import { resolveProjectRelativeSrc } from "@hyperframes/parsers/asset-resolution";
+import { alphaDecoderFor } from "@hyperframes/parsers/media-alpha";
 import {
   MEDIA_RENDER_ID_ATTR,
   isAudibleVideoElement,
@@ -80,7 +81,7 @@ import {
   type CacheEntry,
   type CacheFrameFormat,
 } from "./extractionCache.js";
-import { framePathsFromDirectory } from "./extractedFrameIndex.js";
+import { framePathsFromDirectory, frameSequencePath } from "./extractedFrameIndex.js";
 
 export { resolveProjectRelativeSrc };
 
@@ -253,6 +254,7 @@ export interface ExtractionOptions {
   /** Directories the caller rewrites on every render (downloaded media); their sources are cached by content. */
   contentKeyedDirs?: readonly string[];
   urlByAbsentLocalPath?: ReadonlyMap<string, string>;
+  shownBox?: { width: number; height: number };
 }
 
 const DOWNLOAD_SUBDIR = "_downloads";
@@ -263,6 +265,14 @@ const SDR_TO_HDR_COLORSPACE_FILTER = "colorspace=all=bt2020:iall=bt709:range=tv"
 const HDR_TO_SDR_ZSCALE_TRANSFORM_KEY = "hdr2sdr-hable-srgb";
 const HDR_TO_SDR_VIDEOTOOLBOX_TRANSFORM_KEY = "hdr2sdr-videotoolbox-hdr";
 const SDR_CANVAS_PASSTHROUGH_FILTER = "setparams=color_primaries=bt709:color_trc=iec61966-2-1";
+function halveToCoverScaleFilter(box: { width: number; height: number }): string {
+  const fit = `max(${Math.ceil(box.width)}/iw\\,${Math.ceil(box.height)}/ih)`;
+  const halvings = `floor(log(1/${fit})/log(2))`;
+  const side = (dim: "iw" | "ih") =>
+    `if(lt(${fit}\\,0.5)\\,2*ceil(${dim}/pow(2\\,${halvings})/2)\\,${dim})`;
+  return `scale=w=${side("iw")}:h=${side("ih")}:flags=area+accurate_rnd`;
+}
+
 const SDR_JPEG_AS_BT601_FULL_RANGE_FILTER =
   "scale=flags=neighbor+accurate_rnd,format=gbrp,scale=out_color_matrix=bt601:out_range=pc:flags=neighbor,format=yuv420p";
 
@@ -758,7 +768,7 @@ export function parseVideoElements(html: string): VideoElement[] {
       mediaStart: readMediaStart(el),
       playbackRate: readElementRateSpec(el),
       loop: el.hasAttribute("loop"),
-      hasAudio: hasAudioAttr === "true",
+      hasAudio: hasAudioAttr === "true" && isAudibleVideoElement(el),
       ...(isSelfOrAncestorHidden(el) ||
       (isAudibleVideoElement(el) && isMemberGroupHidden(groupsById, el))
         ? { hidden: true }
@@ -1013,7 +1023,7 @@ async function extractVideoFramesRangeUnredacted(
   }
   const format = resolveFrameFormat(metadata, options.format);
   const framePattern = `${FRAME_FILENAME_PREFIX}%05d.${format}`;
-  const outputPattern = join(videoOutputDir, framePattern);
+  const outputPattern = frameSequencePath(videoOutputDir, framePattern);
 
   // Forced-SDR extraction tone-maps HDR with zscale, the Studio proxy policy. A macOS ffmpeg
   // without zscale falls back to VideoToolbox, whose frames stay HDR and are tone-mapped by
@@ -1094,7 +1104,10 @@ async function extractVideoFramesRangeUnredacted(
       ...(isHdr ? [] : chromeGuessForUntaggedMatrix(metadata)),
       SDR_CANVAS_PASSTHROUGH_FILTER,
     );
-    if (format === "jpg") vfFilters.push(SDR_JPEG_AS_BT601_FULL_RANGE_FILTER);
+    if (format === "jpg") {
+      if (options.shownBox) vfFilters.push(halveToCoverScaleFilter(options.shownBox));
+      vfFilters.push(SDR_JPEG_AS_BT601_FULL_RANGE_FILTER);
+    }
   }
   const encodeArgs = ["-q:v", format === "jpg" ? String(Math.ceil((100 - quality) / 3)) : "0"];
   // Render-scoped temp frames are read once; level 1 measured 3-5x faster for ~14% larger files.
@@ -1553,32 +1566,25 @@ export function resolveVideoExtractionDuration(
   return resolveVideoExtractionWindow(video, metadata, timelineEnd).durationSeconds;
 }
 
-/**
- * Codecs whose bitstream is allowed to carry an alpha channel. Default the
- * extraction path to PNG output for these regardless of `metadata.hasAlpha`
- * so a missed sidecar tag doesn't silently strip transparency. Opaque content
- * encoded in one of these codecs pays a small file-size cost on the cached
- * frames but stays correct on the rare case where alpha IS present and the
- * tag was missed.
- */
+/** Codecs whose bitstream can carry alpha: decoded with the alpha-aware decoder whether or not a tag says so. */
 const ALPHA_CAPABLE_CODECS = new Set(["vp9", "vp8", "prores"]);
+/** Their alpha rides a side channel ffprobe can miss, so frames stay PNG; ProRes alpha shows in its pixel format. */
+const SIDECAR_ALPHA_CODECS = new Set(["vp9", "vp8"]);
 
 export function codecMayHaveAlpha(codec: string | undefined): boolean {
   return ALPHA_CAPABLE_CODECS.has((codec ?? "").toLowerCase());
 }
 
 export function decoderForCodec(codec: string | undefined): string {
-  const c = (codec ?? "").toLowerCase();
-  if (c === "vp9") return "libvpx-vp9";
-  if (c === "vp8") return "libvpx";
-  return c;
+  return alphaDecoderFor(codec) ?? (codec ?? "").toLowerCase();
 }
 
 export function resolveFrameFormat(
   metadata: VideoMetadata,
   requested?: VideoFrameFormat,
 ): CacheFrameFormat {
-  if (metadata.hasAlpha || codecMayHaveAlpha(metadata.videoCodec)) return "png";
+  if (metadata.hasAlpha || SIDECAR_ALPHA_CODECS.has((metadata.videoCodec ?? "").toLowerCase()))
+    return "png";
   if (requested === "png" || requested === "jpg") return requested;
   return "jpg";
 }

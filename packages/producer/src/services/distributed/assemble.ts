@@ -40,6 +40,7 @@ import {
   muxVideoWithAudio,
   resolveConfig,
   runFfmpeg,
+  appendSoftwareEncoderThreadsArg,
 } from "@hyperframes/engine";
 import { fpsToFfmpegArg } from "@hyperframes/core";
 import { defaultLogger, type ProducerLogger } from "../../logger.js";
@@ -147,7 +148,8 @@ export async function assemble(
   }
 
   if (chunksAreStitchedMp4(planDir, cfr)) {
-    await writeStitchedMp4(chunkPaths, outputPath);
+    const separateAudio = stitchesSeparateAudio(planDir) && audioPath !== null;
+    await writeStitchedMp4(chunkPaths, outputPath, separateAudio ? audioPath : undefined);
     return {
       outputPath,
       durationMs: Date.now() - start,
@@ -266,6 +268,27 @@ function videoInputArgs(ctx: JoinContext, videoSources: readonly string[]): stri
     : concatDemuxerInput(videoSources, ctx.workDir, ctx.fpsArg);
 }
 
+export function cfrEncodeArgs(
+  inputArgs: string[],
+  encoder: CfrRateControlSource,
+  fpsArg: string,
+): string[] {
+  const args = [
+    ...inputArgs,
+    "-c:v",
+    "libx264",
+    ...cfrRateControlArgs(encoder),
+    "-pix_fmt",
+    "yuv420p",
+    "-fps_mode",
+    "cfr",
+    "-r",
+    fpsArg,
+  ];
+  appendSoftwareEncoderThreadsArg(args);
+  return args;
+}
+
 // ── 2c. Optional exact-CFR re-encode ──────────────────────────────────
 // Lands the stream-level `avg_frame_rate` (PTS-derived under stream copy)
 // on the requested rational, for consumers that strict-check it.
@@ -275,18 +298,7 @@ async function reencodeCfr(
   encoder: CfrRateControlSource,
 ): Promise<string> {
   const cfrOutputPath = join(ctx.workDir, `cfr.${ctx.format}`);
-  const cfrArgs = [
-    ...videoInputArgs(ctx, chunkPaths),
-    "-c:v",
-    "libx264",
-    ...cfrRateControlArgs(encoder),
-    "-pix_fmt",
-    "yuv420p",
-    "-fps_mode",
-    "cfr",
-    "-r",
-    ctx.fpsArg,
-  ];
+  const cfrArgs = cfrEncodeArgs(videoInputArgs(ctx, chunkPaths), encoder, ctx.fpsArg);
   appendRenderProvenanceArgs(cfrArgs, cfrOutputPath);
   cfrArgs.push("-y", cfrOutputPath);
   await ctx.timed("cfrMs", () =>
@@ -399,22 +411,32 @@ async function runAssembleFfmpeg(
   }
 }
 
-/** Chunks that carry their audio are stitched under one index, the same bytes as the S3 stitch. */
+/** Mp4 chunks carrying audio, or with it as a separate file, stitch under one index like S3's. */
 export function chunksAreStitchedMp4(planDir: string, cfr: boolean): boolean {
-  if (!chunksCarryAudio(planDir)) return false;
+  const { chunksCarryAudio, separateAudio } = lockedAudio(planDir);
+  if (!chunksCarryAudio && !separateAudio) return false;
+  if (planFormat(planDir) !== "mp4") return false;
   if (cfr) {
-    throw new Error("[assemble] cfr=true cannot re-encode a plan whose mp4 chunks carry audio");
+    throw new Error("[assemble] cfr=true cannot re-encode a plan whose mp4 chunks are stitched");
   }
   return true;
 }
 
-function chunksCarryAudio(planDir: string): boolean {
+export function stitchesSeparateAudio(planDir: string): boolean {
+  return lockedAudio(planDir).separateAudio === true;
+}
+
+function planFormat(planDir: string): DistributedFormat {
+  const plan = JSON.parse(readFileSync(join(planDir, "plan.json"), "utf-8")) as PlanJsonForAssemble;
+  return plan.dimensions.format;
+}
+
+function lockedAudio(
+  planDir: string,
+): Pick<LockedRenderConfig, "chunksCarryAudio" | "separateAudio"> {
   const encoderJsonPath = join(planDir, "meta", "encoder.json");
-  if (!existsSync(encoderJsonPath)) return false;
-  return (
-    (JSON.parse(readFileSync(encoderJsonPath, "utf-8")) as LockedRenderConfig).chunksCarryAudio ===
-    true
-  );
+  if (!existsSync(encoderJsonPath)) return {};
+  return JSON.parse(readFileSync(encoderJsonPath, "utf-8")) as LockedRenderConfig;
 }
 
 /**

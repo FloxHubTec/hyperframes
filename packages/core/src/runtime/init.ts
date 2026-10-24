@@ -11,6 +11,7 @@ import {
   revealTimedClipsAfterFirstPass,
   SKIPPED_CLIP,
   showHiddenClips,
+  defersMedia,
   skipsHiddenImages,
 } from "./timedClipHide";
 import {
@@ -125,6 +126,12 @@ import { applyVariableBindings, unproxiedMediaSrc } from "./applyVariableBinding
 import { createColorGradingRuntime, type RuntimeColorGradingApi } from "./colorGrading";
 import { COLOR_GRADING_AUTHORED_OPACITY_ATTR } from "../colorGrading";
 import { initVfx, paintVfx } from "./vfx";
+import {
+  captureMotionBlurBusy,
+  initCaptureMotionBlur,
+  paintCaptureMotionBlur,
+  releaseCaptureMotionBlurFrame,
+} from "./captureMotionBlur";
 import { TransportClock } from "./clock";
 import { WebAudioTransport } from "./webAudioTransport";
 import {
@@ -1389,6 +1396,13 @@ export function initSandboxRuntimeModular(): void {
     const ours = compositionTimingObserver?.takeRecords() ?? [];
     if (pending.length > 0 || ours.some((record) => record.target !== el))
       invalidateCompositionTimingCaches();
+  };
+
+  const withoutOwnCompositionRecords = (write: () => void) => {
+    const pending = compositionTimingObserver?.takeRecords() ?? [];
+    write();
+    compositionTimingObserver?.takeRecords();
+    if (pending.length > 0) invalidateCompositionTimingCaches();
   };
 
   const watchCompositionTimingInputs = () => {
@@ -2809,6 +2823,7 @@ export function initSandboxRuntimeModular(): void {
   };
 
   const hiddenImagesSkipped = skipsHiddenImages();
+  const mediaDeferred = defersMedia();
   const LOOKAHEAD_SECONDS = 2;
   const RELEASE_LOOKAHEAD_SECONDS = 4;
   // Unskipped while within the window on either side of the playhead, so a step or shuttle back
@@ -2834,7 +2849,7 @@ export function initSandboxRuntimeModular(): void {
   // A clip with no authored length loads as in a render: a reload would drop the duration it is
   // timed by.
   const inPreloadWindow = (el: HTMLMediaElement) =>
-    hiddenImagesSkipped && el.hasAttribute("data-start") && lengthIsAuthored(el);
+    mediaDeferred && el.hasAttribute("data-start") && lengthIsAuthored(el);
 
   // Media on screen or due within the look-ahead loads; the rest stops holding a connection to
   // the origin that also serves Studio's thumbnails.
@@ -2845,6 +2860,39 @@ export function initSandboxRuntimeModular(): void {
   const armedFrom = new WeakSet<HTMLMediaElement>();
   // An untracked clip (NaN) shares a track with nothing, as in the timeline payload.
   const hostOf = (el: Element) => el.parentElement?.closest("[data-composition-id]");
+  // Clips due soon fetch a few at a time, earliest first: a fast cut sequence has dozens inside the
+  // look-ahead, and fetching them all queues the clip that is due behind clips that are not.
+  const PREFETCH_SLOTS = 3;
+  const prefetching = new Set<HTMLMediaElement>();
+  const waitingForSlot = new Set<HTMLMediaElement>();
+  const PREFETCH_SETTLED_EVENTS = ["canplay", "suspend", "error"];
+  const endPrefetch = (el: HTMLMediaElement) => {
+    for (const type of PREFETCH_SETTLED_EVENTS) el.removeEventListener(type, onPrefetchSettled);
+    return prefetching.delete(el);
+  };
+  const onPrefetchSettled = (event: Event) => {
+    const el = event.currentTarget as HTMLMediaElement;
+    // A load() queues a suspend of the stopped fetch before the new one starts; only a playable clip is done.
+    if (event.type !== "error" && el.readyState < 3) return;
+    endPrefetch(el);
+    fillPrefetchSlots();
+  };
+  const fillPrefetchSlots = () => {
+    const earliestFirst = Array.from(waitingForSlot)
+      .filter((el) => el.isConnected)
+      .sort((a, b) => resolveAbsoluteMediaStartSeconds(a) - resolveAbsoluteMediaStartSeconds(b));
+    for (const el of earliestFirst) {
+      if (prefetching.size >= PREFETCH_SLOTS) break;
+      waitingForSlot.delete(el);
+      syncTimedElementVisibility(state.currentTime, [el]);
+    }
+  };
+  const startPrefetch = (el: HTMLMediaElement) => {
+    preloadMedia(el);
+    if (prefetching.has(el) || el.readyState >= 3) return;
+    prefetching.add(el);
+    for (const type of PREFETCH_SETTLED_EVENTS) el.addEventListener(type, onPrefetchSettled);
+  };
   const armNextOnTrack = (el: HTMLMediaElement) => {
     const track = parseAuthoredTrack(el, Number.NaN);
     const clips = buildRuntimeMediaCache(
@@ -2866,10 +2914,17 @@ export function initSandboxRuntimeModular(): void {
     armedBy.set(next.el, el);
     if (mediaNearPlayhead.get(next.el) !== true) {
       mediaNearPlayhead.set(next.el, true);
-      preloadMedia(next.el);
+      waitingForSlot.delete(next.el);
+      startPrefetch(next.el);
     }
   };
-  const preloadNearPlayhead = (el: HTMLMediaElement, visible: boolean, upcoming: boolean) => {
+  const preloadNearPlayhead = (
+    el: HTMLMediaElement,
+    visible: boolean,
+    upcoming: boolean,
+    time: number,
+    forLoop: boolean,
+  ) => {
     const playing = clock.isPlaying();
     if (!(visible && playing)) armedFrom.delete(el);
     else if (!armedFrom.has(el)) {
@@ -2878,8 +2933,21 @@ export function initSandboxRuntimeModular(): void {
     }
     // An arm lasts while the clip that set it plays on screen, so a jump away drops it.
     const armer = armedBy.get(el);
-    const near = visible || upcoming || (armer !== undefined && armedFrom.has(armer));
+    const armed = armer !== undefined && armedFrom.has(armer);
     const decided = mediaNearPlayhead.get(el);
+    const unslotted = !visible && !armed && decided !== true && prefetching.size >= PREFETCH_SLOTS;
+    if (unslotted && upcoming) waitingForSlot.add(el);
+    else waitingForSlot.delete(el);
+    // While playing, a clip that has passed is not fetched again, and one still downloading is released:
+    // either only takes bandwidth from the next ones. A loaded clip stays for a scrub back.
+    const passed =
+      !visible &&
+      !forLoop &&
+      playing &&
+      resolveAbsoluteMediaStartSeconds(el) + (resolveDurationForElement(el) ?? Number.NaN) <= time;
+    const spent = passed && (decided !== true || (el.networkState === 2 && el.readyState < 4));
+    const near = visible || armed || (upcoming && !unslotted && !spent);
+    if ((visible || !near) && endPrefetch(el)) queueMicrotask(fillPrefetchSlots);
     if (decided === near) return;
     mediaNearPlayhead.set(el, near);
     if (!near) {
@@ -2890,21 +2958,24 @@ export function initSandboxRuntimeModular(): void {
       }
     } else if (!visible || decided === undefined) {
       // Not a clip a jump lands on: the media sync arms that one, and load() would undo its seek.
-      preloadMedia(el);
+      if (visible) preloadMedia(el);
+      else startPrefetch(el);
     }
   };
   // Held past the look-ahead so a scrub across its edge does not refetch, and while playing when
   // due at the loop start.
+  const dueAtLoopStart = (el: HTMLMediaElement, visibleAt: ReturnType<typeof timedVisibilityAt>) =>
+    loopStartSeconds !== null &&
+    clock.isPlaying() &&
+    (visibleAt(el, loopStartSeconds) ||
+      dueSoon(el, visibleAt, loopStartSeconds, RELEASE_LOOKAHEAD_SECONDS));
   const mediaStaysDue = (
     el: HTMLMediaElement,
     visibleAt: ReturnType<typeof timedVisibilityAt>,
     t: number,
   ) =>
     (mediaNearPlayhead.get(el) === true && dueSoon(el, visibleAt, t, RELEASE_LOOKAHEAD_SECONDS)) ||
-    (loopStartSeconds !== null &&
-      clock.isPlaying() &&
-      (visibleAt(el, loopStartSeconds) ||
-        dueSoon(el, visibleAt, loopStartSeconds, RELEASE_LOOKAHEAD_SECONDS)));
+    dueAtLoopStart(el, visibleAt);
 
   const visibilityDecided = new WeakMap<Element, boolean>();
   // Every time at which an element's visibility, upcoming or preload decision can flip: its own window
@@ -3028,7 +3099,9 @@ export function initSandboxRuntimeModular(): void {
       if (!isRuntimeStamped) rawNode.style.visibility = isVisibleNow ? "visible" : "hidden";
       rawNode.toggleAttribute(CLIP_HIDDEN_ATTR, !isRuntimeStamped && !isVisibleNow);
       const upcoming =
-        hiddenImagesSkipped && !isVisibleNow && dueSoon(rawNode, visibleAt, currentTime);
+        (hiddenImagesSkipped || mediaDeferred) &&
+        !isVisibleNow &&
+        dueSoon(rawNode, visibleAt, currentTime);
       if (upcoming && !rawNode.hasAttribute(STUDIO_PREVIEW_UPCOMING_ATTR))
         loadPreviewImagesIn(rawNode);
       rawNode.toggleAttribute(STUDIO_PREVIEW_UPCOMING_ATTR, upcoming);
@@ -3037,6 +3110,8 @@ export function initSandboxRuntimeModular(): void {
           rawNode,
           isVisibleNow,
           upcoming || mediaStaysDue(rawNode, visibleAt, currentTime),
+          currentTime,
+          dueAtLoopStart(rawNode, visibleAt),
         );
       if (!isMediaElement(rawNode) && !isImageElement(rawNode)) decidedTimedClip = true;
       if (isVideoElement(rawNode) || isImageElement(rawNode)) {
@@ -3400,8 +3475,8 @@ export function initSandboxRuntimeModular(): void {
         cueAheadSeconds,
         getCompositionDuration: () =>
           getSafeTimelineDurationSeconds(state.capturedTimeline, 0, timingRevision),
-        onElementVolume: (el, _effectiveVolume, authorVolume) =>
-          webAudio.setElementVolume(el, authorVolume),
+        onElementVolume: (el, _effectiveVolume, authorVolume, clipGain) =>
+          webAudio.setElementVolume(el, authorVolume, clipGain),
         isWebAudioOwned: (el) => webAudio.ownsElement(el),
         isWebAudioRouted: (el) => webAudio.routesElement(el),
         onAutoplayBlocked: () => {
@@ -3659,6 +3734,26 @@ export function initSandboxRuntimeModular(): void {
 
   // Passes that must see scene DOM, which arrives after init: when scenes mount, or when one is
   // swapped. Resolves when caption overrides have landed.
+  // Capture motion blur (data-motion-blur="on" on the root). Its pose reads seek the timeline
+  // and adapters only: media and transport bookkeeping stay on the frame's seek.
+  function initMotionBlur(): void {
+    const root = resolveRootCompositionElement();
+    if (!root) return;
+    initCaptureMotionBlur({
+      root,
+      fps: state.canonicalFps,
+      durationSeconds: () =>
+        getSafeTimelineDurationSeconds(state.capturedTimeline, 0) ||
+        Number(root.getAttribute("data-duration")) ||
+        0,
+      timeline: () => state.capturedTimeline,
+      now: () => Math.max(0, state.currentTime || 0),
+      seek: (t, suppressEvents) => {
+        seekRootChildrenAndAdapters(state.capturedTimeline, t, { suppressEvents });
+      },
+      ignoreMutations: withoutOwnCompositionRecords,
+    });
+  }
   const settleSceneDom = (): Promise<void> => {
     bindMediaMetadataListeners();
     installAssetFailureDiagnostics();
@@ -3667,6 +3762,7 @@ export function initSandboxRuntimeModular(): void {
     applyVariableBindings(document);
     // An unregistered vfx chain paints nothing and logs nothing, so re-scan the new DOM.
     initVfx(document.body, state.canonicalFps);
+    initMotionBlur();
     return captionsApplied;
   };
   if (!externalCompositionsReady) {
@@ -4012,6 +4108,7 @@ export function initSandboxRuntimeModular(): void {
       }
     };
     initVfx(document.body, state.canonicalFps);
+    initMotionBlur();
     applyFetchedCaptionOverrides(captionOverrides, captionHosts, rewindCaptionTimelines);
     releaseDetachedMedia();
     childrenBound = false;
@@ -4064,6 +4161,7 @@ export function initSandboxRuntimeModular(): void {
   });
   // Per-pixel effect chains: compile once here, repaint on every seek below.
   initVfx(document.body, state.canonicalFps);
+  initMotionBlur();
 
   const applyPlaybackRate = (nextRate: number) => {
     const parsed = Number(nextRate);
@@ -4120,6 +4218,8 @@ export function initSandboxRuntimeModular(): void {
     }
     colorGrading.redraw();
     paintVfx(state.currentTime);
+    const blurred = paintCaptureMotionBlur(state.currentTime);
+    if (blurred) registerSeekCompletion(blurred);
     postState(true);
   };
 
@@ -4172,6 +4272,8 @@ export function initSandboxRuntimeModular(): void {
       runAdapters("pause");
       syncMediaForCurrentState();
       colorGrading.redraw();
+      // Paused: back to plain DOM so Studio can select inside the composition.
+      void paintCaptureMotionBlur(state.currentTime);
       postState(true);
     },
     seek: (timeSeconds, options) => {
@@ -4232,6 +4334,8 @@ export function initSandboxRuntimeModular(): void {
       syncMediaForCurrentState();
       colorGrading.redraw();
       paintVfx(state.currentTime, { engineMode: true });
+      const blurred = paintCaptureMotionBlur(state.currentTime, { engineMode: true });
+      if (blurred) registerSeekCompletion(blurred);
       postState(true);
     },
     getTime: () => heldSeek?.time ?? clock.now(),
@@ -4340,9 +4444,15 @@ export function initSandboxRuntimeModular(): void {
     window.__hfTypegpuTime = t;
     forceDispatchSeekEvent(t);
   };
-  window.__hfWaitForSeekCompletion = waitForSeekCompletion;
+  // Engine and CLI capture wait here once the page is final (the engine's injected video frames
+  // land after renderSeek), so a blurred engine frame is captured now, not at the seek.
+  const waitForFinalFrame: typeof waitForSeekCompletion = (options) => {
+    releaseCaptureMotionBlurFrame();
+    return waitForSeekCompletion(options);
+  };
+  window.__hfWaitForSeekCompletion = waitForFinalFrame;
   runtimeCleanupCallbacks.push(() => {
-    if (window.__hfWaitForSeekCompletion === waitForSeekCompletion) {
+    if (window.__hfWaitForSeekCompletion === waitForFinalFrame) {
       delete window.__hfWaitForSeekCompletion;
     }
   });
@@ -4638,6 +4748,14 @@ export function initSandboxRuntimeModular(): void {
         swallow("runtime.init.activateSiblings", err);
       }
     }
+    if (rearmed.length === 0) return rearmed;
+    // GSAP leaves paused scenes out of the root's length and play() keeps that stale length.
+    try {
+      masterTimeline.shiftChildren?.(0);
+      masterTimeline.totalDuration?.();
+    } catch (err) {
+      swallow("runtime.init.remeasureRoot", err);
+    }
     return rearmed;
   };
 
@@ -4736,8 +4854,7 @@ export function initSandboxRuntimeModular(): void {
     const revision = opts?.revision ?? readCompositionTimingRevision();
     if (revision !== tweensRenderedThrough.revision)
       tweensRenderedThrough = { revision, time: Number.NEGATIVE_INFINITY };
-    const jumped = !(Math.abs(t - lastTransportSeekTime) <= 1.5 / state.canonicalFps);
-    const firstRenders = jumped && t > tweensRenderedThrough.time;
+    const firstRenders = t > tweensRenderedThrough.time;
     const hideClipsAgain = firstRenders ? showHiddenClips() : null;
     if (tl) {
       // #10: when data-duration exceeds the timeline's intrinsic length the
@@ -5141,16 +5258,21 @@ export function initSandboxRuntimeModular(): void {
       // affected — the seek runs whenever the clock is playing.
       const isPlaying = clock.isPlaying();
       const manualEditOwnsPausedFrame = !isPlaying && hasActiveStudioManualEditGesture();
+      // Both captures of a blurred frame must see the same page: the next tick catches up.
+      const blurHoldsFrame = isPlaying && captureMotionBlurBusy();
       if (manualEditOwnsPausedFrame) {
         // Force one reconciliation after drop/cancel even though the playhead did not move.
         pausedSeekDeferredByManualGesture = true;
       } else if (
-        isPlaying ||
-        pausedSeekDeferredByManualGesture ||
-        t !== lastTransportSeekTime ||
-        state.capturedTimeline !== lastTransportSeekTimeline
+        !blurHoldsFrame &&
+        (isPlaying ||
+          pausedSeekDeferredByManualGesture ||
+          t !== lastTransportSeekTime ||
+          state.capturedTimeline !== lastTransportSeekTimeline)
       ) {
         seekTimelineAndAdapters(t, { revision: timingRevision });
+        // Playback: draw and move on; nothing waits on this frame's blur. Paused, it unwraps.
+        void paintCaptureMotionBlur(t, { playing: isPlaying });
         if (!isPlaying) pausedSeekDeferredByManualGesture = false;
       }
       if (isPlaying) {
@@ -5173,6 +5295,7 @@ export function initSandboxRuntimeModular(): void {
         }
         runAdapters("pause");
         syncMediaForCurrentState(timingRevision);
+        void paintCaptureMotionBlur(state.currentTime);
         postState(true);
         return;
       }

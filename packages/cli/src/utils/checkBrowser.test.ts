@@ -28,9 +28,19 @@ const mocks = vi.hoisted(() => ({
   bundleWithLocalizedFonts: vi.fn(async () => "<html></html>"),
   serverClose: vi.fn(async () => undefined),
   resolveProxy:
-    vi.fn<(projectDir: string, absoluteSourcePath: string, variant?: string) => Promise<string>>(),
+    vi.fn<
+      (
+        projectDir: string,
+        absoluteSourcePath: string,
+        variant?: string,
+        box?: { width: number; height: number },
+      ) => Promise<string>
+    >(),
   FfmpegUnavailableError: class FfmpegUnavailableError extends Error {},
-  getProxyCachePath: vi.fn((projectDir: string, sourcePath: string) => `${sourcePath}.proxy.mp4`),
+  getProxyCachePath: vi.fn(
+    (projectDir: string, sourcePath: string, _variant?: string, _box?: unknown) =>
+      `${sourcePath}.proxy.mp4`,
+  ),
   scanProjectMediaCodecMap: vi.fn<
     (...args: unknown[]) => Promise<
       Record<
@@ -88,12 +98,19 @@ vi.mock("@hyperframes/studio-server/proxy-transcoder", () => ({
   getProxyCachePath: mocks.getProxyCachePath,
   resolveProxies: (
     projectDir: string,
-    sources: Array<{ sourcePath: string; variant: string }>,
+    sources: Array<{
+      sourcePath: string;
+      variant: string;
+      box?: { width: number; height: number };
+    }>,
     onSettled: () => void = () => {},
   ) =>
     Promise.allSettled(
-      sources.map(({ sourcePath, variant }) =>
-        mocks.resolveProxy(projectDir, sourcePath, variant).finally(onSettled),
+      sources.map(({ sourcePath, variant, box }) =>
+        (box
+          ? mocks.resolveProxy(projectDir, sourcePath, variant, box)
+          : mocks.resolveProxy(projectDir, sourcePath, variant)
+        ).finally(onSettled),
       ),
     ),
 }));
@@ -152,6 +169,8 @@ function mountCanvasFixture(inner = ""): void {
 }
 
 it("carries raw browser geometry through the page driver and pipeline", async () => {
+  // Vitest's console reads Date.now, which would spend a mocked reading below.
+  vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(Date, "now")
     .mockReturnValueOnce(100)
     .mockReturnValueOnce(160)
@@ -268,7 +287,7 @@ it("splits the samples over a second Chrome and reports what one Chrome reports"
   expect(sampled(unopened.messages)).toEqual(sampled(serial.messages));
 });
 
-it("runs the dense overlap grid in one page task, keeping each sample's time on what it logs", async () => {
+it("runs the dense overlap grid in page tasks of at most 8 samples, keeping each sample's time on what it logs", async () => {
   mountCanvasFixture(
     `<section data-composition-file="scenes/copy.html"><p id="copy" data-layout-name="copy">Hi</p></section>`,
   );
@@ -293,6 +312,7 @@ it("runs the dense overlap grid in one page task, keeping each sample's time on 
     evaluateCalls += 1;
     return Reflect.apply(evaluate, page, args);
   });
+  const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
   const denseAudits: number[] = [];
   const injectScript = page.addScriptTag;
   page.addScriptTag = vi.fn(async (arg: { content: string }) => {
@@ -323,14 +343,25 @@ it("runs the dense overlap grid in one page task, keeping each sample's time on 
     runAuditGrid,
   );
 
+  const lines = stderr.mock.calls.map((call) => String(call[0]));
+  expect(lines).toContain("[hyperframes] check: samples 1/1");
+  const batches = Math.ceil(denseAudits.length / 8);
+  expect(lines).toContain(`[hyperframes] check: overlap ${batches}/${batches}`);
   expect(denseAudits.length).toBeGreaterThan(10);
-  expect(new Set(denseAudits).size).toBe(1);
+  const tasks = new Map<number, number>();
+  for (const calls of denseAudits) tasks.set(calls, (tasks.get(calls) ?? 0) + 1);
+  const perTask = [...tasks.values()];
+  expect(Math.max(...perTask)).toBeLessThanOrEqual(8);
+  expect(perTask).toHaveLength(Math.ceil(denseAudits.length / 8));
   expect(result.runtimeFindings).toContainEqual(
     expect.objectContaining({ code: "console_error", message: "thrown at 2.5", time: 2.5 }),
   );
-  expect(result.runtimeFindings).toContainEqual(
-    expect.objectContaining({ message: "queued during the grid", time: 0, timeRange: [0, 10] }),
+  const queued = result.runtimeFindings.filter(
+    (finding) => finding.message === "queued during the grid",
   );
+  expect(queued).toHaveLength(perTask.length);
+  expect(queued[0]).toMatchObject({ time: 0, timeRange: [0, expect.any(Number)] });
+  expect(queued.at(-1)?.timeRange?.[1]).toBe(10);
   expect(
     result.runtimeFindings.find((finding) => finding.message === "thrown at 2.5"),
   ).not.toHaveProperty("timeRange");
@@ -1099,6 +1130,38 @@ describe("preResolveHostileMediaProxies", () => {
     expect(settled).toBe(true);
   });
 
+  it("makes the copy at the size that fills the composition, not at the source size", async () => {
+    const projectDir = mkProjectDir();
+    mocks.scanProjectMediaCodecMap.mockResolvedValue({
+      "/clip.mp4": {
+        codecName: "hevc",
+        browserHostile: true,
+        representativeMime: null,
+        hasAlpha: false,
+      },
+    });
+    mocks.resolveProxy.mockResolvedValue("/cache/clip.mp4");
+    const html =
+      '<html><body><div data-composition-id="root" data-width="1920" data-height="1080"></div></body></html>';
+
+    await preResolveHostileMediaProxies(projectDir, html);
+
+    // The page asks for the quantized stage size, so the copy and its cache check use that box.
+    const box = { width: 2048, height: 1448 };
+    expect(mocks.resolveProxy).toHaveBeenCalledWith(
+      projectDir,
+      join(projectDir, "clip.mp4"),
+      "h264",
+      box,
+    );
+    expect(mocks.getProxyCachePath).toHaveBeenCalledWith(
+      projectDir,
+      join(projectDir, "clip.mp4"),
+      "h264",
+      box,
+    );
+  });
+
   it("does nothing (no scan, no resolveProxy) when autoProxy is off in hyperframes.json", async () => {
     const projectDir = mkProjectDir();
     writeFileSync(
@@ -1134,6 +1197,7 @@ describe("preResolveHostileMediaProxies", () => {
         }),
       ],
       failedPaths: new Set(["/clip.mp4"]),
+      files: [{ file: "clip.mp4", state: "failed", reason: "ffmpeg exited with code 1" }],
     });
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("media proxy pre-resolve: 0/1 ready, 1 failed"),
@@ -1205,7 +1269,11 @@ describe("preResolveHostileMediaProxies", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     writeFileSync(join(projectDir, "a.mov.proxy.mp4"), "");
-    await preResolveHostileMediaProxies(projectDir, "<html></html>");
+    const { files } = await preResolveHostileMediaProxies(projectDir, "<html></html>");
+    expect(files).toEqual([
+      { file: "a.mov", state: "cached" },
+      { file: "b.mov", state: "ready" },
+    ]);
     expect(errorSpy.mock.calls.map(([line]) => String(line).slice(0, 48))).toEqual([
       "[hyperframes] Making browser-playable copies of ",
       "[hyperframes] browser-playable copies: 1/2",
@@ -1231,6 +1299,7 @@ describe("preResolveHostileMediaProxies", () => {
     await expect(preResolveHostileMediaProxies(projectDir, "<html></html>")).resolves.toEqual({
       findings: [],
       failedPaths: new Set(),
+      files: [],
     });
 
     expect(errorSpy).toHaveBeenCalledWith(
@@ -1378,5 +1447,158 @@ describe("component output membership", () => {
     expect(() => matchComponentFindings({ components: ["#missing"], findings: [] })).toThrow(
       "matched nothing",
     );
+  });
+});
+
+describe("motion blur findings in the check output (T6)", () => {
+  type Handler = (message: ReturnType<typeof fakeConsoleMessage>) => void;
+  const ACCELERATED = {
+    state: "off",
+    reason: "a WebGL canvas cannot be captured",
+    reasonCode: "accelerated-canvas",
+    movers: 0,
+  };
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, "__hfMotionBlur");
+  });
+
+  async function checkWith(
+    report: object,
+    options: { cores?: number; echo?: [string, string][]; mount?: () => void } = {},
+  ) {
+    vi.mocked(os.availableParallelism).mockReturnValue(options.cores ?? 1);
+    mountCanvasFixture(`<p id="copy" data-layout-name="copy">Hi</p>`);
+    options.mount?.();
+    const handlers: Handler[] = [];
+    const log = (type: string, text: string) =>
+      handlers.forEach((handler) => handler(fakeConsoleMessage(type, text)));
+    Reflect.set(window, "__hfMotionBlur", {
+      probe: () => {
+        for (const [type, text] of options.echo ?? []) log(type, text);
+        return report;
+      },
+      suspend: vi.fn(),
+    });
+    const browser = Object.assign(Object.create(null), {
+      close: vi.fn(async () => undefined),
+      process: () => ({ exitCode: 0, signalCode: null }),
+    });
+    let opened = 0;
+    vi.mocked(openSettledCompositionPage).mockImplementation(
+      async (_html: string, _url: string, settle: OpenSettledCompositionPageOptions) => {
+        const page = fakePage();
+        const first = ++opened === 1;
+        page.on = vi.fn((event: string, handler: Handler) => {
+          if (event === "console" && first) handlers.push(handler);
+        });
+        settle.onBrowser?.(browser);
+        await settle.beforeNavigate?.(page);
+        return { page, browser, renderReadyTimedOut: false };
+      },
+    );
+    const result = await runBrowserCheck(
+      PROJECT,
+      { ...DEFAULT_CHECK_OPTIONS, contrast: false },
+      { kind: "none" },
+      runAuditGrid,
+    );
+    return { findings: result.runtimeFindings, pages: opened };
+  }
+  const blurCodes = (findings: { code: string }[]) =>
+    findings.map((finding) => finding.code).filter((code) => code.startsWith("motion_blur"));
+
+  it("carries a blur finding, its fix and its anchor into the output", async () => {
+    const { findings } = await checkWith(ACCELERATED);
+    const [finding, ...rest] = findings.filter(({ code }) => code === "motion_blur_off");
+    expect(rest).toEqual([]);
+    expect(finding).toMatchObject({
+      severity: "warning",
+      message: expect.stringContaining("a WebGL canvas cannot be captured"),
+      selector: expect.any(String),
+      fixHint: expect.stringMatching(/WebGL\/WebGPU.*sub-composition/),
+    });
+  });
+
+  it("anchors the finding on the root the runtime picks, not the first composition (W4)", async () => {
+    const mount = (): void => {
+      document.body.innerHTML = `
+        <div id="aux" data-composition-id="aux" data-duration="4"></div>
+        <div id="real" data-composition-id="main" data-root="true" data-duration="10"></div>`;
+      const rect = { x: 3, y: 4, width: 640, height: 360 } as DOMRect;
+      const real = document.getElementById("real");
+      if (real) real.getBoundingClientRect = () => rect;
+    };
+    const { findings } = await checkWith(ACCELERATED, { mount });
+    expect(findings.find(({ code }) => code === "motion_blur_off")).toMatchObject({
+      selector: '[data-composition-id][data-root="true"]',
+      dataAttributes: expect.objectContaining({
+        "data-root": "true",
+        "data-composition-id": "main",
+      }),
+      bbox: { x: 3, y: 4, width: 640, height: 360 },
+    });
+  });
+
+  it("still carries it, once, when a second Chrome shares the sampling", async () => {
+    const { findings, pages } = await checkWith(ACCELERATED, { cores: 4 });
+    expect(pages).toBe(2);
+    expect(blurCodes(findings)).toEqual(["motion_blur_off"]);
+  });
+
+  it("keeps an unrelated console warning and drops the runtime's duplicate of the finding", async () => {
+    const { findings } = await checkWith(ACCELERATED, {
+      echo: [
+        ["warn", "[motion-blur] off: a WebGL canvas cannot be captured"],
+        ["warn", "your own warning"],
+      ],
+    });
+    const warnings = findings.filter(({ code }) => code === "console_warning");
+    expect(warnings.map(({ message }) => message)).toEqual(["your own warning"]);
+    expect(blurCodes(findings)).toEqual(["motion_blur_off"]);
+  });
+
+  it("keeps the runtime's off-line when there is no finding to replace it", async () => {
+    const { findings } = await checkWith(
+      { state: "on", reason: null, reasonCode: null, movers: 2 },
+      { echo: [["warn", "[motion-blur] off: later, for a reason the probe did not see"]] },
+    );
+    expect(findings.map(({ code }) => code)).toContain("console_warning");
+    expect(blurCodes(findings)).toEqual([]);
+  });
+
+  it("does not drop an error that merely starts like the echo", async () => {
+    const { findings } = await checkWith(ACCELERATED, {
+      echo: [["error", "[motion-blur] off: thrown by the page itself"]],
+    });
+    expect(findings.map(({ code }) => code)).toContain("console_error");
+  });
+
+  it("says nothing moves only when the report says no mover, not when it says some", async () => {
+    const still = await checkWith({ state: "on", reason: null, reasonCode: null, movers: 0 });
+    expect(blurCodes(still.findings)).toEqual(["motion_blur_no_movers"]);
+    const moving = await checkWith({ state: "on", reason: null, reasonCode: null, movers: 3 });
+    expect(blurCodes(moving.findings)).toEqual([]);
+    const off = await checkWith(ACCELERATED);
+    expect(blurCodes(off.findings)).toEqual(["motion_blur_off"]);
+  });
+
+  it("treats a report without a mover count as no movers", async () => {
+    const { findings } = await checkWith({ state: "on", reason: null, reasonCode: null });
+    expect(blurCodes(findings)).toEqual(["motion_blur_no_movers"]);
+  });
+
+  it("adds nothing for a page that never opted in", async () => {
+    vi.mocked(os.availableParallelism).mockReturnValue(1);
+    mountCanvasFixture();
+    const page = fakePage();
+    installSessionMock(page);
+    const result = await runBrowserCheck(
+      PROJECT,
+      { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: false },
+      { kind: "none" },
+      runAuditGrid,
+    );
+    expect(blurCodes(result.runtimeFindings)).toEqual([]);
   });
 });

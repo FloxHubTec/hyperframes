@@ -686,6 +686,13 @@ describe("resolveFrameFormat", () => {
     expect(resolveFrameFormat(metadata({ hasAlpha: true }), "jpg")).toBe("png");
     expect(resolveFrameFormat(metadata({ videoCodec: "vp9" }), "jpg")).toBe("png");
   });
+
+  it("keeps ProRes without an alpha plane on jpg and ProRes with one on png", () => {
+    expect(resolveFrameFormat(metadata({ videoCodec: "prores" }), undefined)).toBe("jpg");
+    expect(resolveFrameFormat(metadata({ videoCodec: "prores", hasAlpha: true }), "jpg")).toBe(
+      "png",
+    );
+  });
 });
 
 describe("parseVideoElements", () => {
@@ -1388,6 +1395,19 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
     };
   }
 
+  it("extracts into a work directory whose name holds a printf code", async () => {
+    const outDir = join(FIXTURE_DIR, "x 12% Up");
+    mkdirSync(outDir, { recursive: true });
+    const result = await extractAllVideoFrames([fixtureVideo()], FIXTURE_DIR, {
+      fps: 1,
+      outputDir: outDir,
+    });
+    expect(result.errors).toEqual([]);
+    const frame = result.extracted[0]!.framePaths.get(0)!;
+    expect(frame.startsWith(outDir)).toBe(true);
+    expect(existsSync(frame)).toBe(true);
+  });
+
   it("keeps the rightmost 8 columns of a 1080-wide (16n + 8) jpg extraction", async () => {
     const source = join(FIXTURE_DIR, "white-1080.mp4");
     const synth = await runFfmpeg([
@@ -1440,6 +1460,58 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
     expect(delivered).toHaveLength(8);
     for (const [i, v] of delivered.entries())
       expect(Math.abs(v - expected[i]!)).toBeLessThanOrEqual(5);
+  }, 60_000);
+
+  async function proresFrame(name: string, pixFmt: string, profile: string, source: string) {
+    const clip = join(FIXTURE_DIR, `${name}.mov`);
+    const synth = await runFfmpeg(
+      ["-y", "-loglevel", "error", "-f", "lavfi", "-i", source].concat([
+        "-c:v",
+        "prores_ks",
+        "-profile:v",
+        profile,
+        "-pix_fmt",
+        pixFmt,
+        clip,
+      ]),
+    );
+    expect(synth.success).toBe(true);
+    const outDir = join(FIXTURE_DIR, `out-${name}`);
+    mkdirSync(outDir, { recursive: true });
+    const result = await extractAllVideoFrames(
+      [{ ...fixtureVideo(), id: name, src: clip }],
+      FIXTURE_DIR,
+      { fps: 1, outputDir: outDir },
+    );
+    expect(result.errors).toEqual([]);
+    return result.extracted[0]!.framePaths.get(0)!;
+  }
+
+  it("extracts ProRes without an alpha plane to jpg", async () => {
+    const frame = await proresFrame("prores422", "yuv422p10le", "2", "testsrc2=s=320x180:d=1:r=1");
+    expect(frame.endsWith(".jpg")).toBe(true);
+  }, 60_000);
+
+  it("keeps the alpha of ProRes 4444 exact in png frames", async () => {
+    const frame = await proresFrame(
+      "prores4444",
+      "yuva444p10le",
+      "4",
+      "color=c=0x00ff00@0.5:s=320x180:d=1:r=1,format=yuva444p10le",
+    );
+    expect(frame.endsWith(".png")).toBe(true);
+    const alpha = spawnSync("ffmpeg", [
+      "-v",
+      "error",
+      "-i",
+      frame,
+      "-vf",
+      "alphaextract,crop=1:1:10:10",
+      "-f",
+      "rawvideo",
+      "-",
+    ]);
+    expect(Math.abs(alpha.stdout[0]! - 128)).toBeLessThanOrEqual(1);
   }, 60_000);
 
   it("keeps color-sensitive UI reds closer to source when extraction is forced to png", async () => {
@@ -2238,6 +2310,38 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling at the output frame rate", () => {
       },
       60_000,
     );
+
+    it("halves frames while they still cover the box a video is shown in", async () => {
+      const firstFrameSize = async (
+        videoId: string,
+        shownBox: { width: number; height: number },
+      ) => {
+        const result = await extractVideoFramesRange(gopSource, videoId, 0, 1, {
+          fps: 30,
+          outputDir: FIXTURE_DIR,
+          format: "jpg",
+          frameRanges: [{ firstFrame: 0, frames: 1 }],
+          shownBox,
+        });
+        const [frame] = result.framePaths.values();
+        return spawnSync("ffprobe", [
+          "-v",
+          "error",
+          "-show_entries",
+          "stream=width,height",
+          "-of",
+          "csv=p=0",
+          "--",
+          frame!,
+        ])
+          .stdout.toString()
+          .trim();
+      };
+      // 64x36 source: halved as often as the box allows (even sides round up); never below the box.
+      expect(await firstFrameSize("shown-quarter", { width: 16, height: 9 })).toBe("16,10");
+      expect(await firstFrameSize("shown-third", { width: 20, height: 12 })).toBe("32,18");
+      expect(await firstFrameSize("shown-near-full", { width: 40, height: 20 })).toBe("64,36");
+    }, 30_000);
   });
 });
 

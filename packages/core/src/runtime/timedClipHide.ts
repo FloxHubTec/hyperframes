@@ -1,6 +1,7 @@
 import { CLIP_HIDDEN_ATTR, olderShaderBuildOnPage, revealClip } from "./clipReveal";
 import {
   RUNTIME_STAMPED_ATTR,
+  STUDIO_PREVIEW_CAPTURE_MODE,
   STUDIO_PREVIEW_MARK_META,
   STUDIO_PREVIEW_UPCOMING_ATTR,
 } from "../studioPreviewMark";
@@ -22,9 +23,12 @@ const HIDDEN_CLIP_DOUBLED_FOR_WEIGHT = `[${CLIP_HIDDEN_ATTR}][${CLIP_HIDDEN_ATTR
 const HIDDEN_CLIP_BY_INLINE_STYLE = `[${CLIP_HIDDEN_ATTR}][style*="visibility: hidden"]`;
 const skipHiddenImages = (clip: string) =>
   `${SKIPPABLE_CLIP}${clip} img { display: none !important; }`;
-const hideHiddenClipContents = (clip: string) =>
-  `${clip} * { visibility: hidden !important; } ` +
-  `svg${clip}, svg${clip} *, ${clip} svg, ${clip} svg * { filter: none !important; }`;
+const hideHiddenClipContents = (clip: string) => {
+  const filterOutputLayers = [clip, `${clip} *`]
+    .flatMap((layer) => [layer, `${layer}::before`, `${layer}::after`])
+    .join(", ");
+  return `${clip} * { visibility: hidden !important; } ${filterOutputLayers} { filter: none !important; }`;
+};
 
 export function showHiddenClips(): () => void {
   const hidden = Array.from(document.querySelectorAll<HTMLElement>(`[${CLIP_HIDDEN_ATTR}]`));
@@ -47,6 +51,10 @@ function appendStyle(parent: Element, attr: string, css: string): void {
   parent.appendChild(style);
 }
 
+export function defersMedia(): boolean {
+  return document.querySelector(STUDIO_PREVIEW_MARK) !== null;
+}
+
 /** True in Studio's preview, where hidden clips' images are neither fetched nor decoded until due. */
 export function skipsHiddenImages(): boolean {
   return document.querySelector(`style[${SKIP_ATTR}]`) !== null;
@@ -56,8 +64,10 @@ export function hideTimedClipsUntilFirstPass(): void {
   if (typeof document === "undefined") return;
   const parent = document.head ?? document.documentElement;
   if (!parent) return;
-  const preview = document.querySelector(STUDIO_PREVIEW_MARK) !== null;
-  if (preview && !skipsHiddenImages())
+  const mark = document.querySelector(STUDIO_PREVIEW_MARK);
+  const preview = mark !== null;
+  const capture = mark?.getAttribute("content") === STUDIO_PREVIEW_CAPTURE_MODE;
+  if (preview && !capture && !skipsHiddenImages())
     appendStyle(parent, SKIP_ATTR, skipHiddenImages(HIDDEN_CLIP_DOUBLED_FOR_WEIGHT));
   if (!document.querySelector(`style[${CONTENTS_ATTR}]`))
     appendStyle(parent, CONTENTS_ATTR, hideHiddenClipContents(HIDDEN_CLIP_DOUBLED_FOR_WEIGHT));
