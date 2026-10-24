@@ -3867,7 +3867,6 @@ export function createColorGradingRuntime(pausedMediaLease?: {
         if (entry.contextLost) restoreSourceElement(entry);
         else drawEntry(entry);
       }
-      // A clip shown while the context was gone got no entry; grade it now, not at the next scan.
       refresh();
     });
     shared = { canvas, gl };
