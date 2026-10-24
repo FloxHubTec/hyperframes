@@ -10,6 +10,7 @@ import { HF_AUDIO_GROUP_ATTR } from "@hyperframes/core/audio-groups";
 import { byStart, type ClipFact, type ClipLane } from "@hyperframes/core/clip-facts";
 import { fpsToNumber, parseFpsWithDefault, parseNumeric } from "@hyperframes/core";
 import { findSyncPartner, readLinkTiming, syncOffsetFrames } from "@hyperframes/core/media-link";
+import { resolveAuthoredAssetFile } from "@hyperframes/parsers/asset-resolution";
 import { readCompositionFps } from "../utils/compositionFps.js";
 import {
   readMediaOffsetSeconds,
@@ -19,14 +20,12 @@ import {
   type MediaTag,
 } from "@hyperframes/parsers/media-duration";
 import {
-  decodeUrlPathVariants,
   isSubCompositionHost,
   topLevelElements,
   trackKindOf,
-  type StructureNode,
   type TrackKind,
 } from "@hyperframes/parsers";
-import { cleanAssetUrl } from "@hyperframes/parsers/asset-resolution";
+import { toDomNode, type DomNode } from "./domStructure.js";
 import {
   compositionOriginSeconds,
   cutToHostSlots,
@@ -106,17 +105,7 @@ export interface ProjectTimeline {
   tracks: TimelineTrack[];
 }
 
-interface DomNode extends StructureNode<DomNode> {
-  el: Element;
-}
-
 const TRACK_ORDER: readonly TrackKind[] = ["video", "graphics", "captions", "audio"];
-
-function toNode(el: Element): DomNode {
-  const attrs: Record<string, string | undefined> = {};
-  for (const { name, value } of Array.from(el.attributes)) attrs[name] = value;
-  return { tag: el.tagName, attrs, children: Array.from(el.children).map(toNode), el };
-}
 
 /** An unreadable chain drops only the fx lanes; the clip's own `volume` lane still shows. */
 function safeChain(raw: string): ReturnType<typeof parseAudioFxChain> | undefined {
@@ -197,9 +186,8 @@ async function probeSource(scope: DocScope, el: Element, tag: MediaTag): Promise
   const src = el.getAttribute("src");
   if (!src) return { ok: false, reason: "no src attribute" };
   if (/^https?:\/\//i.test(src)) return { ok: false, reason: "remote source not probed" };
-  const file = decodeUrlPathVariants(cleanAssetUrl(src))
-    .map((path) => realFileInside(scope.projectDir, resolve(scope.dir, path)))
-    .find((path) => path !== null);
+  const found = resolveAuthoredAssetFile(scope.projectDir, scope.file, src);
+  const file = found && realFileInside(scope.projectDir, found);
   if (!file) return { ok: false, reason: "source file not found" };
   return scope.withProbeSlot(async () => {
     try {
@@ -390,7 +378,7 @@ async function readSubComposition(
     fps: parent.fps,
   };
   const rows = await Promise.all(
-    topLevelElements(toNode(root)).map((node) => describeRow(scope, node, 1)),
+    topLevelElements(toDomNode(root)).map((node) => describeRow(scope, node, 1)),
   );
   return rows.flatMap((row) => cutRow(row, slots)).sort(byStart);
 }
@@ -519,7 +507,7 @@ export async function describeProject(
     fps: projectFps(source),
   };
   const rows = (
-    await Promise.all(topLevelElements(toNode(root)).map((node) => describeRow(scope, node, 0)))
+    await Promise.all(topLevelElements(toDomNode(root)).map((node) => describeRow(scope, node, 0)))
   ).sort(byStart);
   const declared = parseNumeric(root.getAttribute("data-duration"));
   return {
