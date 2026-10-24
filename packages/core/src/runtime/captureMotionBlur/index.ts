@@ -527,8 +527,6 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
             resolve();
           },
         };
-        // An engine frame isolates once armed: video frames are injected into the page until then,
-        // and the injector skips a sub-composition host that isolation would have hidden.
         if (pending.phase === "movers" && !engineMode) isolate(pending);
         if (engineMode) return;
         startTimer();
