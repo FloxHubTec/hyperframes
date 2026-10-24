@@ -158,8 +158,8 @@ describe("background-removal/inference — missing optional native modules", () 
   });
 });
 
-// A provider that loads and then fails on a frame (CoreML's "Unable to compute the prediction" on a long run) used to
-// end the whole run: only loading the model fell back to CPU.
+// A provider that loads and then fails on a frame (CoreML's "Unable to compute the prediction" on a long run) must
+// not end the whole run: the session moves to CPU and that frame runs again, once.
 describe("background-removal/inference — a provider failing on a frame", () => {
   const COREML_ERROR =
     "Non-zero status code returned while running CoreML node. Unable to compute the prediction using a neural network model";
