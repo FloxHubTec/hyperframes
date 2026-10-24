@@ -876,8 +876,8 @@ export async function driveWarmupTicks(
     } catch {
       // Page not ready yet; keep spinning.
     }
-    // Locked mode pins the tick count, not the pacing: once the page is ready the rest run back to back.
-    if (!(options.lockWarmupTicks && !state.running)) await sleep(options.intervalMs);
+    const pageReady = !state.running;
+    if (!(options.lockWarmupTicks && pageReady)) await sleep(options.intervalMs);
   }
 }
 

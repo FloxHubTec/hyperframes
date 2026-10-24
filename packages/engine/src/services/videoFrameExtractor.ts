@@ -215,13 +215,7 @@ function exactSourceRate(probed: number): number | null {
   );
 }
 
-/**
- * How many of the `tailFrames` slots from `firstFrame` a constant-rate window yields when it reaches
- * the source's end, from the stored final-frame time alone: slot j holds a frame while its time,
- * `startTime + (firstFrame + j) / outputFps`, is before the last frame's end. A slot exactly at the
- * end is empty. Null where the answer is not certain (a late stream without a full last packet, an unrecognised rate,
- * a slot within a few microseconds of the end, or no slot at all); callers decode the tail instead.
- */
+/** The slots of a constant-rate window that reach the source's end holding a frame, from the stored final-frame time; null when not certain (callers decode the tail). */
 export function tailFramesFromFinalFrame(input: {
   startTime: number;
   firstFrame: number;

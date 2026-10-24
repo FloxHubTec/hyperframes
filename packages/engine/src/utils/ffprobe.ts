@@ -404,7 +404,7 @@ export function writeMetadataCache<T>(
   );
 }
 
-/** Part of the name a stored probe is kept under (`.probe.v2.json`): bump it with the args below. */
+/** Part of the name a stored probe is kept under: bump it with the args below. */
 export const PROBE_FACTS_VERSION = "v2";
 const PROBE_JSON_ARGS = ["-print_format", "json", "-show_format", "-show_streams"];
 
@@ -445,10 +445,12 @@ function readStoredFacts(filePath: string): Promise<StoredProbeFacts | null> | u
 }
 
 /** The ffprobe JSON `probeMediaOutput` works from; a declared URL's stored copy is read in place of probing it. */
-export async function readProbeJson(filePath: string, signal?: AbortSignal): Promise<string> {
-  const stored = await readStoredFacts(filePath);
-  if (stored) return JSON.stringify(stored.ffprobe);
-  return runFfprobe(filePath, PROBE_JSON_ARGS, signal);
+export function readProbeJson(filePath: string, signal?: AbortSignal): Promise<string> {
+  const pending = readStoredFacts(filePath);
+  if (!pending) return runFfprobe(filePath, PROBE_JSON_ARGS, signal);
+  return pending.then((stored) =>
+    stored ? JSON.stringify(stored.ffprobe) : runFfprobe(filePath, PROBE_JSON_ARGS, signal),
+  );
 }
 
 /** What a site stores beside a video: its ffprobe JSON and the final-frame timestamp a plan would otherwise probe for. */
@@ -947,21 +949,23 @@ function resolveStreamWindow(
   return { videoStreamStartSeconds, videoStreamDurationSeconds, cacheKey };
 }
 
-/** The final-frame facts a site stored beside the video for this stream window; undefined when none match. */
-export async function readStoredFinalFrame(
+/** The final-frame facts a site stored beside the video for this stream window; none when nothing is declared (no await then, so a probe spawns at once). */
+export function readStoredFinalFrame(
   filePath: string,
   metadata: Pick<VideoMetadata, "videoStreamDurationSeconds" | "videoStreamStartSeconds">,
-): Promise<{ seconds: number; lastPacketSeconds?: number } | undefined> {
+): Promise<{ seconds: number; lastPacketSeconds?: number } | undefined> | undefined {
   const { videoStreamStartSeconds, videoStreamDurationSeconds } = resolveStreamWindow(
     filePath,
     metadata,
   );
-  const stored = (await readStoredFacts(filePath))?.finalFrame;
-  return stored &&
-    stored.streamStart === videoStreamStartSeconds &&
-    stored.streamDuration === videoStreamDurationSeconds
-    ? stored
-    : undefined;
+  return readStoredFacts(filePath)?.then((facts) => {
+    const stored = facts?.finalFrame;
+    return stored &&
+      stored.streamStart === videoStreamStartSeconds &&
+      stored.streamDuration === videoStreamDurationSeconds
+      ? stored
+      : undefined;
+  });
 }
 
 /**
@@ -1042,7 +1046,8 @@ export async function extractFinalVideoFrameTimestamp(
   if (cached) return cached;
 
   const probePromise = (async () => {
-    const stored = await readStoredFinalFrame(filePath, metadata);
+    const pendingStored = readStoredFinalFrame(filePath, metadata);
+    const stored = pendingStored && (await pendingStored);
     if (stored) return stored.seconds;
     if (!(videoDurationSeconds > 0) || !Number.isFinite(videoDurationSeconds)) {
       throw new Error(

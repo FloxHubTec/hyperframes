@@ -113,6 +113,5 @@ export interface MixResult {
   tracksProcessed: number;
   error?: string;
   failures?: AudioProcessingFailure[];
-  /** Wall ms per phase of the mix, for the render log. */
   phaseMs?: Partial<Record<"prepare" | "groups" | "mix" | "master" | "encode", number>>;
 }
