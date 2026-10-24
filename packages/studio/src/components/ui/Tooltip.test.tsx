@@ -132,6 +132,7 @@ it("wraps a long label at a reading width and cuts it at its lines", async () =>
 
   const tip = bubble();
   expect(tip?.className).toContain("whitespace-normal");
+  expect(tip?.className, "a long URL or path breaks too").toContain("break-words");
   expect(tip?.className).toContain("max-w-[300px]");
   expect(tip?.className).not.toContain("whitespace-nowrap");
   const text = tip?.querySelector<HTMLElement>("span");

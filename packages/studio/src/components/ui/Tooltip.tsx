@@ -63,7 +63,7 @@ export function Tooltip({
             role="tooltip"
             className={cn(
               "pointer-events-none rounded-md border border-border-input bg-surface px-2 py-1 text-step-10 font-medium text-text-1 shadow-menu",
-              lines ? "max-w-[300px] whitespace-normal" : "whitespace-nowrap",
+              lines ? "max-w-[300px] whitespace-normal break-words" : "whitespace-nowrap",
               floatingMotion("duration-tooltip"),
             )}
           >
