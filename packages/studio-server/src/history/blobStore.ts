@@ -22,7 +22,7 @@ export interface BlobStore {
 
 const BLOB_HASH = /^[0-9a-f]{64}$/;
 
-function blobPath(dir: string, hash: string): string {
+export function blobPath(dir: string, hash: string): string {
   // Checked where the path is joined, so no caller can read or write outside the store.
   if (!BLOB_HASH.test(hash)) throw new Error("That is not a history blob.");
   return join(dir, hash.slice(0, 2), hash);

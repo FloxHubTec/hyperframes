@@ -30,7 +30,7 @@ import {
   listProjectFiles,
 } from "../helpers/projectSignature.js";
 import { openBlobStore, readBlob, type BlobStore } from "./blobStore.js";
-import { isUncopied } from "./uncopied.js";
+import { isUncopied, uncopiedOnlyHashes } from "./uncopied.js";
 import { pruneGoneProjectHistoriesDaily } from "./pruneHistories.js";
 import {
   ID_PATH,
@@ -480,18 +480,7 @@ class Engine {
 
   /** Copies an older version took of files that are no longer copied; text and small files are never touched. */
   async reclaimUncopied(): Promise<void> {
-    const copied = new Set<string>();
-    const uncopied = new Set<string>();
-    const note = (path: string, hash: string | null) => {
-      if (hash) (isUncopied(path, this.blobs.size(hash)) ? uncopied : copied).add(hash);
-    };
-    for (const [path, hash] of this.log.baseline) note(path, hash);
-    for (const entry of this.log.entries)
-      for (const file of entry.files) {
-        note(file.path, file.before);
-        note(file.path, file.after);
-      }
-    await this.blobs.drop([...uncopied].filter((hash) => !copied.has(hash)));
+    await this.blobs.drop(uncopiedOnlyHashes(this.log, (hash) => this.blobs.size(hash)));
   }
 
   hearWrites(): void {
