@@ -88,7 +88,6 @@ export function sceneSwapFor(
       () => deadline.abort(new Error("the preview took too long to swap")),
       SCENE_SWAP_MS,
     );
-    // The caller's signal outlives this swap: a listener left on it would keep this film's window alive.
     const onCancel = () => deadline.abort(cancel?.reason);
     cancel?.addEventListener("abort", onCancel, { once: true });
     const swapping = (async () => {
