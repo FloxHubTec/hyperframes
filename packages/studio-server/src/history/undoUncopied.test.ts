@@ -141,6 +141,32 @@ describe("undoing a change that made or replaced media", () => {
   });
 });
 
+describe("the same bytes at two paths in separate entries", () => {
+  it("brings both files back through undo and redo in any order", async () => {
+    const { history, projectDir } = await project();
+    const bytes = Buffer.alloc(2 * MiB, 8);
+    const first = await change(history, "Place a", () =>
+      writeFileSync(join(projectDir, "a.mp4"), bytes),
+    );
+    const second = await change(history, "Place b", () =>
+      writeFileSync(join(projectDir, "b.mp4"), bytes),
+    );
+    const undoneSecond = await history.undo(second.id, { who: you });
+    const undoneFirst = await history.undo(first.id, { who: you });
+
+    const redoneFirst = await history.undo(undoneFirst.ok ? undoneFirst.entry!.id : "", {
+      who: you,
+    });
+    const redoneSecond = await history.undo(undoneSecond.ok ? undoneSecond.entry!.id : "", {
+      who: you,
+    });
+
+    expect([redoneFirst, redoneSecond]).toMatchObject([{ ok: true }, { ok: true }]);
+    for (const name of ["a.mp4", "b.mp4"])
+      expect(readFileSync(join(projectDir, name)).equals(bytes)).toBe(true);
+  });
+});
+
 describe("the set-aside store beside the blobs", () => {
   async function stores() {
     const home = tempDir("hf-aside-home-");
@@ -153,12 +179,12 @@ describe("the set-aside store beside the blobs", () => {
 
   it("keeps a copied blob of the same bytes when the set-aside copy is released", async () => {
     const { home, source, blobs, hash } = await stores();
-    await blobs.keep(source, false);
+    await blobs.keep("join.mp4", source, false);
     const copy = join(home, "backup.txt");
     writeFileSync(copy, readFileSync(source));
 
     expect(await blobs.put(copy)).toBe(hash);
-    await blobs.release([hash]);
+    await blobs.release([[hash, "join.mp4"]]);
 
     expect(blobs.has(hash)).toBe(true);
     expect((await blobs.read(hash)).length).toBe(2 * MiB);
@@ -166,7 +192,7 @@ describe("the set-aside store beside the blobs", () => {
 
   it("counts for no bytes and no size until it is released", async () => {
     const { source, blobs, hash } = await stores();
-    await blobs.keep(source, true);
+    await blobs.keep("join.mp4", source, true);
 
     expect([blobs.has(hash), blobs.bytes(), blobs.size(hash)]).toEqual([true, 0, 0]);
     expect(existsSync(source)).toBe(false);
@@ -174,7 +200,7 @@ describe("the set-aside store beside the blobs", () => {
 
   it("leaves only the finished copy in the set-aside folder", async () => {
     const { home, source, blobs, hash } = await stores();
-    await blobs.keep(source, false);
+    await blobs.keep("join.mp4", source, false);
 
     const aside = join(home, "aside");
     expect(readdirSync(aside)).toEqual([hash.slice(0, 2)]);

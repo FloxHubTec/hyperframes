@@ -16,8 +16,8 @@ export interface BlobStore {
   writeTo(hash: string, absPath: string, beforeReplace?: () => void): Promise<void>;
   bytes(): number;
   size(hash: string): number;
-  keep(absPath: string, remove: boolean): Promise<void>;
-  release(hashes: Iterable<string>): Promise<void>;
+  keep(path: string, absPath: string, remove: boolean): Promise<void>;
+  release(held: Iterable<readonly [hash: string, path: string]>): Promise<void>;
   prune(keep: ReadonlySet<string>): Promise<void>;
   drop(hashes: Iterable<string>): Promise<void>;
 }
@@ -65,6 +65,8 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
   // Bytes history moved out of the project live apart from the blobs, so reclaiming old media copies never takes them.
   const asideDir = join(dirname(dir), "aside");
   const asideSizes = new Map<string, number>();
+  // The project paths still counting on each set-aside copy; it goes when the last one has its file back.
+  const holds = new Map<string, Set<string>>();
   await mkdir(dir, { recursive: true });
   for (const [root, found] of [
     [dir, sizes],
@@ -73,6 +75,7 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
     for (const shard of await readdir(root).catch(() => []))
       for (const hash of await readdir(join(root, shard)).catch(() => []))
         found.set(hash, (await stat(join(root, shard, hash))).size);
+  for (const hash of asideSizes.keys()) holds.set(hash, new Set(["*"]));
   const pathOf = (hash: string) => blobPath(sizes.has(hash) ? dir : asideDir, hash);
   let total = [...sizes.values()].reduce((sum, size) => sum + size, 0);
   const forget = async (hash: string) => {
@@ -83,6 +86,7 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
   const forgetAside = async (hash: string) => {
     await rm(blobPath(asideDir, hash), { force: true });
     asideSizes.delete(hash);
+    holds.delete(hash);
   };
 
   return {
@@ -112,12 +116,19 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
     read: (hash) => readFile(pathOf(hash)),
     writeTo: async (hash, absPath, beforeReplace) =>
       cloneOrCopy(pathOf(hash), absPath, beforeReplace),
-    async release(hashes) {
-      for (const hash of hashes) if (asideSizes.has(hash)) await forgetAside(hash);
+    async release(held) {
+      for (const [hash, path] of held) {
+        holds.get(hash)?.delete(path);
+        if (holds.get(hash)?.size === 0) await forgetAside(hash);
+      }
     },
-    async keep(absPath, remove) {
+    async keep(path, absPath, remove) {
       const hash = await hashFile(absPath);
-      if (sizes.has(hash) || asideSizes.has(hash)) return;
+      if (sizes.has(hash)) return;
+      if (asideSizes.has(hash)) {
+        holds.get(hash)!.add(path);
+        return;
+      }
       const to = blobPath(asideDir, hash);
       await mkdir(dirname(to), { recursive: true });
       const moved =
@@ -135,6 +146,7 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
         await rename(temp, to);
       }
       asideSizes.set(hash, (await stat(to)).size);
+      holds.set(hash, new Set([path]));
     },
     bytes: () => total,
     size: (hash) => sizes.get(hash) ?? 0,
