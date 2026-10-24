@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.153",
+  "version": "0.8.191",
   "description": "",
   "repository": {
     "type": "git",
@@ -43,6 +43,12 @@
       "node": "./dist/telemetryRedaction.js",
       "import": "./src/telemetryRedaction.ts",
       "types": "./src/telemetryRedaction.ts"
+    },
+    "./distributed-fps": {
+      "bun": "./src/distributedFps.ts",
+      "node": "./dist/distributedFps.js",
+      "import": "./src/distributedFps.ts",
+      "types": "./src/distributedFps.ts"
     },
     "./beats": {
       "bun": "./src/beats/index.ts",
@@ -109,6 +115,18 @@
       "node": "./dist/keyframeDefaults.js",
       "import": "./src/keyframeDefaults.ts",
       "types": "./src/keyframeDefaults.ts"
+    },
+    "./html-in-canvas": {
+      "bun": "./src/htmlInCanvas.ts",
+      "node": "./dist/htmlInCanvas.js",
+      "import": "./src/htmlInCanvas.ts",
+      "types": "./src/htmlInCanvas.ts"
+    },
+    "./motion-blur-settings": {
+      "bun": "./src/motionBlurSettings.ts",
+      "node": "./dist/motionBlurSettings.js",
+      "import": "./src/motionBlurSettings.ts",
+      "types": "./src/motionBlurSettings.ts"
     },
     "./gsap-cdn": {
       "bun": "./src/gsapCdn.ts",
@@ -265,6 +283,12 @@
       "node": "./dist/audibleVideo.js",
       "import": "./src/audibleVideo.ts",
       "types": "./src/audibleVideo.ts"
+    },
+    "./audio-analysis": {
+      "bun": "./src/audioAnalysis.ts",
+      "node": "./dist/audioAnalysis.js",
+      "import": "./src/audioAnalysis.ts",
+      "types": "./src/audioAnalysis.ts"
     },
     "./audio-gain": {
       "bun": "./src/audioGain.ts",
@@ -554,6 +578,10 @@
         "import": "./dist/telemetryRedaction.js",
         "types": "./dist/telemetryRedaction.d.ts"
       },
+      "./distributed-fps": {
+        "import": "./dist/distributedFps.js",
+        "types": "./dist/distributedFps.d.ts"
+      },
       "./beats": {
         "import": "./dist/beats/index.js",
         "types": "./dist/beats/index.d.ts"
@@ -597,6 +625,14 @@
       "./keyframe-defaults": {
         "import": "./dist/keyframeDefaults.js",
         "types": "./dist/keyframeDefaults.d.ts"
+      },
+      "./html-in-canvas": {
+        "import": "./dist/htmlInCanvas.js",
+        "types": "./dist/htmlInCanvas.d.ts"
+      },
+      "./motion-blur-settings": {
+        "import": "./dist/motionBlurSettings.js",
+        "types": "./dist/motionBlurSettings.d.ts"
       },
       "./gsap-cdn": {
         "import": "./dist/gsapCdn.js",
@@ -701,6 +737,10 @@
       "./audible-video": {
         "import": "./dist/audibleVideo.js",
         "types": "./dist/audibleVideo.d.ts"
+      },
+      "./audio-analysis": {
+        "import": "./dist/audioAnalysis.js",
+        "types": "./dist/audioAnalysis.d.ts"
       },
       "./audio-gain": {
         "import": "./dist/audioGain.js",
@@ -886,7 +926,7 @@
     "types": "./dist/index.d.ts"
   },
   "scripts": {
-    "build": "bun run build:fonts && bun run build:svg-selector-aliases && bun run build:hyperframes-runtime && bun run build:position-edits-render && bun run build:audio-fx-runtime && tsc && tsx scripts/rewrite-esm-extensions.ts",
+    "build": "bun run build:fonts && bun run build:svg-selector-aliases && bun run build:hyperframes-runtime && bun run build:position-edits-render && bun run build:audio-fx-runtime && tsc && node ../../scripts/rewrite-relative-import-extensions.mjs dist",
     "build:fonts": "node scripts/build-fonts.mjs",
     "test": "bun run check:position-edits-render && bun run check:svg-selector-aliases && bun run build:audio-fx-runtime && vitest run",
     "test:watch": "vitest",
@@ -921,7 +961,6 @@
     "@hyperframes/parsers": "workspace:*",
     "@hyperframes/studio-server": "workspace:*",
     "acorn": "^8.17.0",
-    "bpm-detective": "^2.0.5",
     "linkedom": "^0.18.12",
     "postcss": "^8.5.8",
     "wawoff2": "^2.0.1"
