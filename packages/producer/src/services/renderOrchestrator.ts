@@ -1812,11 +1812,7 @@ function colorGradingValueHasLut(rawAttributeValue: string): boolean {
   }
 }
 
-/**
- * Longest a live probe-page read may hold the render. A page running its own
- * free-running render loop can leave `page.evaluate` unanswered until the CDP
- * protocol timeout (minutes); the static answer is always available.
- */
+/** Longest a live probe-page read may hold the render; a busy page otherwise waits out the CDP timeout. */
 export const PROBE_READ_TIMEOUT_MS = 5_000;
 
 /** `page.evaluate` that rejects after `PROBE_READ_TIMEOUT_MS`, so callers fall back to their static answer. */
