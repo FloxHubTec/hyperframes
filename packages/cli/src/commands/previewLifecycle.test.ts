@@ -137,8 +137,158 @@ describe("background preview lifecycle", () => {
     });
 
     expect(result).toMatchObject({ type: "reused", port: 41402, pid: 4321 });
-    expect(scan).toHaveBeenCalledWith(41402);
+    expect(scan).toHaveBeenCalledExactlyOnceWith(41402);
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([3021, 32521, 32522, 32620, 32621])(
+    "bounds the explicit-port scan when the saved port is %s",
+    async (savedPort) => {
+      const stateHome = tempDir("hf-preview-state-");
+      const requestedPort = 32521;
+      const owned = { ...server, port: savedPort };
+      const requested = { ...server, port: requestedPort, pid: "5555" };
+      const servers = savedPort === requestedPort ? [requested] : [owned, requested];
+      writePreviewSession(
+        { pid: 4321, port: savedPort, projectDir, logPath: "/tmp/preview.log" },
+        stateHome,
+      );
+      const scan = vi.fn(async (start = 3002) =>
+        servers.filter((candidate) => candidate.port >= start && candidate.port < start + 100),
+      );
+      const probe = vi.fn(
+        async (port: number) => servers.find((candidate) => candidate.port === port) ?? null,
+      );
+      const spawn = vi.fn();
+      const kill = vi.fn();
+
+      const result = await startBackgroundPreview(projectDir, requestedPort, {
+        scan,
+        probe,
+        spawn,
+        kill,
+        stateHome,
+        preferredPort: requestedPort,
+      });
+
+      expect(result).toMatchObject({ type: "reused", port: requestedPort, pid: 5555 });
+      expect(scan).toHaveBeenCalledExactlyOnceWith(requestedPort);
+      expect(probe.mock.calls).toEqual(
+        savedPort < requestedPort || savedPort > 32620 ? [[savedPort]] : [],
+      );
+      expect(spawn).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([true, false])(
+    "bounds the explicit-port replacement scan through shutdown (force-new: %s)",
+    async (forceNew) => {
+      const stateHome = tempDir("hf-preview-state-");
+      const owned = { ...server, port: 3021, browserGpuMode: "hardware" as const };
+      const replacement = {
+        ...server,
+        port: 32521,
+        pid: "5432",
+        browserGpuMode: "software" as const,
+      };
+      const sibling = { ...replacement, port: 32522, pid: "8765" };
+      writePreviewSession(
+        { pid: 4321, port: owned.port, projectDir, logPath: "/tmp/preview.log" },
+        stateHome,
+      );
+      let ownedRunning = true;
+      let replacementRunning = false;
+      let stopping = false;
+      const scan = vi.fn(async (start = 3002) =>
+        [
+          sibling,
+          ...(ownedRunning ? [owned] : []),
+          ...(replacementRunning ? [replacement] : []),
+        ].filter((candidate) => candidate.port >= start && candidate.port < start + 100),
+      );
+      const probe = vi.fn(async (port: number) =>
+        ownedRunning && port === owned.port ? owned : null,
+      );
+      const kill = vi.fn((pid: number) => {
+        expect(pid).toBe(4321);
+        stopping = true;
+      });
+      const sleep = vi.fn(async () => {
+        if (stopping) ownedRunning = false;
+      });
+      const spawn = vi.fn(() => {
+        expect(ownedRunning).toBe(false);
+        replacementRunning = true;
+        return { pid: 5432, unref: vi.fn() };
+      });
+
+      const result = await startBackgroundPreview(projectDir, replacement.port, {
+        browserGpuMode: "software",
+        forceNew,
+        preferredPort: replacement.port,
+        kill,
+        probe,
+        scan,
+        sleep,
+        spawn,
+        stateHome,
+      });
+
+      expect(result).toMatchObject({ type: "started", port: replacement.port, pid: 5432 });
+      expect(scan.mock.calls.length).toBeGreaterThan(1);
+      expect(scan.mock.calls.every(([port]) => port === replacement.port)).toBe(true);
+      expect(probe.mock.calls.length).toBeGreaterThanOrEqual(4);
+      expect(probe.mock.calls.every(([port]) => port === owned.port)).toBe(true);
+      expect(kill).toHaveBeenCalledExactlyOnceWith(4321);
+      expect(sleep).toHaveBeenCalledOnce();
+      expect(spawn).toHaveBeenCalledOnce();
+      expect(
+        JSON.parse(readFileSync(previewSessionPath(projectDir, stateHome), "utf8")),
+      ).toMatchObject({
+        port: replacement.port,
+        pid: 5432,
+      });
+    },
+  );
+
+  it("keeps explicit-port replacement blocked while the saved listener is still running", async () => {
+    const stateHome = tempDir("hf-preview-state-");
+    const owned = { ...server, port: 3021 };
+    writePreviewSession(
+      { pid: 4321, port: owned.port, projectDir, logPath: "/tmp/preview.log" },
+      stateHome,
+    );
+    const scan = vi.fn(async (start = 3002) =>
+      owned.port >= start && owned.port < start + 100 ? [owned] : [],
+    );
+    const probe = vi.fn(async (port: number) => (port === owned.port ? owned : null));
+    const spawn = vi.fn();
+    const kill = vi.fn();
+
+    await expect(
+      startBackgroundPreview(projectDir, 32521, {
+        forceNew: true,
+        preferredPort: 32521,
+        scan,
+        probe,
+        spawn,
+        kill,
+        sleep: async () => {},
+        stateHome,
+      }),
+    ).rejects.toThrow("background preview did not stop");
+
+    expect(scan.mock.calls.every(([port]) => port === 32521)).toBe(true);
+    expect(probe.mock.calls.every(([port]) => port === owned.port)).toBe(true);
+    expect(kill).toHaveBeenCalledExactlyOnceWith(4321);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(readFileSync(previewSessionPath(projectDir, stateHome), "utf8")),
+    ).toMatchObject({
+      port: owned.port,
+      pid: 4321,
+    });
   });
 
   it("throws a port-mismatch error when the caller explicitly requests a port the reused server isn't on", async () => {
@@ -586,9 +736,10 @@ describe("background preview lifecycle", () => {
     const spawn = vi.fn();
     const kill = vi.fn();
 
-    const result = await startBackgroundPreview(projectDir, 3002, {
+    const result = await startBackgroundPreview(projectDir, sibling.port, {
       kill,
-      scan: async () => [owned, sibling],
+      scan: async () => [sibling],
+      probe: async (port) => (port === owned.port ? owned : null),
       spawn,
       stateHome,
       preferredPort: sibling.port,
@@ -602,10 +753,10 @@ describe("background preview lifecycle", () => {
   it("lists every same-project server in the port-mismatch error, not just the reuse candidate", async () => {
     const stateHome = mkdtempSync(join(tmpdir(), "hf-preview-state-"));
     const owned = { ...server, port: 3002 };
-    const sibling = { ...server, port: 3003, pid: "5555" };
+    const sibling = { ...server, port: 3004, pid: "5555" };
     const foreign = {
       ...server,
-      port: 3004,
+      port: 3003,
       projectDir: resolve("/tmp/hyperframes-preview-lifecycle-other"),
       pid: "7777",
     };
@@ -615,18 +766,19 @@ describe("background preview lifecycle", () => {
     );
     const spawn = vi.fn();
 
-    const failure = await startBackgroundPreview(projectDir, 3002, {
-      scan: async () => [owned, sibling, foreign],
+    const failure = await startBackgroundPreview(projectDir, foreign.port, {
+      scan: async () => [sibling, foreign],
+      probe: async (port) => (port === owned.port ? owned : null),
       spawn,
       stateHome,
-      preferredPort: 3004,
+      preferredPort: foreign.port,
     }).then(
       () => null,
       (error: unknown) => error,
     );
 
     expect(failure).toBeInstanceOf(PreviewServerPortMismatchError);
-    expect(failure).toMatchObject({ requestedPort: 3004, ports: [3002, 3003] });
+    expect(failure).toMatchObject({ requestedPort: 3003, ports: [3002, 3004] });
     expect((failure as Error).message).toContain("add --force-new or run --stop first");
     expect(spawn).not.toHaveBeenCalled();
   });
@@ -640,10 +792,10 @@ describe("background preview lifecycle", () => {
       stateHome,
     );
     const spawn = vi.fn();
-    const probe = vi.fn(async (port: number) => (port === farSibling.port ? farSibling : null));
+    const probe = vi.fn(async (port: number) => (port === owned.port ? owned : null));
 
     const result = await startBackgroundPreview(projectDir, farSibling.port, {
-      scan: async () => [owned],
+      scan: async () => [farSibling],
       probe,
       spawn,
       stateHome,
@@ -651,7 +803,7 @@ describe("background preview lifecycle", () => {
     });
 
     expect(result).toMatchObject({ type: "reused", port: farSibling.port, pid: 5555 });
-    expect(probe).toHaveBeenCalledExactlyOnceWith(farSibling.port);
+    expect(probe).toHaveBeenCalledExactlyOnceWith(owned.port);
     expect(spawn).not.toHaveBeenCalled();
   });
 
@@ -863,7 +1015,7 @@ describe("background preview lifecycle", () => {
     });
 
     expect(status?.port).toBe(3210);
-    expect(scan).toHaveBeenCalledWith(3210);
+    expect(scan).toHaveBeenCalledExactlyOnceWith(3210);
   });
 
   it("stops only the matching project server and waits until it is unreachable", async () => {

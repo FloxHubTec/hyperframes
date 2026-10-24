@@ -78,6 +78,19 @@ Run `docker info`.
 
 Confirm Docker is installed, its daemon is running, your user has permission, and the first image download can reach the registry.
 
+### Preview checks an unexpected port range
+
+For a managed background preview, choose the discovery range with an explicit port:
+
+```bash
+npx hyperframes preview --background --port 4567
+```
+
+Discovery checks ports 4567–4666. If this project has a saved preview on another
+port outside that range, only that saved port is checked separately. When moving
+an existing managed preview to the requested port, add `--force-new` to stop and
+replace it. Without `--port`, discovery starts at the saved preview's port.
+
 ## Media problems
 
 ### Video is black in preview but renders
