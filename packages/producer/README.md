@@ -88,7 +88,7 @@ await executeRenderJob(job, "./my-project", "./output.webm");
 The producer captures Chrome screenshots with the page background forced transparent (`html, body, [data-composition-id] { background: transparent !important }`) and the CDP default background override set to RGBA 0,0,0,0. The captured PNGs carry a real alpha channel and that channel is preserved end-to-end:
 
 - VP9 (`webm`) is encoded with `-pix_fmt yuva420p`, `-auto-alt-ref 0`, `-cpu-used 4` by default, and `alpha_mode=1` metadata. Tune the speed/quality tradeoff with `PRODUCER_VP9_CPU_USED` (`-8` to `8`) or local CLI `--vp9-cpu-used`.
-- ProRes 4444 (`mov`) encodes Chrome's 8-bit RGBA capture with `-pix_fmt yuva444p10le`. The 10-bit encoding preserves alpha; captured color precision remains 8 bits per channel.
+- ProRes 4444 (`mov`) uses `-pix_fmt yuva444p10le` and carries a separate alpha plane. Chrome's RGBA capture, including alpha, is 8 bits per channel; the 10-bit pixel format adds no capture precision.
 - PNG sequences are written without re-encoding (zero-padded `frame_NNNNNN.png`).
 
 This is not chroma keying. There is no green/blue background to remove and no "key" tolerance to tune — pixels that were transparent in the browser are transparent in the output.
