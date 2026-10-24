@@ -15,6 +15,7 @@ export interface CancellableProcessOptions {
   maxBufferBytes?: number;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  detached?: boolean;
   onSpawn?: (pid: number) => void;
 }
 
@@ -57,6 +58,7 @@ export function runCancellableProcess(
   const signal = options.signal;
   signal?.throwIfAborted();
 
+  const detached = options.detached ?? process.platform !== "win32";
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
     try {
@@ -65,7 +67,7 @@ export function runCancellableProcess(
         env: options.env,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
-        detached: process.platform !== "win32",
+        detached,
       };
       child = spawn(command, [...args], spawnOptions);
     } catch (error) {
@@ -106,7 +108,7 @@ export function runCancellableProcess(
       terminationCode = code;
       terminationSignal = "SIGTERM";
       if (processTreePid) {
-        terminationTask = terminateProcessTree(processTreePid, { child, processGroup: true });
+        terminationTask = terminateProcessTree(processTreePid, { child, processGroup: detached });
         void terminationTask.catch(() => undefined);
       }
     };
