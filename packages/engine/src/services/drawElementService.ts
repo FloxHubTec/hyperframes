@@ -682,7 +682,7 @@ export async function initDrawElementWorkerEncode(page: Page): Promise<void> {
     // frame's id so the node-side promise rejects instead of hanging.
     const workerSrc = `
       // Reuse one OffscreenCanvas across frames (dimensions are constant for a
-      // render) — a fresh canvas per frame churns ~w*h*4 bytes of backing store
+      // render): a fresh canvas per frame churns ~w*h*4 bytes of backing store
       // every frame and pressures GC on the encode hot path.
       let oc = null, c = null;
       self.onmessage = async (e) => {
@@ -1054,6 +1054,7 @@ export async function produceDrawElementFrameBatch(
         __hf_accel_canvases?: HTMLCanvasElement[];
         __hf3d?: { update: () => void };
         __hf?: { seek?: (t: number) => void };
+        __hfWaitForSeekCompletion?: () => Promise<void>;
         __hfDecodeDynamicCssBackgroundImages?: () => Promise<void>;
         __hfDeInvalidate?: () => boolean;
         __HF_ROOT_PROPS__?: boolean;
@@ -1089,6 +1090,7 @@ export async function produceDrawElementFrameBatch(
         const { t, fid } = frame;
         try {
           if (aw.__hf && typeof aw.__hf.seek === "function") aw.__hf.seek(t);
+          await aw.__hfWaitForSeekCompletion?.();
           await aw.__hfDecodeDynamicCssBackgroundImages?.();
           aw.__hf3d?.update();
           const accel = (aw.__hf_accel_canvases ?? []).filter((c) => root.contains(c));
