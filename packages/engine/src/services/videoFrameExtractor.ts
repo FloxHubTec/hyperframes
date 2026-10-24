@@ -215,7 +215,7 @@ function exactSourceRate(probed: number): number | null {
   );
 }
 
-/** The slots of a constant-rate window that reach the source's end holding a frame, from the stored final-frame time; null when not certain (callers decode the tail). */
+/** Slots of a window reaching the source's end that hold a frame, from the stored final frame; null if unsure. */
 export function tailFramesFromFinalFrame(input: {
   startTime: number;
   firstFrame: number;

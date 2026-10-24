@@ -234,7 +234,7 @@ async function storeAudioSidecars(
 }
 
 /**
- * Each video's ffprobe JSON, stored beside it, so a render reads a few kilobytes instead of probing the video over the network.
+ * Each video's ffprobe JSON, stored beside it, so a render reads kilobytes instead of probing the video.
  * Optional: a machine without ffprobe leaves the site as it was, and renders probe the video.
  */
 async function storeProbeFacts(

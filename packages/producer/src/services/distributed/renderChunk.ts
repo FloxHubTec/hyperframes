@@ -870,13 +870,9 @@ export async function renderChunk(
 
       const isPngSequence = plan.dimensions.format === "png-sequence";
       outputKind = isPngSequence ? "frame-dir" : "file";
-      // For mp4 / mov / webm we use the standard preset machinery; the
-      // locked encoder values come from the plan's encoder metadata and the
-      // `lockGopForChunkConcat` toggle is the only Phase-2 flag that flips
-      // on at this site. png-sequence has no encoder, but `runEncodeStage`
-      // still reads `preset.quality` for bookkeeping (it never reaches
-      // ffmpeg on the pngseq branch). Fall back to the mp4 preset shape —
-      // same trick `renderOrchestrator` plays.
+      // mp4 / mov / webm use the standard preset machinery; locked encoder values come from the plan's
+      // encoder metadata. png-sequence has no encoder, but `runEncodeStage` still reads `preset.quality`,
+      // so fall back to the mp4 preset shape, as `renderOrchestrator` does.
       const presetFormat: "mp4" | "mov" | "webm" = isPngSequence
         ? "mp4"
         : (plan.dimensions.format as "mp4" | "mov" | "webm");

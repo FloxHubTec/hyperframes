@@ -453,7 +453,7 @@ export function readProbeJson(filePath: string, signal?: AbortSignal): Promise<s
   );
 }
 
-/** What a site stores beside a video: its ffprobe JSON and the final-frame timestamp a plan would otherwise probe for. */
+/** What a site stores beside a video: its ffprobe JSON and the final-frame facts a plan would otherwise probe for. */
 export async function buildProbeFactsText(filePath: string, signal?: AbortSignal): Promise<string> {
   const facts: StoredProbeFacts = {
     ffprobe: parseProbeJson(await runFfprobe(filePath, PROBE_JSON_ARGS, signal)),
@@ -949,7 +949,7 @@ function resolveStreamWindow(
   return { videoStreamStartSeconds, videoStreamDurationSeconds, cacheKey };
 }
 
-/** The final-frame facts a site stored beside the video for this stream window; none when nothing is declared (no await then, so a probe spawns at once). */
+/** Stored final-frame facts for this stream window; none if undeclared (no await then, so a probe spawns at once). */
 export function readStoredFinalFrame(
   filePath: string,
   metadata: Pick<VideoMetadata, "videoStreamDurationSeconds" | "videoStreamStartSeconds">,
