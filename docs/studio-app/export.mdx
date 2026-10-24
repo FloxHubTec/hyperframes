@@ -9,19 +9,21 @@ import { DocsVideo } from "/snippets/docs-video.jsx";
 When the video is ready, choose **Export** in the project's top bar. The **Export** panel opens beside the picture.
 
 <DocsVideo
-  title="Exporting a 4K MP4 from the Studio app"
-  src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/studio-export-demo-v1.mp4"
-  poster="/public/images/studio-app/studio-export-demo.jpg"
+  title="Exporting a 1080p MP4 from the Studio app"
+  src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/studio-export-demo-v2.mp4"
+  poster="/public/images/studio-app/studio-export-demo-v2.jpg"
   aspect="16 / 10"
   autoPlay
   loop
 />
 
-*Export, 4K, Render. The wait in the middle plays at 10×: this 12-second video took about 95 seconds on a MacBook.*
+*Export, Change, 1080p, Render. The wait plays at 2×: this 12-second video took about 16 seconds on a MacBook.*
 
 ## This Mac or the cloud
 
-**Render on** picks where the video is made. **This Mac** is the default.
+Exports render on **This Mac** unless you pick the cloud. Under the render button, **Render in the cloud** opens
+**Cloud rendering**, which compares the two and lets you **Add API key**. Once a key is saved, **Render on** in Export
+picks **This Mac** or **Cloud**.
 
 | | This Mac | Cloud |
 | --- | --- | --- |
@@ -30,7 +32,7 @@ When the video is ready, choose **Export** in the project's top bar. The **Expor
 | Your files | Stay on your computer | The project is uploaded to HeyGen to render |
 | Limits | Any shape and length | 16:9, 9:16 or 1:1, at 24, 25, 30 or 60 fps, project up to 200 MB |
 
-**Cloud** shows up once a HeyGen API key is saved in **Settings** > **HeyGen API key**. If the project is over 200 MB,
+The key can also go in **Settings** > **HeyGen API key**. If the project is over 200 MB,
 choose **Ask Framey to do it** under **Make it fit the cloud**: Framey moves your big videos and images to your
 HeyGen assets. Either way, the video lands in your Downloads folder. A cloud render that has started can't be
 stopped: **Cancel** stops waiting, but the cloud may still finish it and charge your balance.
