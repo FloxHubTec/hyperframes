@@ -1,7 +1,7 @@
 // fallow-ignore-file code-duplication
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core";
+import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core/browser-marker";
 import { runRenderSetupWorker } from "./cancellableProcess.js";
 import { terminateProcessTree, windowsProcessTreeKillArgs } from "./processTree.js";
 

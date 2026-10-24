@@ -1,4 +1,4 @@
-import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core";
+import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core/browser-marker";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const child = vi.hoisted(() => ({ execFileSync: vi.fn(), execSync: vi.fn() }));

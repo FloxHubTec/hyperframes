@@ -2,7 +2,7 @@
 // error, catching a script-fetched asset a static markup scan can't see.
 
 import puppeteer, { type Browser } from "puppeteer";
-import { withHyperframesBrowserMarker } from "@hyperframes/core";
+import { withHyperframesBrowserMarker } from "@hyperframes/core/browser-marker";
 import { injectScriptsAtHeadStart } from "@hyperframes/core/compiler";
 import { getVerifiedHyperframeRuntimeSource } from "./services/hyperframeRuntimeLoader.js";
 

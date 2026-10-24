@@ -6,7 +6,7 @@ import {
   type PuppeteerNode,
 } from "puppeteer-core";
 import { TargetCloseError } from "puppeteer-core/internal/common/Errors.js";
-import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core";
+import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core/browser-marker";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { launchManagedBrowser } from "./launch.js";
 

@@ -19,7 +19,7 @@
  * Performance: ~6 fps at 1080x1920 via base64 transfer.
  */
 
-import { withHyperframesBrowserMarker } from "@hyperframes/core";
+import { withHyperframesBrowserMarker } from "@hyperframes/core/browser-marker";
 import type { Page, Browser, PuppeteerNode } from "puppeteer-core";
 import { resolveFullChromePath, sigintLaunchOptions } from "./browserManager.js";
 

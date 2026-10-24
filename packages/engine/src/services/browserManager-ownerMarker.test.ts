@@ -1,4 +1,4 @@
-import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core";
+import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core/browser-marker";
 import type { LaunchOptions, PuppeteerNode } from "puppeteer-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {

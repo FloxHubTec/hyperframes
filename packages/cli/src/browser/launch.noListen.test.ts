@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core";
+import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core/browser-marker";
 import type { LaunchOptions, PuppeteerNode } from "puppeteer-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 

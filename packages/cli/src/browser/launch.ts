@@ -1,5 +1,5 @@
 import type { Browser, LaunchOptions, PuppeteerNode } from "puppeteer-core";
-import { withHyperframesBrowserMarker } from "@hyperframes/core";
+import { withHyperframesBrowserMarker } from "@hyperframes/core/browser-marker";
 import {
   resolveCaptureBrowserGpuMode,
   type BrowserGpuMode,

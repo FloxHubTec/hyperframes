@@ -6,7 +6,7 @@
  * launch args, pooled browser acquisition/release.
  */
 
-import { withHyperframesBrowserMarker } from "@hyperframes/core";
+import { withHyperframesBrowserMarker } from "@hyperframes/core/browser-marker";
 import { scanHtmlOpeningTags } from "@hyperframes/parsers/html-attribute-spans";
 import type { Browser, LaunchOptions, Page, PuppeteerNode } from "puppeteer-core";
 import { execSync } from "child_process";

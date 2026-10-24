@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HYPERFRAMES_BROWSER_MARKER_ARG, withHyperframesBrowserMarker } from "./index.js";
+import { HYPERFRAMES_BROWSER_MARKER_ARG, withHyperframesBrowserMarker } from "./browserMarker.js";
 
 describe("withHyperframesBrowserMarker", () => {
   it("appends the marker to a copy of the args", () => {
