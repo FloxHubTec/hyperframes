@@ -14,6 +14,7 @@ import {
   prebuildPreview,
   handlePreviewKillAll,
   handlePreviewList,
+  previewHostAppError,
   previewLaunchMode,
   previewLaunchModeError,
   previewPortError,
@@ -34,6 +35,12 @@ vi.mock("../utils/lintProject.js", async (importOriginal) => ({
 vi.mock("../utils/cancellableProcess.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../utils/cancellableProcess.js")>()),
   runRenderSetupWorker: lint.worker,
+}));
+// The real cleanup kills every orphaned Chrome the user owns, so no test may reach it.
+const killOrphanedProcesses = vi.hoisted(() => vi.fn(() => 0));
+vi.mock("../utils/orphanCleanup.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../utils/orphanCleanup.js")>()),
+  killOrphanedProcesses,
 }));
 
 const tempDirs: string[] = [];
@@ -599,5 +606,39 @@ describe("studio dev-server spawns", () => {
 
     expect(spawn).toHaveBeenCalledOnce();
     expect(spawn.mock.calls[0]?.[2]).toMatchObject({ windowsHide: true });
+  });
+});
+
+describe("preview inside a host app's agent run", () => {
+  const hostRun = { HYPERFRAMES_DESKTOP_PROJECT: "/projects/demo" };
+
+  it("refuses a background preview, which would outlive the run", () => {
+    expect(previewHostAppError("background", hostRun)).toMatch(/host app .* owns its preview/);
+    expect(previewHostAppError("background", hostRun)).toContain("--foreground");
+  });
+
+  it("allows a preview attached to the run, and background outside a host app", () => {
+    expect(previewHostAppError("embedded", hostRun)).toBeNull();
+    expect(previewHostAppError("local", hostRun)).toBeNull();
+    expect(previewHostAppError("background", {})).toBeNull();
+  });
+
+  it("refuses before spawning anything", async () => {
+    vi.stubEnv("HYPERFRAMES_DESKTOP_PROJECT", "/projects/demo");
+    const project = mkdtempSync(join(tmpdir(), "hf-host-preview-"));
+    writeFileSync(join(project, "index.html"), "<html><body></body></html>");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    let printed = "";
+    try {
+      await runCommand(previewCommand, { rawArgs: [project, "--background", "--json"] });
+      printed = String(log.mock.calls.at(-1)?.[0]);
+    } finally {
+      log.mockRestore();
+      vi.unstubAllEnvs();
+      rmSync(project, { recursive: true, force: true });
+    }
+    const payload = JSON.parse(printed);
+    expect(payload).toMatchObject({ ok: false, error: { code: "host-app-owns-preview" } });
+    expect(killOrphanedProcesses).not.toHaveBeenCalled();
   });
 });
