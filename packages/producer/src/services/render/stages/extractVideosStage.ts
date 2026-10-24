@@ -33,7 +33,6 @@ import { join } from "node:path";
 import {
   type CaptureVideoMetadataHint,
   type EngineConfig,
-  type ExtractedFrames,
   type ExtractionResult,
   type FrameLookupTable,
   type HdrTransfer,
@@ -47,6 +46,9 @@ import {
   extractMediaMetadata,
   isVideoPastTimelineEnd,
   isHdrColorSpace,
+  rebaseVideoToWindow,
+  resolveFinalFrameExtractionWindow,
+  resolveVideoExtractionWindow,
   isHttpUrl,
   resolveProjectRelativeSrc,
   runVideoExtractionWithRetry,
@@ -590,7 +592,10 @@ export function appendAutoDetectedVideoAudio(
   }
 }
 
-/** The audio-only form of the extract stage: which videos carry sound takes a probe per source, not their frames. */
+/**
+ * The audio-only form of the extract stage: which videos carry sound takes a probe per source, not their frames.
+ * Each video is moved to its extraction window first, as extraction does, so its sound lands where its picture does.
+ */
 export async function appendVideoAudioFromProbe(input: {
   projectDir: string;
   compiledDir: string;
@@ -608,7 +613,16 @@ export async function appendVideoAudioFromProbe(input: {
         : resolveProjectRelativeSrc(video.src, projectDir, compiledDir);
       const readFrom = urlByAbsentLocalPath?.get(path) ?? path;
       if (!isHttpUrl(readFrom) && !existsSync(readFrom)) return null;
-      return { videoId: video.id, metadata: await extractMediaMetadata(readFrom) };
+      const metadata = await extractMediaMetadata(readFrom);
+      const window = await resolveFinalFrameExtractionWindow(
+        readFrom,
+        video,
+        metadata,
+        resolveVideoExtractionWindow(video, metadata, composition.duration),
+      );
+      if (window.durationSeconds <= 0) return null;
+      rebaseVideoToWindow(video, window);
+      return { videoId: video.id, metadata };
     }),
   );
   appendAutoDetectedVideoAudio(
