@@ -4,6 +4,8 @@ sidebarTitle: "Install"
 description: "Download the HyperFrames Studio app for Mac or Linux, open it for the first time, and sign in with your HeyGen account."
 ---
 
+import { HoverVideo } from "/snippets/hover-video.jsx";
+
 The HyperFrames Studio app for Mac and Linux is the easiest way to make a video with HyperFrames. You describe the video, an
 agent on your computer builds it, and you change it by typing, pointing at the picture, drawing, or commenting.
 You do not need to write code. Framey, the small
@@ -15,7 +17,7 @@ green guide, points you to the next step along the way.
 - **Windows:** coming soon. Until then, make videos with [your AI agent](/quickstart#with-your-agent) or in
   [Claude.ai or ChatGPT](/guides/mcp).
 
-<Frame caption="Home: Make something, with Make, Reference and Learn, and Remix from inspiration beside it.">
+<Frame caption="Home: Make something, with Make and Reference (and Script or Learn on some accounts), and Remix from inspiration beside it.">
   <img
     src="/public/images/studio-app/home.jpg"
     alt="The HyperFrames Studio app's Home screen: the Make something box and the Remix from inspiration feed"
@@ -28,7 +30,7 @@ green guide, points you to the next step along the way.
   <Tab title="Mac">
     <Steps>
       <Step title="Download">
-        Go to [hyperframes.dev/studio](https://hyperframes.dev/studio) and choose **Download for macOS**.
+        Go to [hyperframes.dev/studio](https://hyperframes.dev/studio) and choose **Download for macOS** (in Safari or Firefox the button is **Apple Silicon**, with an **Intel** link next to it).
       </Step>
       <Step title="Install">
         Open the downloaded disk image and double-click **Install HyperFrames**. The installer copies the app into
@@ -95,7 +97,7 @@ You can sign in or out at any time from **Settings** > **Account**.
 
 ## Updates
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/settings-updates-v1.mp4" autoPlay muted loop playsInline aria-label="Settings, Updates: Check for updates" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/settings-updates-v1.mp4" poster="/public/images/studio-app/spots/settings-updates-v1.jpg" hasAudio={false} label="Settings, Updates: Check for updates" />
 
 The app updates itself. When a new version is ready, a round button appears in the bottom-right corner; click it and
 the app restarts as soon as nothing is running, reopening the project you had open. To check by hand, use

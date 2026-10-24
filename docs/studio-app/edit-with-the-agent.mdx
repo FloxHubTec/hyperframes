@@ -4,6 +4,8 @@ description: "Type a change, point at the picture, draw, or comment, then send s
 sidebarTitle: "Edit with the agent"
 ---
 
+import { HoverVideo } from "/snippets/hover-video.jsx";
+
 import { DocsVideo } from "/snippets/docs-video.jsx";
 
 Every change starts the same way: show the agent where, say what, and send. You can type, point at something in
@@ -31,7 +33,7 @@ other thing and queues your message to run next. To swap them, change **While Fr
 
 ## Point, draw, or comment on the picture
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/comment-tool-v1.mp4" autoPlay muted loop playsInline aria-label="Where Comment is, under the preview" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/comment-tool-v1.mp4" poster="/public/images/studio-app/spots/comment-tool-v1.jpg" hasAudio={false} label="Where Comment is, under the preview" />
 
 The tools under the picture, on the left:
 
@@ -54,7 +56,7 @@ Check them, add a note for all of them, then send them as one request with the s
 
 ## Change the timeline yourself
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/show-timeline-v1.mp4" autoPlay muted loop playsInline aria-label="Show timeline opens the timeline under the preview" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/show-timeline-v1.mp4" poster="/public/images/studio-app/spots/show-timeline-v1.jpg" hasAudio={false} label="Show timeline opens the timeline under the preview" />
 
 Some changes are faster by hand. Show the timeline with the button under the preview. Hover a clip to **Split** it at the playhead, **Delete** it,
 open **Quick edit** to change a video or audio clip's **Speed**, **Volume**, and **Fade**, or ask the agent about it,
@@ -65,7 +67,7 @@ Right-click an empty gap for **Close gap** or **Close all gaps**.
 
 ## Get inspired
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/inspirations-panel-v1.mp4" autoPlay muted loop playsInline aria-label="The Inspirations panel on the right" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/inspirations-panel-v1.mp4" poster="/public/images/studio-app/spots/inspirations-panel-v1.jpg" hasAudio={false} label="The Inspirations panel on the right" />
 
 Home's **Remix from inspiration** feed and a project's **Inspirations** tab hold short example moments from real
 videos (**Motion graphics**, **A-roll Cuts**, **Mobile Ads**). Choose **Add as inspiration** on Home, or **Use** in the
@@ -73,7 +75,7 @@ tab, to put a moment in your message as a reference, then say how to use it and 
 
 ## Undo
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/go-back-v1.mp4" autoPlay muted loop playsInline aria-label="Go back to before this, under each finished run" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/go-back-v1.mp4" poster="/public/images/studio-app/spots/go-back-v1.jpg" hasAudio={false} label="Go back to before this, under each finished run" />
 
 Press Cmd+Z to undo and Cmd+Shift+Z to redo (Ctrl+Z and Ctrl+Shift+Z, or Ctrl+Y, on Windows and Linux). Each agent run in the chat also has its own **Undo** button.
 

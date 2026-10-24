@@ -4,6 +4,8 @@ sidebarTitle: "First video"
 description: "Describe a video in one sentence, answer the agent's questions, approve a storyboard, and get your first video in the HyperFrames Studio app."
 ---
 
+import { HoverVideo } from "/snippets/hover-video.jsx";
+
 import { DocsVideo } from "/snippets/docs-video.jsx";
 
 Type one sentence on Home and choose **Let's go**. The agent may ask a question or two, shows you the video as stills,
@@ -23,7 +25,7 @@ build 25.*
 
 ## What happens
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/storyboard-tab-v1.mp4" autoPlay muted loop playsInline aria-label="The Storyboard tab above the preview" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/storyboard-tab-v1.mp4" poster="/public/images/studio-app/spots/storyboard-tab-v1.jpg" hasAudio={false} label="The Storyboard tab above the preview" />
 
 <Steps>
   <Step title="Say what you want">

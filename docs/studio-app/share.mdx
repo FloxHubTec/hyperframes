@@ -4,6 +4,8 @@ sidebarTitle: "Share for review"
 description: "Get feedback on a video from the HyperFrames Studio app: one click makes a review link people can watch and comment on. Choose who can open it, send new versions on the same link, or turn it off."
 ---
 
+import { HoverVideo } from "/snippets/hover-video.jsx";
+
 import { DocsVideo } from "/snippets/docs-video.jsx";
 
 **Share** in the project's top bar turns your latest export into a review page and copies its link. Send it to
@@ -23,7 +25,7 @@ ends it for everyone.*
 
 ## Share a link
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/share-button-v1.mp4" autoPlay muted loop playsInline aria-label="Share in the top bar" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/share-button-v1.mp4" poster="/public/images/studio-app/spots/share-button-v1.jpg" hasAudio={false} label="Share in the top bar" />
 
 Choose **Share**. The app uploads your last MP4 export, makes the review page and copies its link. If there's no
 MP4 yet, it opens the Export panel first and shares as soon as the export finishes. See

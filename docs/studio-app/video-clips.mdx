@@ -4,6 +4,8 @@ sidebarTitle: "HeyGen Video 1"
 description: "Generate an AI video clip up to a minute long with HeyGen Video 1 in the HyperFrames Studio app, and put it straight into your project."
 ---
 
+import { HoverVideo } from "/snippets/hover-video.jsx";
+
 import { DocsVideo } from "/snippets/docs-video.jsx";
 
 **HeyGen Video 1** generates one unbroken shot from a description, up to a minute long. The clip lands in your
@@ -11,11 +13,11 @@ project's files, and the agent places it on the timeline.
 
 ## Ask the agent for a clip
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/video1-tool-v1.mp4" autoPlay muted loop playsInline aria-label="Tools (#), then HeyGen Video 1" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/video1-tool-v1.mp4" poster="/public/images/studio-app/spots/video1-tool-v1.jpg" hasAudio={false} label="Tools (#), then HeyGen Video 1" />
 
 <Steps>
   <Step title="Open Tools">
-    In the chat, type **#** or choose **Tools (#)**, then pick **HeyGen Video 1**.
+    In the chat, type **#** to open **HyperFrames tools**, then pick **HeyGen Video 1**.
   </Step>
   <Step title="Set the length">
     Choose the length pill to open **Length in seconds**. A clip can be 5 to 60 seconds; it starts at 15.
@@ -31,7 +33,7 @@ You can steer the clip in the same message:
 
 - **Start from a picture**: give an image and it becomes the clip's exact first frame.
 - **Match a look**: give up to 9 reference images.
-- **Copy a movement**: give one reference video. Only its first 5 seconds are used.
+- **Copy a movement**: give one reference video of 5 seconds or less (trim a longer one first; the app refuses it). The clip is then one take of up to 15 seconds, with no start picture.
 - **Shape**: 16:9, 9:16 or 1:1, at 480p or 768p (768p is the default).
 
 ## Or use Generate media
@@ -63,7 +65,7 @@ the same shot at 720p went through.
 
 ## What it costs
 
-In the chat, the agent asks you to confirm the estimated price before anything is spent; the **Generate media**
+In the chat, the agent makes the clip as soon as you ask, without a separate price check; the **Generate media**
 form shows the price before you start. It is paid from your HyperFrames plan when
 the plan covers it, otherwise from the HeyGen API credits on the key in **Settings**.
 

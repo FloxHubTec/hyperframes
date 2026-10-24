@@ -4,6 +4,8 @@ sidebarTitle: "The project screen"
 description: "Every part of a Studio app project: the chat and its @, # and / menus, the Script panel that edits video like a document, Media, Captions, Inspirations and Layers."
 ---
 
+import { HoverVideo } from "/snippets/hover-video.jsx";
+
 import { DocsVideo } from "/snippets/docs-video.jsx";
 
 A project has three columns: the chat with your agent on the left, the preview in the middle, and panels on the
@@ -13,27 +15,27 @@ right. The timeline opens under the preview with **Show timeline**.
 
 Three keys open menus right where you type.
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/at-menu-v1.mp4" autoPlay muted loop playsInline aria-label="Typing @ opens the menu of things to add" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/at-menu-v1.mp4" poster="/public/images/studio-app/spots/at-menu-v1.jpg" hasAudio={false} label="Typing @ opens the menu of things to add" />
 
 **`@` adds something to your message.** The menu groups everything the agent can use: **Media** you added,
 **Scenes & brand kit**, **Inspirations** (moments from real videos), **Captions** styles, **Voices**, other
 **Projects**, or **Add files from your Mac**. Press **Tab** to jump between groups. Whatever you pick shows as a chip
 above your words, so the agent knows exactly which file or style you mean.
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/hash-tools-v1.mp4" autoPlay muted loop playsInline aria-label="Tools (#) under the chat box" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/hash-tools-v1.mp4" poster="/public/images/studio-app/spots/hash-tools-v1.jpg" hasAudio={false} label="Typing # opens HyperFrames tools" />
 
 **`#` picks a tool** for this request: **Storyboard**, **Brand kit**, **Podcast edit**, **HeyGen Voice 1**,
 **Remove background**, **HeyGen Video 1**, **Reference video**, **Create assets** or **Computer use**. Use it when
 you want a specific job done the specific way ("#Remove background on the presenter, then put the title behind her").
-The HeyGen ones need a HeyGen API key.
+The HeyGen ones bill your HeyGen plan when it covers them, otherwise the HeyGen API key in **Settings**.
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/slash-menu-v1.mp4" autoPlay muted loop playsInline aria-label="Typing / opens commands and skills" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/slash-menu-v1.mp4" poster="/public/images/studio-app/spots/slash-menu-v1.jpg" hasAudio={false} label="Typing / opens commands and skills" />
 
 **`/` runs a command or turns on a skill.** **/clear** starts a fresh chat (earlier messages stay above) and
-**/compact** shortens a long one. Below them are ready-made video formats (founder take, AI breakdown reel, cards
+in Claude Code, **/compact** shortens a long one. Below them are ready-made video formats (founder take, AI breakdown reel, cards
 behind you, behind-head captions and more) and any skills you have installed: picking one turns it on for the project.
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/skills-menu-v1.mp4" autoPlay muted loop playsInline aria-label="The Skills menu in the chat header" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/skills-menu-v1.mp4" poster="/public/images/studio-app/spots/skills-menu-v1.jpg" hasAudio={false} label="The Skills menu in the chat header" />
 
 The chat header shows which agent, model and effort the next request uses (click to change), and **Skills** lists
 what the agent can use: HyperFrames' own (always on), **Talking-head formats** and **Video workflows** that work only
@@ -43,41 +45,53 @@ when picked, and **Your skills** from Claude Code or Codex.
 
 ## Script: edit the video like a document
 
-Open **Script** at the top of the right panel. Every word spoken in your video appears as text, transcribed on your
-computer. Select words (click the first, Shift-click the last) and press **Delete**: the video is cut with them. The
-panel says how much shorter it got, and **Put back** undoes any cut.
+Open **Script** at the top of the right panel (on some accounts it opens from a clip's menu instead). Every word
+spoken in your video appears as text. The audio is sent to HeyGen to transcribe it, so this needs your HeyGen sign-in
+on a plan that includes it, or a HeyGen API key in **Settings**.
+
+Select words (click the first, Shift-click the last), then choose **Cut** or press <kbd>⌫</kbd>. The words stay in
+the script, struck through, and the cut waits under **Pending video edits** above the chat box with anything else you
+staged. Choose **Send** and the agent applies them all; the video gets shorter once it's done. **Restore** on struck
+words takes a cut back before you send.
 
 <DocsVideo
-  title="Delete a sentence in the script and the video cuts with it"
-  src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/script-demo-v1.mp4"
-  poster="/public/images/studio-app/script-demo.jpg"
+  title="Cut a sentence in the script, then send it to the agent"
+  src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/script-demo-v2.mp4"
+  poster="/public/images/studio-app/script-demo-v2.jpg"
   aspect="16 / 10"
   autoPlay
   loop
 />
 
-*Select a sentence, Delete: "1 cut · 4.9 s shorter", and playback jumps straight over it.*
+With words selected, the bar offers:
 
-With words selected, the bar also offers **Play** (just those words), **Silence** (keep the picture, mute the
-sound), **Clip** (cut them into a vertical clip of their own) and **Fix** (retype a word; it's spoken again in the same
-voice). **Clean up** removes **Ums and long pauses**, or **Repeated takes**, keeping the last take of each line you
-said more than once.
+- **Comment**: a note on those words for the agent.
+- **Cut** (or **Restore** on cut words).
+- **Fix words**: correct what the transcript heard. The audio stays the same.
+- **Add**: a **Zoom in**, a **B-roll shot** or a **Title card** on those words.
+- **Make clip** (podcast projects): cut the words into a vertical clip of their own.
+- **Ask**: ask your agent about those words.
+
+When the agent spots filler or repeated takes, the top of the script shows how many cuts it suggests and how much
+shorter they'd make the video, with **Keep all** and **Cut all**. Click a suggested cut to see why, and keep or cut
+just that one.
 
 ## Media, Captions, Inspirations, Layers
 
-The icons under **Media** switch the right panel:
+The row of icons at the top of the right panel, **All files**, **Captions**, **Inspirations**, **Layers** (and
+**Reviews** where review is on), switches what the panel shows:
 
 <div className="hf-shelf">
   <div>
-    <video className="hf-spot hf-spot-inline" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/captions-panel-tight-v1.mp4" autoPlay muted loop playsInline aria-label="The Captions panel" />
+    <HoverVideo className="hf-spot hf-spot-inline" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/captions-panel-tight-v1.mp4" poster="/public/images/studio-app/spots/captions-panel-tight-v1.jpg" hasAudio={false} label="The Captions panel" />
     <p><strong>Captions:</strong> 91 caption styles. Click one to use it in the chat, then say where it goes.</p>
   </div>
   <div>
-    <video className="hf-spot hf-spot-inline" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/inspirations-panel-tight-v1.mp4" autoPlay muted loop playsInline aria-label="The Inspirations panel" />
+    <HoverVideo className="hf-spot hf-spot-inline" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/inspirations-panel-tight-v1.mp4" poster="/public/images/studio-app/spots/inspirations-panel-tight-v1.jpg" hasAudio={false} label="The Inspirations panel" />
     <p><strong>Inspirations:</strong> moments from real videos (motion graphics, A-roll cuts, mobile ads, shaders), with ideas for whatever you selected.</p>
   </div>
   <div>
-    <video className="hf-spot hf-spot-inline" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/layers-panel-tight-v1.mp4" autoPlay muted loop playsInline aria-label="The Layers panel" />
+    <HoverVideo className="hf-spot hf-spot-inline" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/layers-panel-tight-v1.mp4" poster="/public/images/studio-app/spots/layers-panel-tight-v1.jpg" hasAudio={false} label="The Layers panel" />
     <p><strong>Layers:</strong> every element in the video, top to bottom; pick one to select it in the preview.</p>
   </div>
 </div>

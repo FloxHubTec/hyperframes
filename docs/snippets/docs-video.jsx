@@ -18,6 +18,10 @@ export const DocsVideo = ({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
+  // Lazy, like ShowcaseWall's: a reduce-motion visitor's first render must not autoplay. The controls still play it.
+  const [reduced] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
   const [controlsVisible, setControlsVisible] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [fullscreenSupported, setFullscreenSupported] = useState(false);
@@ -209,7 +213,7 @@ export const DocsVideo = ({
           aria-label={title}
           src={src}
           poster={poster}
-          autoPlay={autoPlay}
+          autoPlay={autoPlay && !reduced}
           loop={loop}
           playsInline
           preload="metadata"

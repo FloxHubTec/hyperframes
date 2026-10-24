@@ -1,7 +1,9 @@
 ---
 title: "Connect your agent"
-description: "Pick the agent the HyperFrames Studio app works with: Claude Code, Codex, Grok, Antigravity, or OpenCode for free. The app installs it for you."
+description: "Pick the agent the HyperFrames Studio app works with: Claude Code, Codex, Grok, Antigravity, GitHub Copilot, or OpenCode for free. The app installs it for you."
 ---
+
+import { HoverVideo } from "/snippets/hover-video.jsx";
 
 The app makes your videos with an agent that runs on your computer. The first time you send a request without one,
 the **Connect an agent** sheet opens: choose an agent and the app installs it for you, then helps you sign in.
@@ -12,6 +14,7 @@ the **Connect an agent** sheet opens: choose an agent and the app installs it fo
 | Codex | Your browser opens Codex's sign-in: your ChatGPT account. | Billed by OpenAI |
 | Grok | Grok gives you a code to confirm in your browser. | Billed by xAI |
 | Antigravity | Signs in from Terminal: the sheet gives you the command. | Billed by Google |
+| GitHub Copilot | Signs in from Terminal: the sheet gives you the command. | Billed by GitHub |
 | OpenCode | None: it runs free models. Sign in to a provider from Terminal to add its models. | Free |
 
 Runs bill to the plan of the account your agent is signed in with. To use an API key instead, change **Bill runs
@@ -19,7 +22,7 @@ to** in **Settings** > **Permissions**.
 
 ## Set one up
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/settings-permissions-v1.mp4" autoPlay muted loop playsInline aria-label="Settings, Permissions: every agent and its state" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/settings-permissions-v1.mp4" poster="/public/images/studio-app/spots/settings-permissions-v1.jpg" hasAudio={false} label="Settings, Permissions: every agent and its state" />
 
 <Steps>
   <Step title="Choose an agent">
@@ -28,7 +31,7 @@ to** in **Settings** > **Permissions**.
   </Step>
   <Step title="Sign in">
     Choose **Sign in to Claude Code** (or your agent's name) and finish in your browser, or follow the sheet's
-    Terminal step for Antigravity and OpenCode.
+    Terminal step for Antigravity, GitHub Copilot and OpenCode.
   </Step>
   <Step title="Send">
     When the agent answers, the app sends the request you started with.
@@ -43,20 +46,22 @@ If a step fails, the sheet shows the command to run yourself: choose **Copy**, t
 | Codex | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | `codex login` |
 | Grok | `curl -fsSL https://x.ai/cli/install.sh \| bash` | `grok login` |
 | Antigravity | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | run `agy` once |
+| GitHub Copilot | `curl -fsSL https://gh.io/copilot-install \| bash` | `copilot login` |
 | OpenCode | `curl -fsSL https://opencode.ai/v2/install \| bash` | optional: `opencode providers login` |
 
 ## Access: Auto or Full access
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/settings-agent-v1.mp4" autoPlay muted loop playsInline aria-label="Settings, Agent: Auto or Full access" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/settings-agent-v1.mp4" poster="/public/images/studio-app/spots/settings-agent-v1.jpg" hasAudio={false} label="Settings, Agent: Auto or Full access" />
 
 **Auto**, the default, lets your agent work in your project and use the internet, and blocks risky steps. **Full
 access** lets it install and run anything, with no checks. Change it in **Settings** > **Agent**.
 
-OpenCode only runs with **Full access**: the first time you send to it, the app asks to **Turn on** Full access.
+GitHub Copilot and OpenCode only run with **Full access**: the first time you send to one, the app asks to **Turn on**
+Full access.
 
 ## Switch agents
 
-<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/agent-picker-v1.mp4" autoPlay muted loop playsInline aria-label="The agent picker in the chat header" />
+<HoverVideo className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/agent-picker-v1.mp4" poster="/public/images/studio-app/spots/agent-picker-v1.jpg" hasAudio={false} label="The agent picker in the chat header" />
 
 Open the agent picker in the chat header and choose a ready agent; it's used from your next request. To set the
 agent, model and effort for every new request, use **Settings** > **Agent**. **Settings** > **Permissions** lists
