@@ -1,5 +1,4 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
-import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { terminateProcessTree } from "./processTree.js";
 import { renderSetupFailureFrom, renderSetupResultFrom } from "../renderSetupWorkerLifecycle.js";
@@ -17,6 +16,7 @@ export interface CancellableProcessOptions {
   env?: NodeJS.ProcessEnv;
   detached?: boolean;
   onSpawn?: (pid: number) => void;
+  onStdout?: (chunk: string) => void;
 }
 
 class CancellableProcessError extends Error {
@@ -78,9 +78,6 @@ export function runCancellableProcess(
     if (child.pid) options.onSpawn?.(child.pid);
     let stdout = "";
     let stderr = "";
-    const stdoutDecoder = new StringDecoder("utf8");
-    const stderrDecoder = new StringDecoder("utf8");
-    let outputBytes = 0;
     let settled = false;
     let terminationReason: unknown;
     let terminationSignal: NodeJS.Signals | undefined;
@@ -115,16 +112,15 @@ export function runCancellableProcess(
     const onAbort = (): void => terminate(signal?.reason ?? new Error("Operation aborted"));
 
     child.stdout?.on("data", (chunk: Buffer | string) => {
-      stdout += typeof chunk === "string" ? chunk : stdoutDecoder.write(chunk);
-      outputBytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
-      if (outputBytes > maxBufferBytes) {
+      stdout += chunk.toString();
+      options.onStdout?.(chunk.toString());
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > maxBufferBytes) {
         terminate(new Error(`Process output exceeded ${maxBufferBytes} bytes`), "ENOBUFS");
       }
     });
     child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderr += typeof chunk === "string" ? chunk : stderrDecoder.write(chunk);
-      outputBytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
-      if (outputBytes > maxBufferBytes) {
+      stderr += chunk.toString();
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > maxBufferBytes) {
         terminate(new Error(`Process output exceeded ${maxBufferBytes} bytes`), "ENOBUFS");
       }
     });
@@ -132,8 +128,6 @@ export function runCancellableProcess(
     // fallow-ignore-next-line complexity
     child.once("close", async (status, closeSignal) => {
       if (settled) return;
-      stdout += stdoutDecoder.end();
-      stderr += stderrDecoder.end();
       if (terminationTask) terminationSignal = await terminationTask.catch(() => terminationSignal);
       if (settled) return;
       settled = true;
@@ -202,7 +196,7 @@ function tsxLoaderFromCliInstall(): string {
 }
 
 export async function runRenderSetupWorker<T>(
-  mode: "browser" | "lint" | "orphan-cleanup",
+  mode: "browser" | "browser-install" | "lint" | "orphan-cleanup",
   input: unknown,
   options: CancellableProcessOptions,
 ): Promise<T> {
