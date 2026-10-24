@@ -11,6 +11,7 @@ import {
 } from "@hyperframes/core/beats";
 import { parseHTMLContent } from "@hyperframes/core/compiler";
 import { walkCompositionDescendants } from "@hyperframes/parsers";
+import { isPathInside } from "@hyperframes/core";
 import type { Example } from "./_examples.js";
 import { resolveProject, type ProjectDir } from "../utils/project.js";
 import type { AudioSignal } from "@hyperframes/core/audio-analysis";
@@ -61,6 +62,8 @@ function resolveMusicTarget(project: ProjectDir): { rel: string; audioPath: stri
   const rel = audioRelPathForSrc(src); // same derivation the Studio uses
   if (!rel) fail(`Cannot derive a beat-file path for music src: ${src}`);
   const audioPath = resolve(project.dir, rel);
+  // An encoded `../` in the src decodes to a parent path; never read outside the project.
+  if (!isPathInside(audioPath, project.dir)) fail(`Music src resolves outside the project: ${src}`);
   if (!existsSync(audioPath)) fail(`Audio file not found: ${rel}`);
   return { rel, audioPath };
 }
@@ -109,7 +112,9 @@ export default defineCommand({
       fail(`No beats detected in ${rel} — nothing written. (Track may be silent/ambient.)`);
     }
 
-    const outPath = join(project.dir, "beats", `${rel}.json`);
+    const beatsDir = join(project.dir, "beats");
+    const outPath = join(beatsDir, `${rel}.json`);
+    if (!isPathInside(outPath, beatsDir)) fail(`Beat file path resolves outside beats/: ${rel}`);
     mkdirSync(dirname(outPath), { recursive: true });
     writeFileSync(outPath, serializeBeats(result.beatTimes, result.beatStrengths, rel));
     report(`beats/${rel}.json`, result, Boolean(args.json));

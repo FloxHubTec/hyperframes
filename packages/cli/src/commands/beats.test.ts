@@ -87,6 +87,24 @@ describe.skipIf(!canDecode)("hyperframes beats", () => {
     expect(out).toMatch(/No beats detected in assets\/song\.wav/);
     expect(existsSync(join(dir, "beats"))).toBe(false);
   });
+
+  it("refuses a music src that resolves outside the project", async () => {
+    // An encoded `../` survives URL normalization and decodes to a parent path, so
+    // without a containment check the command reads ../../secret.wav and writes
+    // beats/../../secret.wav.json, both outside the project.
+    const dir = project(join("escape", "nested", "proj"), 120);
+    const base = join(root, "escape");
+    writeFileSync(join(base, "secret.wav"), readFileSync(join(dir, "assets", "song.wav")));
+    writeFileSync(
+      join(dir, "index.html"),
+      `<div data-composition-id="main"><audio id="music" src="..%2F..%2Fsecret.wav"></audio></div>`,
+    );
+    const { exitCode, out } = await runBeats(dir);
+    expect(exitCode).toBe(1);
+    expect(out).toMatch(/outside the project/);
+    expect(existsSync(join(base, "nested", "secret.wav.json"))).toBe(false);
+    expect(existsSync(join(dir, "beats"))).toBe(false);
+  });
 });
 
 describe.skipIf(!canDecode)("beats source discovery", () => {
