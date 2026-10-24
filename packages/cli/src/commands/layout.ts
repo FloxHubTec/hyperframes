@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import type { Example } from "./_examples.js";
 import { c } from "../ui/colors.js";
 import { resolveProject } from "../utils/project.js";
-import { resolveDiagnosticNavigationTimeoutMs } from "../utils/renderArgs.js";
+import { pageNavigationTimeoutMs } from "../utils/renderArgs.js";
+import { gotoWhenSent } from "../capture/navigateForCapture.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { serveStaticProjectHtml } from "../utils/staticProjectServer.js";
 import { printDeprecationNotice, withMeta } from "../utils/updateCheck.js";
@@ -184,10 +185,7 @@ async function alignViewportToComposition(
   });
 
   await page.setViewport(size);
-  await page.goto(url, {
-    waitUntil: "domcontentloaded",
-    timeout: resolveDiagnosticNavigationTimeoutMs(),
-  });
+  await gotoWhenSent(page, url, pageNavigationTimeoutMs());
 }
 
 async function runLayoutAudit(
@@ -205,8 +203,12 @@ async function runLayoutAudit(
   const { ensureBrowser } = await import("../browser/manager.js");
   const puppeteer = await import("puppeteer-core");
   const { buildChromeArgs } = await import("@hyperframes/engine");
-  const { assertWebGpuAdapterAvailable, compositionRequiresWebGpu, resolveLocalBrowserGpuMode } =
-    await import("../browser/gpuPolicy.js");
+  const {
+    assertWebGpuAdapterAvailable,
+    compositionRequiresWebGpu,
+    resolveLocalBrowserGpuMode,
+    resolveLocalWebGpu,
+  } = await import("../browser/gpuPolicy.js");
   const html = await bundleProjectHtml(projectDir);
   const server = await serveStaticProjectHtml(
     projectDir,
@@ -220,23 +222,21 @@ async function runLayoutAudit(
     const requestedGpuMode = resolveLocalBrowserGpuMode();
     const resolvedGpuMode = await resolveManagedGpuMode(requestedGpuMode, browser.executablePath);
     const requiresWebGpu = compositionRequiresWebGpu(html);
+    const { gpuConfig, softwareWebGpu } = resolveLocalWebGpu(resolvedGpuMode, requiresWebGpu);
     chromeBrowser = await launchManagedBrowser(puppeteer.default, {
       headless: true,
       executablePath: browser.executablePath,
       args: buildChromeArgs(
         { width: 1920, height: 1080, captureMode: "screenshot", requiresWebGpu },
-        { browserGpuMode: resolvedGpuMode },
+        gpuConfig,
       ),
     });
 
     const page = await chromeBrowser.newPage();
     await installPageFunctionGuard(page);
     await page.setViewport({ width: 1920, height: 1080 });
-    await page.goto(server.url, {
-      waitUntil: "domcontentloaded",
-      timeout: resolveDiagnosticNavigationTimeoutMs(),
-    });
-    await assertWebGpuAdapterAvailable(page, requiresWebGpu);
+    await gotoWhenSent(page, server.url, pageNavigationTimeoutMs());
+    await assertWebGpuAdapterAvailable(page, requiresWebGpu, softwareWebGpu);
     await alignViewportToComposition(page, server.url);
     await waitForRuntimeReady(page, opts.timeout);
     await waitForCompositionFonts(page, 750);
@@ -389,7 +389,10 @@ async function runMotionPass(
   await page.addScriptTag({ content: loadBrowserScript("motion-signature.browser.js") });
   await page.addScriptTag({ content: loadBrowserScript("motion-sample.browser.js") });
   const frames = await collectMotionFrames(page, times, selectors, livenessScopes);
-  return { issues: evaluateMotion(frames, spec.assertions, canvas), sampleCount: frames.length };
+  return {
+    issues: evaluateMotion(frames, spec.assertions, canvas, duration),
+    sampleCount: frames.length,
+  };
 }
 
 /** Read + validate the motion sidecar; print the error and exit on a bad spec. */

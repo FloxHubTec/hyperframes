@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
@@ -410,7 +410,9 @@ describe("background preview lifecycle", () => {
     let spawned = false;
     const scan = vi.fn(async () => (spawned ? [server] : []));
     const unref = vi.fn();
-    const spawn = vi.fn(() => {
+    const spawn = vi.fn<
+      NonNullable<NonNullable<Parameters<typeof startBackgroundPreview>[2]>["spawn"]>
+    >(() => {
       spawned = true;
       return { pid: 4321, unref };
     });
@@ -426,6 +428,14 @@ describe("background preview lifecycle", () => {
     });
 
     expect(result).toMatchObject({ type: "started", port: 3210, pid: 4321 });
+    expect(spawn).toHaveBeenCalledOnce();
+    const launch = spawn.mock.calls[0];
+    expect(launch?.[0]).toBe("/usr/bin/node");
+    expect(launch?.[1]).toEqual(expect.arrayContaining(["preview", projectDir, "--foreground"]));
+    expect(launch?.[2].windowsHide).toBe(true);
+    expect(launch?.[2].detached).toBe(true);
+    expect(launch?.[2].stdio).toEqual(["ignore", expect.any(Number), expect.any(Number)]);
+    expect(launch?.[2].env).toBe(process.env);
     expect(unref).toHaveBeenCalledOnce();
     expect(existsSync(previewSessionPath(projectDir, stateHome))).toBe(true);
   });
@@ -680,6 +690,32 @@ describe("background preview lifecycle", () => {
     expect(kill).toHaveBeenCalledWith(4321);
     expect(spawn).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ type: "started", port: 3002, pid: 5432 });
+  });
+
+  it("stops waiting when the detached child exits and reports its exit and log", async () => {
+    const stateHome = tempDir("hf-preview-state-");
+    const kill = vi.fn();
+    const scan = vi.fn(async () => []);
+    let onExit: ((code: number | null, signal: string | null) => void) | undefined;
+
+    await expect(
+      startBackgroundPreview(projectDir, 3002, {
+        scan,
+        spawn: (_command, _args, options) => {
+          writeSync(
+            options.stdio[1],
+            "\u001b[?25hError: listen EPERM: operation not permitted 127.0.0.1:3002\n",
+          );
+          return { pid: 4321, unref: vi.fn(), once: (_event, listener) => (onExit = listener) };
+        },
+        sleep: async () => onExit?.(1, null),
+        kill,
+        stateHome,
+      }),
+    ).rejects.toThrow(/exited \(exit code 1\) before it was ready[\s\S]*\nError: listen EPERM/);
+
+    expect(kill).not.toHaveBeenCalled();
+    expect(scan.mock.calls.length).toBeLessThan(5);
   });
 
   it("reaps a detached child that never becomes reachable without recording ownership", async () => {

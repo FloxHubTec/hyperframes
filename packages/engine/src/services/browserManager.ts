@@ -6,14 +6,23 @@
  * launch args, pooled browser acquisition/release.
  */
 
-import type { Browser, Page, PuppeteerNode } from "puppeteer-core";
+import { scanHtmlOpeningTags } from "@hyperframes/parsers/html-attribute-spans";
+import type { Browser, LaunchOptions, Page, PuppeteerNode } from "puppeteer-core";
 import { execSync } from "child_process";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { chromeMajorCeiling, exceedsChromeCeiling } from "./chromeHostCeiling.js";
+import {
+  browserPathFromEnv,
+  chromeMajorCeiling,
+  compareBrowserVersionsDescending,
+  exceedsChromeCeiling,
+  isManagedChromeDir,
+  pickSharedShell,
+} from "./chromeHostCeiling.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { getSystemTotalMb, LOW_MEMORY_TOTAL_MB_THRESHOLD } from "./systemMemory.js";
+import { describeWslGpuAccess, detectWsl, type WslHostFacts } from "./wslHost.js";
 import {
   BrowserLeasePool,
   type BrowserLaunchFingerprint,
@@ -72,78 +81,90 @@ async function getPuppeteer(): Promise<PuppeteerNode> {
   return _puppeteer;
 }
 
+export interface GpuProbeLifecycle {
+  launch(puppeteer: PuppeteerNode, options: LaunchOptions): Promise<Browser>;
+  close(browser: Browser): Promise<void>;
+}
+
+interface GpuProbeOptions {
+  chromePath?: string;
+  browserTimeout?: number;
+  platform?: NodeJS.Platform;
+  probeLifecycle?: GpuProbeLifecycle;
+  wslHost?: WslHostFacts;
+}
+
+const GPU_PROBE_TIMEOUT_MS = 15_000;
+
 async function probeHardwareWebGlInfo(
   ppt: PuppeteerNode,
   options: {
     args: string[];
     browserTimeout: number;
     executablePath: string | undefined;
+    probeLifecycle?: GpuProbeLifecycle;
+    env?: NodeJS.ProcessEnv;
   },
 ): Promise<WebGlProbeInfo> {
   let probeBrowser: Browser | undefined;
   try {
-    probeBrowser = await ppt.launch({
+    const launchOptions: LaunchOptions = {
       ...sigintLaunchOptions(),
       headless: true,
       args: options.args,
       defaultViewport: { width: 64, height: 64 },
       executablePath: options.executablePath,
+      env: options.env,
       timeout: options.browserTimeout,
-    });
-    const page = await probeBrowser.newPage();
-    return await page.evaluate(() => {
-      const unavailable = { hasWebGL: false, vendor: "", renderer: "" };
-      const c = document.createElement("canvas");
-      let gl = c.getContext("webgl") as WebGLRenderingContext | null;
-      if (gl === null) {
-        gl = c.getContext("experimental-webgl") as WebGLRenderingContext | null;
-      }
-      if (gl === null) return unavailable;
-      const ext = gl.getExtension("WEBGL_debug_renderer_info") as {
-        UNMASKED_VENDOR_WEBGL: number;
-        UNMASKED_RENDERER_WEBGL: number;
-      } | null;
-      let vendorParam: number = gl.VENDOR;
-      let rendererParam: number = gl.RENDERER;
-      if (ext !== null) {
-        vendorParam = ext.UNMASKED_VENDOR_WEBGL;
-        rendererParam = ext.UNMASKED_RENDERER_WEBGL;
-      }
-      const vendor = gl.getParameter(vendorParam);
-      const renderer = gl.getParameter(rendererParam);
-      return {
-        hasWebGL: true,
-        vendor: vendor == null ? "" : String(vendor),
-        renderer: renderer == null ? "" : String(renderer),
-      };
-    });
+      waitForInitialPage: false,
+    };
+    probeBrowser = options.probeLifecycle
+      ? await options.probeLifecycle.launch(ppt, launchOptions)
+      : await ppt.launch(launchOptions);
+    return await rejectAfter(
+      readWebGlInfo(probeBrowser),
+      GPU_PROBE_TIMEOUT_MS,
+      `GPU probe page did not answer within ${GPU_PROBE_TIMEOUT_MS}ms`,
+    );
   } finally {
-    await probeBrowser?.close().catch(() => {});
+    if (probeBrowser) {
+      if (options.probeLifecycle) await options.probeLifecycle.close(probeBrowser);
+      else await closeBrowserAfterFailedProbe(probeBrowser);
+    }
   }
+}
+
+async function readWebGlInfo(browser: Browser): Promise<WebGlProbeInfo> {
+  const page = await browser.newPage();
+  return await page.evaluate(() => {
+    const unavailable = { hasWebGL: false, vendor: "", renderer: "" };
+    const c = document.createElement("canvas");
+    let gl = c.getContext("webgl") as WebGLRenderingContext | null;
+    if (gl === null) {
+      gl = c.getContext("experimental-webgl") as WebGLRenderingContext | null;
+    }
+    if (gl === null) return unavailable;
+    const ext = gl.getExtension("WEBGL_debug_renderer_info") as {
+      UNMASKED_VENDOR_WEBGL: number;
+      UNMASKED_RENDERER_WEBGL: number;
+    } | null;
+    let vendorParam: number = gl.VENDOR;
+    let rendererParam: number = gl.RENDERER;
+    if (ext !== null) {
+      vendorParam = ext.UNMASKED_VENDOR_WEBGL;
+      rendererParam = ext.UNMASKED_RENDERER_WEBGL;
+    }
+    const vendor = gl.getParameter(vendorParam);
+    const renderer = gl.getParameter(rendererParam);
+    return {
+      hasWebGL: true,
+      vendor: vendor == null ? "" : String(vendor),
+      renderer: renderer == null ? "" : String(renderer),
+    };
+  });
 }
 
 export type AcquiredBrowser = BrowserLease;
-
-function compareBrowserVersionsDescending(left: string, right: string): number {
-  const parse = (value: string): number[] => {
-    const version = value.slice(value.indexOf("-") + 1);
-    const segments: number[] = [];
-    for (const segment of version.split(".")) {
-      const parsed = Number.parseInt(segment, 10);
-      if (!Number.isFinite(parsed)) break;
-      segments.push(parsed);
-    }
-    return segments;
-  };
-  const leftSegments = parse(left);
-  const rightSegments = parse(right);
-  const length = Math.max(leftSegments.length, rightSegments.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (rightSegments[index] ?? 0) - (leftSegments[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  return 0;
-}
 
 const CACHED_HEADLESS_SHELL_EXECUTABLES: Readonly<
   Record<string, readonly [directory: string, executable: string]>
@@ -168,6 +189,15 @@ function cachedHeadlessShellExecutable(
   return CACHED_HEADLESS_SHELL_EXECUTABLES[`${hostPlatform}/${hostArch}`];
 }
 
+function isNonEmptyFile(path: string): boolean {
+  try {
+    const stat = statSync(path, { throwIfNoEntry: false });
+    return stat?.isFile() === true && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
 function findCachedHeadlessShell(baseDir: string): string | undefined {
   if (!existsSync(baseDir)) return undefined;
   const executable = cachedHeadlessShellExecutable();
@@ -178,12 +208,37 @@ function findCachedHeadlessShell(baseDir: string): string | undefined {
     for (const version of versions) {
       if (exceedsChromeCeiling(version, ceiling)) continue;
       const binary = join(baseDir, version, ...executable);
-      if (existsSync(binary)) return binary;
+      if (isNonEmptyFile(binary)) return binary;
     }
   } catch {
     // Ignore unreadable cache directories and continue browser discovery.
   }
   return undefined;
+}
+
+function findSharedHeadlessShell(baseDir: string): string | undefined {
+  const executable = cachedHeadlessShellExecutable();
+  if (!executable || !existsSync(baseDir)) return undefined;
+  try {
+    return pickSharedShell(readdirSync(baseDir), (version) => {
+      const binary = join(baseDir, version, ...executable);
+      return isNonEmptyFile(binary) ? binary : undefined;
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function findManagedHeadlessShell(baseDir: string): string | undefined {
+  const executable = cachedHeadlessShellExecutable();
+  if (!executable || !existsSync(baseDir)) return undefined;
+  try {
+    const version = readdirSync(baseDir).find(isManagedChromeDir);
+    const binary = version && join(baseDir, version, ...executable);
+    return binary && isNonEmptyFile(binary) ? binary : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -197,32 +252,62 @@ export function resolveHeadlessShellPath(
   if (config?.chromePath) {
     return config.chromePath;
   }
-  if (process.env.PRODUCER_HEADLESS_SHELL_PATH) {
-    const envPath = process.env.PRODUCER_HEADLESS_SHELL_PATH;
-    if (!existsSync(envPath)) {
+  const fromEnv = browserPathFromEnv();
+  if (fromEnv) {
+    if (!existsSync(fromEnv.path)) {
       throw new Error(
-        `[BrowserManager] Chrome binary not found at PRODUCER_HEADLESS_SHELL_PATH="${envPath}". ` +
+        `[BrowserManager] Chrome binary not found at ${fromEnv.name}="${fromEnv.path}". ` +
           "Run `hyperframes browser ensure` to re-download.",
       );
     }
-    return envPath;
+    return fromEnv.path;
   }
-  if (process.env.HYPERFRAMES_BROWSER_PATH) {
-    const envPath = process.env.HYPERFRAMES_BROWSER_PATH;
-    if (!existsSync(envPath)) {
-      throw new Error(
-        `[BrowserManager] Chrome binary not found at HYPERFRAMES_BROWSER_PATH="${envPath}". ` +
-          "Run `hyperframes browser ensure` to re-download.",
-      );
-    }
-    return envPath;
-  }
-  const home = homedir();
+  const ours = join(homedir(), ".cache", "hyperframes", "chrome", "chrome-headless-shell");
+  const shared = join(homedir(), ".cache", "puppeteer", "chrome-headless-shell");
   return (
-    findCachedHeadlessShell(
-      join(home, ".cache", "hyperframes", "chrome", "chrome-headless-shell"),
-    ) ?? findCachedHeadlessShell(join(home, ".cache", "puppeteer", "chrome-headless-shell"))
+    findManagedHeadlessShell(ours) ??
+    findSharedHeadlessShell(shared) ??
+    findCachedHeadlessShell(ours)
   );
+}
+
+/** Full Chrome for Testing in Puppeteer's cache (`@puppeteer/browsers install chrome@...`), newest first. */
+export function resolveFullChromePath(): string | undefined {
+  const baseDir = join(homedir(), ".cache", "puppeteer", "chrome");
+  let versions: string[];
+  try {
+    versions = readdirSync(baseDir).sort(compareBrowserVersionsDescending);
+  } catch {
+    return undefined;
+  }
+  for (const version of versions) {
+    const candidates = [
+      join(
+        baseDir,
+        version,
+        "chrome-mac-arm64",
+        "Google Chrome for Testing.app",
+        "Contents",
+        "MacOS",
+        "Google Chrome for Testing",
+      ),
+      join(
+        baseDir,
+        version,
+        "chrome-mac-x64",
+        "Google Chrome for Testing.app",
+        "Contents",
+        "MacOS",
+        "Google Chrome for Testing",
+      ),
+      join(baseDir, version, "chrome-linux64", "chrome"),
+      join(baseDir, version, "chrome-win64", "chrome.exe"),
+    ];
+    for (const binary of candidates) {
+      if (existsSync(binary)) return binary;
+    }
+  }
+  return undefined;
 }
 
 // Preserve the producer-era export so re-export shims keep the same public API.
@@ -262,7 +347,6 @@ interface BeginFrameProbeResult {
   durationMs: number;
 }
 
-const BEGINFRAME_SCREENSHOT_PROBE_ATTEMPTS = 10;
 const BEGINFRAME_PROBE_TIMEOUT_MS = 2000;
 const BEGINFRAME_PROBE_CLEANUP_TIMEOUT_MS = 250;
 
@@ -275,15 +359,20 @@ async function awaitBeforeDeadline<T>(
   if (remainingMs <= 0) {
     throw new Error(`beginFrame probe timeout before ${label}`);
   }
+  return rejectAfter(operation, remainingMs, `beginFrame probe timeout during ${label}`);
+}
+
+async function rejectAfter<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       operation,
       new Promise<never>((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error(`beginFrame probe timeout during ${label}`)),
-          remainingMs,
-        );
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
       }),
     ]);
   } finally {
@@ -373,7 +462,8 @@ async function probeBeginFrameSupport(
     let bytes = Buffer.alloc(0);
     let isPng = false;
     let attempts = 0;
-    for (attempts = 1; attempts <= BEGINFRAME_SCREENSHOT_PROBE_ATTEMPTS; attempts += 1) {
+    while (!isPng && Date.now() < deadline) {
+      attempts += 1;
       const response = await awaitBeforeDeadline(
         client.send("HeadlessExperimental.beginFrame", {
           frameTimeTicks: 1000 + (attempts - 1) * 33,
@@ -391,7 +481,7 @@ async function probeBeginFrameSupport(
         bytes[1] === 0x50 &&
         bytes[2] === 0x4e &&
         bytes[3] === 0x47;
-      if (isPng) break;
+      if (isPng || Date.now() + 10 >= deadline) break;
       await awaitBeforeDeadline(
         new Promise((resolveDelay) => setTimeout(resolveDelay, 10)),
         deadline,
@@ -401,7 +491,7 @@ async function probeBeginFrameSupport(
     if (!isPng) {
       throw new Error(
         `beginFrame screenshot returned ${bytes.length} bytes after ` +
-          `${BEGINFRAME_SCREENSHOT_PROBE_ATTEMPTS} attempts with signature ` +
+          `${attempts} attempts in ${Date.now() - started}ms with signature ` +
           `${bytes.length >= 4 ? bytes.subarray(0, 4).toString("hex") : "<empty>"}`,
       );
     }
@@ -421,11 +511,7 @@ async function probeBeginFrameSupport(
     };
   }
   if (page && !(await settleWithin(page.close(), BEGINFRAME_PROBE_CLEANUP_TIMEOUT_MS))) {
-    return {
-      supported: false,
-      detail: `${result.detail}; probe page cleanup timed out`,
-      durationMs: Date.now() - started,
-    };
+    return { ...result, detail: `${result.detail}; probe page cleanup timed out` };
   }
   return result;
 }
@@ -450,6 +536,10 @@ export const _closeBrowserAfterFailedProbeForTests = closeBrowserAfterFailedProb
 interface GpuProbeOutcome {
   mode: "software" | "hardware";
   cause?: "no-gpu" | "probe-error";
+  /** Under WSL, what we checked on its GPU path (see describeWslGpuAccess). */
+  wslAccess?: string[];
+  /** Under WSL, Chrome reached the GPU only without WSLg's WAYLAND_DISPLAY. */
+  withoutWaylandDisplay?: boolean;
 }
 
 /**
@@ -469,6 +559,7 @@ let _autoBrowserGpuModeCache: Promise<GpuProbeOutcome> | undefined;
 export function _resetAutoBrowserGpuModeCacheForTests(): void {
   _autoBrowserGpuModeCache = undefined;
   _unverifiedHardwareGpuWarned = false;
+  _wslSoftwareNoteLogged = false;
 }
 
 async function getPuppeteerOrNull(): Promise<PuppeteerNode | null> {
@@ -505,14 +596,7 @@ function formatProbeFailure(err: unknown): string {
   return `probe failed (${err instanceof Error ? err.message : String(err)})`;
 }
 
-async function probeAutoBrowserGpuMode(options: {
-  chromePath?: string;
-  browserTimeout?: number;
-  platform?: NodeJS.Platform;
-}): Promise<GpuProbeOutcome> {
-  const platform = options.platform ?? process.platform;
-  const browserTimeout = options.browserTimeout ?? DEFAULT_CONFIG.browserTimeout;
-  const executablePath = options.chromePath ?? resolveHeadlessShellPath({});
+async function probeAutoBrowserGpuMode(options: GpuProbeOptions): Promise<GpuProbeOutcome> {
   const ppt = await getPuppeteerOrNull();
 
   if (ppt === null) {
@@ -520,19 +604,56 @@ async function probeAutoBrowserGpuMode(options: {
     return { mode: "software", cause: "probe-error" };
   }
 
+  const probed = await probeWebGlMode(ppt, options);
+  if (probed.mode === "hardware") return probed;
+  // Chrome 150+ uses WSLg Wayland EGL, which lacks offscreen configs: https://issues.chromium.org/issues/567222741
+  if (detectWsl(options.wslHost) && process.env.WAYLAND_DISPLAY !== undefined) {
+    const env = envWithoutWaylandDisplay();
+    const retried = await probeWebGlMode(ppt, options, env, "without WAYLAND_DISPLAY: ");
+    if (retried.mode === "hardware") return { mode: "hardware", withoutWaylandDisplay: true };
+  }
+  return { ...probed, ...wslAccess(options) };
+}
+
+async function probeWebGlMode(
+  ppt: PuppeteerNode,
+  options: GpuProbeOptions,
+  env?: NodeJS.ProcessEnv,
+  label = "",
+): Promise<GpuProbeOutcome> {
   try {
     const info = await probeHardwareWebGlInfo(ppt, {
-      args: getHardwareGpuProbeArgs(platform),
-      browserTimeout,
-      executablePath,
+      args: getHardwareGpuProbeArgs(options.platform ?? process.platform),
+      browserTimeout: options.browserTimeout ?? DEFAULT_CONFIG.browserTimeout,
+      executablePath: options.chromePath ?? resolveHeadlessShellPath({}),
+      probeLifecycle: options.probeLifecycle,
+      env,
     });
     const resolved = resolveWebGlProbeMode(info);
-    logResolvedBrowserGpuMode(resolved, describeWebGlProbe(info));
+    logResolvedBrowserGpuMode(resolved, label + describeWebGlProbe(info));
     return resolved === "hardware" ? { mode: "hardware" } : { mode: "software", cause: "no-gpu" };
   } catch (err) {
-    logResolvedBrowserGpuMode("software", formatProbeFailure(err));
+    logResolvedBrowserGpuMode("software", label + formatProbeFailure(err));
     return { mode: "software", cause: "probe-error" };
   }
+}
+
+function envWithoutWaylandDisplay(): NodeJS.ProcessEnv {
+  const { WAYLAND_DISPLAY: _wslg, ...env } = process.env;
+  return env;
+}
+
+/** True when a `resolvedMode` render must launch without WAYLAND_DISPLAY to reach the GPU. */
+export async function captureWithoutWaylandDisplay(
+  resolvedMode: "software" | "hardware",
+): Promise<boolean> {
+  if (resolvedMode !== "hardware") return false;
+  return (await _autoBrowserGpuModeCache)?.withoutWaylandDisplay === true;
+}
+
+function wslAccess(options: GpuProbeOptions): Pick<GpuProbeOutcome, "wslAccess"> {
+  const lines = describeWslGpuAccess(options.wslHost);
+  return lines ? { wslAccess: lines } : {};
 }
 
 /**
@@ -563,16 +684,20 @@ async function probeAutoBrowserGpuMode(options: {
  */
 export function resolveBrowserGpuMode(
   mode: EngineConfig["browserGpuMode"],
-  options: {
-    chromePath?: string;
-    browserTimeout?: number;
-    platform?: NodeJS.Platform;
-  } = {},
+  options: GpuProbeOptions = {},
 ): Promise<"software" | "hardware"> {
   if (mode === "software") return Promise.resolve(mode);
 
   _autoBrowserGpuModeCache ??= probeAutoBrowserGpuMode(options);
-  if (mode === "auto") return _autoBrowserGpuModeCache.then((probed) => probed.mode);
+  if (mode === "auto") {
+    return _autoBrowserGpuModeCache.then((probed) => {
+      if (probed.mode === "software" && probed.wslAccess && !_wslSoftwareNoteLogged) {
+        _wslSoftwareNoteLogged = true;
+        console.error(buildWslSoftwareNote(probed));
+      }
+      return probed.mode;
+    });
+  }
 
   return _autoBrowserGpuModeCache.then((probed) => {
     // Warn once per cache lifetime, not once per caller: `createCaptureSession`
@@ -580,9 +705,7 @@ export function resolveBrowserGpuMode(
     // an un-deduplicated warning prints N+1 times and buries itself.
     if (probed.mode === "software" && !_unverifiedHardwareGpuWarned) {
       _unverifiedHardwareGpuWarned = true;
-      console.warn(
-        buildUnverifiedHardwareGpuWarning(options.platform ?? process.platform, probed.cause),
-      );
+      console.warn(buildUnverifiedHardwareGpuWarning(options.platform ?? process.platform, probed));
     }
     return "hardware";
   });
@@ -593,6 +716,21 @@ export function resolveBrowserGpuMode(
  * cache lifetime (re-armed by `_resetAutoBrowserGpuModeCacheForTests`).
  */
 let _unverifiedHardwareGpuWarned = false;
+let _wslSoftwareNoteLogged = false;
+
+/** Auto mode under WSL selected software: say so, with what we checked. */
+function buildWslSoftwareNote({ cause, wslAccess = [] }: GpuProbeOutcome): string {
+  const check =
+    cause === "probe-error"
+      ? "the GPU check could not finish (see the probe line above)"
+      : "the GPU check found no hardware GPU";
+  return [
+    `[hyperframes] WSL: ${check}, so this render uses software WebGL (SwiftShader) and runs ` +
+      "at CPU speed.",
+    ...wslAccess,
+    "  Pass --no-browser-gpu to skip the GPU check and render in software.",
+  ].join("\n");
+}
 
 /**
  * Warning text for "you asked for hardware GPU and we could not confirm it".
@@ -605,33 +743,39 @@ let _unverifiedHardwareGpuWarned = false;
  */
 function buildUnverifiedHardwareGpuWarning(
   platform: NodeJS.Platform | string,
-  cause: GpuProbeOutcome["cause"],
+  { cause, wslAccess }: GpuProbeOutcome,
 ): string {
   if (cause === "probe-error") {
     return (
       "[hyperframes] browserGpuMode=hardware was requested, but the GPU probe could not run, " +
-      "so hardware acceleration is UNVERIFIED — if Chrome falls back to software WebGL the " +
+      "so hardware acceleration is UNVERIFIED. If Chrome falls back to software WebGL the " +
       "capture will run at CPU speed. Honouring the explicit request anyway.\n" +
       "  This is a probe failure, not evidence of a missing GPU: see the " +
       "`browserGpuMode probe → software (probe failed ...)` line above for the underlying " +
       "error, which usually means Chrome could not launch (bad HYPERFRAMES_BROWSER_PATH, " +
       "missing shared libraries, or a denied sandbox) rather than a GPU problem.\n" +
-      "  Run `hyperframes doctor` to check the Chrome install."
+      "  Run `hyperframes doctor` to check the Chrome install." +
+      (wslAccess
+        ? ["", "  Under WSL, a GPU path that is slow to start or unreachable can also cause it:"]
+            .concat(wslAccess)
+            .join("\n")
+        : "")
     );
   }
   const remediation =
-    platform === "linux"
-      ? "Inside Docker, the container needs GPU passthrough: `--gpus all` with the NVIDIA " +
+    wslAccess?.join("\n") ??
+    (platform === "linux"
+      ? "  Inside Docker, the container needs GPU passthrough: `--gpus all` with the NVIDIA " +
         "Container Toolkit installed, or `--device /dev/dri` for Mesa/AMD/Intel. The image " +
         "also needs the matching userspace driver + libEGL. Verify with " +
         "`hyperframes render --browser-gpu` and watch for this warning disappearing."
-      : "Check that the host exposes a GPU to this process and that the graphics drivers are " +
-        "installed.";
+      : "  Check that the host exposes a GPU to this process and that the graphics drivers " +
+        "are installed.");
   return (
     "[hyperframes] browserGpuMode=hardware was requested, but the WebGL probe found no " +
-    "hardware GPU — Chrome will silently fall back to software WebGL and the capture will " +
+    "hardware GPU, so Chrome will silently fall back to software WebGL and the capture will " +
     "run at CPU speed. Honouring the explicit request anyway.\n" +
-    `  ${remediation}\n` +
+    `${remediation}\n` +
     "  Pass --no-browser-gpu to select deterministic SwiftShader instead of waiting on a " +
     "hardware path that is not there."
   );
@@ -649,11 +793,13 @@ function logResolvedBrowserGpuMode(resolved: "hardware" | "software", reason: st
   console.error(`[hyperframes] browserGpuMode probe → ${resolved} (${reason})`);
 }
 
+type BrowserLaunchConfig = Partial<
+  Pick<EngineConfig, "browserTimeout" | "protocolTimeout" | "chromePath" | "forceScreenshot">
+> & { withoutWaylandDisplay?: boolean };
+
 function createBrowserLaunchFingerprint(
   chromeArgs: string[],
-  config?: Partial<
-    Pick<EngineConfig, "browserTimeout" | "protocolTimeout" | "chromePath" | "forceScreenshot">
-  >,
+  config?: BrowserLaunchConfig,
 ): BrowserLaunchFingerprint {
   const launchConfig = {
     browserTimeout: DEFAULT_CONFIG.browserTimeout,
@@ -678,6 +824,7 @@ function createBrowserLaunchFingerprint(
   return {
     args: chromeArgs,
     executablePath: headlessShell,
+    withoutWaylandDisplay: launchConfig.withoutWaylandDisplay === true,
     browserTimeoutMs: launchConfig.browserTimeout,
     protocolTimeoutMs: launchConfig.protocolTimeout,
     requestedCaptureMode,
@@ -689,12 +836,7 @@ export const _createBrowserLaunchFingerprintForTests = createBrowserLaunchFinger
 
 export async function acquireBrowser(
   chromeArgs: string[],
-  config?: Partial<
-    Pick<
-      EngineConfig,
-      "browserTimeout" | "protocolTimeout" | "enableBrowserPool" | "chromePath" | "forceScreenshot"
-    >
-  >,
+  config?: BrowserLaunchConfig & Partial<Pick<EngineConfig, "enableBrowserPool">>,
 ): Promise<AcquiredBrowser> {
   const enablePool = config?.enableBrowserPool ?? DEFAULT_CONFIG.enableBrowserPool;
   return browserLeasePool.acquire(createBrowserLaunchFingerprint(chromeArgs, config), enablePool);
@@ -705,6 +847,7 @@ async function launchBrowser(
   fingerprint: Readonly<BrowserLaunchFingerprint>,
 ): Promise<{ browser: Browser; captureMode: CaptureMode }> {
   const ppt = await getPuppeteer();
+  const env = fingerprint.withoutWaylandDisplay ? envWithoutWaylandDisplay() : undefined;
   let captureMode = fingerprint.requestedCaptureMode;
   let browser: Browser | undefined;
   try {
@@ -714,6 +857,7 @@ async function launchBrowser(
       args: [...fingerprint.args],
       defaultViewport: null,
       executablePath: fingerprint.executablePath,
+      env,
       timeout: fingerprint.browserTimeoutMs,
       protocolTimeout: fingerprint.protocolTimeoutMs,
     });
@@ -746,6 +890,7 @@ async function launchBrowser(
           args: stripBeginFrameFlags([...fingerprint.args]),
           defaultViewport: null,
           executablePath: fingerprint.executablePath,
+          env,
           timeout: fingerprint.browserTimeoutMs,
           protocolTimeout: fingerprint.protocolTimeoutMs,
         });
@@ -1002,11 +1147,12 @@ export function buildChromeArgs(options: BuildChromeArgsOptions, config?: GpuCon
   return chromeArgs;
 }
 
-/** Does the composition's root element declare `data-requires-webgpu`? */
+/** Does the root, or a mounted root (data-hf-inner-root once bundled), declare `data-requires-webgpu`? */
 export function compositionRequiresWebGpu(html: string): boolean {
-  // Quoted values are consumed whole, so '<' or '>' inside one stays in the tag; no nested quantifier overlaps.
-  for (const [tag] of html.matchAll(/<(?:[^<>"']|"[^"]*"|'[^']*')*>/g)) {
-    if (/\bdata-composition-id\b/i.test(tag)) return /\bdata-requires-webgpu(?:\s|=|>)/i.test(tag);
+  for (const tag of scanHtmlOpeningTags(html)) {
+    const names = tag.attributes.map((attribute) => attribute.name);
+    const isRoot = names.includes("data-composition-id") || names.includes("data-hf-inner-root");
+    if (isRoot && names.includes("data-requires-webgpu")) return true;
   }
   return false;
 }

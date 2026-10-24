@@ -96,6 +96,23 @@ const neverDecodes = (clip: HTMLElement) => {
 describe("runtime entry", () => {
   afterEach(resetRuntimeGlobals);
 
+  it("starts a held capture-motion-blur frame when capture waits on the seek, after video injection", async () => {
+    const release = vi.fn();
+    vi.doMock("./captureMotionBlur", async (original) => ({
+      ...(await original<typeof import("./captureMotionBlur")>()),
+      releaseCaptureMotionBlurFrame: release,
+    }));
+    try {
+      mountRoot().appendChild(document.createElement("div"));
+      await evaluateRuntime();
+      expect(release).not.toHaveBeenCalled();
+      await window.__hfWaitForSeekCompletion?.();
+      expect(release).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.doUnmock("./captureMotionBlur");
+    }
+  });
+
   it("drives an async frame source without a GSAP timeline and waits before capture", async () => {
     const root = mountRoot();
     root.setAttribute("data-duration", "10");
@@ -438,6 +455,59 @@ describe("runtime entry", () => {
       expect(loadsOf(later)).toEqual([beforeJump]);
     });
 
+    it("fetches the clips due soon three at a time, earliest first, so the clip due never queues behind them", async () => {
+      spyLoad();
+      servePreview();
+      const [now, ...due] = videos(mountRoot(), "0", "1.5", "1.1", "1.4", "1.2", "1.3");
+
+      await evaluateRuntime();
+      expect(armed(now, ...due)).toEqual([true, true, true, true, false, false]);
+      expect(loadsOf(...due)).toEqual([1, 1, 1, 0, 0]);
+      due[0]!.dispatchEvent(new Event("suspend"));
+      expect(armed(...due)).toEqual([true, true, true, false, false]);
+      Object.defineProperty(due[0]!, "readyState", { value: 3 });
+      due[0]!.dispatchEvent(new Event("canplay"));
+      expect(armed(...due)).toEqual([true, true, true, true, false]);
+      due[1]!.dispatchEvent(new Event("error"));
+      expect(armed(...due)).toEqual([true, true, true, true, true]);
+    });
+
+    it("frees a clip the playhead has passed while it is still downloading, and keeps one that finished", async () => {
+      spyLoad();
+      servePreview();
+      stubPlayback();
+      const [slow, done] = videos(mountRoot(), "0", "0.5");
+      Object.defineProperty(slow, "networkState", { value: 2 });
+      Object.defineProperty(done, "networkState", { value: 1 });
+      Object.defineProperty(done, "readyState", { value: 4 });
+
+      await evaluateRuntime();
+      window.__player?.play();
+      expect(armed(slow, done)).toEqual([true, true]);
+      window.__player?.seek(2.6, { keepPlaying: true });
+      expect(armed(slow, done)).toEqual([false, true]);
+    });
+
+    it("keeps a passed clip released for the rest of the play instead of refetching it each pass", async () => {
+      spyLoad();
+      servePreview();
+      stubPlayback();
+      const [slow, next] = videos(mountRoot(), "0", "2");
+      // A fetch is running whenever preload asks for one.
+      Object.defineProperty(slow, "networkState", { get: () => (slow.preload === "auto" ? 2 : 1) });
+
+      await evaluateRuntime();
+      window.__player?.play();
+      window.__player?.seek(2.05, { keepPlaying: true });
+      expect(armed(slow, next)).toEqual([false, true]);
+      const loadsAfterRelease = loadsOf(slow)[0];
+      for (let t = 2.1; t <= 4.0; t += 0.05) {
+        window.__player?.seek(t, { keepPlaying: true });
+        expect(slow.preload).toBe("none");
+      }
+      expect(loadsOf(slow)[0]).toBe(loadsAfterRelease);
+    });
+
     // jsdom's media elements cannot play; the runtime only needs play() to settle.
     const stubPlayback = () => {
       vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
@@ -678,6 +748,21 @@ describe("runtime entry", () => {
       untrimmed.removeAttribute("data-duration");
       await Promise.resolve();
       expect([first.preload, later.preload, untrimmed.preload]).toEqual(["", "none", ""]);
+    });
+
+    it("defers a clip at 0 inside a later scene, by its start in the film", async () => {
+      servePreview();
+      const root = mountRoot();
+      const opening = timed(root, "div", "0");
+      const later = timed(root, "div", "5");
+      for (const scene of [opening, later]) {
+        scene.setAttribute("data-composition-id", "scene");
+        timed(scene, "div", "0");
+      }
+      await evaluateRuntime();
+      const [now, due] = [timed(opening, "video", "0"), timed(later, "video", "0")];
+      await Promise.resolve();
+      expect([now.preload, due.preload]).toEqual(["", "none"]);
     });
 
     it("keeps a render loading every media element at bind", async () => {
