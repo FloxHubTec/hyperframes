@@ -38,6 +38,25 @@ describe("parseRenderOptions — outputResolution", () => {
   });
 });
 
+describe("parseRenderOptions — encoder options", () => {
+  it("forwards crf, videoBitrate and videoFrameFormat from a valid body", () => {
+    expect(parseRenderOptions({ crf: 12, format: "webm", videoFrameFormat: "png" })).toMatchObject({
+      crf: 12,
+      videoFrameFormat: "png",
+    });
+    expect(parseRenderOptions({ videoBitrate: "10M" }).videoBitrate).toBe("10M");
+  });
+
+  it("drops every encoder override when any of them is invalid, and for mov rate control", () => {
+    expect(parseRenderOptions({ crf: 52 }).crf).toBeUndefined();
+    expect(parseRenderOptions({ crf: 12, videoBitrate: "10M" })).toMatchObject({
+      crf: undefined,
+      videoBitrate: undefined,
+    });
+    expect(parseRenderOptions({ crf: 12, format: "mov" }).crf).toBeUndefined();
+  });
+});
+
 describe("parseRenderOptions — render strictness", () => {
   it("preserves best-effort compatibility and requires an explicit strict opt-in", () => {
     expect(parseRenderOptions({}).strictness).toBe("best-effort");
@@ -105,6 +124,18 @@ describe("prepareRenderBody — validation", () => {
     );
   });
 
+  it("rejects an out-of-range crf with the studio-server message", async () => {
+    const result = await prepareRenderBody({ format: "webm", crf: 64, html: "<html></html>" });
+    expect((result as { error: string }).error).toBe(
+      "crf must be an integer from 0 to 63 for webm",
+    );
+  });
+
+  it("rejects crf together with videoBitrate", async () => {
+    const result = await prepareRenderBody({ crf: 12, videoBitrate: "10M", html: "<html></html>" });
+    expect((result as { error: string }).error).toBe("use either crf or videoBitrate, not both");
+  });
+
   it("rejects conflicting canonical and legacy policies", async () => {
     const result = await prepareRenderBody({
       outputDynamicRange: "sdr",
@@ -129,15 +160,16 @@ describe("prepareRenderBody — validation", () => {
     expect((result as { error: string }).error).toContain("must be a string preset");
   });
 
-  it("rejects outputResolution combined with an alpha format (webm/mov)", async () => {
+  it("accepts outputResolution with an alpha format (webm/mov)", async () => {
     for (const format of ["webm", "mov"]) {
       const result = await prepareRenderBody({
         outputResolution: "4k",
         format,
         html: "<html></html>",
       });
-      expect(result).toHaveProperty("error");
-      expect((result as { error: string }).error).toContain("can't supersample");
+      expect(result).toHaveProperty("prepared");
+      const { input } = (result as { prepared: { input: Record<string, unknown> } }).prepared;
+      expect(input.outputResolution).toBe("landscape-4k");
     }
   });
 

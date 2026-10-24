@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
   DEFAULT_HISTORY_ROOT,
@@ -172,14 +180,17 @@ function previewOwner(route: (path: string) => string): Owner {
   };
 }
 
-async function directOwner(projectDir: string): Promise<{ owner: Owner; turn: Turn | null }> {
+async function directOwner(
+  projectDir: string,
+  ownerWaitMs = historyDeps.ownerWaitMs,
+): Promise<{ owner: Owner; turn: Turn | null }> {
   let turn: Turn | null = null;
   const history = await openProjectHistory({
     projectDir,
     historyRoot: historyDeps.historyRoot,
     now: () => historyDeps.now(),
     pruneGoneProjectsBudgetMs: 1000,
-    ownerWaitMs: historyDeps.ownerWaitMs,
+    ownerWaitMs,
     closedWindowAfterOwnership: () => {
       turn = readTurn(projectDir);
       return turn
@@ -214,7 +225,10 @@ async function directOwner(projectDir: string): Promise<{ owner: Owner; turn: Tu
 }
 
 /** One owner: a preview that keeps this project's history, else the engine, which refuses a second opener. */
-async function connect(projectDir: string): Promise<{ owner: Owner; turn: Turn | null }> {
+async function connect(
+  projectDir: string,
+  ownerWaitMs?: number,
+): Promise<{ owner: Owner; turn: Turn | null }> {
   const server = await historyDeps.findServer(projectDir);
   if (server) {
     const route = (path: string) => studioApiUrl(server, `history${path}`);
@@ -225,16 +239,17 @@ async function connect(projectDir: string): Promise<{ owner: Owner; turn: Turn |
     );
     if (status !== 404) return { owner: previewOwner(route), turn: readTurn(projectDir) };
   }
-  return directOwner(projectDir);
+  return directOwner(projectDir, ownerWaitMs);
 }
 
 /** Runs `task` with the project's history. ponytail: with no preview, a command mid-turn splits the turn in two. */
 export async function withOwner<T>(
   dir: string | undefined,
   task: (owner: Owner, turn: Turn | null, projectDir: string) => Promise<T>,
+  { ownerWaitMs }: { ownerWaitMs?: number } = {},
 ): Promise<T> {
   const { dir: projectDir } = resolveProject(dir);
-  const { owner, turn } = await connect(projectDir);
+  const { owner, turn } = await connect(projectDir, ownerWaitMs);
   try {
     return await task(owner, turn, projectDir);
   } finally {
@@ -254,16 +269,58 @@ export async function withOwner<T>(
   }
 }
 
+const CANNOT_WRITE = new Set(["ENOSPC", "EDQUOT", "EACCES", "EPERM", "EROFS"]);
+const WRITE_CALLS = new Set([
+  "mkdir",
+  "write",
+  "rename",
+  "unlink",
+  "link",
+  "copyfile",
+  "rmdir",
+  "symlink",
+  "utime",
+  "ftruncate",
+  "fsync",
+]);
+
+function openedForWriting(path: string): boolean {
+  try {
+    accessSync(path, constants.R_OK);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/** A write the history could not make, never a read: a denied `open` of a missing or readable file was a write. */
+function failedWrite(error: unknown): boolean {
+  const { code = "", syscall = "", path } = error as NodeJS.ErrnoException;
+  if (!CANNOT_WRITE.has(code)) return false;
+  return (
+    WRITE_CALLS.has(syscall) || (syscall === "open" && path !== undefined && openedForWriting(path))
+  );
+}
+
 export async function withReader<T>(
   dir: string | undefined,
   task: (reader: Reader) => Promise<T>,
 ): Promise<T> {
+  let ran = false;
   try {
-    return await withOwner(dir, (owner) => task(owner));
+    return await withOwner(dir, (owner) => {
+      ran = true;
+      return task(owner);
+    });
   } catch (error) {
-    if (!(error instanceof HistoryBusyError)) throw error;
+    const unwritable = failedWrite(error);
+    if (ran || !(error instanceof HistoryBusyError || unwritable)) throw error;
+    if (unwritable)
+      console.error(
+        `[hyperframes] Could not write this project's history (${(error as Error).message}); showing it as last recorded.`,
+      );
   }
-  // Busy is only thrown on opening, so the task has not run; an open turn's marker is left as it is.
+  // Opening failed, so the task has not run; an open turn's marker is left as it is.
   const view = readProjectHistory({
     projectDir: resolveProject(dir).dir,
     historyRoot: historyDeps.historyRoot,
