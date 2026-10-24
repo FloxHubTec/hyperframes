@@ -447,12 +447,14 @@ describe("core runtime browser contract", () => {
       try {
         await filmPage.evaluate(() => window.__player!.renderSeek!(1));
         await filmPage.tracing.start({ categories: ["devtools.timeline"] });
-        await filmPage.evaluate(() => {
+        const transforms = await filmPage.evaluate(() => {
           const scene = document.getElementById("scene")!;
+          const read: string[] = [];
           for (let frame = 1; frame <= 5; frame++) {
             scene.style.transform = `translateX(${frame}px)`;
-            getComputedStyle(scene).transform;
+            read.push(getComputedStyle(scene).transform);
           }
+          return read;
         });
         const trace = JSON.parse(Buffer.from((await filmPage.tracing.stop())!).toString()) as {
           traceEvents: { name: string; args?: { elementCount?: number } }[];
@@ -460,6 +462,7 @@ describe("core runtime browser contract", () => {
         const restyled = trace.traceEvents
           .filter((event) => event.name === "UpdateLayoutTree")
           .map((event) => event.args?.elementCount ?? 0);
+        expect(transforms.at(-1)).toBe("matrix(1, 0, 0, 1, 5, 0)");
         expect(restyled.length).toBeGreaterThanOrEqual(5);
         expect(Math.max(...restyled)).toBeLessThan(10);
       } finally {
