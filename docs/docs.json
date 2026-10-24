@@ -265,6 +265,7 @@
               "studio-app/workspace",
               "studio-app/connect-your-agent",
               "studio-app/export",
+              "studio-app/share",
               "studio-app/troubleshooting"
             ]
           }
