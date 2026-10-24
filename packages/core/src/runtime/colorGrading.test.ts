@@ -1,6 +1,10 @@
 // fallow-ignore-file code-duplication
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HF_COLOR_GRADING_ATTR, serializeHfColorGrading } from "../colorGrading";
+import {
+  HF_COLOR_GRADING_ATTR,
+  HF_COLOR_GRADING_EFFECT_KEYS,
+  serializeHfColorGrading,
+} from "../colorGrading";
 import {
   createColorGradingRuntime,
   installAuthoredOpacityCapture,
@@ -122,6 +126,11 @@ function createMockWebGl(
   } as unknown as WebGLRenderingContext;
 }
 
+// Each clip shows its pixels on a 2D canvas, copied from the one shared WebGL canvas.
+function mock2d(): CanvasRenderingContext2D {
+  return { clearRect: vi.fn(), drawImage: vi.fn() } as unknown as CanvasRenderingContext2D;
+}
+
 function makeDrawableVideo(): HTMLVideoElement {
   const video = document.createElement("video");
   video.id = "hero-video";
@@ -182,6 +191,8 @@ describe("createColorGradingRuntime", () => {
   let getContextSpy: ReturnType<typeof vi.spyOn>;
   let runtime: RuntimeColorGradingApi | null = null;
 
+  const webglContexts = () => getContextSpy.mock.calls.filter(([type]) => type === "webgl").length;
+
   beforeEach(() => {
     document.body.innerHTML = "";
     lastUniform1f = null;
@@ -192,7 +203,7 @@ describe("createColorGradingRuntime", () => {
     getContextSpy = vi
       .spyOn(HTMLCanvasElement.prototype, "getContext")
       .mockImplementation((type: string) =>
-        type === "webgl" ? createMockWebGl() : null,
+        type === "webgl" ? createMockWebGl() : type === "2d" ? mock2d() : null,
       ) as ReturnType<typeof vi.spyOn>;
   });
 
@@ -200,6 +211,7 @@ describe("createColorGradingRuntime", () => {
     runtime?.destroy();
     runtime = null;
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     getContextSpy.mockRestore();
     delete window.__hfVariables;
     delete window.__hfVariablesByComp;
@@ -235,6 +247,18 @@ describe("createColorGradingRuntime", () => {
       expect(canvas.height).toBe(height);
     },
   );
+
+  it("draws a bordered source's grading canvas without a border over its whole box", () => {
+    vi.stubGlobal("devicePixelRatio", 1);
+    const video = makeDrawableVideo();
+    video.style.border = "16px solid rgb(255, 0, 0)";
+
+    const { canvas } = startRuntimeWithVideo(video);
+
+    expect(canvas.style.borderStyle).toBe("none");
+    expect(canvas.width).toBe(640);
+    expect(canvas.height).toBe(360);
+  });
 
   it("says an element is graded only while it draws through a grading canvas", () => {
     const { video } = startRuntimeWithVideo();
@@ -342,9 +366,39 @@ describe("createColorGradingRuntime", () => {
     const recreated = document.querySelector<HTMLCanvasElement>("[data-hf-color-grading-canvas]");
     expect(recreated).not.toBeNull();
     expect(recreated).toBe(canvas);
-    expect(getContextSpy).toHaveBeenCalledTimes(1);
+    expect(webglContexts()).toBe(1);
     expect(video.style.getPropertyValue("opacity")).toBe("0");
     expect(video.style.getPropertyPriority("opacity")).toBe("important");
+  });
+
+  it("draws every graded clip through one WebGL context, however often a seek run shows and hides them", () => {
+    const clips = Array.from({ length: 6 }, (_, i) => {
+      const video = makeDrawableVideo();
+      video.id = `clip-${i}`;
+      video.style.display = "none";
+      document.body.appendChild(video);
+      return video;
+    });
+    runtime = createColorGradingRuntime();
+
+    // Each seek shows two neighbouring clips and hides the rest, as scenes come and go.
+    for (const at of [0, 2, 4, 1, 3, 5, 0, 4]) {
+      clips.forEach((video, i) => {
+        const shown = i === at || i === (at + 1) % clips.length;
+        video.style.display = shown ? "block" : "none";
+        runtime?.setSourceVisibility(video, shown);
+      });
+    }
+
+    expect(webglContexts()).toBe(1);
+    const shared = getContextSpy.mock.instances[0];
+    const copies = getContextSpy.mock.results
+      .filter((_, i) => getContextSpy.mock.calls[i]?.[0] === "2d")
+      .flatMap(
+        ({ value }) => (value as { drawImage: ReturnType<typeof vi.fn> }).drawImage.mock.calls,
+      );
+    expect(copies.length).toBeGreaterThan(0);
+    expect(copies.every(([source]) => source === shared)).toBe(true);
   });
 
   it("defers WebGL setup for hidden attributed media until it becomes visible", () => {
@@ -354,7 +408,7 @@ describe("createColorGradingRuntime", () => {
 
     runtime = createColorGradingRuntime();
 
-    expect(getContextSpy).not.toHaveBeenCalled();
+    expect(webglContexts()).toBe(0);
     expect(document.querySelector("[data-hf-color-grading-canvas]")).toBeNull();
     expect(runtime.getStatus(video)).toEqual({
       state: "pending",
@@ -363,7 +417,7 @@ describe("createColorGradingRuntime", () => {
 
     video.style.display = "block";
     expect(runtime.setSourceVisibility(video, true)).toBe(true);
-    expect(getContextSpy).toHaveBeenCalledTimes(1);
+    expect(webglContexts()).toBe(1);
     expect(document.querySelector("[data-hf-color-grading-canvas]")).not.toBeNull();
   });
 
@@ -393,12 +447,12 @@ describe("createColorGradingRuntime", () => {
         { id: "warm", dataUrl: "data:image/png;base64,preview" },
       ],
     });
-    expect(getContextSpy).toHaveBeenCalledTimes(1);
+    expect(webglContexts()).toBe(1);
     expect(document.querySelector("[data-hf-color-grading-canvas]")).toBeNull();
     expect(video.style.opacity).toBe("");
 
     await runtime.renderPreviews("#hero-video", [{ id: "mono", grading: "mono-clean" }]);
-    expect(getContextSpy).toHaveBeenCalledTimes(1);
+    expect(webglContexts()).toBe(1);
 
     const retinaBatch = await runtime.renderPreviews(
       "#hero-video",
@@ -704,7 +758,7 @@ describe("createColorGradingRuntime", () => {
 
     runtime = createColorGradingRuntime();
 
-    expect(getContextSpy).toHaveBeenCalledTimes(1);
+    expect(webglContexts()).toBe(1);
     if (!lastUniform1f) throw new Error("Expected WebGL uniform calls");
     expect(lastUniform1f).toHaveBeenCalledWith("u_intensity", 0);
     expect(lastUniform1f).toHaveBeenCalledWith("u_kuwahara", 0);
@@ -719,6 +773,82 @@ describe("createColorGradingRuntime", () => {
     expect(lastUniform1f).toHaveBeenCalledWith("u_kuwahara", 1);
   });
 
+  describe("a picture served by URL", () => {
+    const uploads = () => texImage2DCalls.map((call) => call[5]);
+
+    /** The graded picture, and the pictures the runtime creates afterwards, still loading. */
+    function servedPicture(): { image: HTMLImageElement; created: HTMLImageElement[] } {
+      const image = makeDrawableImage();
+      Object.defineProperty(image, "currentSrc", { value: "http://127.0.0.1/p/cutout.png" });
+      document.body.appendChild(image);
+      const created: HTMLImageElement[] = [];
+      const createElement = document.createElement.bind(document);
+      vi.spyOn(document, "createElement").mockImplementation(
+        (tag: string, options?: ElementCreationOptions) => {
+          const element = createElement(tag, options);
+          if (element instanceof HTMLImageElement) {
+            Object.defineProperty(element, "complete", { value: false, configurable: true });
+            created.push(element);
+          }
+          return element;
+        },
+      );
+      return { image, created };
+    }
+
+    function settle(copy: HTMLImageElement | undefined, naturalWidth: number): void {
+      if (!copy) throw new Error("Expected a CORS copy of the picture");
+      Object.defineProperty(copy, "complete", { value: true });
+      Object.defineProperty(copy, "naturalWidth", { value: naturalWidth });
+      copy.dispatchEvent(new Event(naturalWidth > 0 ? "load" : "error"));
+    }
+
+    it("grades the picture itself in a document with an origin", () => {
+      const { image, created } = servedPicture();
+      runtime = createColorGradingRuntime();
+
+      expect(created).toEqual([]);
+      expect(uploads().at(-1)).toBe(image);
+    });
+
+    it("grades a CORS copy in an opaque document, whose own no-cors load WebGL can't read", () => {
+      vi.stubGlobal("origin", "null");
+      const { image, created } = servedPicture();
+      runtime = createColorGradingRuntime();
+
+      const [copy] = created;
+      expect([copy?.src, copy?.crossOrigin]).toEqual([
+        "http://127.0.0.1/p/cutout.png",
+        "anonymous",
+      ]);
+      expect(uploads()).not.toContain(image);
+      for (let tick = 0; tick < 5; tick += 1) runtime.redrawAnimated();
+      settle(copy, 640);
+      expect(uploads().filter((upload) => upload === copy)).toHaveLength(1);
+      expect(uploads()).not.toContain(image);
+    });
+
+    it("redraws a grading started while another's copy was loading", () => {
+      vi.stubGlobal("origin", "null");
+      const { created } = servedPicture();
+      createColorGradingRuntime().destroy();
+      runtime = createColorGradingRuntime();
+
+      expect(created).toHaveLength(1);
+      settle(created[0], 640);
+      expect(uploads().at(-1)).toBe(created[0]);
+    });
+
+    it("grades the picture itself when an opaque document's CORS copy is refused, as before", () => {
+      vi.stubGlobal("origin", "null");
+      const { image, created } = servedPicture();
+      runtime = createColorGradingRuntime();
+
+      settle(created[0], 0);
+      expect(uploads().at(-1)).toBe(image);
+    });
+  });
+
   it("redraws animated still images from the transport tick", () => {
     const image = makeDrawableImage();
     document.body.appendChild(image);
@@ -728,6 +858,54 @@ describe("createColorGradingRuntime", () => {
 
     expect(runtime.redrawAnimated()).toBe(1);
     expect(lastUniform1f).toHaveBeenCalledWith("u_blur", 0.7);
+  });
+
+  describe("a graded canvas", () => {
+    function makeGradedCanvas(width: number, height: number): HTMLCanvasElement {
+      const canvas = document.createElement("canvas");
+      canvas.id = "drawn";
+      canvas.width = width;
+      canvas.height = height;
+      canvas.setAttribute(
+        HF_COLOR_GRADING_ATTR,
+        serializeHfColorGrading({ adjust: { exposure: 0.5 } }),
+      );
+      Object.defineProperty(canvas, "offsetWidth", { value: 640, configurable: true });
+      Object.defineProperty(canvas, "offsetHeight", { value: 360, configurable: true });
+      canvas.getBoundingClientRect = () =>
+        ({ width: 640, height: 360, left: 0, top: 0, right: 640, bottom: 360 }) as DOMRect;
+      document.body.appendChild(canvas);
+      return canvas;
+    }
+    const canvasUploads = (canvas: HTMLCanvasElement) =>
+      texImage2DCalls.filter((args) => args.length === 6 && args[5] === canvas).length;
+
+    it("grades its pixels and re-uploads them on every transport tick and seek", () => {
+      const canvas = makeGradedCanvas(320, 180);
+      runtime = createColorGradingRuntime();
+
+      expect(runtime.isGraded(canvas)).toBe(true);
+      expect(runtime.getStatus("drawn")).toMatchObject({ state: "active" });
+      expect(canvas.style.getPropertyValue("opacity")).toBe("0");
+      expect(canvasUploads(canvas)).toBe(1);
+
+      expect(runtime.redrawAnimated()).toBe(1);
+      expect(runtime.redraw()).toBe(1);
+      expect(canvasUploads(canvas)).toBe(3);
+    });
+
+    it("waits for a drawing buffer, whatever its CSS box", () => {
+      const canvas = makeGradedCanvas(0, 0);
+      runtime = createColorGradingRuntime();
+
+      expect(runtime.getStatus("drawn")).toMatchObject({ state: "pending" });
+      expect(canvasUploads(canvas)).toBe(0);
+
+      canvas.width = 320;
+      canvas.height = 180;
+      expect(runtime.redraw()).toBe(1);
+      expect(canvasUploads(canvas)).toBe(1);
+    });
   });
 
   it("redraws animated held video frames without duplicating active video draws", () => {
@@ -796,6 +974,40 @@ describe("createColorGradingRuntime", () => {
     expect(canvas.style.display).toBe("block");
     expect(canvas.style.visibility).toBe("visible");
     expect(canvas.style.opacity).toBe("0.75");
+  });
+
+  it("drops the injected render frame's border while grading draws over it", () => {
+    const video = makeDrawableVideo();
+    Object.defineProperty(video, "readyState", {
+      value: HTMLMediaElement.HAVE_METADATA,
+      configurable: true,
+    });
+    Object.defineProperty(video, "videoWidth", { value: 0, configurable: true });
+    Object.defineProperty(video, "videoHeight", { value: 0, configurable: true });
+    document.body.appendChild(video);
+    runtime = createColorGradingRuntime();
+    const canvas = document.querySelector<HTMLCanvasElement>("[data-hf-color-grading-canvas]");
+    if (!canvas) throw new Error("Expected color grading canvas");
+
+    const frame = document.createElement("img");
+    frame.id = "__render_frame_hero-video__";
+    frame.className = "__render_frame__";
+    frame.style.border = "16px solid rgb(255, 0, 0)";
+    Object.defineProperty(frame, "complete", { value: true, configurable: true });
+    Object.defineProperty(frame, "naturalWidth", { value: 640, configurable: true });
+    Object.defineProperty(frame, "naturalHeight", { value: 360, configurable: true });
+    video.parentNode?.insertBefore(frame, canvas);
+    video.style.setProperty("visibility", "hidden", "important");
+
+    runtime.redraw();
+
+    expect(canvas.style.display).toBe("block");
+    expect(frame.style.borderStyle).toBe("none");
+
+    video.style.border = "16px dashed rgb(255, 0, 0)";
+    video.removeAttribute(HF_COLOR_GRADING_ATTR);
+    runtime.refresh();
+    expect(frame.style.borderStyle).toBe("dashed");
   });
 
   it("keeps a staged scene copy's canvas on its own render frame (#3994)", async () => {
@@ -868,6 +1080,54 @@ describe("createColorGradingRuntime", () => {
     expect(canvas.style.opacity).toBe("1");
   });
 
+  it.each([
+    ["a seek", "redraw"],
+    ["a playback tick", "redrawAnimated"],
+  ] as const)("grades an image whose ancestor starts hidden once %s shows it", (_, pass) => {
+    // A layer a timeline reveals, or a sub-composition host that starts later.
+    const scene = document.createElement("div");
+    scene.style.visibility = "hidden";
+    const image = makeDrawableImage();
+    scene.appendChild(image);
+    document.body.appendChild(scene);
+    runtime = createColorGradingRuntime();
+
+    runtime[pass]();
+    expect(runtime.isGraded(image)).toBe(false);
+    expect(webglContexts()).toBe(0);
+
+    scene.style.visibility = "visible";
+    runtime[pass]();
+
+    expect(runtime.isGraded(image)).toBe(true);
+    expect(image.nextElementSibling?.hasAttribute("data-hf-color-grading-canvas")).toBe(true);
+    expect(image.style.getPropertyValue("opacity")).toBe("0");
+  });
+
+  it.each([
+    ["shown", "visible"],
+    ["still hidden", "hidden"],
+  ])("keeps a live grade switched off while %s, though its saved attribute grades", (_, start) => {
+    const scene = document.createElement("div");
+    scene.style.visibility = start;
+    const image = makeDrawableImage();
+    image.style.removeProperty("--hf-color-grading-blur");
+    image.setAttribute(
+      HF_COLOR_GRADING_ATTR,
+      serializeHfColorGrading({ adjust: { exposure: 0.5 } }),
+    );
+    scene.appendChild(image);
+    document.body.appendChild(scene);
+    runtime = createColorGradingRuntime();
+
+    runtime.setGrading(image, {});
+    scene.style.visibility = "visible";
+    runtime.redraw();
+    runtime.redrawAnimated();
+
+    expect(runtime.isGraded(image)).toBe(false);
+  });
+
   it("updates canvas opacity through grading's own hide when CSS animation progresses (#3329)", () => {
     const video = makeDrawableVideo();
     // Simulate a CSS entrance animation: the authored opacity is empty (no
@@ -914,8 +1174,31 @@ describe("createColorGradingRuntime", () => {
 
     runtime = createColorGradingRuntime();
 
-    expect(getContextSpy).toHaveBeenCalledTimes(1);
+    expect(webglContexts()).toBe(1);
     expect(document.querySelector("[data-hf-color-grading-canvas]")).not.toBeNull();
+  });
+
+  it("grades a clip's first producer frame when the DOM observer runs before it decodes", () => {
+    const video = makeDrawableVideo();
+    video.style.visibility = "hidden";
+    document.body.appendChild(video);
+    runtime = createColorGradingRuntime();
+
+    let decoded = false;
+    const frame = document.createElement("img");
+    frame.id = "__render_frame_hero-video__";
+    frame.className = "__render_frame__";
+    frame.style.visibility = "visible";
+    Object.defineProperty(frame, "complete", { get: () => decoded, configurable: true });
+    Object.defineProperty(frame, "naturalWidth", { get: () => (decoded ? 640 : 0) });
+    Object.defineProperty(frame, "naturalHeight", { get: () => (decoded ? 360 : 0) });
+    video.after(frame);
+    runtime.refresh();
+    decoded = true;
+
+    expect(runtime.redraw()).toBe(1);
+    expect(texImage2DCalls.at(-1)).toContain(frame);
+    expect(frame.nextSibling).toBe(document.querySelector("[data-hf-color-grading-canvas]"));
   });
 
   it("does not recreate an inactive clip from its hidden producer frame", () => {
@@ -933,7 +1216,7 @@ describe("createColorGradingRuntime", () => {
     expect(runtime.setSourceVisibility(video, false)).toBe(true);
     runtime.refresh();
     expect(canvas.isConnected).toBe(false);
-    expect(getContextSpy).toHaveBeenCalledTimes(1);
+    expect(webglContexts()).toBe(1);
     expect(video.hasAttribute("data-hf-color-grading-source-hidden")).toBe(false);
   });
 
@@ -1183,7 +1466,11 @@ describe("createColorGradingRuntime", () => {
 
   it("falls back to the untreated shader output when half-float targets are unavailable", () => {
     getContextSpy.mockImplementation((type: string) =>
-      type === "webgl" ? createMockWebGl({ halfFloatSupported: false }) : null,
+      type === "webgl"
+        ? createMockWebGl({ halfFloatSupported: false })
+        : type === "2d"
+          ? mock2d()
+          : null,
     );
     const video = makeDrawableVideo();
     video.setAttribute(
@@ -1260,6 +1547,244 @@ describe("createColorGradingRuntime", () => {
     expect(secondGrainSeed).toBe((firstGrainSeed ?? 0) + 15);
     const fragment = lastShaderSources.find((source) => source.includes("sampleMedia"));
     expect(fragment).toContain("float time = u_effectTime * speed;");
+  });
+
+  function mainFragmentSources(): string[] {
+    return lastShaderSources.filter((source) =>
+      source.includes("vec4 sampleColor = sampleMedia(uv);"),
+    );
+  }
+
+  function stageNames(source: string, directive: "define" | "ifdef"): string[] {
+    const pattern = new RegExp(`^#${directive} (HF_STAGE_\\w+)$`, "gm");
+    return [...new Set([...source.matchAll(pattern)].map((match) => match[1] ?? ""))].sort();
+  }
+
+  it("compiles an adjust-only grade with every optional shader stage left out", () => {
+    startRuntimeWithVideo();
+
+    const fragments = mainFragmentSources();
+    expect(fragments).not.toHaveLength(0);
+    for (const fragment of fragments) expect(stageNames(fragment, "define")).toEqual([]);
+    expect(stageNames(fragments[0] ?? "", "ifdef")).toContain("HF_STAGE_ASCII");
+  });
+
+  it("compiles exactly the stages a grade enables", () => {
+    const video = makeDrawableVideo();
+    video.setAttribute(
+      HF_COLOR_GRADING_ATTR,
+      serializeHfColorGrading({ details: { vignette: 0.3 }, effects: { ascii: 0.5 } }),
+    );
+    startRuntimeWithVideo(video);
+
+    expect(stageNames(mainFragmentSources().at(-1) ?? "", "define")).toEqual([
+      "HF_STAGE_ASCII",
+      "HF_STAGE_VIGNETTE",
+    ]);
+  });
+
+  it.each([
+    ["HF_STAGE_BLUR", { effects: { blur: 0.4 } }],
+    ["HF_STAGE_KUWAHARA", { effects: { kuwahara: 0.4 } }],
+    ["HF_STAGE_PIXELATE", { effects: { pixelate: 0.4 } }],
+    ["HF_STAGE_TAPE", { effects: { tapeDamage: 0.4 } }],
+    ["HF_STAGE_CHROMA_BLEED", { effects: { chromaBleed: 0.4 } }],
+    ["HF_STAGE_CHROMATIC", { effects: { chromaticAberration: 0.4 } }],
+    ["HF_STAGE_CRT", { effects: { crtCurvature: 0.4 } }],
+    ["HF_STAGE_GLITCH", { effects: { digitalGlitch: 0.4 } }],
+    ["HF_STAGE_GRAIN", { details: { grain: 0.4 } }],
+    ["HF_STAGE_FILM_ARTIFACTS", { effects: { filmArtifacts: 0.4 } }],
+    ["HF_STAGE_MONO_SCREEN", { effects: { monoScreen: 0.4 } }],
+    ["HF_STAGE_ENGRAVING", { effects: { engraving: 0.4 } }],
+    ["HF_STAGE_CROSSHATCH", { effects: { crosshatch: 0.4 } }],
+    ["HF_STAGE_HALFTONE", { effects: { halftone: 0.4 } }],
+    ["HF_STAGE_TWO_INK_PRINT", { effects: { twoInkPrint: 0.4 } }],
+    ["HF_STAGE_DITHER", { effects: { dither: 0.4 } }],
+    ["HF_STAGE_ASCII", { effects: { ascii: 0.4 } }],
+    ["HF_STAGE_BLOOM", { effects: { bloom: 0.4 } }],
+    ["HF_STAGE_SCANLINES", { effects: { scanlines: 0.4 } }],
+    ["HF_STAGE_VIGNETTE", { details: { vignette: 0.4 } }],
+    [
+      "HF_STAGE_RGB_CURVES",
+      {
+        curves: {
+          master: [
+            [0, 0],
+            [0.5, 0.6],
+            [1, 1],
+          ],
+        },
+      },
+    ],
+    [
+      "HF_STAGE_HUE_CURVES",
+      {
+        hueCurves: {
+          hueVsHue: [
+            [0, 0],
+            [120, 12],
+            [240, 0],
+          ],
+        },
+      },
+    ],
+    [
+      "HF_STAGE_SECONDARIES",
+      {
+        secondaries: [
+          {
+            key: { hue: { center: 350, range: 20, softness: 10 } },
+            correction: { saturation: 0.15 },
+          },
+        ],
+      },
+    ],
+    ["HF_STAGE_LUT", { lut: { src: "/looks/test.cube" } }],
+  ] as const)("keys %s to its own grade value and nothing else", (stage, grading) => {
+    const { video } = startRuntimeWithVideo();
+    runtime!.setGrading(`#${video.id}`, grading);
+
+    expect(stageNames(mainFragmentSources().at(-1) ?? "", "define")).toEqual([stage]);
+  });
+
+  it("can enable every stage the shader guards, and no stage it does not", () => {
+    const { video } = startRuntimeWithVideo();
+    runtime!.setGrading(`#${video.id}`, {
+      details: { grain: 0.5, vignette: 0.5 },
+      effects: Object.fromEntries(HF_COLOR_GRADING_EFFECT_KEYS.map((key) => [key, 0.5])),
+      curves: {
+        master: [
+          [0, 0],
+          [0.5, 0.6],
+          [1, 1],
+        ],
+      },
+      hueCurves: {
+        hueVsHue: [
+          [0, 0],
+          [120, 12],
+          [240, 0],
+        ],
+      },
+      secondaries: [
+        {
+          key: { hue: { center: 350, range: 20, softness: 10 } },
+          correction: { saturation: 0.15 },
+        },
+      ],
+      lut: { src: "/looks/test.cube" },
+    });
+    runtime!.setCompare(`#${video.id}`, { enabled: true });
+
+    const fragment = mainFragmentSources().at(-1) ?? "";
+    expect(stageNames(fragment, "ifdef")).not.toHaveLength(0);
+    expect(stageNames(fragment, "define")).toEqual(stageNames(fragment, "ifdef"));
+  });
+
+  it("compiles a variant once per stage set and reuses it when the grade returns", () => {
+    const { video } = startRuntimeWithVideo();
+    const compiled = () => mainFragmentSources().length;
+    const baseline = compiled();
+
+    runtime!.setGrading(`#${video.id}`, { effects: { halftone: 0.6 } });
+    expect(compiled()).toBe(baseline + 1);
+    runtime!.setGrading(`#${video.id}`, { adjust: { exposure: 0.1 } });
+    runtime!.setGrading(`#${video.id}`, { effects: { halftone: 0.2 } });
+    expect(compiled()).toBe(baseline + 1);
+  });
+
+  it("evicts the least recently used variant, not a variant still in use", () => {
+    const { video } = startRuntimeWithVideo();
+    const amounts = [
+      "blur",
+      "kuwahara",
+      "pixelate",
+      "tapeDamage",
+      "chromaBleed",
+      "chromaticAberration",
+      "crtCurvature",
+      "digitalGlitch",
+      "filmArtifacts",
+      "monoScreen",
+      "engraving",
+      "crosshatch",
+      "halftone",
+      "twoInkPrint",
+      "dither",
+      "ascii",
+      "bloom",
+      "scanlines",
+    ] as const;
+    const distinctGrades = [
+      ...amounts.map((key) => ({ effects: { [key]: 0.5 } })),
+      ...amounts
+        .slice(1)
+        .map((key, index) => ({ effects: { [amounts[index]!]: 0.5, [key]: 0.5 } })),
+    ];
+    const compiled = () => mainFragmentSources().length;
+    const adjustOnly = { adjust: { exposure: 0.5 } };
+
+    // The adjust-only variant plus 31 more fills the 32-entry cache.
+    for (const grading of distinctGrades.slice(0, 31)) runtime!.setGrading(`#${video.id}`, grading);
+    runtime!.setGrading(`#${video.id}`, adjustOnly);
+    const beforeEviction = compiled();
+    runtime!.setGrading(`#${video.id}`, distinctGrades[31]!);
+    runtime!.setGrading(`#${video.id}`, adjustOnly);
+
+    expect(compiled()).toBe(beforeEviction + 1);
+  });
+
+  it("selects the variant from the animated grade, not the authored one", () => {
+    const video = makeDrawableVideo();
+    video.setAttribute(HF_COLOR_GRADING_ATTR, serializeHfColorGrading({ effects: { blur: 0 } }));
+    video.style.setProperty("--hf-color-grading-blur", "0.45");
+    startRuntimeWithVideo(video);
+
+    expect(stageNames(mainFragmentSources().at(-1) ?? "", "define")).toEqual(["HF_STAGE_BLUR"]);
+  });
+
+  it("compiles each look preview with its own stages", async () => {
+    const video = makeDrawableVideo();
+    video.removeAttribute(HF_COLOR_GRADING_ATTR);
+    document.body.appendChild(video);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,x");
+    runtime = createColorGradingRuntime();
+
+    await runtime.renderPreviews("#hero-video", [
+      { id: "halftone", grading: { effects: { halftone: 0.5 } } },
+    ]);
+
+    expect(stageNames(mainFragmentSources().at(-1) ?? "", "define")).toEqual(["HF_STAGE_HALFTONE"]);
+  });
+
+  it("draws a variant the driver rejects through every stage, and stops retrying it", () => {
+    const { video } = startRuntimeWithVideo();
+    const gl = getContextSpy.mock.results[0]?.value as WebGLRenderingContext;
+    const rejected = "#define HF_STAGE_HALFTONE\n#ifdef GL_FRAGMENT_PRECISION_HIGH";
+    gl.getShaderParameter = vi.fn(() => !lastShaderSources.at(-1)?.startsWith(rejected));
+    const attempts = () => lastShaderSources.filter((source) => source.startsWith(rejected)).length;
+
+    runtime!.setGrading(`#${video.id}`, { effects: { halftone: 0.6 } });
+    const fallback = mainFragmentSources().at(-1) ?? "";
+    expect(stageNames(fallback, "define")).toEqual(stageNames(fallback, "ifdef"));
+    runtime!.setGrading(`#${video.id}`, { adjust: { exposure: 0.1 } });
+    runtime!.setGrading(`#${video.id}`, { effects: { halftone: 0.2 } });
+
+    expect(attempts()).toBe(1);
+    expect(runtime!.isGraded(video)).toBe(true);
+  });
+
+  it("stops compiling once even the every-stage variant is rejected", () => {
+    const { video } = startRuntimeWithVideo();
+    const gl = getContextSpy.mock.results[0]?.value as WebGLRenderingContext;
+    gl.getShaderParameter = vi.fn(() => false);
+    const compiled = () => mainFragmentSources().length;
+    const afterCreation = compiled();
+
+    runtime!.setGrading(`#${video.id}`, { effects: { halftone: 0.6 } });
+    runtime!.setGrading(`#${video.id}`, { effects: { halftone: 0.2 } });
+
+    expect(compiled()).toBe(afterCreation + 2);
   });
 
   it("uses the effected media sample as the graded shader input", () => {
@@ -1639,7 +2164,11 @@ describe("createColorGradingRuntime", () => {
 
   it("reports media texture upload failures in runtime status", () => {
     getContextSpy.mockImplementation((type: string) =>
-      type === "webgl" ? createMockWebGl({ failMediaUpload: true }) : null,
+      type === "webgl"
+        ? createMockWebGl({ failMediaUpload: true })
+        : type === "2d"
+          ? mock2d()
+          : null,
     );
     const video = makeDrawableVideo();
     document.body.appendChild(video);
@@ -1654,9 +2183,10 @@ describe("createColorGradingRuntime", () => {
 
   it("falls back to the source media on WebGL context loss and redraws after restore", () => {
     const { video, canvas } = startRuntimeWithVideo();
+    const shared = getContextSpy.mock.instances[0] as HTMLCanvasElement;
 
     const lost = new Event("webglcontextlost", { cancelable: true });
-    canvas.dispatchEvent(lost);
+    shared.dispatchEvent(lost);
 
     expect(lost.defaultPrevented).toBe(true);
     expect(canvas.style.display).toBe("none");
@@ -1667,7 +2197,7 @@ describe("createColorGradingRuntime", () => {
       message: "WebGL context lost",
     });
 
-    canvas.dispatchEvent(new Event("webglcontextrestored"));
+    shared.dispatchEvent(new Event("webglcontextrestored"));
 
     expect(runtime?.getStatus("#hero-video").state).toBe("active");
     expect(video.hasAttribute("data-hf-color-grading-source-hidden")).toBe(true);

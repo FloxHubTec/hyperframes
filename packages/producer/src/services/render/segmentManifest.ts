@@ -48,6 +48,8 @@ export interface SegmentPlanHashInput {
   outputHeight: number;
   /** Serialised motion-blur options, or "" when off; sample count and shutter change every pixel. */
   motionBlur: string;
+  pageMotionBlur: "off" | undefined;
+  captureQuality: number | undefined;
 }
 
 const MANIFEST_FILENAME = "segments.json";
@@ -70,6 +72,8 @@ export function computeSegmentPlanHash(input: SegmentPlanHashInput): string {
     input.useGpu ? "gpu" : "cpu",
     `${input.outputWidth}x${input.outputHeight}`,
     input.motionBlur,
+    input.pageMotionBlur ?? "",
+    input.captureQuality === undefined ? "" : String(input.captureQuality),
   ].join(" ");
   return createHash("sha256").update(ordered).digest("hex").slice(0, 16);
 }
