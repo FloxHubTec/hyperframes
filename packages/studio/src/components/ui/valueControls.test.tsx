@@ -326,6 +326,8 @@ describe("NumberField", () => {
     expect(commits).toEqual([]);
     fire(input, "keydown", { key: "Enter" });
 
+    expect(input.value).toBe(String(expected));
+    expect(document.activeElement).toBe(input);
     expect(commits).toEqual([expected]);
     expect(designInputCalls()).toHaveLength(1);
 
@@ -353,6 +355,8 @@ describe("NumberField", () => {
     type(input, "150");
     fire(input, "keydown", { key: "Enter" });
 
+    expect(input.value).toBe("100");
+    expect(document.activeElement).toBe(input);
     expect(commits).toEqual([]);
     expect(designInputCalls()).toHaveLength(0);
 
