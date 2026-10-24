@@ -229,6 +229,7 @@ export interface BrowserResult {
 
 export interface EnsureBrowserOptions {
   onProgress?: (downloadedBytes: number, totalBytes: number) => void;
+  downloadStallMs?: number;
   // Re-download the managed build even when cached; only its version dir is replaced.
   force?: boolean;
   // Always resolve to OUR pinned `CHROME_VERSION` build (cached, or freshly
@@ -695,6 +696,55 @@ function wrapDownloadFailureWithBrowserPathHint(
   return new Error(message, { cause: cause instanceof Error ? cause : undefined });
 }
 
+const DOWNLOAD_STALL_MS = 60_000;
+const DOWNLOAD_ATTEMPTS = 3;
+
+class BrowserDownloadStalledError extends Error {}
+
+type ProgressCallback = (downloadedBytes: number, totalBytes: number) => void;
+
+// install() takes no abort signal: a stalled transfer is abandoned, so the command and its lock stop waiting on it.
+function withDownloadStallTimeout<T>(
+  start: (onProgress: ProgressCallback) => Promise<T>,
+  { stallMs, host }: { stallMs: number; host: string },
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let timer: NodeJS.Timeout | undefined;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(
+        () =>
+          reject(
+            new BrowserDownloadStalledError(
+              `The Chrome download from ${host} stalled: no data for ${stallMs / 1000}s.`,
+            ),
+          ),
+        stallMs,
+      );
+      timer.unref?.();
+    };
+    arm();
+    start((downloaded, total) => {
+      if (total > 0 && downloaded >= total) clearTimeout(timer);
+      else arm();
+    })
+      .then(resolve, reject)
+      .finally(() => clearTimeout(timer));
+  });
+}
+
+async function retryOnStall<T>(run: () => Promise<T>, clear: () => void): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run();
+    } catch (err) {
+      if (!(err instanceof BrowserDownloadStalledError) || attempt >= DOWNLOAD_ATTEMPTS) throw err;
+      console.warn(`[hyperframes] ${err.message} Retrying (${attempt}/${DOWNLOAD_ATTEMPTS - 1}).`);
+      clear();
+    }
+  }
+}
+
 async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserResult> {
   if (isLinuxArm()) {
     return ensureLinuxArmBrowser(options);
@@ -709,7 +759,8 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
         `${freeMb} MB free at ${CACHE_ROOT_DIR}. Free disk space, then retry.`,
     );
   }
-  const { Browser, Cache, detectBrowserPlatform, install } = await loadPuppeteerBrowsers();
+  const browsers = await loadPuppeteerBrowsers();
+  const { Browser, Cache, detectBrowserPlatform, install } = browsers;
 
   const platform = detectBrowserPlatform();
   if (!platform) {
@@ -722,6 +773,13 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
   // install() only debug-logs each failed unzip tool before trying the next one; keep those lines.
   let unzipLog: string[] = [];
   const buildId = managedChromeVersion();
+  let downloadHost = "the Chrome download host";
+  try {
+    downloadHost = new URL(browsers.getDownloadUrl(Browser.CHROMEHEADLESSSHELL, platform, buildId))
+      .host;
+  } catch {
+    // keep the generic name: the host only makes the stall message more specific
+  }
   const runInstall = async () => {
     unzipLog = [];
     const installOptions: InstallOptions & { unpack?: true } = {
@@ -729,7 +787,6 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
       browser: Browser.CHROMEHEADLESSSHELL,
       buildId,
       platform,
-      downloadProgressCallback: options?.onProgress,
       logger: (prefix) => {
         const debug = debuglog(prefix);
         const isUnzip = prefix === "puppeteer:browsers:fileUtil";
@@ -741,20 +798,35 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
         };
       },
     };
+    const guarded = <T>(call: (onProgress: ProgressCallback) => Promise<T>) =>
+      withDownloadStallTimeout(
+        (onProgress) =>
+          call((downloaded, total) => {
+            options?.onProgress?.(downloaded, total);
+            onProgress(downloaded, total);
+          }),
+        { stallMs: options?.downloadStallMs ?? DOWNLOAD_STALL_MS, host: downloadHost },
+      );
     const unzipMayAskOnInput = process.platform !== "win32";
     if (unzipMayAskOnInput) {
-      const archive = await install({ ...installOptions, unpack: false });
+      const archive = await guarded((cb) =>
+        install({ ...installOptions, downloadProgressCallback: cb, unpack: false }),
+      );
       const into = new Cache(stagingDir).installationDir(installOptions.browser, platform, buildId);
       await unzipArchive(archive, into);
     }
-    return install(installOptions);
+    return guarded((cb) => install({ ...installOptions, downloadProgressCallback: cb }));
   };
 
   try {
-    const staged = await installWithCorruptArchiveRecovery(runInstall, clearStaging, (err) =>
-      console.warn(
-        `[hyperframes] Downloaded browser archive was corrupt (${normalizeErrorMessage(err)}); re-downloading.`,
-      ),
+    const staged = await retryOnStall(
+      () =>
+        installWithCorruptArchiveRecovery(runInstall, clearStaging, (err) =>
+          console.warn(
+            `[hyperframes] Downloaded browser archive was corrupt (${normalizeErrorMessage(err)}); re-downloading.`,
+          ),
+        ),
+      clearStaging,
     );
     assertExecutableUnpacked(stagingDir, staged.executablePath);
     unzipLog = [];
