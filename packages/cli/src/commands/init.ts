@@ -670,12 +670,9 @@ async function scaffoldProject(
 }
 
 /**
- * Install the core set (the `/hyperframes` entry router + shared domain
- * skills) when it is missing. A skill that is already installed is never
- * refreshed, replaced or removed here: that is `hyperframes skills update`,
- * run by the user. The end-user workflow skills are NOT pulled here either;
- * they install on demand (`hyperframes skills update <name>`).
- * Best-effort: offline, it degrades to a presence check and never breaks init.
+ * Install the core set when it is missing. An installed skill is never
+ * refreshed or removed here; that is `hyperframes skills update`, run by the
+ * user. Best-effort: offline it only checks presence and never breaks init.
  * The install itself lands once GLOBALLY (~/.claude/skills + ~/.agents/skills)
  * and mirrors into every other installed agent, so it is project-independent —
  * the check is global-first to match.
