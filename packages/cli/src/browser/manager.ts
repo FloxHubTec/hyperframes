@@ -21,6 +21,9 @@ import {
   pickSharedShell,
 } from "@hyperframes/engine/chrome-host-ceiling";
 import { getFreeDiskMb } from "../telemetry/system.js";
+import http from "node:http";
+import https from "node:https";
+import { syncBuiltinESMExports } from "node:module";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
 import { unzipArchive } from "./unzipArchive.js";
@@ -230,6 +233,7 @@ export interface BrowserResult {
 export interface EnsureBrowserOptions {
   onProgress?: (downloadedBytes: number, totalBytes: number) => void;
   downloadStallMs?: number;
+  downloadBaseUrl?: string;
   // Re-download the managed build even when cached; only its version dir is replaced.
   force?: boolean;
   // Always resolve to OUR pinned `CHROME_VERSION` build (cached, or freshly
@@ -696,6 +700,32 @@ function wrapDownloadFailureWithBrowserPathHint(
   return new Error(message, { cause: cause instanceof Error ? cause : undefined });
 }
 
+// Every request install() makes goes through http(s).request; keep them so a stall can destroy them.
+function trackHttpRequests(): { abortAll: (reason: Error) => void; restore: () => void } {
+  const live = new Set<http.ClientRequest>();
+  const originals = { http: http.request, https: https.request };
+  const wrap = <F extends typeof http.request>(original: F) =>
+    ((...args: Parameters<F>) => {
+      const request = (original as (...a: unknown[]) => http.ClientRequest)(...args);
+      live.add(request);
+      request.once("close", () => live.delete(request));
+      return request;
+    }) as F;
+  http.request = wrap(originals.http);
+  https.request = wrap(originals.https);
+  syncBuiltinESMExports();
+  return {
+    abortAll: (reason) => {
+      for (const request of live) request.destroy(reason);
+    },
+    restore: () => {
+      http.request = originals.http;
+      https.request = originals.https;
+      syncBuiltinESMExports();
+    },
+  };
+}
+
 const DOWNLOAD_STALL_MS = 60_000;
 const DOWNLOAD_ATTEMPTS = 3;
 
@@ -703,24 +733,22 @@ class BrowserDownloadStalledError extends Error {}
 
 type ProgressCallback = (downloadedBytes: number, totalBytes: number) => void;
 
-// install() takes no abort signal: a stalled transfer is abandoned, so the command and its lock stop waiting on it.
+// install() takes no abort signal, so `abort` must close the sockets it opened or they keep the process alive.
 function withDownloadStallTimeout<T>(
   start: (onProgress: ProgressCallback) => Promise<T>,
-  { stallMs, host }: { stallMs: number; host: string },
+  { stallMs, host, abort }: { stallMs: number; host: string; abort: (reason: Error) => void },
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let timer: NodeJS.Timeout | undefined;
     const arm = () => {
       clearTimeout(timer);
-      timer = setTimeout(
-        () =>
-          reject(
-            new BrowserDownloadStalledError(
-              `The Chrome download from ${host} stalled: no data for ${stallMs / 1000}s.`,
-            ),
-          ),
-        stallMs,
-      );
+      timer = setTimeout(() => {
+        const stalled = new BrowserDownloadStalledError(
+          `The Chrome download from ${host} stalled: no data for ${stallMs / 1000}s.`,
+        );
+        abort(stalled);
+        reject(stalled);
+      }, stallMs);
       timer.unref?.();
     };
     arm();
@@ -775,8 +803,14 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
   const buildId = managedChromeVersion();
   let downloadHost = "the Chrome download host";
   try {
-    downloadHost = new URL(browsers.getDownloadUrl(Browser.CHROMEHEADLESSSHELL, platform, buildId))
-      .host;
+    downloadHost = new URL(
+      browsers.getDownloadUrl(
+        Browser.CHROMEHEADLESSSHELL,
+        platform,
+        buildId,
+        options?.downloadBaseUrl,
+      ),
+    ).host;
   } catch {
     // keep the generic name: the host only makes the stall message more specific
   }
@@ -787,6 +821,7 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
       browser: Browser.CHROMEHEADLESSSHELL,
       buildId,
       platform,
+      baseUrl: options?.downloadBaseUrl,
       logger: (prefix) => {
         const debug = debuglog(prefix);
         const isUnzip = prefix === "puppeteer:browsers:fileUtil";
@@ -798,15 +833,25 @@ async function downloadBrowser(options?: EnsureBrowserOptions): Promise<BrowserR
         };
       },
     };
-    const guarded = <T>(call: (onProgress: ProgressCallback) => Promise<T>) =>
-      withDownloadStallTimeout(
-        (onProgress) =>
-          call((downloaded, total) => {
-            options?.onProgress?.(downloaded, total);
-            onProgress(downloaded, total);
-          }),
-        { stallMs: options?.downloadStallMs ?? DOWNLOAD_STALL_MS, host: downloadHost },
-      );
+    const guarded = async <T>(call: (onProgress: ProgressCallback) => Promise<T>) => {
+      const requests = trackHttpRequests();
+      try {
+        return await withDownloadStallTimeout(
+          (onProgress) =>
+            call((downloaded, total) => {
+              options?.onProgress?.(downloaded, total);
+              onProgress(downloaded, total);
+            }),
+          {
+            stallMs: options?.downloadStallMs ?? DOWNLOAD_STALL_MS,
+            host: downloadHost,
+            abort: requests.abortAll,
+          },
+        );
+      } finally {
+        requests.restore();
+      }
+    };
     const unzipMayAskOnInput = process.platform !== "win32";
     if (unzipMayAskOnInput) {
       const archive = await guarded((cb) =>
