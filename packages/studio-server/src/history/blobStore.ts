@@ -61,7 +61,7 @@ async function cloneOrCopy(from: string, to: string, beforeReplace?: () => void)
 }
 
 const listDir = (path: string) =>
-  readdir(path).catch((error: NodeJS.ErrnoException) => {
+  readdir(path, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [];
     throw error;
   });
@@ -78,9 +78,15 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
     [dir, sizes],
     [asideDir, asideSizes],
   ] as const)
-    for (const shard of await listDir(root))
-      for (const hash of await listDir(join(root, shard)))
-        found.set(hash, (await stat(join(root, shard, hash))).size);
+    for (const shard of await listDir(root)) {
+      if (!shard.isDirectory()) {
+        // A crash mid-copy leaves its unpublished temp file beside the shards.
+        if (shard.name.startsWith("incoming-")) await rm(join(root, shard.name), { force: true });
+        continue;
+      }
+      for (const hash of await listDir(join(root, shard.name)))
+        found.set(hash.name, (await stat(join(root, shard.name, hash.name))).size);
+    }
   for (const hash of asideSizes.keys()) holds.set(hash, new Set(["*"]));
   const pathOf = (hash: string) => blobPath(sizes.has(hash) ? dir : asideDir, hash);
   let total = [...sizes.values()].reduce((sum, size) => sum + size, 0);

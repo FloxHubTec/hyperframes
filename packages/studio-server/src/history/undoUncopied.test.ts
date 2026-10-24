@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -205,5 +206,26 @@ describe("the set-aside store beside the blobs", () => {
     const aside = join(home, "aside");
     expect(readdirSync(aside)).toEqual([hash.slice(0, 2)]);
     expect(readdirSync(join(aside, hash.slice(0, 2)))).toEqual([hash]);
+  });
+
+  it("opens past a temp file a crash left mid-copy, and clears it", async () => {
+    const { home, source, blobs, hash } = await stores();
+    await blobs.keep("join.mp4", source, false);
+    const leftovers = [join(home, "blobs", "incoming-1234"), join(home, "aside", "incoming-5678")];
+    for (const leftover of leftovers) writeFileSync(leftover, "half a copy");
+
+    const reopened = await openBlobStore(join(home, "blobs"));
+
+    expect(reopened.has(hash)).toBe(true);
+    expect(leftovers.some((leftover) => existsSync(leftover))).toBe(false);
+  });
+
+  it("still fails the open when the folder cannot be read", async () => {
+    const { home } = await stores();
+    const blobsDir = join(home, "blobs");
+    chmodSync(blobsDir, 0o111);
+    cleanup.push(() => chmodSync(blobsDir, 0o755));
+
+    await expect(openBlobStore(blobsDir)).rejects.toMatchObject({ code: "EACCES" });
   });
 });
