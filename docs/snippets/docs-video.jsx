@@ -14,7 +14,8 @@ export const DocsVideo = ({
   const [enhanced, setEnhanced] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [waiting, setWaiting] = useState(false);
-  const [muted, setMuted] = useState(false);
+  // Browsers only autoplay muted video, so an autoplaying player starts muted; the sound button unmutes it.
+  const [muted, setMuted] = useState(autoPlay);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
@@ -214,6 +215,7 @@ export const DocsVideo = ({
           src={src}
           poster={poster}
           autoPlay={autoPlay && !reduced}
+          muted={autoPlay}
           loop={loop}
           playsInline
           preload="metadata"
