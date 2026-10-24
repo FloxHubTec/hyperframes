@@ -5,6 +5,7 @@ export const DocsVideo = ({
   autoPlay = false,
   loop = false,
   portrait = false,
+  aspect, // e.g. "16 / 10" for app recordings; the frame is 16 / 9 otherwise
 }) => {
   const videoRef = useRef(null);
   const playerRef = useRef(null);
@@ -191,6 +192,7 @@ export const DocsVideo = ({
       <div
         ref={playerRef}
         className="hf-docs-video"
+        style={aspect ? { aspectRatio: aspect } : undefined}
         role="region"
         aria-label={title}
         tabIndex={0}

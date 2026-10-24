@@ -1,0 +1,103 @@
+---
+title: "Find your way around a project"
+sidebarTitle: "The project screen"
+description: "Every part of a Studio app project: the chat and its @, # and / menus, the Script panel that edits video like a document, Media, Captions, Inspirations and Layers."
+---
+
+import { DocsVideo } from "/snippets/docs-video.jsx";
+
+A project has three columns: the chat with your agent on the left, the preview in the middle, and panels on the
+right. The timeline opens under the preview with **Show timeline**.
+
+## The chat box: @, # and /
+
+Three keys open menus right where you type.
+
+<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/at-menu-v1.mp4" autoPlay muted loop playsInline aria-label="Typing @ opens the menu of things to add" />
+
+**`@` adds something to your message.** The menu groups everything the agent can use: **Media** you added,
+**Scenes & brand kit**, **Inspirations** (moments from real videos), **Captions** styles, **Voices**, other
+**Projects**, or **Add files from your Mac**. Press **Tab** to jump between groups. Whatever you pick shows as a chip
+above your words, so the agent knows exactly which file or style you mean.
+
+<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/hash-tools-v1.mp4" autoPlay muted loop playsInline aria-label="Tools (#) under the chat box" />
+
+**`#` picks a tool** for this request: **Storyboard**, **Brand kit**, **Podcast edit**, **HeyGen Voice 1**,
+**Remove background**, **HeyGen Video 1**, **Reference video**, **Create assets** or **Computer use**. Use it when
+you want a specific job done the specific way ("#Remove background on the presenter, then put the title behind her").
+The HeyGen ones need a HeyGen API key.
+
+<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/slash-menu-v1.mp4" autoPlay muted loop playsInline aria-label="Typing / opens commands and skills" />
+
+**`/` runs a command or turns on a skill.** **/clear** starts a fresh chat (earlier messages stay above) and
+**/compact** shortens a long one. Below them are ready-made video formats (founder take, AI breakdown reel, cards
+behind you, behind-head captions and more) and any skills you have installed: picking one turns it on for the project.
+
+<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/skills-menu-v1.mp4" autoPlay muted loop playsInline aria-label="The Skills menu in the chat header" />
+
+The chat header shows which agent, model and effort the next request uses (click to change), and **Skills** lists
+what the agent can use: HyperFrames' own (always on), **Talking-head formats** and **Video workflows** that work only
+when picked, and **Your skills** from Claude Code or Codex.
+
+<div style={{ clear: "both" }} />
+
+## Script: edit the video like a document
+
+Open **Script** at the top of the right panel. Every word spoken in your video appears as text, transcribed on your
+computer. Select words (click the first, Shift-click the last) and press **Delete**: the video is cut with them. The
+panel says how much shorter it got, and **Put back** undoes any cut.
+
+<DocsVideo
+  title="Delete a sentence in the script and the video cuts with it"
+  src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/script-demo-v1.mp4"
+  poster="/public/images/studio-app/script-demo.jpg"
+  aspect="16 / 10"
+  autoPlay
+  loop
+/>
+
+*Select a sentence, Delete: "1 cut · 4.9 s shorter", and playback jumps straight over it.*
+
+With words selected, the bar also offers **Play** (just those words), **Silence** (keep the picture, mute the
+sound), **Clip** (cut them into a vertical clip of their own) and **Fix** (retype a word; it's spoken again in the same
+voice). **Clean up** removes **Ums and long pauses**, or **Repeated takes**, keeping the last take of each line you
+said more than once.
+
+## Media, Captions, Inspirations, Layers
+
+The icons under **Media** switch the right panel:
+
+<div className="hf-shelf">
+  <div>
+    <video className="hf-spot hf-spot-inline" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/captions-panel-tight-v1.mp4" autoPlay muted loop playsInline aria-label="The Captions panel" />
+    <p><strong>Captions:</strong> 91 caption styles. Click one to use it in the chat, then say where it goes.</p>
+  </div>
+  <div>
+    <video className="hf-spot hf-spot-inline" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/inspirations-panel-tight-v1.mp4" autoPlay muted loop playsInline aria-label="The Inspirations panel" />
+    <p><strong>Inspirations:</strong> moments from real videos (motion graphics, A-roll cuts, mobile ads, shaders), with ideas for whatever you selected.</p>
+  </div>
+  <div>
+    <video className="hf-spot hf-spot-inline" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/layers-panel-tight-v1.mp4" autoPlay muted loop playsInline aria-label="The Layers panel" />
+    <p><strong>Layers:</strong> every element in the video, top to bottom; pick one to select it in the preview.</p>
+  </div>
+</div>
+
+**Media** lists the project's files by folder. Add one to the chat to talk about it ("use this as the background"),
+and use the plus button to bring in files from your Mac.
+
+## Framey
+
+Framey, the small green character by the preview, shows what your agent is doing and tells you when a video is ready
+or needs you. Change how it looks in **Settings** > **Framey**.
+
+## The preview tools
+
+Under the preview: **Select** to click any element (right-click it for **Ask Framey**, layer order, **Cut out object
+here** on footage), **Draw** to circle what should change, and **Comment** to leave a note at a moment. Changes stack
+up and go to the agent together; see [edit a video with the agent](/studio-app/edit-with-the-agent).
+
+## Related topics
+
+- [Edit a video with the agent](/studio-app/edit-with-the-agent)
+- [Remove a background](/guides/remove-background)
+- [Use your brand kit](/studio-app/brand-kits)

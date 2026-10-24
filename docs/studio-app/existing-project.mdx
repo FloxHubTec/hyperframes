@@ -1,0 +1,57 @@
+---
+title: "Continue a Claude Code or Codex project in Studio"
+sidebarTitle: "Continue from Claude Code"
+description: "Open a HyperFrames project you started with Claude Code, Codex or another agent in the Studio app, keep its conversation, and hand it back to your agent when you're done."
+---
+
+Started a video in Claude Code, Codex or another agent? Open the same folder in the Studio app and keep going there:
+the preview sits beside the chat, and you can point, draw and comment on the picture. Nothing is copied or moved,
+so your agent and the app work on the same files.
+
+## From your agent: one command
+
+In the project folder, run:
+
+```bash
+npx hyperframes open
+```
+
+```text
+◇  Opening Spring Launch in HyperFrames
+   Its chat picks up this Claude Code conversation.
+```
+
+The app opens the project, and its chat carries on the conversation you were having, so you don't explain the video
+again. This works from Claude Code, Codex and Grok. If the app isn't installed, the command gives you the download
+link.
+
+You can also ask your agent: "Open this in the HyperFrames app."
+
+## From the app: Import projects
+
+<video className="hf-aside hf-spot" src="https://static.heygen.ai/hyperframes-oss/docs/studio-demos/import-projects-v1.mp4" autoPlay muted loop playsInline aria-label="The sidebar's Import projects opens a list of the projects on this Mac" />
+
+The app looks for HyperFrames projects on your Mac. The ones it hasn't opened yet are under **Import projects** in the
+sidebar, with their count. Choose **Import** on one, or **Import all**.
+
+Importing adds a project to HyperFrames without moving it: it stays in its folder, and your changes are saved there.
+
+The first time, macOS asks before the app looks in Documents, Downloads and Desktop. Have one somewhere else? Choose
+**File** > **Open Folder…** (<kbd>⌘</kbd> <kbd>O</kbd>), or drop the folder on the sidebar.
+
+## Back to your agent: catch up
+
+When you go back to your terminal, ask your agent to catch up, or run:
+
+```bash
+npx hyperframes catch-up
+```
+
+It lists what happened in the app since you last looked: what you asked, what Framey did, and which files changed.
+Your agent reads it and carries on from there.
+
+## Related topics
+
+- [Connect your agent](/studio-app/connect-your-agent)
+- [The project screen](/studio-app/workspace)
+- [Install HyperFrames in your agent](/guides/plugins)
