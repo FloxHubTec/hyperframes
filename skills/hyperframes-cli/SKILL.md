@@ -7,7 +7,7 @@ description: The HyperFrames CLI by job - scaffold, check, look at frames, edit 
 
 # HyperFrames CLI
 
-Run `npx hyperframes <command>` or the project's wrapper. Needs Node.js 22+ and FFmpeg. All commands have `--help`; most take `--json`. Failures print `✗ …`, a `Fix:` line and exit non-zero.
+Run the project's wrapper, or `npx hyperframes <command>` if none. Needs Node.js 22+ and FFmpeg. All commands have `--help`; most take `--json`. Failures print `✗ …`, a `Fix:` line and exit non-zero.
 
 ## Commands by job
 
