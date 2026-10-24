@@ -167,7 +167,8 @@ describe("snapshot contact sheet failures", () => {
     writeFileSync(join(output, "frame-hero.png"), "user image");
     const read: string[] = [];
     const image = {
-      metadata: async () => ({ width: 640, height: 360 }),
+      metadata: async () => ({ width: 640, height: 360, autoOrient: { width: 640, height: 360 } }),
+      autoOrient: () => image,
       resize: () => image,
       composite: () => image,
       jpeg: () => image,
