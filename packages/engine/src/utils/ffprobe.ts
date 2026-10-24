@@ -978,40 +978,40 @@ export async function extractAudioMetadata(
 }
 
 async function probeAudioMetadata(filePath: string, signal?: AbortSignal): Promise<AudioMetadata> {
-    const output = await probeMediaOutput(filePath, signal);
-    const audioStream = output.streams.find((s) => s.codec_type === "audio");
-    if (!audioStream) throw new Error("[FFmpeg] No audio stream found");
+  const output = await probeMediaOutput(filePath, signal);
+  const audioStream = output.streams.find((s) => s.codec_type === "audio");
+  if (!audioStream) throw new Error("[FFmpeg] No audio stream found");
 
-    let durationSeconds = output.format.duration ? parseFloat(output.format.duration) : 0;
-    const streamDuration = audioStream.duration ? parseFloat(audioStream.duration) : undefined;
-    const sampleRate = audioStream.sample_rate ? parseInt(audioStream.sample_rate) : 44100;
-    const audioCodec = audioStream.codec_name || "unknown";
-    // Container summaries can undercount intact audio, so the decoded last frame wins.
-    // The probe returns null instead of throwing: a throw here drops the audio element.
-    if (sampleRate > 0) {
-      const decoded = await probeDecodedAudioDuration(
-        filePath,
-        sampleRate,
-        audioStartSeconds(audioStream, output.format),
-        durationSeconds,
-        signal,
-      );
-      if (decoded !== null) {
-        durationSeconds = reconcileAudioDuration(durationSeconds, decoded, output.format);
-      }
-    }
-
-    return {
-      durationSeconds,
-      streamDurationSeconds: streamDuration && streamDuration > 0 ? streamDuration : undefined,
+  let durationSeconds = output.format.duration ? parseFloat(output.format.duration) : 0;
+  const streamDuration = audioStream.duration ? parseFloat(audioStream.duration) : undefined;
+  const sampleRate = audioStream.sample_rate ? parseInt(audioStream.sample_rate) : 44100;
+  const audioCodec = audioStream.codec_name || "unknown";
+  // Container summaries can undercount intact audio, so the decoded last frame wins.
+  // The probe returns null instead of throwing: a throw here drops the audio element.
+  if (sampleRate > 0) {
+    const decoded = await probeDecodedAudioDuration(
+      filePath,
       sampleRate,
-      channels: audioStream.channels || 2,
-      audioCodec,
-      bitrate: output.format.bit_rate ? parseInt(output.format.bit_rate) : undefined,
-      latestStreamLeadSeconds: latestStreamLeadSeconds(output),
-      audioStreamLeadSeconds: streamLeadSeconds(output, audioStream),
-      audioStreamCount: output.streams.filter((s) => s.codec_type === "audio").length,
-    };
+      audioStartSeconds(audioStream, output.format),
+      durationSeconds,
+      signal,
+    );
+    if (decoded !== null) {
+      durationSeconds = reconcileAudioDuration(durationSeconds, decoded, output.format);
+    }
+  }
+
+  return {
+    durationSeconds,
+    streamDurationSeconds: streamDuration && streamDuration > 0 ? streamDuration : undefined,
+    sampleRate,
+    channels: audioStream.channels || 2,
+    audioCodec,
+    bitrate: output.format.bit_rate ? parseInt(output.format.bit_rate) : undefined,
+    latestStreamLeadSeconds: latestStreamLeadSeconds(output),
+    audioStreamLeadSeconds: streamLeadSeconds(output, audioStream),
+    audioStreamCount: output.streams.filter((s) => s.codec_type === "audio").length,
+  };
 }
 
 /** Chrome's media time 0 is the earliest of these; a stream starting later plays that much in. */
