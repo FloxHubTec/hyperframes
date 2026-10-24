@@ -144,6 +144,15 @@ export interface StudioApiAdapter {
   runtimeUrl: string;
 
   /**
+   * Optional same-origin path where the host serves its bundled GSAP files as
+   * `<root>/gsap@<version>/dist/<file>`. Preview loads the GSAP, CustomEase and
+   * MotionPathPlugin scripts it adds from here; a composition that needs
+   * another GSAP version still loads that version from jsDelivr. Ignored when
+   * `HYPERFRAMES_GSAP_BASE_URL` is set. Without it, Studio uses jsDelivr.
+   */
+  gsapLocalRoot?: string;
+
+  /**
    * Optional: post-process preview HTML before Studio augments it.
    * Useful when preview must mirror render-time compilation steps.
    */

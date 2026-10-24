@@ -3368,3 +3368,58 @@ describe("nested CDN integrity", () => {
     }
   });
 });
+
+describe("missing local GSAP in renders", () => {
+  async function compileMissingGsap(base: string | undefined): Promise<{
+    html: string;
+    fetched: string[];
+  }> {
+    const projectDir = mkdtempSync(join(tmpdir(), "hf-render-gsap-mirror-"));
+    writeFileSync(
+      join(projectDir, "index.html"),
+      `<!DOCTYPE html>
+<html><head><script src="node_modules/gsap/dist/gsap.min.js"></script></head><body>
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+</body></html>`,
+    );
+    const fetched: string[] = [];
+    const originalFetch = globalThis.fetch;
+    const previous = process.env.HYPERFRAMES_GSAP_BASE_URL;
+    if (base === undefined) delete process.env.HYPERFRAMES_GSAP_BASE_URL;
+    else process.env.HYPERFRAMES_GSAP_BASE_URL = base;
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      fetched.push(String(input instanceof Request ? input.url : input));
+      return new Response("window.gsap = {};", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const result = await compileForRender(projectDir, join(projectDir, "index.html"), projectDir);
+      return { html: result.html, fetched };
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previous === undefined) delete process.env.HYPERFRAMES_GSAP_BASE_URL;
+      else process.env.HYPERFRAMES_GSAP_BASE_URL = previous;
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }
+
+  it("loads it from HYPERFRAMES_GSAP_BASE_URL when set", async () => {
+    const { html, fetched } = await compileMissingGsap("http://127.0.0.1:8080/vendor/npm/");
+    expect(fetched).toContain("http://127.0.0.1:8080/vendor/npm/gsap@3.15.0/dist/gsap.min.js");
+    expect(fetched.some((url) => url.includes("jsdelivr"))).toBe(false);
+    expect(html).toContain(
+      "inlined: http://127.0.0.1:8080/vendor/npm/gsap@3.15.0/dist/gsap.min.js",
+    );
+  });
+
+  it("keeps jsDelivr when no mirror is set", async () => {
+    const { fetched } = await compileMissingGsap(undefined);
+    expect(fetched).toContain("https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js");
+  });
+
+  it.each(["http://mirror.example/npm", "/vendor/npm"])(
+    "fails the render on an invalid mirror instead of using jsDelivr: %s",
+    async (base) => {
+      await expect(compileMissingGsap(base)).rejects.toThrow("HYPERFRAMES_GSAP_BASE_URL");
+    },
+  );
+});

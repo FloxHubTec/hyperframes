@@ -38,7 +38,7 @@ import {
 import { MAX_AUDIO_GAIN } from "@hyperframes/core/audio-gain";
 import { readPlaybackRate } from "@hyperframes/parsers/media-duration";
 import { resolveRateSpec } from "@hyperframes/core/speed-ramp";
-import { gsapCdnDist } from "@hyperframes/core/gsap-cdn";
+import { gsapCdnDist, normalizeGsapBaseUrl } from "@hyperframes/core/gsap-cdn";
 import {
   assignBundledRuntimeCompositionIds,
   assignMediaRenderIds,
@@ -1954,19 +1954,29 @@ export interface CompileForRenderOptions {
   pageMotionBlur?: "off";
 }
 
-const GSAP_CDN_BASE = gsapCdnDist();
+/** Renders follow the same `HYPERFRAMES_GSAP_BASE_URL` mirror as Studio preview. */
+function renderGsapDist(): string {
+  try {
+    return gsapCdnDist(undefined, normalizeGsapBaseUrl(process.env.HYPERFRAMES_GSAP_BASE_URL));
+  } catch (cause) {
+    throw new Error(
+      "Invalid HYPERFRAMES_GSAP_BASE_URL: use an absolute HTTPS npm mirror root (plain HTTP only for localhost) without credentials, query, or fragment",
+      { cause },
+    );
+  }
+}
 
 function rewriteUnresolvableGsapToCdn(html: string, projectDir: string): string {
+  let gsapDist: string | undefined;
   return html.replace(
     /(<script\b[^>]*\bsrc=["'])([^"']*gsap[^"']*\/dist\/([^"']+))(["'][^>]*>)/gi,
     (full, prefix, src, file, suffix) => {
       if (/^https?:\/\//i.test(src)) return full;
       const absPath = resolve(projectDir, src);
       if (existsSync(absPath)) return full;
-      defaultLogger.info(
-        `[Compiler] Rewriting missing gsap script to CDN: ${src} → ${GSAP_CDN_BASE}${file}`,
-      );
-      return `${prefix}${GSAP_CDN_BASE}${file}${suffix}`;
+      gsapDist ??= renderGsapDist();
+      defaultLogger.info(`[Compiler] Rewriting missing gsap script: ${src} → ${gsapDist}${file}`);
+      return `${prefix}${gsapDist}${file}${suffix}`;
     },
   );
 }
