@@ -4512,7 +4512,7 @@ async function captureFrameCore(
     session.capturePerf.frameMs.push(captureTimeMs);
     if (session.capturePerf.frames === 1) {
       const blur = await describePageMotionBlur(session.page).catch(() => null);
-      if (blur) console.log(blur);
+      if (blur) console.error(blur);
     }
 
     // Retain this freshly-captured buffer so the following static frames can reuse it.
@@ -4962,7 +4962,7 @@ export async function closeCaptureSession(session: CaptureSession): Promise<void
   }
   if (session.page && !session.pageReleased) {
     const blur = await describePageMotionBlurAtEnd(session.page);
-    if (blur) console.log(blur);
+    if (blur) console.error(blur);
   }
   // Realized static-dedup telemetry: how much the cache actually helped this
   // render (vs the prediction logged at arm time). Both capture paths
