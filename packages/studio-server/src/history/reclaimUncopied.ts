@@ -22,9 +22,12 @@ function historyIds(historyRoot: string): string[] {
 
 function namedHashes(log: HistoryLog): Set<string> {
   const hashes = new Set<string>(log.baseline.values());
-  for (const entry of log.entries)
-    for (const file of entry.files)
-      for (const hash of [file.before, file.after]) hash && hashes.add(hash);
+  for (const entry of log.entries) {
+    for (const file of entry.files) {
+      if (file.before) hashes.add(file.before);
+      if (file.after) hashes.add(file.after);
+    }
+  }
   return hashes;
 }
 
