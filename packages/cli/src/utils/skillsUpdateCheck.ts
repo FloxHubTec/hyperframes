@@ -17,8 +17,6 @@ interface SkillsUpdateMeta {
   updateAvailable: boolean;
   outdated: number;
   missing: number;
-  /** Installed skills flagged removed-upstream (renamed/dropped) at the last check. */
-  removed: number;
 }
 
 /** Synchronous read from cache — never fetches. */
@@ -28,7 +26,6 @@ function getSkillsUpdateMeta(): SkillsUpdateMeta {
     updateAvailable: config.skillsUpdateAvailable ?? false,
     outdated: config.skillsOutdatedCount ?? 0,
     missing: config.skillsMissingCount ?? 0,
-    removed: config.skillsRemovedCount ?? 0,
   };
 }
 
@@ -54,11 +51,6 @@ export async function refreshSkillsCache(): Promise<void> {
     // Core-missing only: skills that install on demand (workflows not yet
     // triggered on this machine) are not "missing" worth nagging about.
     config.skillsMissingCount = result.summary.coreMissing;
-    // Removed-upstream skills are just as reconcilable as outdated/missing
-    // ones (a plain `skills update` prunes them) — omitting them here is what
-    // made the nudge undercount (e.g. reporting "2 skills out of date or
-    // missing" while a 3rd, renamed/dropped skill sat unmentioned).
-    config.skillsRemovedCount = result.summary.removed;
     writeConfig(config);
   }
 }
@@ -90,7 +82,6 @@ export function invalidateSkillsCache(): void {
     delete config.skillsUpdateAvailable;
     delete config.skillsOutdatedCount;
     delete config.skillsMissingCount;
-    delete config.skillsRemovedCount;
     writeConfig(config);
   } catch {
     // best-effort — never break the command that just reconciled skills
@@ -103,9 +94,9 @@ export function skillsCheckDue(): boolean {
   return !cacheFresh(readConfig().lastSkillsCheck, Date.now());
 }
 
-/** The stale-skills nudge text, or null when nothing is outdated, missing, or removed. */
+/** The stale-skills nudge text, or null when nothing is outdated or missing. */
 function skillsNoticeText(meta: SkillsUpdateMeta): string | null {
-  const total = meta.outdated + meta.missing + meta.removed;
+  const total = meta.outdated + meta.missing;
   if (total < 1) return null;
   const noun = total === 1 ? "skill" : "skills";
   return `\n  ${total} HyperFrames ${noun} out of date or missing.\n  Run: npx hyperframes skills update\n\n`;

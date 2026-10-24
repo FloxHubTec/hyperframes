@@ -670,13 +670,11 @@ async function scaffoldProject(
 }
 
 /**
- * Keep the AI coding skills present and current — TARGETED, not the full
- * set. Guarantees the core set (the `/hyperframes` entry router + shared
- * domain skills) and refreshes any skill already installed; the end-user
- * workflow skills are NOT pulled here — they install on demand when their
- * workflow is triggered (`hyperframes skills update <name>`, which the router
- * runs before entering a workflow). Re-running `init` on an up-to-date machine
- * is a no-op, and `init` never expands a deliberate partial install.
+ * Install the core set (the `/hyperframes` entry router + shared domain
+ * skills) when it is missing. A skill that is already installed is never
+ * refreshed, replaced or removed here: that is `hyperframes skills update`,
+ * run by the user. The end-user workflow skills are NOT pulled here either;
+ * they install on demand (`hyperframes skills update <name>`).
  * Best-effort: offline, it degrades to a presence check and never breaks init.
  * The install itself lands once GLOBALLY (~/.claude/skills + ~/.agents/skills)
  * and mirrors into every other installed agent, so it is project-independent —
@@ -691,7 +689,7 @@ async function keepSkillsCurrent(destDir: string): Promise<void> {
   // skills-install failure can never break `init` itself — it warns and
   // proceeds.
   try {
-    const result = await updateSkills({ refreshInstalled: true, cwd: destDir });
+    const result = await updateSkills({ onlyMissing: true, cwd: destDir });
     if (result.presenceOnly) {
       // Freshness never got checked (GitHub unreachable) — don't claim
       // "up to date"; the engine already reported what it could verify or
@@ -1208,8 +1206,7 @@ export default defineCommand({
     const files = readdirSync(destDir);
     clack.note(files.map((f) => c.accent(f)).join("\n"), c.success(`Created ${name}/`));
 
-    // Check skills against GitHub and refresh only what's stale — the core set
-    // plus anything already installed; workflow skills install on demand.
+    // Install the core set if it is missing; installed skills are left alone.
     // --skip-skills (or HYPERFRAMES_SKIP_SKILLS=1) leaves skills alone.
     if (!skipSkills) {
       await keepSkillsCurrent(destDir);

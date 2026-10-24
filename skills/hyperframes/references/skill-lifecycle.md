@@ -9,11 +9,11 @@ For a plugin installation, follow [plugin execution rules](plugin-installation.m
 
 ## What `init` does
 
-`npx hyperframes init` checks GitHub and refreshes the core set plus the HyperFrames skills already installed. It only ever touches skills the install record attributes to `heygen-com/hyperframes`; a skill from another publisher is never refreshed, overwritten or removed. A current install is a no-op. Offline or rate-limited checks degrade gracefully and do not fail project scaffolding.
+`npx hyperframes init` installs the core set when it is missing and leaves every skill that is already installed as it is: it never refreshes, replaces or removes one. Updating is `npx hyperframes skills update`, run by you. Offline or rate-limited checks degrade gracefully and do not fail project scaffolding.
 
 `--skip-skills` makes `init` leave skills alone. `HYPERFRAMES_SKIP_SKILLS=1` does the same for CI and tests.
 
-`HYPERFRAMES_SKIP_SKILLS=1` also makes `skills update` (bare or named) and bare `skills` exit 0 without installing or pruning, so an install pinned to one commit stays pinned.
+`HYPERFRAMES_SKIP_SKILLS=1` also makes `skills update` (bare or named) and bare `skills` exit 0 without installing, so an install pinned to one commit stays pinned.
 
 ## Diagnose and update
 
@@ -26,7 +26,7 @@ npx hyperframes skills
 ```
 
 - `skills check` exits non-zero when an installed skill is stale or the core set is incomplete. Skills available on demand but not installed are not failures.
-- Bare `skills update` refreshes the core set and the HyperFrames skills already installed, and removes only HyperFrames skills retired upstream. Skills from other publishers are never touched.
+- Bare `skills update` refreshes the core set and the HyperFrames skills already installed. It never removes a skill, and it leaves a skill the install record attributes to another publisher alone, even when the name matches one of ours.
 - Named `skills update <name...>` also installs those named skills.
 - Bare `skills` installs the full published set explicitly.
 

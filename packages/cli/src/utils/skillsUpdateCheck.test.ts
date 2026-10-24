@@ -1,7 +1,4 @@
-// Nudge-count regression coverage: `refreshSkillsCache` must persist
-// `summary.removed` (renamed/dropped skills), and the printed nudge total must
-// include it — otherwise the background nudge undercounts what a plain
-// `skills update` would actually reconcile (the "misleading 2 vs 3" bug).
+// Nudge-count coverage: the printed total is outdated plus missing, as cached by refreshSkillsCache.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -69,18 +66,18 @@ describe("skillsUpdateCheck", () => {
     mockCheckSkills.mockResolvedValue({
       location: "/home/user/.claude/skills",
       updateAvailable: false,
-      summary: { current: 1, outdated: 0, missing: 0, coreMissing: 0, removed: 0 },
+      summary: { current: 1, outdated: 0, missing: 0, coreMissing: 0 },
     });
     const { refreshSkillsCache } = await import("./skillsUpdateCheck.js");
     await refreshSkillsCache();
     expect(config).toMatchObject({ commandCount: 2, skillsOutdatedCount: 0 });
   });
 
-  it("refreshSkillsCache persists the removed count alongside outdated/missing", async () => {
+  it("refreshSkillsCache persists the outdated and core-missing counts", async () => {
     mockCheckSkills.mockResolvedValue({
       location: "/home/user/.claude/skills",
       updateAvailable: true,
-      summary: { current: 1, outdated: 2, missing: 3, coreMissing: 1, removed: 3 },
+      summary: { current: 1, outdated: 2, missing: 3, coreMissing: 1 },
     });
 
     const { refreshSkillsCache } = await import("./skillsUpdateCheck.js");
@@ -90,7 +87,6 @@ describe("skillsUpdateCheck", () => {
       skillsUpdateAvailable: true,
       skillsOutdatedCount: 2,
       skillsMissingCount: 1,
-      skillsRemovedCount: 3,
     });
     // Must resolve against the canonical upstream manifest, not a possibly
     // stale in-repo skills-manifest.json, so this nudge agrees with what
@@ -102,13 +98,11 @@ describe("skillsUpdateCheck", () => {
     mockCheckSkills.mockResolvedValue({
       location: null,
       updateAvailable: false,
-      summary: { current: 0, outdated: 0, missing: 0, coreMissing: 0, removed: 0 },
+      summary: { current: 0, outdated: 0, missing: 0, coreMissing: 0 },
     });
 
     const { refreshSkillsCache } = await import("./skillsUpdateCheck.js");
     await refreshSkillsCache();
-
-    expect(config["skillsRemovedCount"]).toBeUndefined();
   });
 
   /** Drive printSkillsUpdateNotice from the given cache shape; returns what it wrote (if anything). */
@@ -130,34 +124,12 @@ describe("skillsUpdateCheck", () => {
     expect(await noticeTextFor({ skillsOutdatedCount: 2, skillsMissingCount: 1 })).toBeNull();
   });
 
-  it("the cached nudge total counts removed skills, not just outdated/missing", async () => {
-    // Cache pre-populated as if a prior refreshSkillsCache had run — only
-    // outdated + missing, no removed (the pre-fix shape).
-    const text = await noticeTextFor({
-      skillsOutdatedCount: 1,
-      skillsMissingCount: 1,
-      skillsRemovedCount: 2,
-    });
-    // 1 outdated + 1 missing + 2 removed = 4, not the pre-fix "2".
-    expect(text).toContain("4 HyperFrames skills out of date or missing");
-  });
-
-  it("prints nothing when outdated, missing, and removed are all zero", async () => {
+  it("prints nothing when outdated and missing are both zero", async () => {
     const text = await noticeTextFor({
       skillsOutdatedCount: 0,
       skillsMissingCount: 0,
-      skillsRemovedCount: 0,
     });
     expect(text).toBeNull();
-  });
-
-  it("a removed-only count (no outdated/missing) still triggers the nudge", async () => {
-    const text = await noticeTextFor({
-      skillsOutdatedCount: 0,
-      skillsMissingCount: 0,
-      skillsRemovedCount: 1,
-    });
-    expect(text).toContain("1 HyperFrames skill out of date or missing");
   });
 
   // Regression: the stale-24h-cache bug. A successful `skills update`/install
@@ -172,7 +144,6 @@ describe("skillsUpdateCheck", () => {
       skillsUpdateAvailable: true,
       skillsOutdatedCount: 12,
       skillsMissingCount: 8,
-      skillsRemovedCount: 0,
     };
 
     it("a fresh cache short-circuits the background check with the stale verdict (the bug's precondition)", async () => {
@@ -187,14 +158,14 @@ describe("skillsUpdateCheck", () => {
       mockCheckSkills.mockResolvedValue({
         location: "/home/user/.claude/skills",
         updateAvailable: false,
-        summary: { current: 20, outdated: 0, missing: 0, coreMissing: 0, removed: 0 },
+        summary: { current: 20, outdated: 0, missing: 0, coreMissing: 0 },
       });
 
       const { skillsCheckDue, refreshSkillsCache, invalidateSkillsCache } =
         await import("./skillsUpdateCheck.js");
       invalidateSkillsCache();
 
-      // All five cached fields are gone — timestamp AND counts.
+      // All four cached fields are gone — timestamp AND counts.
       expect(config["lastSkillsCheck"]).toBeUndefined();
       expect(config["skillsUpdateAvailable"]).toBeUndefined();
       expect(config["skillsOutdatedCount"]).toBeUndefined();
