@@ -60,6 +60,12 @@ async function cloneOrCopy(from: string, to: string, beforeReplace?: () => void)
   }
 }
 
+const listDir = (path: string) =>
+  readdir(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+
 export async function openBlobStore(dir: string): Promise<BlobStore> {
   const sizes = new Map<string, number>();
   // Bytes history moved out of the project live apart from the blobs, so reclaiming old media copies never takes them.
@@ -72,8 +78,8 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
     [dir, sizes],
     [asideDir, asideSizes],
   ] as const)
-    for (const shard of await readdir(root).catch(() => []))
-      for (const hash of await readdir(join(root, shard)).catch(() => []))
+    for (const shard of await listDir(root))
+      for (const hash of await listDir(join(root, shard)))
         found.set(hash, (await stat(join(root, shard, hash))).size);
   for (const hash of asideSizes.keys()) holds.set(hash, new Set(["*"]));
   const pathOf = (hash: string) => blobPath(sizes.has(hash) ? dir : asideDir, hash);
