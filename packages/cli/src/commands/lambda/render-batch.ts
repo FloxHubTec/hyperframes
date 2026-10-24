@@ -39,6 +39,7 @@ import {
 } from "../../utils/variables.js";
 import { normalizeErrorMessage } from "../../utils/errorMessage.js";
 import { warnOnDimensionMismatch } from "./_dimensions.js";
+import { runWithConcurrencyLimit } from "../../utils/concurrency.js";
 import { requireStack } from "./state.js";
 
 // Dynamic-import the SDK so tsup keeps it out of the static-import head of
@@ -225,16 +226,20 @@ export async function runRenderBatch(args: RenderBatchArgs): Promise<void> {
   // Deploy the site once and reuse it across every entry. --site-id and
   // --dry-run both skip the deploy via a synthesised handle.
   let siteHandle: SiteHandle;
+  const { assertStackReadsSites, deploySite, siteHandleFromId } = await loadSDK();
+  if (!args.dryRun) {
+    await assertStackReadsSites({ stateMachineArn: stack.stateMachineArn, region: stack.region });
+  }
   if (args.siteId) {
-    siteHandle = makePlaceholderSiteHandle(args.siteId, stack.bucketName);
+    siteHandle = siteHandleFromId(stack.bucketName, args.siteId);
   } else if (args.dryRun) {
-    siteHandle = makePlaceholderSiteHandle("dry-run-site", stack.bucketName);
+    siteHandle = siteHandleFromId(stack.bucketName, "dry-run-site");
   } else {
-    const { deploySite } = await loadSDK();
     siteHandle = await deploySite({
       projectDir,
       bucketName: stack.bucketName,
       region: stack.region,
+      onNotice: (message) => console.error(c.dim(message)),
     });
     if (!args.json) {
       console.log(
@@ -274,6 +279,7 @@ export async function runRenderBatch(args: RenderBatchArgs): Promise<void> {
     }
     try {
       const handle = await renderToLambda({
+        projectDir,
         siteHandle,
         bucketName: stack.bucketName,
         stateMachineArn: stack.stateMachineArn,
@@ -330,23 +336,6 @@ export async function runRenderBatch(args: RenderBatchArgs): Promise<void> {
     console.log(`  ${tag} line ${row.inputLine}  ${c.dim(row.outputKey)}  ${detail}`);
   }
   if (failed > 0) setCommandExitCode(1);
-}
-
-/**
- * Synthesise a SiteHandle from a known siteId for paths that skip the
- * `deploySite` upload (`--site-id` and `--dry-run`). The SDK reads only
- * `siteId` + `projectS3Uri` when `uploaded: false`, so the byte / time
- * fields are intentional placeholders.
- */
-function makePlaceholderSiteHandle(siteId: string, bucketName: string): SiteHandle {
-  return {
-    siteId,
-    bucketName,
-    projectS3Uri: `s3://${bucketName}/sites/${siteId}/project.tar.gz`,
-    bytes: 0,
-    uploadedAt: "",
-    uploaded: false,
-  };
 }
 
 /**
@@ -450,39 +439,4 @@ export function parseBatchFile(path: string): Array<{ entry: BatchEntry; lineNum
     });
   }
   return out;
-}
-
-/**
- * Run `worker` against every input with at most `limit` concurrent
- * invocations. Preserves input order in the returned array; each output
- * is positional with its input.
- *
- * Implementation: index-cursor + N concurrent producers each picking the
- * next index until the input is drained. Uses `Promise.all` and
- * propagates the first worker rejection — partial-failure isolation is
- * the caller's responsibility (in this file, `startEntry` wraps the
- * per-entry render in try/catch so a single failure surfaces in the
- * manifest rather than aborting the batch).
- *
- * Exported so unit tests can pin the concurrency cap independently of
- * the AWS-dependent fan-out path.
- */
-export async function runWithConcurrencyLimit<T, R>(
-  inputs: readonly T[],
-  limit: number,
-  worker: (input: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  if (limit < 1) throw new Error(`runWithConcurrencyLimit: limit must be ≥ 1, got ${limit}`);
-  const results = new Array<R>(inputs.length);
-  let cursor = 0;
-  const workerCount = Math.min(limit, inputs.length);
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      while (cursor < inputs.length) {
-        const idx = cursor++;
-        results[idx] = await worker(inputs[idx]!, idx);
-      }
-    }),
-  );
-  return results;
 }
