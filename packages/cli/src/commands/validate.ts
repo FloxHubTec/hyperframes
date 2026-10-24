@@ -14,8 +14,11 @@ import { resolveProject, type ProjectDir } from "../utils/project.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import type { ProjectLintResult } from "../utils/lintProject.js";
 import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
+import { resolveNaturalMediaTimelineDuration } from "@hyperframes/core";
 import { c } from "../ui/colors.js";
+import { decodeWellFormedEscapes } from "@hyperframes/studio-server";
 import { printDeprecationNotice, withMeta } from "../utils/updateCheck.js";
+import { pageNavigationTimeoutMs } from "../utils/renderArgs.js";
 import {
   installPageFunctionGuard,
   resolveCliChromeGpuMode,
@@ -48,31 +51,17 @@ const CONTRAST_SAMPLES = 5;
 const SEEK_SETTLE_MS = 150;
 const PREFERRED_SEEK_TARGET_WAIT_MS = 500;
 const MEDIA_EXTENSIONS = /\.(aac|flac|m4a|mov|mp3|mp4|oga|ogg|wav|webm)$/i;
-// Floor for the initial page navigation. A blocking external <script> (GSAP
-// from a CDN, etc.) delays `domcontentloaded`; the actual render (much larger
-// budget) rides it out, so validate's navigation must be at least as patient as
-// the user's --timeout, never stuck below this floor.
-const NAV_TIMEOUT_FLOOR_MS = 10000;
-
-// Navigation budget = the larger of the floor and the user's --timeout, so
-// `--timeout` (already the "wait longer for slow loads" knob for media/settle)
-// also extends navigation instead of being ignored by a hardcoded 10s.
-export function resolveNavigationTimeoutMs(optTimeout?: number): number {
-  return Math.max(NAV_TIMEOUT_FLOOR_MS, optTimeout ?? 0);
-}
-
 // Turn Puppeteer's opaque "Navigation timeout of Nms exceeded" into an
-// actionable message: the usual cause is a blocking CDN <script> that render
-// tolerates but validate's tighter budget does not. Returns a replacement Error
-// for a navigation timeout, or null for any other error (caller rethrows as-is).
+// actionable message: the usual cause is a slow blocking CDN <script>. Returns a
+// replacement Error for a navigation timeout, or null for any other error.
 export function navigationTimeoutHint(err: unknown, navTimeoutMs: number): Error | null {
   const msg = err instanceof Error ? err.message : String(err);
   if (!/navigation timeout/i.test(msg)) return null;
   return new Error(
     `Page navigation timed out after ${navTimeoutMs}ms. A blocking external <script> ` +
-      `(e.g. GSAP loaded from a CDN) can delay page load past this budget even when the ` +
-      `full render succeeds. Vendor the script locally (recommended for deterministic ` +
-      `renders), or re-run with a longer --timeout.`,
+      `(e.g. GSAP loaded from a CDN) can delay page load past this budget, which render ` +
+      `shares. Vendor the script locally (recommended for deterministic renders), or ` +
+      `re-run with a longer --timeout or PRODUCER_PAGE_NAVIGATION_TIMEOUT_MS.`,
   );
 }
 
@@ -89,6 +78,10 @@ export function shouldIgnoreRequestFailure(
   } catch {
     return false;
   }
+}
+
+export function projectPathOfUrl(url: string): string {
+  return decodeWellFormedEscapes(new URL(url).pathname).replace(/^\//, "");
 }
 
 export function shouldIgnoreHttpError(url: string, status: number): boolean {
@@ -150,7 +143,7 @@ export function raceMediaReady(
  * can't see.
  */
 export async function auditClipDurations(
-  page: import("puppeteer-core").Page,
+  page: Pick<import("puppeteer-core").Page, "evaluate">,
   analyzeClipMediaFit: typeof import("@hyperframes/engine").analyzeClipMediaFit,
   extraWaitMs: number,
 ): Promise<ConsoleEntry[]> {
@@ -195,7 +188,7 @@ export async function auditClipDurations(
       id: string;
       kind: string;
       slot: number;
-      mediaStart: number;
+      attributes: Record<string, string | null>;
       duration: number;
       loop: boolean;
     }> = [];
@@ -206,7 +199,12 @@ export async function auditClipDurations(
         id: el.id || el.getAttribute("src") || `(${el.tagName.toLowerCase()})`,
         kind: el.tagName === "AUDIO" ? "Audio" : "Video",
         slot,
-        mediaStart: parseFloat(el.getAttribute("data-media-start") ?? "0") || 0,
+        attributes: {
+          "data-media-start": el.getAttribute("data-media-start"),
+          "data-playback-start": el.getAttribute("data-playback-start"),
+          "data-playback-rate": el.getAttribute("data-playback-rate"),
+          "data-automation": el.getAttribute("data-automation"),
+        },
         duration: el.duration,
         loop: el.loop || el.getAttribute("data-loop") === "true",
       });
@@ -223,7 +221,11 @@ export async function auditClipDurations(
       unreadable.push(clip.id);
       continue;
     }
-    const mediaSeconds = Math.max(0, clip.duration - clip.mediaStart);
+    const mediaSeconds = resolveNaturalMediaTimelineDuration(
+      { getAttribute: (name) => clip.attributes[name] ?? null },
+      clip.duration,
+    );
+    if (mediaSeconds === null) continue;
     const fit = analyzeClipMediaFit({ slotSeconds: clip.slot, mediaSeconds, loop: clip.loop });
     if (!fit) continue;
     warnings.push({
@@ -434,88 +436,89 @@ async function validateInBrowser(
     const puppeteer = await import("puppeteer-core");
     const { buildChromeArgs, analyzeClipMediaFit } = await import("@hyperframes/engine");
     const requestedGpuMode = resolveCliChromeGpuMode();
-    const { assertWebGpuAdapterAvailable, compositionRequiresWebGpu } =
+    const { assertWebGpuAdapterAvailable, compositionRequiresWebGpu, resolveLocalWebGpu } =
       await import("../browser/gpuPolicy.js");
     const resolvedGpuMode = await resolveManagedGpuMode(requestedGpuMode, browser.executablePath);
     const requiresWebGpu = compositionRequiresWebGpu(html);
+    const { gpuConfig, softwareWebGpu } = resolveLocalWebGpu(resolvedGpuMode, requiresWebGpu);
     const chromeBrowser = await launchManagedBrowser(puppeteer.default, {
       headless: true,
       executablePath: browser.executablePath,
-      args: buildChromeArgs(
-        { ...viewport, captureMode: "screenshot", requiresWebGpu },
-        { browserGpuMode: resolvedGpuMode },
-      ),
+      args: buildChromeArgs({ ...viewport, captureMode: "screenshot", requiresWebGpu }, gpuConfig),
     });
 
-    const page = await chromeBrowser.newPage();
-    await installPageFunctionGuard(page);
-    await page.setViewport(viewport);
-
-    page.on("console", (msg) => {
-      const type = msg.type();
-      const loc = msg.location();
-      const text = msg.text();
-      if (type === "error") {
-        if (text.startsWith("Failed to load resource")) return;
-        errors.push({ level: "error", text, url: loc.url, line: loc.lineNumber });
-      } else if (type === "warn") {
-        warnings.push({ level: "warning", text, url: loc.url, line: loc.lineNumber });
-      }
-    });
-
-    page.on("pageerror", (err) => {
-      const text = normalizeErrorMessage(err);
-      // CDN scripts (e.g. GSAP from jsdelivr) returning HTML error pages
-      // instead of JS produce "Unexpected token '<'" SyntaxErrors. These
-      // are network failures, not composition authoring errors.
-      if (text.includes("Unexpected token '<'") || text.includes("Unexpected token '&lt;'")) return;
-      errors.push({ level: "error", text });
-    });
-
-    page.on("requestfailed", (req) => {
-      const url = req.url();
-      if (url.includes("favicon") || url.startsWith("data:")) return;
-      const failureText = req.failure()?.errorText;
-      if (shouldIgnoreRequestFailure(url, failureText, req.resourceType())) return;
-      const path = decodeURIComponent(new URL(url).pathname).replace(/^\//, "");
-      errors.push({
-        level: "error",
-        text: `Failed to load ${path}: ${failureText ?? "net::ERR_FAILED"}`,
-        url,
-      });
-    });
-
-    page.on("response", (res) => {
-      if (res.status() >= 400) {
-        const url = res.url();
-        if (url.includes("favicon")) return;
-        if (shouldIgnoreHttpError(url, res.status())) return;
-        const path = decodeURIComponent(new URL(url).pathname).replace(/^\//, "");
-        errors.push({ level: "error", text: `${res.status()} loading ${path}`, url });
-      }
-    });
-
-    const navTimeoutMs = resolveNavigationTimeoutMs(opts.timeout);
     try {
-      await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
-    } catch (err) {
-      const hinted = navigationTimeoutHint(err, navTimeoutMs);
-      if (hinted) throw hinted;
-      throw err;
-    }
-    await assertWebGpuAdapterAvailable(page, requiresWebGpu);
-    await waitForRuntimeReady(page, opts.timeout ?? 3000);
-    await new Promise((r) => setTimeout(r, opts.timeout ?? 3000));
+      const page = await chromeBrowser.newPage();
+      await installPageFunctionGuard(page);
+      await page.setViewport(viewport);
 
-    for (const w of await auditClipDurations(page, analyzeClipMediaFit, opts.timeout ?? 3000)) {
-      warnings.push(w);
-    }
+      page.on("console", (msg) => {
+        const type = msg.type();
+        const loc = msg.location();
+        const text = msg.text();
+        if (type === "error") {
+          if (text.startsWith("Failed to load resource")) return;
+          errors.push({ level: "error", text, url: loc.url, line: loc.lineNumber });
+        } else if (type === "warn") {
+          warnings.push({ level: "warning", text, url: loc.url, line: loc.lineNumber });
+        }
+      });
 
-    if (opts.contrast) {
-      contrast = await runContrastAudit(page);
-    }
+      page.on("pageerror", (err) => {
+        const text = normalizeErrorMessage(err);
+        // CDN scripts (e.g. GSAP from jsdelivr) returning HTML error pages
+        // instead of JS produce "Unexpected token '<'" SyntaxErrors. These
+        // are network failures, not composition authoring errors.
+        if (text.includes("Unexpected token '<'") || text.includes("Unexpected token '&lt;'"))
+          return;
+        errors.push({ level: "error", text });
+      });
 
-    await chromeBrowser.close();
+      page.on("requestfailed", (req) => {
+        const url = req.url();
+        if (url.includes("favicon") || url.startsWith("data:")) return;
+        const failureText = req.failure()?.errorText;
+        if (shouldIgnoreRequestFailure(url, failureText, req.resourceType())) return;
+        const path = projectPathOfUrl(url);
+        errors.push({
+          level: "error",
+          text: `Failed to load ${path}: ${failureText ?? "net::ERR_FAILED"}`,
+          url,
+        });
+      });
+
+      page.on("response", (res) => {
+        if (res.status() >= 400) {
+          const url = res.url();
+          if (url.includes("favicon")) return;
+          if (shouldIgnoreHttpError(url, res.status())) return;
+          const path = projectPathOfUrl(url);
+          errors.push({ level: "error", text: `${res.status()} loading ${path}`, url });
+        }
+      });
+
+      const navTimeoutMs = pageNavigationTimeoutMs(opts.timeout);
+      try {
+        await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
+      } catch (err) {
+        const hinted = navigationTimeoutHint(err, navTimeoutMs);
+        if (hinted) throw hinted;
+        throw err;
+      }
+      await assertWebGpuAdapterAvailable(page, requiresWebGpu, softwareWebGpu);
+      await waitForRuntimeReady(page, opts.timeout ?? 3000);
+      await new Promise((r) => setTimeout(r, opts.timeout ?? 3000));
+
+      for (const w of await auditClipDurations(page, analyzeClipMediaFit, opts.timeout ?? 3000)) {
+        warnings.push(w);
+      }
+
+      if (opts.contrast) {
+        contrast = await runContrastAudit(page);
+      }
+    } finally {
+      await chromeBrowser.close().catch(() => {});
+    }
   } finally {
     await server.close();
     localized.cleanup();

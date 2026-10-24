@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   compositionStyle,
   cssStyleMergeKey,
@@ -6,17 +7,22 @@ import {
   headStyleRuns,
   INLINED_FILE_ATTR,
   inlineScriptRuns,
-  isJavaScriptType,
   styleElementsFor,
   type CompositionStyle,
 } from "./scriptRuns";
-import { SCENE_PART_ATTR } from "../sceneParts";
+import {
+  countPageRoot,
+  executableScripts,
+  isJavaScriptType,
+  planCompositionAssembly,
+} from "./compositionAssembly";
+import { SCENE_FONTS_ATTR, SCENE_PART_ATTR } from "../sceneParts";
 import {
   ensureExternalScriptTag,
   readExternalScriptAttributes,
   type ExternalScriptAttributes,
 } from "./externalScripts";
-import { emitMountedModuleScripts } from "./importMaps";
+import { emitMountedModuleScripts, parseImportMap, type ImportMap } from "./importMaps";
 import { markFlattenedInnerRoot } from "../runtime/flattenedRoot";
 export { FLATTENED_INNER_ROOT_STRIP_ATTRS } from "../runtime/flattenedRoot";
 import { parseHostVariableValues, warnUnknownEnumValues } from "../runtime/getVariables";
@@ -24,9 +30,17 @@ import { sanitizeCssValue } from "../runtime/applyVariableBindings";
 import { cssVariableName } from "../tokenSlug";
 import { AsyncLocalStorage } from "async_hooks";
 import { readFileSync, existsSync, statSync } from "fs";
+import { parse as parseJs } from "acorn";
 import { resolve, relative, dirname, isAbsolute, sep } from "path";
+import { extractStandaloneEntryFromIndex, isTemplateEntry } from "./standaloneEntry";
+import {
+  decodeCssEscapes,
+  decodeWellFormedEscapes,
+  encodeUrlPath,
+  decodedUrlPath,
+  splitUrlSuffix,
+} from "@hyperframes/parsers/asset-paths";
 import { CSS_URL_RE, isNonRelativeUrl } from "./assetPaths.js";
-import { transformSync } from "esbuild";
 import { compileHtml, type MediaDurationProber } from "./htmlCompiler";
 import {
   RUNTIME_BOOTSTRAP_ATTR,
@@ -39,8 +53,10 @@ import {
 import {
   buildVariablesByCompScript,
   dedupeFontFaceRules,
+  hoistFontFaceRules,
   scopeCssToComposition,
   wrapInlineScriptWithErrorBoundary,
+  scopedModulePrelude,
   wrapScopedCompositionScript,
 } from "./compositionScoping";
 import { validateHyperframeHtmlContract } from "./staticGuard";
@@ -51,10 +67,10 @@ import {
   inlineSubCompositions,
   refuseSwapsReachedByRootScripts,
 } from "./inlineSubCompositions";
-import { queryByAttr } from "../utils/cssSelector";
 import { isSafePath, resolveWithinProject } from "../safePath.js";
 import { ensureHfIds } from "@hyperframes/parsers/hf-ids";
 import { HF_COLOR_GRADING_ATTR } from "../colorGrading";
+import { assignMediaRenderIds } from "./mediaRenderIds";
 
 const DEFAULT_RUNTIME_SCRIPT_URL = "";
 
@@ -133,26 +149,35 @@ function withCommentsStripped<T>(
   return { result, restore };
 }
 
+function resolveRelativeUrlPath(fromDir: string, basePath: string): string {
+  return resolve(fromDir, decodeWellFormedEscapes(basePath.replaceAll("\\", "/")));
+}
+
 function rebaseCssUrls(css: string, cssFileDir: string, projectDir: string): string {
   const resolvedRoot = resolve(projectDir);
   const resolvedDir = resolve(cssFileDir);
   if (resolvedDir === resolvedRoot) return css;
   return css.replace(CSS_URL_RE, (full, quote: string, urlValue: string) => {
-    if (!urlValue || !isRelativeUrl(urlValue)) return full;
-    const { basePath, suffix } = splitUrlSuffix(urlValue.trim());
+    const decoded = decodeCssEscapes(urlValue);
+    if (!decoded || !isRelativeUrl(decoded)) return full;
+    const { basePath, suffix } = splitUrlSuffix(decoded);
     if (!basePath) return full;
-    const absolutePath = resolve(resolvedDir, basePath);
-    const rebased = relative(resolvedRoot, absolutePath).split(sep).join("/");
+    const absolutePath = resolveRelativeUrlPath(resolvedDir, basePath);
+    const rebased = encodeUrlPath(relative(resolvedRoot, absolutePath).split(sep).join("/"));
     if (rebased === basePath) return full;
-    return `url(${quote || ""}${rebased}${suffix}${quote || ""})`;
+    const escapedSuffix = suffix.replace(
+      /[\s\p{Cc}"'()\\<>]/gu,
+      (char) => `\\${char.codePointAt(0)!.toString(16).padStart(6, "0")}`,
+    );
+    return `url(${quote || ""}${rebased}${escapedSuffix}${quote || ""})`;
   });
 }
 
 function rebaseRelativePath(urlValue: string, fromDir: string, toDir: string): string {
   const { basePath, suffix } = splitUrlSuffix(urlValue.trim());
   if (!basePath) return urlValue;
-  const absolutePath = resolve(fromDir, basePath);
-  const rebased = relative(resolve(toDir), absolutePath).split(sep).join("/");
+  const absolutePath = resolveRelativeUrlPath(fromDir, basePath);
+  const rebased = encodeUrlPath(relative(resolve(toDir), absolutePath).split(sep).join("/"));
   return appendSuffixToUrl(rebased, suffix);
 }
 
@@ -244,7 +269,7 @@ function inlineCssFile(
     (full, _q1, urlPath, _q2, barePath, mediaQuery) => {
       const importPath = urlPath ?? barePath;
       if (!importPath || !isRelativeUrl(importPath)) return full;
-      const resolved = resolve(cssFileDir, importPath);
+      const resolved = resolve(cssFileDir, decodedUrlPath(importPath));
       // @import is resolved relative to the CSS file, but must stay within the
       // project root; isSafePath also blocks symlink escapes (content is inlined).
       if (!isSafePath(projectDir, resolved)) return full;
@@ -276,14 +301,6 @@ function safeReadFileBuffer(filePath: string): Buffer | null {
   } catch {
     return null;
   }
-}
-
-function splitUrlSuffix(urlValue: string): { basePath: string; suffix: string } {
-  const queryIdx = urlValue.indexOf("?");
-  const hashIdx = urlValue.indexOf("#");
-  if (queryIdx < 0 && hashIdx < 0) return { basePath: urlValue, suffix: "" };
-  const cutIdx = queryIdx < 0 ? hashIdx : hashIdx < 0 ? queryIdx : Math.min(queryIdx, hashIdx);
-  return { basePath: urlValue.slice(0, cutIdx), suffix: urlValue.slice(cutIdx) };
 }
 
 function appendSuffixToUrl(baseUrl: string, suffix: string): string {
@@ -357,31 +374,48 @@ function warnAssetTooLargeToInline(assetPath: string, byteLength: number): void 
   );
 }
 
-function maybeInlineRelativeAssetUrl(
-  urlValue: string,
-  projectDir: string,
+type AssetInliner = (urlValue: string) => string | null;
+type InlinableAsset = { dataUrl: string | null } | { tooLarge: number };
+
+/** Inlines relative asset URLs as data: URLs, reading each project file once per build. */
+function createAssetInliner(
+  resolveProjectPath: (relativePath: string) => string | null,
   inlineAssets: boolean,
-): string | null {
-  if (!inlineAssets) return null;
-  if (!urlValue || !isRelativeUrl(urlValue)) return null;
-  const { basePath, suffix } = splitUrlSuffix(urlValue.trim());
-  if (!basePath) return null;
-  const filePath = resolveWithinProject(projectDir, basePath);
-  if (!filePath) return null;
-  const ext = filePath.toLowerCase().match(/\.[^.]+$/)?.[0] ?? "";
-  const mimeType = INLINE_MIME[ext];
-  if (!mimeType) return null;
-  // Size-check before reading: an oversized asset must not be pulled into memory
-  // just to be discarded.
-  const byteLength = safeStatSize(filePath);
-  if (byteLength !== null && byteLength > MAX_INLINE_ASSET_BYTES) {
-    warnAssetTooLargeToInline(basePath, byteLength);
-    return null;
-  }
-  const content = safeReadFileBuffer(filePath);
-  if (content == null) return null;
-  const dataUrl = `data:${mimeType};base64,${content.toString("base64")}`;
-  return appendSuffixToUrl(dataUrl, suffix);
+): AssetInliner {
+  const assets = new Map<string, InlinableAsset>();
+  const readAsset = (filePath: string, mimeType: string): InlinableAsset => {
+    // Size-check before reading: an oversized asset must not be pulled into memory
+    // just to be discarded.
+    const byteLength = safeStatSize(filePath);
+    if (byteLength !== null && byteLength > MAX_INLINE_ASSET_BYTES) return { tooLarge: byteLength };
+    const content = safeReadFileBuffer(filePath);
+    return {
+      dataUrl: content === null ? null : `data:${mimeType};base64,${content.toString("base64")}`,
+    };
+  };
+  return (urlValue) => {
+    if (!inlineAssets) return null;
+    if (!urlValue || !isRelativeUrl(urlValue)) return null;
+    const { basePath, suffix } = splitUrlSuffix(urlValue.trim());
+    if (!basePath) return null;
+    const filePath = resolveProjectPath(decodeWellFormedEscapes(basePath));
+    if (!filePath) return null;
+    const ext = filePath.toLowerCase().match(/\.[^.]+$/)?.[0] ?? "";
+    const mimeType = INLINE_MIME[ext];
+    if (!mimeType) return null;
+    let asset = assets.get(filePath);
+    if (asset === undefined) {
+      asset = readAsset(filePath, mimeType);
+      assets.set(filePath, asset);
+    } else if ("dataUrl" in asset) {
+      noteRead(filePath);
+    }
+    if ("tooLarge" in asset) {
+      warnAssetTooLargeToInline(basePath, asset.tooLarge);
+      return null;
+    }
+    return asset.dataUrl === null ? null : appendSuffixToUrl(asset.dataUrl, suffix);
+  };
 }
 
 function isExternalSvgFragmentUse(el: Element, attr: string, urlValue: string): boolean {
@@ -403,7 +437,7 @@ function warnColorGradingLutNotInlined(lutSrc: string): void {
 }
 
 // fallow-ignore-next-line complexity
-function rewriteColorGradingLutWithInlinedAssets(value: string, projectDir: string): string {
+function rewriteColorGradingLutWithInlinedAssets(value: string, inlineAsset: AssetInliner): string {
   if (!value.trim().startsWith("{")) return value;
   let parsed: unknown;
   try {
@@ -417,7 +451,7 @@ function rewriteColorGradingLutWithInlinedAssets(value: string, projectDir: stri
   if (typeof lut === "string") {
     // Gated by inlineAssets and inlineColorGradingLuts at the call site above;
     // this call only runs once both have already passed.
-    const inlined = maybeInlineRelativeAssetUrl(lut, projectDir, true);
+    const inlined = inlineAsset(lut);
     if (!inlined) {
       warnColorGradingLutNotInlined(lut);
       return value;
@@ -428,7 +462,7 @@ function rewriteColorGradingLutWithInlinedAssets(value: string, projectDir: stri
   if (typeof lut !== "object" || lut === null || Array.isArray(lut)) return value;
   const lutSrc = Reflect.get(lut, "src");
   if (typeof lutSrc !== "string") return value;
-  const inlined = maybeInlineRelativeAssetUrl(lutSrc, projectDir, true);
+  const inlined = inlineAsset(lutSrc);
   if (!inlined) {
     warnColorGradingLutNotInlined(lutSrc);
     return value;
@@ -437,11 +471,7 @@ function rewriteColorGradingLutWithInlinedAssets(value: string, projectDir: stri
   return JSON.stringify(parsed);
 }
 
-function rewriteSrcsetWithInlinedAssets(
-  srcsetValue: string,
-  projectDir: string,
-  inlineAssets: boolean,
-): string {
+function rewriteSrcsetWithInlinedAssets(srcsetValue: string, inlineAsset: AssetInliner): string {
   if (!srcsetValue) return srcsetValue;
   return srcsetValue
     .split(",")
@@ -450,27 +480,19 @@ function rewriteSrcsetWithInlinedAssets(
       if (!candidate) return candidate;
       const parts = candidate.split(/\s+/);
       if (parts.length === 0) return candidate;
-      const maybeInlined = maybeInlineRelativeAssetUrl(parts[0] ?? "", projectDir, inlineAssets);
+      const maybeInlined = inlineAsset(parts[0] ?? "");
       if (maybeInlined) parts[0] = maybeInlined;
       return parts.join(" ");
     })
     .join(", ");
 }
 
-function rewriteCssUrlsWithInlinedAssets(
-  cssText: string,
-  projectDir: string,
-  inlineAssets: boolean,
-): string {
+function rewriteCssUrlsWithInlinedAssets(cssText: string, inlineAsset: AssetInliner): string {
   if (!cssText) return cssText;
   return cssText.replace(
     /\burl\(\s*(["']?)([^)"']+)\1\s*\)/g,
     (_full, quote: string, rawUrl: string) => {
-      const maybeInlined = maybeInlineRelativeAssetUrl(
-        (rawUrl || "").trim(),
-        projectDir,
-        inlineAssets,
-      );
+      const maybeInlined = inlineAsset((rawUrl || "").trim());
       if (!maybeInlined) return _full;
       return `url(${quote || ""}${maybeInlined}${quote || ""})`;
     },
@@ -538,6 +560,7 @@ function countBundledAuthoredCompositionIds(hosts: Element[]): Map<string, numbe
     if (!authoredCompositionId) continue;
     counts.set(authoredCompositionId, (counts.get(authoredCompositionId) || 0) + 1);
   }
+  countPageRoot(counts, hosts);
   return counts;
 }
 
@@ -718,7 +741,10 @@ function pushRun<T>(runs: PartRun<T>[], scene: string | undefined, chunk: T): vo
   else runs.push({ scene, chunks: [chunk] });
 }
 
-function coalesceHeadStylesAndBodyScripts(document: Document): void {
+async function coalesceHeadStylesAndBodyScripts(
+  document: Document,
+  provenance?: BundleOptions["scriptProvenance"],
+): Promise<void> {
   const allHeadStyles = [...document.querySelectorAll("head style")];
   const isScenePart = (el: Element) => el.hasAttribute(SCENE_PART_ATTR);
   for (const run of allHeadStyles.length > 1 ? headStyleRuns(allHeadStyles, isScenePart) : []) {
@@ -736,10 +762,15 @@ function coalesceHeadStylesAndBodyScripts(document: Document): void {
     isPinned,
   )) {
     const mergedJs = joinJsChunks(members.map((el) => el.textContent || ""));
+    if (mergedJs && !parsesAsScript(mergedJs)) {
+      for (const el of members)
+        el.textContent = await inlineScriptSource(el.textContent || "", provenance);
+      continue;
+    }
     for (const el of members) el.remove();
     if (!mergedJs) continue;
     const inlineScript = document.createElement("script");
-    inlineScript.textContent = escapeInlineScriptSource(stripJsCommentsParserSafe(mergedJs));
+    inlineScript.textContent = await inlineScriptSource(mergedJs, provenance);
     if (anchor) anchor.before(inlineScript);
     else document.body.appendChild(inlineScript);
   }
@@ -791,17 +822,60 @@ function joinJsChunks(chunks: string[]): string {
     .join("\n");
 }
 
-function stripJsCommentsParserSafe(source: string): string {
-  if (!source) return source;
+// acorn in script mode, not the host engine: Bun 1.3's vm.Script compiles lazily and accepts anything.
+// esbuild accepts export, top-level await and return, which a <script> rejects; acorn does not.
+export function parsesAsScript(source: string): boolean {
   try {
-    const result = transformSync(source, { loader: "js", minify: false, legalComments: "none" });
+    parseJs(source, { ecmaVersion: "latest", sourceType: "script" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function stripJsCommentsParserSafe(
+  source: string,
+  provenance?: BundleOptions["scriptProvenance"],
+): Promise<string> {
+  if (!source) return source;
+  const { transform } = await import("esbuild");
+  try {
+    const result = await transform(source, {
+      loader: "js",
+      minify: false,
+      legalComments: "none",
+      ...(provenance
+        ? { sourcemap: "external" as const, sourcefile: "hf-authored-bundle.js" }
+        : {}),
+    });
+    if (provenance) {
+      const sourceURL = `hf-inspect-${createHash("sha256").update(source).digest("hex")}.js`;
+      provenance({ input: source, output: result.code.trim(), sourceMap: result.map, sourceURL });
+      return `${result.code.trim()}\n//# sourceURL=${sourceURL}`;
+    }
     return result.code.trim();
   } catch {
     return source;
   }
 }
 
+async function inlineScriptSource(
+  js: string,
+  provenance?: BundleOptions["scriptProvenance"],
+): Promise<string> {
+  return escapeInlineScriptSource(await stripJsCommentsParserSafe(js, provenance));
+}
+
+export interface BundleScriptProvenance {
+  input: string;
+  output: string;
+  sourceMap: string;
+  sourceURL?: string;
+}
+
 export interface BundleOptions {
+  /** Optional source mapping for inspection; does not alter bundled HTML. */
+  scriptProvenance?: (script: BundleScriptProvenance) => void;
   /** Project-relative HTML entry to bundle. Defaults to `index.html`. */
   entryFile?: string;
   stampHfIds?: boolean;
@@ -841,6 +915,7 @@ export interface BundleOptions {
   sceneParts?: boolean;
   /** Warn when the compiled HTML breaks the HyperFrames contract (default true). */
   staticGuard?: boolean;
+  /** Called once per build for each project file the build reads or looks for. */
   onRead?: (filePath: string) => void;
 }
 
@@ -893,11 +968,13 @@ function hoistExternalScript(
   if (seenSrcs.has(src)) return;
   seenSrcs.add(src);
   if (!isNonRelativeUrl(src) && !isAbsolute(src) && attributes.type !== "module") {
-    const jsPath = resolveWithinProject(projectDir, src);
+    const jsPath = resolveWithinProject(projectDir, decodedUrlPath(src));
     const js = jsPath ? safeReadFile(jsPath) : null;
     if (js != null) {
       chunks.push(() =>
-        preserveLocalScriptIntegrity(doc, src, (value) => resolveWithinProject(projectDir, value))
+        preserveLocalScriptIntegrity(doc, src, (value) =>
+          resolveWithinProject(projectDir, decodedUrlPath(value)),
+        )
           ? ""
           : js,
       );
@@ -918,11 +995,24 @@ function hoistCompositionScripts(
     authoredRootId: string | undefined;
     seenCompScriptSrcs: Set<string>;
     compScriptChunks: DeferredScriptChunk[];
+    importMaps: ImportMap[];
+    moduleScripts: string[];
   },
 ): void {
-  for (const scriptEl of [...container.querySelectorAll("script")]) {
+  for (const scriptEl of executableScripts(container)) {
     const externalSrc = (scriptEl.getAttribute("src") || "").trim();
-    if (externalSrc) {
+    const type = (scriptEl.getAttribute("type") || "").trim().toLowerCase();
+    if (!externalSrc && type === "importmap") {
+      const map = parseImportMap(scriptEl.textContent || "", (url) => url);
+      if (map) opts.importMaps.push(map);
+      else
+        console.warn(
+          `[HyperFrames] ${opts.compId}: import map is not valid JSON, so it is skipped.`,
+        );
+    } else if (!externalSrc && type === "module") {
+      const prelude = opts.compId ? scopedModulePrelude(opts.runtimeCompId || opts.compId) : "";
+      opts.moduleScripts.push(prelude + (scriptEl.textContent || ""));
+    } else if (externalSrc) {
       hoistExternalScript(
         externalSrc,
         opts.projectDir,
@@ -954,7 +1044,28 @@ function hoistCompositionScripts(
 
 export function bundleToSingleHtml(projectDir: string, options?: BundleOptions): Promise<string> {
   const bundle = () => bundleProject(projectDir, options);
-  return options?.onRead ? bundleReads.run(options.onRead, bundle) : bundle();
+  const onRead = options?.onRead;
+  if (!onRead) return bundle();
+  const noted = new Set<string>();
+  const noteOnce = (filePath: string) => {
+    if (noted.has(filePath)) return;
+    noted.add(filePath);
+    onRead(filePath);
+  };
+  return bundleReads.run(noteOnce, bundle);
+}
+
+// A <template> scene has no root or GSAP of its own: bundle it inside the index that mounts it, as render does.
+function readMountedSceneShell(
+  projectDir: string,
+  entryFile: string,
+  entryHtml: string,
+): string | null {
+  if (!isTemplateEntry(entryHtml)) return null;
+  const indexHtml = safeReadFile(resolve(projectDir, "index.html"));
+  return indexHtml === null
+    ? null
+    : extractStandaloneEntryFromIndex(indexHtml, entryFile, entryHtml);
 }
 
 async function bundleProject(projectDir: string, options?: BundleOptions): Promise<string> {
@@ -963,18 +1074,42 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
   if (!indexPath || !existsSync(indexPath)) {
     throw new Error(`${entryFile} not found in project directory`);
   }
-  const sourceDir = dirname(indexPath);
+  noteRead(indexPath);
+  const entryHtml = readFileSync(indexPath, "utf-8");
+  const mountedShell = readMountedSceneShell(projectDir, entryFile, entryHtml);
+  const sourceDir = mountedShell ? projectDir : dirname(indexPath);
+  // Every mount of a sub-composition asks again for each of its url()s; isSafePath realpaths the whole chain.
+  const safePaths = new Map<string, boolean>();
+  const isSafeProjectPath = (resolved: string): boolean => {
+    let safe = safePaths.get(resolved);
+    if (safe === undefined) {
+      safe = isSafePath(projectDir, resolved);
+      safePaths.set(resolved, safe);
+    }
+    return safe;
+  };
+  const entryPaths = new Map<string, string | null>();
   const resolveEntryPath = (relativePath: string): string | null => {
-    const resolved = resolve(sourceDir, relativePath);
-    return isSafePath(projectDir, resolved) ? resolved : null;
+    let entry = entryPaths.get(relativePath);
+    if (entry === undefined) {
+      const resolved = resolve(sourceDir, relativePath);
+      entry = isSafeProjectPath(resolved) ? resolved : null;
+      entryPaths.set(relativePath, entry);
+    }
+    return entry;
+  };
+  const resolveProjectPath = (relativePath: string): string | null => {
+    const resolved = resolve(projectDir, relativePath);
+    return isSafeProjectPath(resolved) ? resolved : null;
   };
 
+  const resolveEntryUrl = (url: string): string | null => resolveEntryPath(decodedUrlPath(url));
+
   const readSource = options?.stampHfIds ? ensureHfIds : (html: string) => html;
-  noteRead(indexPath);
-  const rawHtml = readSource(readFileSync(indexPath, "utf-8"));
+  const rawHtml = readSource(mountedShell ?? entryHtml);
   const compiled = await compileHtml(rawHtml, sourceDir, options?.probeMediaDuration);
 
-  if (options?.staticGuard !== false) {
+  if (options?.staticGuard !== false && !mountedShell) {
     const staticGuard = await validateHyperframeHtmlContract(compiled);
     if (!staticGuard.isValid) {
       console.warn(
@@ -994,7 +1129,7 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
     const href = el.getAttribute("href");
     if (!href || !isRelativeUrl(href) || cssStyleMergeKey(el) === undefined) continue;
     if (el.hasAttribute("disabled")) continue;
-    const cssPath = resolveEntryPath(href);
+    const cssPath = resolveEntryUrl(href);
     if (!cssPath) continue;
     const css = safeReadFile(cssPath);
     if (css == null) continue;
@@ -1016,7 +1151,7 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
         ]),
       ].map((el) => {
         const src = el.getAttribute("src");
-        const path = src && isRelativeUrl(src) ? resolveEntryPath(src) : null;
+        const path = src && isRelativeUrl(src) ? resolveEntryUrl(src) : null;
         return src ? (path && safeReadFile(path)) || "" : el.textContent || "";
       })
     : [];
@@ -1027,12 +1162,21 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
   const subCompositionHosts = trackedCompositionHosts.filter((host) =>
     host.hasAttribute("data-composition-src"),
   );
+  const sceneSources = new Map<string, string | null>();
   const subCompResult = inlineSubCompositions(document, subCompositionHosts, {
     resolveHtml: (srcPath: string) => {
       if (!isRelativeUrl(srcPath)) return null;
       const compPath = resolveEntryPath(srcPath);
-      const html = compPath ? safeReadFile(compPath) : null;
-      return html === null ? null : readSource(html);
+      if (!compPath) return null;
+      let source = sceneSources.get(compPath);
+      if (source === undefined) {
+        const html = safeReadFile(compPath);
+        source = html === null ? null : readSource(html);
+        sceneSources.set(compPath, source);
+      } else {
+        noteRead(compPath);
+      }
+      return source;
     },
     parseHtml: parseHTMLContent,
     hostIdentityMap: hostIdentityByElement,
@@ -1084,11 +1228,11 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
     if (seenCompScriptSrcs.has(extSrc)) continue;
     seenCompScriptSrcs.add(extSrc);
     if (isRelativeUrl(extSrc) && scriptItem.type !== "module") {
-      const jsPath = resolveEntryPath(extSrc);
+      const jsPath = resolveEntryUrl(extSrc);
       const js = jsPath ? safeReadFile(jsPath) : null;
       if (js != null) {
         const chunk = () =>
-          preserveLocalScriptIntegrity(document, extSrc, resolveEntryPath) ? "" : js;
+          preserveLocalScriptIntegrity(document, extSrc, resolveEntryUrl) ? "" : js;
         pushRun(scriptRuns, scriptItem.scene, chunk);
         continue;
       }
@@ -1121,8 +1265,12 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
       const hostIdentity = hostIdentityByElement.get(host);
       const runtimeCompId = hostIdentity?.runtimeCompositionId || compId;
       const innerDoc = parseHTMLContent(templateHtml);
-      const innerRoot = queryByAttr(innerDoc, "data-composition-id", compId);
-      const authoredRootId = innerRoot?.getAttribute("id")?.trim() || null;
+      const plan = planCompositionAssembly<Element>({
+        contentNode: innerDoc,
+        hasTemplate: true,
+        compositionId: compId,
+      });
+      const { innerRoot, authoredRootId } = plan;
       const runtimeScope = runtimeCompId
         ? cssAttributeSelector("data-composition-id", runtimeCompId)
         : "";
@@ -1171,6 +1319,8 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
           authoredRootId: authoredRootId ?? undefined,
           seenCompScriptSrcs,
           compScriptChunks,
+          importMaps: subCompResult.importMaps,
+          moduleScripts: subCompResult.moduleScripts,
         });
 
         // Copy dimension attributes from inner root to host if not already set
@@ -1206,10 +1356,14 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
           authoredRootId: undefined,
           seenCompScriptSrcs,
           compScriptChunks,
+          importMaps: subCompResult.importMaps,
+          moduleScripts: subCompResult.moduleScripts,
         });
 
         host.innerHTML = innerDoc.body.innerHTML || "";
       }
+      for (const el of plan.inertScriptsOutsideRoot)
+        host.insertAdjacentHTML("beforeend", el.outerHTML);
     }
 
     // Remove the template element from the document
@@ -1219,12 +1373,12 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
   for (const el of [...document.querySelectorAll("script[src]")]) {
     const src = el.getAttribute("src");
     if (!src || !isRelativeUrl(src)) continue;
-    if (preserveLocalScriptIntegrity(document, src, resolveEntryPath)) continue;
+    if (preserveLocalScriptIntegrity(document, src, resolveEntryUrl)) continue;
     // Module scripts can contain static imports whose resolution is relative
     // to the script URL. Folding their source into a classic inline script
     // both drops module semantics and changes the import base URL.
     if ((el.getAttribute("type") || "").trim().toLowerCase() === "module") continue;
-    const jsPath = resolveEntryPath(src);
+    const jsPath = resolveEntryUrl(src);
     const js = jsPath ? safeReadFile(jsPath) : null;
     if (js == null) continue;
     el.setAttribute(INLINED_FILE_ATTR, src);
@@ -1249,12 +1403,17 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
     }
   }
   for (const { scene, chunks } of scriptRuns) {
-    const script = document.createElement("script");
-    if (scene) script.setAttribute(SCENE_PART_ATTR, scene);
-    script.textContent = joinJsChunks(
-      chunks.map((chunk) => (typeof chunk === "string" ? chunk : chunk())),
-    );
-    document.body.appendChild(script);
+    const texts = chunks.map((chunk) => (typeof chunk === "string" ? chunk : chunk()));
+    const joined = joinJsChunks(texts);
+    const skipsRunMerge = Boolean(scene);
+    for (const text of parsesAsScript(joined) ? [joined] : texts.filter(Boolean)) {
+      const script = document.createElement("script");
+      if (scene) script.setAttribute(SCENE_PART_ATTR, scene);
+      script.textContent = skipsRunMerge
+        ? await inlineScriptSource(text, options?.scriptProvenance)
+        : text;
+      document.body.appendChild(script);
+    }
   }
   emitMountedModuleScripts(document, subCompResult.importMaps, subCompResult.moduleScripts);
 
@@ -1262,11 +1421,11 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
 
   enforceCompositionPixelSizing(document);
   autoHealMissingCompositionIds(document);
-  coalesceHeadStylesAndBodyScripts(document);
+  await coalesceHeadStylesAndBodyScripts(document, options?.scriptProvenance);
   for (const el of document.querySelectorAll(`script[${INLINED_FILE_ATTR}]`)) {
     const js = el.textContent ?? "";
     el.textContent = escapeInlineScriptSource(
-      isJavaScriptType(el) ? stripJsCommentsParserSafe(js) : js,
+      isJavaScriptType(el) ? await stripJsCommentsParserSafe(js, options?.scriptProvenance) : js,
     );
   }
   deferScriptsUntilFonts(document, (el) => el.hasAttribute(RUNTIME_BOOTSTRAP_ATTR));
@@ -1274,6 +1433,7 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
 
   // Inline textual assets
   const inlineAssets = options?.inlineAssets !== false;
+  const inlineAsset = createAssetInliner(resolveProjectPath, inlineAssets);
   for (const el of [...document.querySelectorAll("[src], [href], [poster], [xlink\\:href]")]) {
     for (const attr of ["src", "href", "poster", "xlink:href"] as const) {
       const value = el.getAttribute(attr);
@@ -1283,34 +1443,36 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
       // origin and triggers "Unsafe attempt to load URL ... from frame".
       // Keep the project-relative URL; render/check servers already expose it.
       if (isExternalSvgFragmentUse(el, attr, value)) continue;
-      const inlined = maybeInlineRelativeAssetUrl(value, projectDir, inlineAssets);
+      const inlined = inlineAsset(value);
       if (inlined) el.setAttribute(attr, inlined);
     }
   }
   for (const el of [...document.querySelectorAll("[srcset]")]) {
     const srcset = el.getAttribute("srcset");
-    if (srcset)
-      el.setAttribute("srcset", rewriteSrcsetWithInlinedAssets(srcset, projectDir, inlineAssets));
+    if (srcset) el.setAttribute("srcset", rewriteSrcsetWithInlinedAssets(srcset, inlineAsset));
   }
-  // Before inlining, so postcss reads paths not font bytes; scene parts keep copies to swap alone.
-  if (!options?.sceneParts) {
-    const liveStyles = [...document.querySelectorAll("style")].filter(isAlwaysAppliedStyle);
-    const dedupedStyles = dedupeFontFaceRules(liveStyles.map((el) => el.textContent || ""));
-    liveStyles.forEach((el, i) => {
-      el.textContent = dedupedStyles[i] ?? "";
-    });
+  // Before inlining, so postcss reads paths not font bytes.
+  const liveStyles = [...document.querySelectorAll("style")].filter(isAlwaysAppliedStyle);
+  const liveCss = liveStyles.map((el) => el.textContent || "");
+  const { styles, faces } = options?.sceneParts
+    ? hoistFontFaceRules(liveCss)
+    : { styles: dedupeFontFaceRules(liveCss), faces: [] };
+  liveStyles.forEach((el, i) => {
+    el.textContent = styles[i] ?? "";
+  });
+  if (faces.length > 0) {
+    const holder = document.createElement("style");
+    holder.setAttribute(SCENE_FONTS_ATTR, "");
+    holder.textContent = faces.join("\n");
+    document.head.prepend(holder);
   }
   for (const styleEl of document.querySelectorAll("style")) {
-    styleEl.textContent = rewriteCssUrlsWithInlinedAssets(
-      styleEl.textContent || "",
-      projectDir,
-      inlineAssets,
-    );
+    styleEl.textContent = rewriteCssUrlsWithInlinedAssets(styleEl.textContent || "", inlineAsset);
   }
   for (const el of [...document.querySelectorAll("[style]")]) {
     el.setAttribute(
       "style",
-      rewriteCssUrlsWithInlinedAssets(el.getAttribute("style") || "", projectDir, inlineAssets),
+      rewriteCssUrlsWithInlinedAssets(el.getAttribute("style") || "", inlineAsset),
     );
   }
   if (inlineAssets && options?.inlineColorGradingLuts !== false) {
@@ -1319,12 +1481,13 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
       if (value) {
         el.setAttribute(
           HF_COLOR_GRADING_ATTR,
-          rewriteColorGradingLutWithInlinedAssets(value, projectDir),
+          rewriteColorGradingLutWithInlinedAssets(value, inlineAsset),
         );
       }
     }
   }
 
+  assignMediaRenderIds(document);
   return document.toString();
 }
 
@@ -1416,7 +1579,23 @@ function authoredDefinesPredicate(document: Document): (id: string) => boolean {
   const authoredCss = [...document.querySelectorAll("style:not([data-hf-composition-variables])")]
     .map((s) => s.textContent || "")
     .join("\n");
-  return (id) => new RegExp(`${cssVariableName(id)}\\s*:`).test(authoredCss);
+  const defined = namesBeforeAColon(authoredCss);
+  return (id) => defined.has(cssVariableName(id));
+}
+
+/** Every `--name` written right before a `:`, including the tail of a longer word (`.a--b:hover`), in one pass. */
+function namesBeforeAColon(css: string): Set<string> {
+  const names = new Set<string>();
+  const word = /[\w-]+/g;
+  const colonNext = /\s*:/y;
+  for (let match = word.exec(css); match; match = word.exec(css)) {
+    colonNext.lastIndex = word.lastIndex;
+    if (!colonNext.test(css)) continue;
+    const text = match[0];
+    for (let at = text.indexOf("--"); at !== -1; at = text.indexOf("--", at + 1))
+      names.add(text.slice(at));
+  }
+  return names;
 }
 
 /**

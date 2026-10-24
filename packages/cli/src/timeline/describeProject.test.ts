@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { MEDIA_DURATION_FIXTURES } from "@hyperframes/parsers/media-duration-fixtures";
 import { fileURLToPath } from "node:url";
+import { format } from "node:util";
+import { runInNewContext } from "node:vm";
 import { beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { ensureDOMParser } from "../utils/dom.js";
 import {
@@ -114,6 +116,44 @@ describe("describeProject", () => {
       ["t1", 0, 2],
       ["t2", 2.5, 3.5],
     ]);
+  });
+
+  it("lists clips nested in a timed wrapper at their playback time and says when one never shows", async () => {
+    const { rows, text } = await rowsOf(`<html><body>
+<div data-composition-id="main" data-width="1920" data-height="1080" data-duration="10">
+  <div id="shot2" data-start="5" data-duration="5" data-track-index="0">
+    <h1 id="seen" data-start="6" data-duration="2">In</h1>
+    <h1 id="lost" data-start="0" data-duration="2">Out</h1>
+  </div>
+</div></body></html>`);
+    const byId = (id: string) => rows.find((r) => r.id === id)!;
+    const at = (p: { kind: string; index: number }) =>
+      rows.find((r) => r.trackKind === p.kind && r.index === p.index)!.id;
+
+    expect(byId("shot2").children.map(at).sort()).toEqual(["lost", "seen"]);
+    expect(byId("seen")).toMatchObject({ absStart: 6, absEnd: 8, warnings: [], nested: false });
+    expect(at(byId("seen").parentRow!)).toBe("shot2");
+    expect(byId("lost").warnings).toEqual([
+      "never visible: plays 0-2s, but #shot2 only shows 5-10s; a nested data-start counts from the composition, not from #shot2",
+    ]);
+    expect(text).toContain("#lost lost 0-2s warning: never visible");
+    expect(text).not.toContain("no stable name");
+  });
+
+  it("lists a sub-composition mounted inside a timed wrapper with every clip it holds", async () => {
+    const { rows } = await rowsOf(`<html><body>
+<div data-composition-id="main" data-width="1920" data-height="1080" data-duration="10">
+  <div id="shot" data-start="0" data-duration="5" data-track-index="0">
+    <div id="scene" data-composition-src="compositions/title.html" data-start="0" data-duration="5"></div>
+  </div>
+</div></body></html>`);
+    const childIds = (id: string) =>
+      rows
+        .find((r) => r.id === id)!
+        .children.map((p) => rows.find((r) => r.trackKind === p.kind && r.index === p.index)?.id);
+
+    expect(childIds("shot")).toEqual(["scene"]);
+    expect(childIds("scene")).toEqual(["t1", "t2"]);
   });
 
   it("reports each half's out-of-sync offset from its source pair, at the project fps", async () => {
@@ -276,6 +316,31 @@ describe("describeProject", () => {
     );
     // (0.72 - 0.2) / 2, hand-computed
     expect(row!.duration).toBeCloseTo(0.26, 1);
+    expect(row!.mediaStart).toBe(0.2);
+  });
+
+  it("probes a nested scene's media where preview loads it: a root asset with a percent-encoded name", async () => {
+    const probed: string[] = [];
+    const { rows } = await rowsOf(
+      `<div data-composition-id="m" data-duration="5">
+        <div id="scene" data-composition-src="compositions/bed.html" data-start="0" data-duration="5"></div>
+      </div>`,
+      false,
+      (root) => {
+        mkdirSync(join(root, "assets"));
+        copyFileSync(REAL_AUDIO, join(root, "assets", "music bed.mp3"));
+        writeFileSync(
+          join(root, "compositions", "bed.html"),
+          `<template><div data-composition-id="bed"><audio id="bed" src="assets/music%20bed.mp3" data-start="0"></audio></div></template>`,
+        );
+      },
+      async (file, tag) => {
+        probed.push(`${tag}:${basename(file)}`);
+        return POP_SECONDS();
+      },
+    );
+    expect(probed).toEqual(["audio:music bed.mp3"]);
+    expect(rows.find((r) => r.id === "bed")).toMatchObject({ durationSource: "media" });
   });
 
   it("takes a media leaf's duration from the probe when none is authored", async () => {
@@ -390,6 +455,80 @@ describe("absolute main-timeline time", () => {
     // Host starts at 5 and the runtime adds the raw -3: it plays at 2, not at the clamped 5.
     expect(rows.find((r) => r.id === "nested")).toMatchObject({ absStart: 2, absEnd: 4 });
   });
+
+  it.each([
+    {
+      basis: "global",
+      start: -1,
+      duration: 3,
+      absoluteStart: -1,
+      absoluteEnd: 2,
+      expectedBar: "█".repeat(16) + " ".repeat(24),
+    },
+    {
+      basis: "local",
+      start: -2,
+      duration: 3,
+      absoluteStart: -1,
+      absoluteEnd: 2,
+      expectedBar: "█".repeat(16) + " ".repeat(24),
+    },
+    {
+      basis: "global",
+      start: -0.001,
+      duration: 1.001,
+      absoluteStart: -0.001,
+      absoluteEnd: 1,
+      expectedBar: "█".repeat(8) + " ".repeat(32),
+    },
+    {
+      basis: "global",
+      start: -2,
+      duration: 10,
+      absoluteStart: -2,
+      absoluteEnd: 8,
+      expectedBar: "█".repeat(40),
+    },
+    {
+      basis: "global",
+      start: 0,
+      duration: 3,
+      absoluteStart: 0,
+      absoluteEnd: 3,
+      expectedBar: "█".repeat(24) + " ".repeat(16),
+    },
+    {
+      basis: "global",
+      start: 1,
+      duration: 3,
+      absoluteStart: 1,
+      absoluteEnd: 4,
+      expectedBar: " ".repeat(8) + "█".repeat(24) + " ".repeat(8),
+    },
+  ])(
+    "prints a bounded bar for $basis media at $start without changing timing",
+    async ({ basis, start, duration, absoluteStart, absoluteEnd, expectedBar }) => {
+      dir = tempDir("hf-timeline-bar-");
+      mkdirSync(join(dir, "compositions"));
+      writeFileSync(
+        join(dir, "index.html"),
+        '<div data-composition-id="main" data-duration="5"><div id="host" data-composition-src="compositions/scene.html" data-start="1" data-duration="3"></div></div>',
+      );
+      writeFileSync(
+        join(dir, "compositions", "scene.html"),
+        `<div data-composition-id="scene"><audio id="voice" data-start="${start}" data-duration="${duration}" data-hf-media-start-basis="${basis}"></audio></div>`,
+      );
+      const timeline = await describeProject(join(dir, "index.html"));
+      const voice = allRows(timeline).find((row) => row.id === "voice");
+      expect(voice).toMatchObject({ absStart: absoluteStart, absEnd: absoluteEnd });
+
+      const output = formatTimeline(timeline);
+      const line = output.split("\n").find((line) => line.includes("#voice voice"));
+      expect(line).toContain(`|${expectedBar}|`);
+      expect(line).toContain(`voice ${absoluteStart}-${absoluteEnd}s`);
+      expect(voice).toMatchObject({ absStart: absoluteStart, absEnd: absoluteEnd });
+    },
+  );
 
   it("resolves a media start given as an expression like any other clip, not as a literal", async () => {
     dir = tempDir("hf-timeline-expr-");
@@ -666,10 +805,11 @@ describe("kind tracks list every clip once", () => {
 });
 
 // The documented one-liners run verbatim; only the example query values are swapped for the fixture's.
+const HERE_TL = '<<<"$TL"';
 const docLines = (kind: "jq" | "node -e"): string[] =>
   readFileSync(SKILL_DOC, "utf8")
     .split("\n")
-    .filter((l) => l.startsWith(`${kind} `) && l.endsWith('<<<"$TL"'));
+    .filter((l) => l.startsWith(`${kind} `) && l.endsWith(HERE_TL));
 const oneLiners = (kind: "jq" | "node -e"): string[] =>
   docLines(kind).map((l) => l.replace("12.5", "7").replace("tsfx-pet2", "nested"));
 
@@ -682,23 +822,38 @@ const hasJq = (() => {
   }
 })();
 
-const runOneLiner = async (line: string, timeline?: ProjectTimeline): Promise<string> => {
-  const own = timeline ? null : inversionProject();
-  return execFileSync("bash", ["-c", line], {
-    env: {
-      ...process.env,
-      TL: JSON.stringify({ timeline: timeline ?? (await describeProject(own!)) }),
+/** Argv of a documented `<cmd> ... '<program>' <<<"$TL"` line, quoted as bash reads these lines. */
+const argvOf = (line: string) =>
+  [...line.slice(0, -HERE_TL.length).matchAll(/'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2]!);
+
+/** Runs a documented line on `tl` with no shell: jq as a process, a `node -e` program in-process. */
+const runOneLiner = (line: string, tl: string): string => {
+  const [cmd, ...args] = argvOf(line);
+  if (cmd === "jq") return execFileSync("jq", args, { input: tl, encoding: "utf8" });
+  expect([cmd, args[0], args.length]).toEqual(["node", "-e", 2]);
+  const out: string[] = [];
+  const fs = {
+    readFileSync: (fd: number, encoding: string) => {
+      expect([fd, encoding]).toEqual([0, "utf8"]);
+      return tl;
     },
-    encoding: "utf8",
+  };
+  runInNewContext(args[1]!, {
+    require: (id: string) => (id === "fs" ? fs : undefined),
+    console: { log: (...parts: unknown[]) => out.push(`${format(...parts)}\n`) },
   });
+  return out.join("");
 };
+const timelineJson = async (timeline: Promise<ProjectTimeline>) =>
+  JSON.stringify({ timeline: await timeline });
 const parseStream = (out: string) => JSON.parse(`[${out.replace(/}\s*{/g, "},{")}]`);
 
 describe("skill query one-liners", () => {
   it("documents five node one-liners, each answering from the fixture", async () => {
     const lines = oneLiners("node -e");
     expect(lines).toHaveLength(5);
-    const [at = "", find, track, gaps, nth] = await Promise.all(lines.map((l) => runOneLiner(l)));
+    const tl = await timelineJson(describeProject(inversionProject()));
+    const [at = "", find, track, gaps, nth] = lines.map((l) => runOneLiner(l, tl));
     expect(at.split("\n").filter(Boolean)).toEqual([
       "nested compositions/scene.html",
       "host index.html",
@@ -712,9 +867,8 @@ describe("skill query one-liners", () => {
   it.skipIf(!hasJq)("documents five jq one-liners that agree with the node ones", async () => {
     const lines = oneLiners("jq");
     expect(lines).toHaveLength(5);
-    const [at, find, track, gaps, nth] = (await Promise.all(lines.map((l) => runOneLiner(l)))).map(
-      parseStream,
-    );
+    const tl = await timelineJson(describeProject(inversionProject()));
+    const [at, find, track, gaps, nth] = lines.map((l) => parseStream(runOneLiner(l, tl)));
     expect(at[0].map((r: { id: string }) => r.id)).toEqual(["nested", "host"]);
     expect(find).toEqual([
       { file: "compositions/scene.html", trackKind: "video", absStart: 6, absEnd: 8 },
@@ -730,12 +884,10 @@ describe("skill query one-liners", () => {
   });
 
   it("answers the eval questions exactly on the eval fixture, counting no clip twice", async () => {
-    const timeline = await evalTimeline();
+    const tl = await timelineJson(evalTimeline());
     const ids = ["tsfx-pet1", "tmus-pet1", "tmus-pet2", "tsfx-pet2", "v-replay1", "v-replay2"];
-    const run = (l: string) => runOneLiner(l.replace("12.5", "15.7"), timeline);
-    const [at = "", find = "", track = "", , nth = ""] = await Promise.all(
-      docLines("node -e").map(run),
-    );
+    const run = (l: string) => runOneLiner(l.replace("12.5", "15.7"), tl);
+    const [at = "", find = "", track = "", , nth = ""] = docLines("node -e").map(run);
     expect(at.split("\n").filter(Boolean)).toEqual([
       "tsfx-pet2 compositions/terminal-sfx.html",
       "sec-sfx index.html",
@@ -750,7 +902,7 @@ describe("skill query one-liners", () => {
     ).toEqual(ids);
     expect(nth).toBe("1 tmus-pet1 13 compositions/terminal-music.html\n");
     if (!hasJq) return;
-    const [jqAt = "", , jqTrack = "", , jqNth = ""] = await Promise.all(docLines("jq").map(run));
+    const [jqAt = "", , jqTrack = "", , jqNth = ""] = docLines("jq").map(run);
     expect(parseStream(jqAt)[0].map((r: { id: string }) => r.id)).toEqual([
       "tsfx-pet2",
       "sec-sfx",

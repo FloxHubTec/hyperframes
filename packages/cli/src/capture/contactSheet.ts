@@ -5,8 +5,9 @@
  * Saves 50-65% tokens vs. AI agents reading images individually.
  */
 
-import sharp, { type OverlayOptions } from "sharp";
+import type { OverlayOptions } from "sharp";
 import { readdirSync, readFileSync, unlinkSync, existsSync } from "node:fs";
+import { loadSharp } from "../utils/optionalPackages.js";
 import { writeCaptureFileSync } from "./captureFile.js";
 import { join, extname, basename, dirname } from "node:path";
 
@@ -46,11 +47,12 @@ export async function createContactSheet(
 
   const files = imagePaths.slice(0, maxImages);
   if (files.length === 0) return null;
+  const sharp = await loadSharp("contact sheets");
 
   // Read first image to determine aspect ratio
   const firstMeta = await sharp(files[0]!).metadata();
-  const srcW = firstMeta.width || 1920;
-  const srcH = firstMeta.height || 1080;
+  const srcW = firstMeta.autoOrient.width || 1920;
+  const srcH = firstMeta.autoOrient.height || 1080;
 
   // Scale to target cell width, maintain aspect ratio
   const scale = cellWidth / srcW;
@@ -72,6 +74,7 @@ export async function createContactSheet(
 
     // Resize image to cell size — contain keeps full image visible (no cropping)
     const resized = await sharp(files[i]!)
+      .autoOrient()
       .resize(cellW, cellH, { fit: "contain", background: { r: 26, g: 26, b: 26 } })
       .toBuffer();
 
@@ -306,6 +309,7 @@ export async function createSvgContactSheet(
   }
 
   if (svgPaths.length === 0) return [];
+  const sharp = await loadSharp("contact sheets");
 
   const svgFileNames = svgPaths.map((p) => p.split("/").pop()!);
 

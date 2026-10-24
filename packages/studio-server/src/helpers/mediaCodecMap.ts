@@ -1,15 +1,15 @@
-import { existsSync, statSync } from "node:fs";
+import { scanHtmlOpeningTags, decodeAuthoredAttribute } from "@hyperframes/parsers";
+import { statSync } from "node:fs";
 import { realpath } from "./safePath.js";
-import { relative, resolve, sep } from "node:path";
+import { sep } from "node:path";
 import { rewriteAssetPath } from "@hyperframes/parsers/asset-paths";
 import {
   cleanAssetUrl,
   isRemoteOrInlineUrl,
   isUnresolvedAssetPlaceholder,
-  maskNonScannableRanges,
-  resolveLocalAssetCandidates,
+  resolveExistingLocalAsset as resolveAsset,
 } from "@hyperframes/parsers/asset-resolution";
-import { pixelFormatHasAlpha, probeMediaMetadata, type FfprobeRunner } from "./mediaMetadata.js";
+import { probeMediaMetadata, type FfprobeRunner } from "./mediaMetadata.js";
 
 /**
  * One reusable answer to "what codec is this asset, and is it browser-hostile?",
@@ -24,7 +24,7 @@ export interface AssetCodecFacts {
    * when no representative mime exists (ProRes: browsers never decode it, so
    * the runtime always proxies rather than probing `canPlayType`). */
   representativeMime: string | null;
-  /** Source carries an alpha channel (ffprobe pix_fmt). Alpha sources use a
+  /** Source carries an alpha channel (`MediaMetadata.hasAlpha`). Alpha sources use a
    * VP8/WebM proxy so their transparency is preserved across Chromium builds. */
   hasAlpha: boolean;
 }
@@ -58,6 +58,7 @@ export const BROWSER_HOSTILE_CODECS: Record<string, BrowserHostileCodec> = {
   // Windows/Linux and Firefox everywhere need the substitute.
   hevc: { representativeMime: 'video/mp4; codecs="hvc1.1.6.L120.B0"', prewarm: true },
   prores: { representativeMime: null, prewarm: true },
+  theora: { representativeMime: 'video/ogg; codecs="theora"', prewarm: true },
   // Every mainstream engine decodes AV1 and VP9, so canPlayType keeps the
   // original and only the rare browser that cannot pays for a transcode.
   av1: { representativeMime: 'video/mp4; codecs="av01.0.08M.08"', prewarm: false },
@@ -204,7 +205,7 @@ async function probeCodecFacts(
   if (metadata.kind !== "video") return null;
   const codecName = metadata.color.codecName;
   if (!codecName) return null;
-  return codecFactsFor(codecName, pixelFormatHasAlpha(metadata.color.pixelFormat));
+  return codecFactsFor(codecName, metadata.hasAlpha === true);
 }
 
 interface CachedAssetProbe {
@@ -281,11 +282,6 @@ export interface HtmlSourceLike {
   compSrcPath?: string;
 }
 
-// --- <video src> collection: shared primitives live in
-// @hyperframes/parsers/asset-resolution; the <video>-specific regex and the
-// pinned key derivation stay here.
-const VIDEO_SRC_RE = /<video\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
-
 /**
  * Resolve a `<video src>` reference to an existing local file.
  *
@@ -301,13 +297,12 @@ function resolveExistingLocalAsset(
   projectDir: string,
   url: string,
 ): { resolvedPath: string; rootRelativePathname: string } | null {
-  const projectRoot = resolve(projectDir);
-  const resolvedPath = resolveLocalAssetCandidates(projectRoot, url).find((candidate) =>
-    existsSync(candidate),
-  );
-  if (!resolvedPath) return null;
-  const rootRelative = relative(projectRoot, resolvedPath).split(sep).join("/");
-  return { resolvedPath, rootRelativePathname: `/${rootRelative}` };
+  const asset = resolveAsset(projectDir, url);
+  if (!asset) return null;
+  return {
+    resolvedPath: asset.resolved,
+    rootRelativePathname: `/${asset.rootRelativePath.split(sep).join("/")}`,
+  };
 }
 
 /**
@@ -322,11 +317,11 @@ function collectLocalVideoAssets(
   const candidates = new Map<string, string>();
 
   for (const { html, compSrcPath } of htmlSources) {
-    const scannable = maskNonScannableRanges(html);
-    const re = new RegExp(VIDEO_SRC_RE.source, VIDEO_SRC_RE.flags);
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(scannable)) !== null) {
-      const rawSrc = match[1] ?? "";
+    for (const tag of scanHtmlOpeningTags(html)) {
+      if (tag.name !== "video" || !tag.closed) continue;
+      const attribute = tag.attributes.find((attr) => attr.name === "src");
+      if (attribute?.kind !== "value") continue;
+      const rawSrc = decodeAuthoredAttribute(attribute.value);
       // Placeholder check runs on the RAW value: cleanAssetUrl() splits on ?/# and would chop inside a ${...} token.
       if (isUnresolvedAssetPlaceholder(rawSrc)) continue;
       const src = cleanAssetUrl(rawSrc);

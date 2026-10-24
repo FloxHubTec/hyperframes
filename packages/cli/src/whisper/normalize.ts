@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
+import { parseHTML } from "linkedom";
 
 export interface Word {
   /** Stable identifier for referencing this word in overrides and compositions.
@@ -125,6 +126,26 @@ function interpolateZeroDuration(words: Word[]): void {
   }
 }
 
+const TRAILING_PUNCTUATION = /^[.,!?;:'")\]}>…–—¡¿\-，。！？、；：」』）】》〉]+$/;
+
+function crossesCjkBoundary(left: string, right: string): boolean {
+  return CJK_CHAR.test(left.at(-1) ?? "") || CJK_CHAR.test(right[0] ?? "");
+}
+
+/**
+ * Whether a token extends the previous word: a sub-word continuation, trailing
+ * punctuation, or a contraction suffix. Whisper marks word boundaries with a
+ * leading space, except in CJK, where no token has one: there each token is
+ * its own word.
+ */
+function continuesWord(previous: string, rawText: string, text: string): boolean {
+  return (
+    TRAILING_PUNCTUATION.test(text) ||
+    /^'(t|m|s|ve|re|ll|d)$/i.test(text) ||
+    (!rawText.startsWith(" ") && !crossesCjkBoundary(previous, text))
+  );
+}
+
 function parseWhisperCpp(data: Record<string, unknown>): Word[] {
   const words: Word[] = [];
   const transcription = data.transcription as Array<{
@@ -141,16 +162,7 @@ function parseWhisperCpp(data: Record<string, unknown>): Word[] {
       if (!text || text.startsWith("[_") || text.startsWith("[BLANK")) continue;
 
       const lastWord = words[words.length - 1];
-
-      // Merge into previous word when the token is a sub-word continuation,
-      // trailing punctuation, or a contraction suffix.
-      // Whisper uses leading spaces to mark word boundaries in all languages.
-      const shouldMerge =
-        lastWord &&
-        (!rawText.startsWith(" ") ||
-          /^[.,!?;:'")\]}>…–—¡¿-]+$/.test(text) ||
-          /^'(t|m|s|ve|re|ll|d)$/i.test(text));
-      if (shouldMerge) {
+      if (lastWord && continuesWord(lastWord.text, rawText, text)) {
         lastWord.text += text;
         lastWord.end = round3((token.offsets?.to ?? 0) / 1000);
         continue;
@@ -189,7 +201,7 @@ function parseOpenAI(data: Record<string, unknown>): Word[] {
 function parseSrt(content: string): Word[] {
   // SRT doesn't have word-level timestamps — parse as phrase-level entries.
   // Each cue becomes one "word" entry (the full phrase).
-  const blocks = content.trim().split(/\n\n+/);
+  const blocks = content.replace(/\r\n?/g, "\n").trim().split(/\n\n+/);
   const words: Word[] = [];
 
   for (const block of blocks) {
@@ -217,9 +229,16 @@ function parseSrt(content: string): Word[] {
   return words;
 }
 
+function decodeVttText(text: string): string {
+  if (!text.includes("&")) return text;
+  const { document } = parseHTML("<html><body></body></html>");
+  const element = document.createElement("span");
+  element.innerHTML = text.replace(/</g, "&lt;");
+  return element.textContent ?? "";
+}
+
 function parseVtt(content: string): Word[] {
-  // Strip the WEBVTT header and any metadata blocks
-  const body = content.replace(/^WEBVTT[^\n]*\n/, "").replace(/^[A-Z-]+:.*\n/gm, "");
+  const body = content.replace(/\r\n?/g, "\n").replace(/^WEBVTT[^\n]*\n/, "");
   // VTT is structurally similar to SRT (without numeric indices)
   const blocks = body.trim().split(/\n\n+/);
   const words: Word[] = [];
@@ -240,7 +259,7 @@ function parseVtt(content: string): Word[] {
     if (!text) continue;
 
     words.push({
-      text,
+      text: decodeVttText(text),
       start: parseVttTimestamp(startStr),
       end: parseVttTimestamp(endStr),
     });
@@ -266,8 +285,9 @@ function parseSrtTimestamp(ts: string): number {
 
 /** Parse VTT timestamp: 00:01:23.456 or 01:23.456 → seconds */
 function parseVttTimestamp(ts: string): number {
-  const parts = ts.split(":");
-  if (parts.length === 3) return parseSrtTimestamp(ts);
+  const timestamp = ts.split(/[ \t]+/, 1)[0] ?? "";
+  const parts = timestamp.split(":");
+  if (parts.length === 3) return parseSrtTimestamp(timestamp);
   // MM:SS.mmm
   if (parts.length === 2) {
     const [min, secMs] = parts;
@@ -321,7 +341,7 @@ function pad3(n: number): string {
 }
 
 function endsSentence(text: string): boolean {
-  return /[.!?][)"'\]}]*$/.test(text);
+  return /[.!?。！？][)"'\]}」』）]*$/.test(text);
 }
 
 function pushCue(cues: Cue[], cue: Cue | undefined): void {
@@ -402,10 +422,7 @@ function inferPreGrouped(words: Word[]): boolean {
 
 /** Join two adjacent tokens, omitting the space across a CJK boundary. */
 function joinTokens(left: string, right: string): string {
-  const a = left.at(-1) ?? "";
-  const b = right[0] ?? "";
-  const sep = CJK_CHAR.test(a) || CJK_CHAR.test(b) ? "" : " ";
-  return `${left}${sep}${right}`;
+  return `${left}${crossesCjkBoundary(left, right) ? "" : " "}${right}`;
 }
 
 export function wordsToCues(words: Word[], opts: WordsToCuesOptions = {}): Cue[] {
@@ -468,7 +485,8 @@ export function formatVtt(words: Word[], opts?: WordsToCuesOptions): string {
     "WEBVTT\n\n" +
     cues
       .map(
-        (cue) => `${formatVttTimestamp(cue.start)} --> ${formatVttTimestamp(cue.end)}\n${cue.text}`,
+        (cue) =>
+          `${formatVttTimestamp(cue.start)} --> ${formatVttTimestamp(cue.end)}\n${cue.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`,
       )
       .join("\n\n") +
     "\n"
@@ -529,7 +547,9 @@ export function patchCaptionHtml(dir: string, words: Word[]): void {
   if (words.length === 0) return;
 
   // Indent to 10 spaces to match typical composition script indentation
-  const wordsJson = JSON.stringify(words, null, 2).replace(/\n/g, "\n          ");
+  const wordsJson = JSON.stringify(words, null, 2)
+    .replace(/</g, "\\u003c")
+    .replace(/\n/g, "\n          ");
 
   let htmlFiles: string[];
   try {
@@ -552,7 +572,7 @@ export function patchCaptionHtml(dir: string, words: Word[]): void {
     const match = scriptMatch ?? transcriptMatch;
     if (match) {
       const varName = scriptMatch ? "script" : "TRANSCRIPT";
-      content = content.replace(match[0], `const ${varName} = ${wordsJson};`);
+      content = content.replace(match[0], () => `const ${varName} = ${wordsJson};`);
       writeFileSync(file, content, "utf-8");
     }
   }

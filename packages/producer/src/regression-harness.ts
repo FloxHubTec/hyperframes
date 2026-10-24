@@ -12,7 +12,7 @@ import {
   cpSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, resolve, join } from "node:path";
+import { dirname, resolve, join, extname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -25,7 +25,7 @@ import {
   compareAudioEnvelopes,
   computeAudioResidualRmsDb,
 } from "./utils/audioRegression.js";
-import { parseFps, fpsToNumber } from "@hyperframes/core";
+import { type DistributedFps, parseFps, fpsToNumber } from "@hyperframes/core";
 import {
   checkDistributedSupport,
   type HarnessMode,
@@ -179,7 +179,7 @@ type TestResult = {
   passed: boolean;
   /**
    * Set when `--mode=distributed-simulated` skips a fixture that the
-   * distributed pipeline can't run (HDR, NTSC fps, fps∉{24,30,60}).
+   * distributed pipeline can't run (HDR, NTSC fps, fps outside DISTRIBUTED_FPS).
    * `passed` is `true` for skipped fixtures — skipping is a clean outcome,
    * not a failure — but the summary distinguishes them.
    */
@@ -764,6 +764,10 @@ function saveFailureDetails(
   const failuresDir = join(suite.dir, "failures");
   mkdirSync(failuresDir, { recursive: true });
 
+  if (result.visual && existsSync(renderedVideoPath) && statSync(renderedVideoPath).isFile()) {
+    copyFileSync(renderedVideoPath, join(failuresDir, `actual${extname(renderedVideoPath)}`));
+  }
+
   // Save compilation failures
   if (result.compilation && !result.compilation.passed) {
     if (compiledHtml && snapshotHtml) {
@@ -1114,10 +1118,10 @@ async function runTestSuite(
         result.skipped = { reason: support.reason };
         return result;
       }
-      // `checkDistributedSupport` already narrowed fps to {24,30,60}; the
+      // `checkDistributedSupport` already narrowed fps to DISTRIBUTED_FPS; the
       // cast surfaces that guarantee to TS. webm is now distributed-
       // supported via closed-GOP concat-copy, so the format passes through.
-      const fpsNum = suite.meta.renderConfig.fps.num as 24 | 30 | 60;
+      const fpsNum = suite.meta.renderConfig.fps.num as DistributedFps;
       const distributedInput = {
         projectDir: tempSrcDir,
         tempRoot,

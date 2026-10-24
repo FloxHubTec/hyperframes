@@ -1,6 +1,13 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SCENE_SWAP_MS, sceneSwapFor } from "./sceneSwap";
+import {
+  SCENE_SWAP_MS,
+  announcePreviewDocumentLoaded,
+  onPreviewContentReplaced,
+  sceneSwapFor,
+  supersededByNewerEdit,
+} from "./sceneSwap";
+import { errorProps } from "../utils/rejectionTelemetry";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -78,10 +85,15 @@ describe("sceneSwapFor", () => {
       .mockImplementation(async () => new Response("<html></html>"));
     const { iframe, swap } = swappableIframe();
     const cancel = new AbortController();
-    cancel.abort(new Error("superseded by a newer edit"));
-    await expect(sceneSwapFor(iframe)!("/preview", () => true, cancel.signal)).rejects.toThrow(
-      "superseded",
+    cancel.abort(supersededByNewerEdit());
+    const rejection = await sceneSwapFor(iframe)!("/preview", () => true, cancel.signal).catch(
+      (error: unknown) => error,
     );
+    // The rejection listener files AbortErrors as cancellations, never as unhandled failures.
+    expect(errorProps(rejection)).toMatchObject({
+      error_name: "AbortError",
+      error_message: "superseded by a newer edit",
+    });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(swap).not.toHaveBeenCalled();
   });
@@ -91,5 +103,26 @@ describe("sceneSwapFor", () => {
     const { iframe, swap } = swappableIframe();
     await sceneSwapFor(iframe)!("/preview", () => true);
     expect(swap).toHaveBeenCalledWith("<html></html>", expect.anything());
+  });
+});
+
+describe("onPreviewContentReplaced", () => {
+  it("reports Player's document-loaded announcement and a scene swap, never a raw load", () => {
+    const iframe = document.createElement("iframe");
+    const replaced = vi.fn();
+    const stop = onPreviewContentReplaced(iframe, replaced);
+
+    iframe.dispatchEvent(new Event("load"));
+    expect(replaced).not.toHaveBeenCalled();
+
+    announcePreviewDocumentLoaded(iframe);
+    expect(replaced).toHaveBeenCalledTimes(1);
+
+    iframe.dispatchEvent(new Event("hf-scenes-swapped"));
+    expect(replaced).toHaveBeenCalledTimes(2);
+
+    stop();
+    announcePreviewDocumentLoaded(iframe);
+    expect(replaced).toHaveBeenCalledTimes(2);
   });
 });

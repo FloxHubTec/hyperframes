@@ -23,6 +23,7 @@ import {
 } from "./useDomEditCommitsHelpers";
 import type { CutoverResult } from "../utils/sdkCutover";
 import { serializeStudioFileMutations } from "../utils/studioFileMutationCoordinator";
+import { encodeUrlPath } from "@hyperframes/parsers";
 
 export interface UseDomEditCommitsParams {
   activeCompPath: string | null;
@@ -112,7 +113,7 @@ export function useDomEditCommits({
       return {
         family: fontFamilyFromAssetPath(asset),
         path: asset,
-        url: buildProjectApiPath(projectId, `/preview/${asset}`),
+        url: buildProjectApiPath(projectId, `/preview/${encodeUrlPath(asset)}`),
       };
     },
     [fileTree, projectId, importedFontAssetsRef],
@@ -177,6 +178,19 @@ export function useDomEditCommits({
                   coalesceKey: options.coalesceKey,
                   coalesceMs: options.coalesceMs,
                   files,
+                  targets: batches
+                    .filter((batch) => Object.hasOwn(files, batch.sourceFile))
+                    .flatMap((batch) =>
+                      batch.patches.map(({ target }) => ({
+                        file: batch.sourceFile,
+                        ...(target.id && { id: target.id }),
+                        ...(target.hfId && { hfId: target.hfId }),
+                        ...(target.selector && { selector: target.selector }),
+                        ...(target.selectorIndex !== undefined && {
+                          selectorIndex: target.selectorIndex,
+                        }),
+                      })),
+                    ),
                 });
               }
               return {

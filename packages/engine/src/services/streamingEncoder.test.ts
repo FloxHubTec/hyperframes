@@ -25,7 +25,11 @@ import {
   type StreamingEncoderOptions,
 } from "./streamingEncoder.js";
 import { DEFAULT_HDR10_MASTERING } from "../utils/hdr.js";
-import { SDR_CAPTURE_TO_BT709_FILTER } from "../utils/sdrCaptureColor.js";
+import { type GpuEncoder } from "../utils/gpuEncoder.js";
+import {
+  SDR_CAPTURE_TO_BT709_FILTER,
+  SDR_RGB_TO_TAGGED_BT709_FILTER,
+} from "../utils/sdrCaptureColor.js";
 
 const baseHdrPq: StreamingEncoderOptions = {
   fps: { num: 30, den: 1 },
@@ -70,6 +74,68 @@ function getX265ParamsValue(args: string[]): string | undefined {
 }
 
 describe("buildStreamingArgs", () => {
+  describe("H.265 sample-entry tagging", () => {
+    const encoders: [GpuEncoder, string][] = [
+      [null, "libx265"],
+      ["nvenc", "hevc_nvenc"],
+      ["videotoolbox", "hevc_videotoolbox"],
+      ["vaapi", "hevc_vaapi"],
+      ["qsv", "hevc_qsv"],
+      ["amf", "hevc_amf"],
+    ];
+
+    function expectSingleHvc1Tag(args: string[]): void {
+      const tagIndex = args.indexOf("-tag:v");
+      expect(args.filter((arg) => arg === "-tag:v")).toHaveLength(1);
+      expect(args[tagIndex + 1]).toBe("hvc1");
+      expect(tagIndex).toBeGreaterThan(args.indexOf("-i") + 1);
+      expect(tagIndex + 1).toBeLessThan(args.length - 1);
+    }
+
+    it.each(encoders)("tags H.265 output exactly once with encoder %s", (encoder, encoderName) => {
+      const args = buildStreamingArgs(
+        { ...baseSdr, codec: "h265", useGpu: true },
+        "/tmp/out.mp4",
+        encoder,
+      );
+
+      expect(args[args.indexOf("-c:v") + 1]).toBe(encoderName);
+      expectSingleHvc1Tag(args);
+    });
+
+    it("keeps the software tag when a detected GPU is disabled", () => {
+      const args = buildStreamingArgs({ ...baseSdr, codec: "h265" }, "/tmp/out.mp4", "nvenc");
+
+      expect(args[args.indexOf("-c:v") + 1]).toBe("libx265");
+      expectSingleHvc1Tag(args);
+    });
+
+    it.each([baseHdrPq, baseHdrHlg])("tags HDR $hdr.transfer VideoToolbox output", (options) => {
+      const args = buildStreamingArgs({ ...options, useGpu: true }, "/tmp/hdr.mp4", "videotoolbox");
+
+      expect(args[args.indexOf("-c:v") + 1]).toBe("hevc_videotoolbox");
+      expect(args[args.indexOf("-color_trc:v") + 1]).toBe(
+        options.hdr?.transfer === "pq" ? "smpte2084" : "arib-std-b67",
+      );
+      expectSingleHvc1Tag(args);
+    });
+
+    it.each(encoders)("does not tag H.264 output with encoder %s", (encoder) => {
+      const args = buildStreamingArgs({ ...baseSdr, useGpu: true }, "/tmp/out.mp4", encoder);
+
+      expect(args).not.toContain("-tag:v");
+      expect(args).not.toContain("hvc1");
+    });
+
+    it("does not tag VP9 output when a GPU is requested", () => {
+      const args = buildStreamingArgs({ ...baseVp9, useGpu: true }, "/tmp/out.webm", "nvenc");
+
+      expect(args[args.indexOf("-c:v") + 1]).toBe("libvpx-vp9");
+      expect(args).not.toContain("-tag:v");
+      expect(args).not.toContain("hvc1");
+    });
+  });
+
   describe("HDR PQ (libx265)", () => {
     it("emits master-display and max-cll in -x265-params", () => {
       const args = buildStreamingArgs(baseHdrPq, "/tmp/out.mp4");
@@ -177,6 +243,15 @@ describe("buildStreamingArgs", () => {
       expect(args[args.indexOf("-vf") + 1]).toBe(
         `${SDR_CAPTURE_TO_BT709_FILTER},pad=ceil(iw/2)*2:ceil(ih/2)*2`,
       );
+    });
+
+    it("converts ProRes to the BT.709 it is tagged with and keeps the alpha format", () => {
+      const args = buildStreamingArgs(
+        { ...baseVp9, codec: "prores", preset: "4444", pixelFormat: "yuva444p10le" },
+        "/tmp/out.mov",
+      );
+      expect(args[args.indexOf("-vf") + 1]).toBe(SDR_RGB_TO_TAGGED_BT709_FILTER);
+      expect(args[args.indexOf("-pix_fmt") + 1]).toBe("yuva444p10le");
     });
   });
 
@@ -1152,6 +1227,70 @@ describe("createFrameReorderBuffer abort (interleaved parallel drain)", () => {
     await expect(buf.waitForFrame(1)).resolves.toBeUndefined();
   });
 });
+
+describe.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0)(
+  "buildStreamingArgs frame tags",
+  () => {
+    // VideoToolbox, like a libx264/libx265 given no colour options, writes only the colour its frames carry.
+    const streamTagsThrough = (args: string[], encoder: string[]): string => {
+      const dir = mkdtempSync(join(tmpdir(), "se-frame-tags-"));
+      try {
+        const out = join(dir, "out.mp4");
+        const vfAt = args.indexOf("-vf");
+        const vf = vfAt === -1 ? [] : ["-vf", args[vfAt + 1]!];
+        const source = ["-f", "lavfi", "-i", "color=c=0x808080:s=64x16:d=0.1"];
+        const encode = spawnSync("ffmpeg", [
+          "-y",
+          "-v",
+          "error",
+          ...source,
+          ...vf,
+          ...encoder,
+          out,
+        ]);
+        expect(encode.status).toBe(0);
+        const entries = "stream=color_space,color_transfer,color_primaries";
+        const probe = ["-v", "error", "-show_entries", entries, "-of", "csv=p=0", "--", out];
+        return spawnSync("ffprobe", probe).stdout.toString().trim();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const tiny = { width: 64, height: 16 };
+
+    it.each([
+      ["captured frames", {}],
+      ["raw RGB frames", { rawInputFormat: "rgb48le" as const }],
+    ])("tags BT.709 on %s, so an encoder that reads only them tags the stream", (_, extra) => {
+      const args = buildStreamingArgs({ ...baseSdr, ...tiny, ...extra }, "o.mp4");
+
+      expect(streamTagsThrough(args, ["-c:v", "libx264", "-preset", "ultrafast"])).toBe(
+        "bt709,bt709,bt709",
+      );
+    });
+
+    it.each([
+      [baseHdrPq, "smpte2084", null],
+      [baseHdrHlg, "arib-std-b67", null],
+      [baseHdrPq, "smpte2084", "videotoolbox"],
+    ] as const)(
+      "tags raw HDR frames %#, so an encoder that reads only them tags the stream",
+      (base, trc, gpu) => {
+        const args = buildStreamingArgs({ ...base, ...tiny, useGpu: gpu !== null }, "o.mp4", gpu);
+        const x265 = [
+          "-c:v",
+          "libx265",
+          "-pix_fmt",
+          "yuv420p10le",
+          "-x265-params",
+          "log-level=error",
+        ];
+
+        expect(streamTagsThrough(args, x265)).toBe(`bt2020nc,${trc},bt2020`);
+      },
+    );
+  },
+);
 
 describe.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0)(
   "buildStreamingArgs raw SDR colour",
