@@ -2,7 +2,6 @@ export const GSAP_CDN_VERSION = "3.15.0";
 const GSAP_CDN_BASE_URL = "https://cdn.jsdelivr.net/npm";
 export const GSAP_BASE_URL_META = "hyperframes-gsap-base-url";
 
-/** Plain HTTP is safe only when the mirror never leaves this machine. */
 function isLoopbackHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(hostname);
 }
@@ -24,11 +23,7 @@ export function normalizeGsapBaseUrl(baseUrl?: string): string {
   return url.href.replace(/\/+$/, "");
 }
 
-/**
- * A same-origin root path (`/vendor/npm`) where the host serves its bundled
- * copy of GSAP. It holds only {@link GSAP_CDN_VERSION}, so any other version
- * resolves to the public CDN instead.
- */
+/** A same-origin path to the host's bundled GSAP, which holds only GSAP_CDN_VERSION. */
 export function normalizeGsapLocalRoot(root: string): string {
   const value = root.trim();
   if (!/^\/(?![/\\])/.test(value) || /[?#\\]/.test(value)) {

@@ -443,7 +443,6 @@ const withPreviewBase = (html: string, projectId: string) =>
     ? html
     : injectTagsAtHeadStart(html, `<base href="${previewBaseHref(projectId)}">`);
 
-/** An explicit mirror wins, then the host's bundled copy, then jsDelivr. */
 function resolvePreviewGsapBaseUrl(adapter: PreviewApiAdapter): string {
   const configured = process.env.HYPERFRAMES_GSAP_BASE_URL;
   if (configured?.trim() || !adapter.gsapLocalRoot) {
