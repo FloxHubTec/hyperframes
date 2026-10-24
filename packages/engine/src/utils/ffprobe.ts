@@ -461,7 +461,8 @@ let runtimeFfprobeMajor: Promise<number | undefined> | undefined;
 function ffprobeMajor(): Promise<number | undefined> {
   runtimeFfprobeMajor ??= new Promise((resolve) => {
     let out = "";
-    const proc = spawn(getFfprobeBinary(), ["-version"], { stdio: ["ignore", "pipe", "ignore"] });
+    const binary = getFfprobeBinary();
+    const proc = spawn(binary, ["-version"], { stdio: ["ignore", "pipe", "ignore"] });
     proc.stdout.on("data", (chunk) => (out += String(chunk)));
     proc.on("error", () => resolve(undefined));
     proc.on("close", () => resolve(Number(/version n?(\d+)/.exec(out)?.[1]) || undefined));

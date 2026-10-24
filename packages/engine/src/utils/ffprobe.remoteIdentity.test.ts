@@ -138,7 +138,8 @@ describe.skipIf(!HAS_FFMPEG)("probing a file held at a URL", { timeout: 60_000 }
   });
 
   it("records the ffprobe major version beside the facts, when the build reports one", () => {
-    const banner = spawnSync(getFfprobeBinary(), ["-version"], { encoding: "utf-8" }).stdout;
+    const binary = getFfprobeBinary();
+    const banner = spawnSync(binary, ["-version"], { encoding: "utf-8" }).stdout;
     const major = Number(/version n?(\d+)/.exec(banner)?.[1]) || undefined;
     expect(JSON.parse(factsJson).ffprobeMajor).toBe(major);
   });
