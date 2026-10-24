@@ -54,8 +54,8 @@ export function createRuntimeStartTimeResolver(params: {
   const findReferenceTarget = (refId: string, from: Element): Element | null => {
     const scope = compositionScopeOf(from);
     if (scope) {
-      for (const candidate of scope.querySelectorAll("[id]")) {
-        if (candidate.id === refId && compositionScopeOf(candidate) === scope) return candidate;
+      for (const candidate of scope.querySelectorAll(`[id="${refId}"]`)) {
+        if (compositionScopeOf(candidate) === scope) return candidate;
       }
     }
     const byId = doc.getElementById(refId);

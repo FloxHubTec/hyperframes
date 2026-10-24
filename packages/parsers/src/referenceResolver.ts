@@ -32,10 +32,8 @@ function findReferenceTargetEl(
 ): RefResolverEl | null {
   const scope = compositionScopeOf(from);
   if (scope) {
-    for (const candidate of scope.querySelectorAll?.("[id]") ?? []) {
-      if (candidate.getAttribute("id") === refId && compositionScopeOf(candidate) === scope) {
-        return candidate;
-      }
+    for (const candidate of scope.querySelectorAll?.(`[id="${refId}"]`) ?? []) {
+      if (compositionScopeOf(candidate) === scope) return candidate;
     }
   }
   return doc.getElementById(refId) ?? doc.querySelector(`[data-composition-id="${refId}"]`);
