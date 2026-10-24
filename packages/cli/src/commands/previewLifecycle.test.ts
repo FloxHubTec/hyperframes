@@ -44,6 +44,8 @@ function reachableChildDependencies(stateHome: string, { immortal = false } = {}
   const liveServer = { ...server, pid: "9876" };
   return {
     scan: async () => (spawned && (immortal || !killed) ? [liveServer] : []),
+    probe: async (port: number) =>
+      port === liveServer.port && spawned && (immortal || !killed) ? liveServer : null,
     spawn: () => {
       spawned = true;
       return { pid: 4321, unref: vi.fn() };
@@ -412,6 +414,9 @@ describe("background preview lifecycle", () => {
       const scan = vi.fn(async () =>
         oldRunning ? [oldServer] : replacementRunning ? [replacement] : [],
       );
+      const probe = vi.fn(async (port: number) =>
+        oldRunning && port === oldServer.port ? oldServer : null,
+      );
       const kill = vi.fn((pid: number) => {
         if (pid === 4321) oldRunning = false;
       });
@@ -424,6 +429,7 @@ describe("background preview lifecycle", () => {
         browserGpuMode: "software",
         forceNew,
         kill,
+        probe,
         scan,
         sleep: async () => {},
         spawn,
@@ -465,6 +471,9 @@ describe("background preview lifecycle", () => {
       sibling,
       ...(replacementRunning ? [replacement] : []),
     ]);
+    const probe = vi.fn(async (port: number) =>
+      ownedRunning && port === owned.port ? owned : port === sibling.port ? sibling : null,
+    );
     const kill = vi.fn((pid: number) => {
       if (pid === 4321) ownedRunning = false;
     });
@@ -476,6 +485,7 @@ describe("background preview lifecycle", () => {
     const result = await startBackgroundPreview(projectDir, replacement.port, {
       browserGpuMode: "software",
       kill,
+      probe,
       scan,
       sleep: async () => {},
       spawn,
@@ -488,10 +498,6 @@ describe("background preview lifecycle", () => {
   });
 
   it("launches the replacement when the owned server died on its own", async () => {
-    // The owned preview crashes (or is Ctrl-C'd) between the outer scan and the
-    // one inside the stop. "Nothing left to stop" is the goal state for a
-    // replacement; treating it as fatal refused to start any preview at all
-    // until the session record was deleted by hand.
     const stateHome = tempDir("hf-preview-state-");
     const owned = { ...server, port: 41490 };
     const replacement = { ...server, port: 41491, pid: "5432" };
@@ -503,7 +509,6 @@ describe("background preview lifecycle", () => {
     let replacementRunning = false;
     const scan = vi.fn(async () => {
       scans += 1;
-      // Alive for the first look, gone by the time the stop path scans.
       const ownedNow = scans === 1 ? [owned] : [];
       return [...ownedNow, ...(replacementRunning ? [replacement] : [])];
     });
@@ -516,6 +521,7 @@ describe("background preview lifecycle", () => {
     const result = await startBackgroundPreview(projectDir, replacement.port, {
       forceNew: true,
       kill,
+      probe: async () => null,
       scan,
       sleep: async () => {},
       spawn,
@@ -821,6 +827,9 @@ describe("background preview lifecycle", () => {
       ...(ownedRunning ? [owned] : []),
       ...(replacementRunning ? [replacement] : []),
     ]);
+    const probe = vi.fn(async (port: number) =>
+      port === owned.port && ownedRunning ? owned : null,
+    );
     const kill = vi.fn((pid: number) => {
       if (pid === 4321) ownedRunning = false;
     });
@@ -832,6 +841,7 @@ describe("background preview lifecycle", () => {
     const result = await startBackgroundPreview(projectDir, 3002, {
       browserGpuMode: "software",
       kill,
+      probe,
       scan,
       sleep: async () => {},
       spawn,
@@ -906,27 +916,38 @@ describe("background preview lifecycle", () => {
     await expectStaleSessionRemoved(stateHome);
   });
 
-  it("keeps a live preview's record when a single probe misses it", async () => {
-    // A server whose event loop is briefly blocked (a Puppeteer thumbnail
-    // capture will do it) answers nothing for a second or two. Retiring the
-    // record on that destroys the wrapperIdentity that is the only PID-reuse
-    // guard `--stop` has, and it never comes back.
-    const stateHome = tempDir("hf-preview-state-");
-    writePreviewSession(
-      { pid: 4321, wrapperIdentity: "posix:birth", port: 3210, projectDir, logPath: "/tmp/p.log" },
-      stateHome,
-    );
+  it.each([undefined, 32521])(
+    "keeps a live preview's record after a missed status probe (port: %s)",
+    async (preferredPort) => {
+      // A server whose event loop is briefly blocked (a Puppeteer thumbnail
+      // capture will do it) answers nothing for a second or two. Retiring the
+      // record on that destroys the wrapperIdentity that is the only PID-reuse
+      // guard `--stop` has, and it never comes back.
+      const stateHome = tempDir("hf-preview-state-");
+      writePreviewSession(
+        {
+          pid: 4321,
+          wrapperIdentity: "posix:birth",
+          port: 3210,
+          projectDir,
+          logPath: "/tmp/p.log",
+        },
+        stateHome,
+      );
 
-    const status = await readBackgroundPreviewStatus(projectDir, 3002, {
-      scan: async () => [],
-      identity: () => "posix:birth",
-      isSignalable: () => true,
-      stateHome,
-    });
+      const status = await readBackgroundPreviewStatus(projectDir, preferredPort ?? 3002, {
+        scan: async () => [],
+        probe: async () => null,
+        identity: () => "posix:birth",
+        isSignalable: () => true,
+        stateHome,
+        preferredPort,
+      });
 
-    expect(status).toBeNull();
-    expect(existsSync(previewSessionPath(projectDir, stateHome))).toBe(true);
-  });
+      expect(status).toBeNull();
+      expect(existsSync(previewSessionPath(projectDir, stateHome))).toBe(true);
+    },
+  );
 
   it("keeps a live preview's record when the identity lookup gives no answer", async () => {
     // `processIdentity` catches every failure into `null`, and on Windows and
@@ -1018,23 +1039,146 @@ describe("background preview lifecycle", () => {
     expect(scan).toHaveBeenCalledExactlyOnceWith(3210);
   });
 
+  it.each([3021, 32521, 32620, 32621])(
+    "bounds explicit status discovery when the saved port is %s",
+    async (savedPort) => {
+      const stateHome = tempDir("hf-preview-state-");
+      const requestedPort = 32521;
+      const savedServer = { ...server, port: savedPort };
+      const requested = { ...server, port: requestedPort, pid: "5555" };
+      const servers = savedPort === requestedPort ? [requested] : [savedServer, requested];
+      writePreviewSession(
+        { pid: 4321, port: savedPort, projectDir, logPath: "/tmp/preview.log" },
+        stateHome,
+      );
+      const scan = vi.fn(async (start = 3002) =>
+        servers
+          .filter((candidate) => candidate.port >= start && candidate.port < start + 100)
+          .sort((a, b) => a.port - b.port),
+      );
+      const probe = vi.fn(
+        async (port: number) => servers.find((candidate) => candidate.port === port) ?? null,
+      );
+
+      const status = await readBackgroundPreviewStatus(projectDir, requestedPort, {
+        scan,
+        probe,
+        stateHome,
+        preferredPort: requestedPort,
+      });
+
+      expect(status).toMatchObject({ port: requestedPort, pid: 5555 });
+      expect(scan).toHaveBeenCalledExactlyOnceWith(requestedPort);
+      expect(probe.mock.calls).toEqual(
+        savedPort < requestedPort || savedPort > 32620 ? [[savedPort]] : [],
+      );
+      expect(
+        JSON.parse(readFileSync(previewSessionPath(projectDir, stateHome), "utf8")),
+      ).toMatchObject({
+        port: savedPort,
+        pid: 4321,
+      });
+    },
+  );
+
+  it("finds a saved preview outside the explicit status range without reporting another project", async () => {
+    const stateHome = tempDir("hf-preview-state-");
+    savePreviewSession(stateHome);
+    const scan = vi.fn(async () => [{ ...server, port: 32521, projectDir: `${projectDir}-other` }]);
+    const probe = vi.fn(async (port: number) => (port === server.port ? server : null));
+
+    const status = await readBackgroundPreviewStatus(projectDir, 32521, {
+      scan,
+      probe,
+      stateHome,
+      preferredPort: 32521,
+    });
+
+    expect(status).toMatchObject({ port: server.port, pid: 4321 });
+    expect(scan).toHaveBeenCalledExactlyOnceWith(32521);
+    expect(probe).toHaveBeenCalledExactlyOnceWith(server.port);
+  });
+
+  it.each([3021, 32521])(
+    "only probes the saved port %s for an explicit stop",
+    async (savedPort) => {
+      const stateHome = tempDir("hf-preview-state-");
+      writePreviewSession(
+        { pid: 4321, port: savedPort, projectDir, logPath: "/tmp/preview.log" },
+        stateHome,
+      );
+      let running = true;
+      const owned = { ...server, port: savedPort };
+      const scan = vi.fn(async () => [{ ...server, port: 32522, pid: "8765" }]);
+      const probe = vi.fn(async (port: number) => (running && port === savedPort ? owned : null));
+      const kill = vi.fn(() => {
+        running = false;
+      });
+
+      expect(
+        await stopBackgroundPreview(projectDir, 32521, {
+          scan,
+          probe,
+          kill,
+          stateHome,
+          preferredPort: 32521,
+        }),
+      ).toBe(true);
+
+      expect(scan).not.toHaveBeenCalled();
+      expect(probe.mock.calls).toEqual([[savedPort], [savedPort]]);
+      expect(kill).toHaveBeenCalledExactlyOnceWith(4321);
+      expect(existsSync(previewSessionPath(projectDir, stateHome))).toBe(false);
+    },
+  );
+
+  it("discovers within the explicit stop range when no session was saved", async () => {
+    const stateHome = tempDir("hf-preview-state-");
+    const discovered = { ...server, port: 32522 };
+    const scan = vi.fn(async () => [discovered]);
+    const probe = vi.fn(async () => null);
+    const kill = vi.fn();
+
+    expect(
+      await stopBackgroundPreview(projectDir, 32521, {
+        scan,
+        probe,
+        kill,
+        stateHome,
+        preferredPort: 32521,
+      }),
+    ).toBe(true);
+
+    expect(scan).toHaveBeenCalledExactlyOnceWith(32521);
+    expect(probe).toHaveBeenCalledExactlyOnceWith(discovered.port);
+    expect(kill).toHaveBeenCalledExactlyOnceWith(4321);
+  });
+
   it("stops only the matching project server and waits until it is unreachable", async () => {
     let running = true;
+    let stopping = false;
     const scan = vi.fn(async () => (running ? [server] : []));
+    const probe = vi.fn(async (port: number) => (running && port === server.port ? server : null));
     const kill = vi.fn(() => {
-      running = false;
+      stopping = true;
+    });
+    const sleep = vi.fn(async () => {
+      if (stopping) running = false;
     });
 
     const result = await stopBackgroundPreview(projectDir, 3002, {
       scan,
+      probe,
       kill,
-      sleep: async () => {},
+      sleep,
       stateHome: tempDir("hf-preview-state-"),
     });
 
     expect(result).toBe(true);
     expect(kill).toHaveBeenCalledWith(4321);
-    expect(scan).toHaveBeenCalledTimes(2);
+    expect(scan).toHaveBeenCalledOnce();
+    expect(probe.mock.calls).toEqual([[server.port], [server.port]]);
+    expect(sleep).toHaveBeenCalledOnce();
   });
 
   it("does not kill an unmatched saved PID that may have been reused", async () => {
@@ -1044,6 +1188,7 @@ describe("background preview lifecycle", () => {
 
     const result = await stopBackgroundPreview(projectDir, 3002, {
       scan: async () => [],
+      probe: async () => null,
       kill,
       stateHome,
     });
@@ -1065,6 +1210,7 @@ describe("background preview lifecycle", () => {
     await expect(
       stopBackgroundPreview(projectDir, 3002, {
         scan,
+        probe: async () => ({ ...server, pid: null }),
         kill,
         sleep: async () => {},
         stateHome,
@@ -1094,6 +1240,7 @@ describe("background preview lifecycle", () => {
 
     const result = await stopBackgroundPreview(projectDir, 3002, {
       scan,
+      probe: async (port) => (running && port === server.port ? { ...server, pid: "9876" } : null),
       kill,
       isDescendant: (childPid, ancestorPid) => childPid === 9876 && ancestorPid === 4321,
       identity: (pid) => (pid === 4321 ? "wrapper-birth" : null),
@@ -1125,6 +1272,7 @@ describe("background preview lifecycle", () => {
 
     const result = await stopBackgroundPreview(projectDir, 3002, {
       scan,
+      probe: async (port) => (running && port === server.port ? { ...server, pid: "9876" } : null),
       kill,
       isDescendant: () => true,
       identity: () => "reused-pid-birth",
@@ -1146,6 +1294,7 @@ describe("background preview lifecycle", () => {
     await expect(
       stopBackgroundPreview(projectDir, 3002, {
         scan: async () => [server],
+        probe: async () => server,
         kill: vi.fn(),
         sleep: async () => {},
         stateHome,
@@ -1171,6 +1320,8 @@ describe("background preview lifecycle", () => {
     const stopped = await stopBackgroundPreview(projectDir, owned.port, {
       kill,
       scan,
+      probe: async (port) =>
+        ownedRunning && port === owned.port ? owned : port === sibling.port ? sibling : null,
       sleep: async () => {},
       stateHome,
     });

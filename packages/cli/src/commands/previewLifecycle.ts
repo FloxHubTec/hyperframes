@@ -307,10 +307,12 @@ export async function readBackgroundPreviewStatus(
   startPort: number,
   dependencies: LifecycleDependencies = {},
 ): Promise<PreviewSession | null> {
-  const scan = dependencies.scan ?? scanActiveServers;
-  const stateHome = dependencies.stateHome ?? defaultStateHome();
-  const saved = readPreviewSession(projectDir, stateHome);
-  const server = matchingServer(await scan(saved?.port ?? startPort), projectDir);
+  const { stateHome, saved, scanned } = await readPreviewLifecycleState(
+    projectDir,
+    startPort,
+    dependencies,
+  );
+  const server = matchingServer(scanned, projectDir);
   if (server) {
     const pid = Number(server.pid ?? saved?.pid);
     if (Number.isInteger(pid) && pid > 0) {
@@ -497,7 +499,7 @@ async function readPreviewLifecycleState(
   const scanStart = dependencies.preferredPort ?? saved?.port ?? startPort;
   const scanned = await scan(scanStart);
   await addSavedPortServer(scanned, saved?.port, scanStart, dependencies);
-  return { scan, stateHome, saved, scanStart, scanned };
+  return { scan, stateHome, saved, scanned };
 }
 
 function unmetPreferredPort(port: number, preferredPort: number | undefined): number | undefined {
@@ -596,7 +598,7 @@ export async function startBackgroundPreview(
   if (unmet !== undefined) {
     // Wait until it stops answering so a concurrent launch or --status cannot adopt a dying server.
     await kill(pid);
-    if (!(await awaitServerGone(projectDir, launchStart, server.port, dependencies))) {
+    if (!(await awaitServerGone(projectDir, server.port, dependencies))) {
       throw new Error(
         `background preview on port ${server.port} did not stop after failing to bind port ${unmet}; see ${logPath}`,
       );
@@ -658,14 +660,12 @@ export async function stopBackgroundPreview(
   startPort: number,
   dependencies: LifecycleDependencies = {},
 ): Promise<boolean> {
-  const { stateHome, saved, scanStart, scanned } = await readPreviewLifecycleState(
-    projectDir,
-    startPort,
-    dependencies,
-  );
+  const stateHome = dependencies.stateHome ?? defaultStateHome();
+  const saved = readPreviewSession(projectDir, stateHome);
+  const scan = dependencies.scan ?? scanActiveServers;
   const server = saved
-    ? matchingServerAtPort(scanned, projectDir, saved.port)
-    : matchingServer(scanned, projectDir);
+    ? await probeMatchingServerAtPort(projectDir, saved.port, dependencies)
+    : matchingServer(await scan(dependencies.preferredPort ?? startPort), projectDir);
   if (!server) {
     removePreviewSession(projectDir, stateHome);
     return false;
@@ -681,31 +681,30 @@ export async function stopBackgroundPreview(
   const kill = dependencies.kill ?? stopProcess;
   await kill(ownedStopTargetPid(saved, pid, dependencies));
 
-  if (!(await awaitServerGone(projectDir, scanStart, server.port, dependencies))) {
+  if (!(await awaitServerGone(projectDir, server.port, dependencies))) {
     throw new Error(`background preview did not stop for ${resolve(projectDir)}`);
   }
   removePreviewSession(projectDir, stateHome);
   return true;
 }
 
+async function probeMatchingServerAtPort(
+  projectDir: string,
+  port: number,
+  dependencies: LifecycleDependencies,
+): Promise<ActiveServer | null> {
+  const server = await (dependencies.probe ?? activeServerOnPort)(port);
+  return matchingServerAtPort(server ? [server] : [], projectDir, port);
+}
+
 async function awaitServerGone(
   projectDir: string,
-  scanStart: number,
   port: number,
   dependencies: LifecycleDependencies,
 ): Promise<boolean> {
-  const scan = dependencies.scan ?? scanActiveServers;
-  const probe = dependencies.probe ?? activeServerOnPort;
   const sleep = dependencies.sleep ?? delay;
   for (let attempt = 0; attempt < 25; attempt++) {
-    let servers: ActiveServer[];
-    if (dependencies.preferredPort === undefined || isPortInScanRange(port, scanStart)) {
-      servers = await scan(scanStart);
-    } else {
-      const server = await probe(port);
-      servers = server ? [server] : [];
-    }
-    if (!matchingServerAtPort(servers, projectDir, port)) return true;
+    if (!(await probeMatchingServerAtPort(projectDir, port, dependencies))) return true;
     await sleep(100);
   }
   return false;
