@@ -563,6 +563,17 @@ describe("checkSkills removed-upstream detection", () => {
     expect(res.summary.removed).toBe(1);
   });
 
+  it("never compares or refreshes a skill another publisher installed under one of our names", async () => {
+    const { home, opts } = setup({ source: "test", skills: { alpha: { hash: "x", files: 1 } } });
+    writeGlobalLock(home, { alpha: { source: "someone/else" } });
+
+    const res = await checkSkills(opts);
+
+    expect(res.skills.find((s) => s.name === "alpha")).toBeUndefined();
+    expect(res.foreign).toEqual(["alpha"]);
+    expect(res.updateAvailable).toBe(false);
+  });
+
   // GH #3111 — the data-loss regression. `skills add --skill '*'` installs every
   // skill in the repo, including the repo-native ones under `.claude/skills/`
   // and `.agents/skills/`, and attributes them all to our source. The published
@@ -666,6 +677,16 @@ describe("checkSkills removed-upstream detection", () => {
         retired,
       ]);
       expect(res.updateAvailable).toBe(true);
+    });
+
+    it("leaves a retired-named bundle alone when the lock gives it to another publisher", async () => {
+      const { home, opts } = setup({ source: "test", skills: { alpha: { hash: "x", files: 1 } } });
+      installSkills(join(home, ".agents/skills"), ["hyperframes-core"]);
+      writeGlobalLock(home, { "hyperframes-core": { source: "someone/else" } });
+
+      const res = await checkSkills(opts);
+
+      expect(res.summary.removed).toBe(0);
     });
 
     it("lists the eight retired workflow skills", () => {

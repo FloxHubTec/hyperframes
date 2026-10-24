@@ -100,6 +100,8 @@ export interface SkillsCheckResult {
     removed: number;
   };
   skills: SkillDiff[];
+  /** Manifest-named skills the lock attributes to another publisher; left untouched. */
+  foreign: string[];
   /**
    * True when an install was located but the upstream skills lock was absent at
    * the expected path, so removed-detection couldn't run (it silently reports
@@ -524,6 +526,15 @@ export function skillsAttributedToSource(lock: SkillLock | null, source: string)
     .map(([name]) => name);
 }
 
+/**
+ * The lock records another publisher as the skill's source. A skill with no
+ * lock entry is not "from another source": provenance is unknown, not foreign.
+ */
+function isFromOtherSource(entry: LockEntry | undefined, source: string): boolean {
+  const recorded = [repoSlug(entry?.source), repoSlug(entry?.sourceUrl)].filter(Boolean);
+  return recorded.length > 0 && !recorded.includes(repoSlug(source));
+}
+
 // Removed-detection reads the vercel-labs/skills lock, whose on-disk paths live
 // in *their* repo, not ours — so if upstream moves the lock, our cross-reference
 // silently finds nothing and `detectRemoved` no-ops without a peep. Pin the
@@ -628,7 +639,9 @@ function detectRemoved(
   const retired = RETIRED_SKILLS.filter(
     (name) =>
       attributed.includes(name) ||
-      (RETIRED_DOMAIN_SKILLS.includes(name) && existsSync(join(root.dir, name, "SKILL.md"))),
+      (RETIRED_DOMAIN_SKILLS.includes(name) &&
+        existsSync(join(root.dir, name, "SKILL.md")) &&
+        !isFromOtherSource(lock?.skills?.[name], latest.source)),
   );
   const removed = [...new Set([...dropped, ...retired])]
     .filter((name) => !(name in latest.skills))
@@ -828,8 +841,22 @@ export async function checkSkills(
   const latest = await resolveLatestManifest(opts.source, opts.cwd, { canonical: opts.canonical });
   const skillNames = Object.keys(latest.skills);
   const root = locateInstall(skillNames, { dir: opts.dir, cwd: opts.cwd, home: opts.home });
-  const installed = root ? hashInstalled(root, skillNames) : {};
-  const diff = diffSkills(installed, latest);
+  // A directory sharing a name with one of ours can belong to another publisher.
+  // The lock says so; such a skill is never compared, refreshed or overwritten.
+  const lock = root ? readSkillLock(lockPathForScope(root.scope, opts)) : null;
+  const foreign = root
+    ? skillNames.filter(
+        (name) =>
+          existsSync(join(root.dir, name, "SKILL.md")) &&
+          isFromOtherSource(lock?.skills?.[name], latest.source),
+      )
+    : [];
+  const ours = skillNames.filter((name) => !foreign.includes(name));
+  const installed = root ? hashInstalled(root, ours) : {};
+  const diff = diffSkills(installed, {
+    ...latest,
+    skills: Object.fromEntries(ours.map((name) => [name, latest.skills[name]!])),
+  });
   const removedResult = root
     ? detectRemoved(root, latest, { cwd: opts.cwd, home: opts.home })
     : { removed: [], lockMissing: false };
@@ -843,6 +870,7 @@ export async function checkSkills(
     updateAvailable: diff.updateAvailable || removed.length > 0,
     summary: { ...diff.summary, removed: removed.length },
     skills: [...diff.skills, ...removed],
+    foreign,
     lockMissing,
   };
 }

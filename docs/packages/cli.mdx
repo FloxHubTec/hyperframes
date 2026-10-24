@@ -113,7 +113,7 @@ npx hyperframes init my-video --tailwind
 | `--keep-original`   | Copy the `--video` file as is instead of converting a non-web codec to H.264 MP4                                                                                                                                                                                                     |
 | `--model`           | Whisper model for that transcription (for example `small.en`, `medium.en`, `large`)                                                                                                                                                                                                   |
 | `--language`        | Language code for transcription (`en`, `es`, `ja`, …). Filters out speech in other languages.                                                                                                                                                                                         |
-| `--skip-skills`     | Currently ignored. Set `HYPERFRAMES_SKIP_SKILLS=1` to opt out in CI or tests.                                                                                                                                                                                                         |
+| `--skip-skills`     | Leave AI coding skills alone: `init` does not check or refresh them. `HYPERFRAMES_SKIP_SKILLS=1` does the same.
 
 Pass `--video` or `--audio` and the CLI transcribes the audio with Whisper and
 patches the captions into the composition for you. `--skip-transcribe` turns
@@ -1859,6 +1859,7 @@ npx hyperframes skills update
 npx hyperframes skills update slideshow
 ```
 
+Only skills the install record attributes to `heygen-com/hyperframes` are ever refreshed or removed; skills from other publishers are left as they are.
 Bare `skills` installs everything. `skills update` keeps a deliberate partial
 installation partial: it refreshes the core set plus whatever is already
 installed, and never expands beyond that unless you name a skill. Naming one
