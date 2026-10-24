@@ -185,7 +185,7 @@ export interface EngineConfig {
   // ── FFmpeg timeouts ──────────────────────────────────────────────────
   /** Timeout for FFmpeg frame encoding (ms). Default: 600_000 */
   ffmpegEncodeTimeout: number;
-  /** Timeout for FFmpeg mux/faststart processes (ms). Default: 300_000 */
+  /** FFmpeg mux/faststart timeout (ms); extraction waits this long for each new frame. Default: 300_000 */
   ffmpegProcessTimeout: number;
   /**
    * Inactivity timeout for FFmpeg streaming encode (ms). The timer resets on
@@ -799,6 +799,13 @@ export function explainDrawElementDisabled(args: {
   return "disabled";
 }
 
+/** `pageNavigationTimeout` alone, for callers that need the page-load budget without the rest of the config. */
+export function resolvePageNavigationTimeout(): number {
+  const raw = process.env.PRODUCER_PAGE_NAVIGATION_TIMEOUT_MS;
+  const parsed = raw === undefined || raw === "" ? NaN : Number(raw);
+  return Number.isFinite(parsed) ? parsed : DEFAULT_CONFIG.pageNavigationTimeout;
+}
+
 export function resolveConfig(overrides?: Partial<EngineConfig>): EngineConfig {
   const env = (key: string): string | undefined => process.env[key];
   const envNum = (key: string, fallback: number): number => {
@@ -845,7 +852,6 @@ export function resolveConfig(overrides?: Partial<EngineConfig>): EngineConfig {
       DEFAULT_CONFIG.largeRenderThreshold,
     ),
 
-    chromePath: env("PRODUCER_HEADLESS_SHELL_PATH"),
     disableGpu: envBool("PRODUCER_DISABLE_GPU", DEFAULT_CONFIG.disableGpu),
     browserGpuMode: envBrowserGpuMode(),
     allowSoftwareWebGpu: envBool(
@@ -932,10 +938,7 @@ export function resolveConfig(overrides?: Partial<EngineConfig>): EngineConfig {
       "PRODUCER_RENDER_READY_TIMEOUT_MS",
       DEFAULT_CONFIG.renderReadyTimeout,
     ),
-    pageNavigationTimeout: envNum(
-      "PRODUCER_PAGE_NAVIGATION_TIMEOUT_MS",
-      DEFAULT_CONFIG.pageNavigationTimeout,
-    ),
+    pageNavigationTimeout: resolvePageNavigationTimeout(),
 
     verifyRuntime: env("PRODUCER_VERIFY_HYPERFRAME_RUNTIME") !== "false",
     runtimeManifestPath: env("PRODUCER_HYPERFRAME_MANIFEST_PATH"),

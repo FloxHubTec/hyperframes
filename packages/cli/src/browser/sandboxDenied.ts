@@ -2,9 +2,14 @@ import type { LaunchOptions } from "puppeteer-core";
 
 const MACH_SERVICE_DENIED = /bootstrap_check_in\b[^\n]*Permission denied/;
 const SINGLE_PROCESS = "--single-process";
+const CPU_COMPOSITING = "--disable-gpu-compositing";
 
 export function machServiceDenied(errorMessage: string): boolean {
   return MACH_SERVICE_DENIED.test(errorMessage);
+}
+
+export function pipeLaunchClosedOnMac(error: unknown, platform = process.platform): boolean {
+  return platform === "darwin" && error instanceof Error && error.name === "TargetCloseError";
 }
 
 /** Codex runs agent commands in a macOS seatbelt, which names itself in the environment. */
@@ -12,14 +17,11 @@ export function inAgentSandbox(env = process.env, platform = process.platform): 
   return platform === "darwin" && env.CODEX_SANDBOX === "seatbelt";
 }
 
-/** The one launch a seatbelt allows: no child process can register its mach port and nothing may listen. */
+/** The one launch a seatbelt allows: no child process registers a mach port, nothing listens, no GPU composites. */
 export function oneProcessOverPipe(options: LaunchOptions): LaunchOptions {
   const args = options.args ?? [];
-  return {
-    ...options,
-    pipe: true,
-    args: args.includes(SINGLE_PROCESS) ? args : [...args, SINGLE_PROCESS],
-  };
+  const missing = [SINGLE_PROCESS, CPU_COMPOSITING].filter((flag) => !args.includes(flag));
+  return { ...options, pipe: true, args: [...args, ...missing] };
 }
 
 export function isOneProcessOverPipe(options: LaunchOptions): boolean {
