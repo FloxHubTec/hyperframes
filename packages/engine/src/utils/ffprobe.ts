@@ -411,7 +411,13 @@ const PROBE_JSON_ARGS = ["-print_format", "json", "-show_format", "-show_streams
 interface StoredProbeFacts {
   ffprobe: FFProbeOutput;
   /** What `extractFinalVideoFrameTimestamp` answers for the stream window it names. */
-  finalFrame?: { streamStart: number; streamDuration: number; seconds: number };
+  finalFrame?: {
+    streamStart: number;
+    streamDuration: number;
+    seconds: number;
+    /** `duration_time` of the final video packet; absent in facts stored before it was read. */
+    lastPacketSeconds?: number;
+  };
 }
 
 const storedFacts = new Map<string, Promise<StoredProbeFacts | null>>();
@@ -462,6 +468,7 @@ export async function buildProbeFactsText(filePath: string, signal?: AbortSignal
         streamStart: window.videoStreamStartSeconds,
         streamDuration: window.videoStreamDurationSeconds,
         seconds: await extractFinalVideoFrameTimestamp(filePath, window, signal),
+        lastPacketSeconds: await extractFinalPacketDuration(filePath, window, signal),
       };
     }
   } catch {
@@ -940,11 +947,11 @@ function resolveStreamWindow(
   return { videoStreamStartSeconds, videoStreamDurationSeconds, cacheKey };
 }
 
-/** The final-frame time a site stored beside the video for this stream window; undefined when none matches. */
-export async function readStoredFinalFrameSeconds(
+/** The final-frame facts a site stored beside the video for this stream window; undefined when none match. */
+export async function readStoredFinalFrame(
   filePath: string,
   metadata: Pick<VideoMetadata, "videoStreamDurationSeconds" | "videoStreamStartSeconds">,
-): Promise<number | undefined> {
+): Promise<{ seconds: number; lastPacketSeconds?: number } | undefined> {
   const { videoStreamStartSeconds, videoStreamDurationSeconds } = resolveStreamWindow(
     filePath,
     metadata,
@@ -953,8 +960,45 @@ export async function readStoredFinalFrameSeconds(
   return stored &&
     stored.streamStart === videoStreamStartSeconds &&
     stored.streamDuration === videoStreamDurationSeconds
-    ? stored.seconds
+    ? stored
     : undefined;
+}
+
+/**
+ * `duration_time` of the stream's last packet (by presentation time), read from the same final
+ * second the final-frame probe reads; undefined when ffprobe reports none.
+ */
+async function extractFinalPacketDuration(
+  filePath: string,
+  window: { videoStreamStartSeconds: number; videoStreamDurationSeconds: number },
+  signal?: AbortSignal,
+): Promise<number | undefined> {
+  const streamEnd = window.videoStreamStartSeconds + window.videoStreamDurationSeconds;
+  const intervalStart = Math.max(window.videoStreamStartSeconds, streamEnd - 1);
+  const stdout = await runFfprobe(
+    filePath,
+    [
+      "-select_streams",
+      "v:0",
+      "-read_intervals",
+      `${intervalStart}%${streamEnd}`,
+      "-show_entries",
+      "packet=pts_time,duration_time",
+      "-of",
+      "csv=p=0",
+    ],
+    signal,
+    { retainTail: true, maxChars: 64 * 1024 },
+  );
+  const packets = stdout
+    .split("\n")
+    .map((line) => line.trim().split(",").map(Number))
+    .filter(([pts, duration]) => Number.isFinite(pts) && Number.isFinite(duration));
+  const last = packets.reduce<number[] | undefined>(
+    (best, packet) => (!best || packet[0]! > best[0]! ? packet : best),
+    undefined,
+  );
+  return last?.[1];
 }
 
 /**
@@ -998,8 +1042,8 @@ export async function extractFinalVideoFrameTimestamp(
   if (cached) return cached;
 
   const probePromise = (async () => {
-    const stored = await readStoredFinalFrameSeconds(filePath, metadata);
-    if (stored !== undefined) return stored;
+    const stored = await readStoredFinalFrame(filePath, metadata);
+    if (stored) return stored.seconds;
     if (!(videoDurationSeconds > 0) || !Number.isFinite(videoDurationSeconds)) {
       throw new Error(
         `[FFmpeg] Cannot locate final video frame for invalid duration ${String(videoDurationSeconds)}`,

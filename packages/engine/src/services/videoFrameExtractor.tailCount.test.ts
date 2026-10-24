@@ -51,6 +51,58 @@ describe("tailFramesFromFinalFrame", () => {
     },
   );
 
+  // A video stream that starts after the file's audio: read off real extractions of mov sources
+  // whose video starts 0.021016 s late. Only a full-frame last packet is trusted (the ProRes
+  // sources end on a short one).
+  const LATE: [
+    start: number,
+    firstFrame: number,
+    tailFrames: number,
+    outputFps: number,
+    sourceFps: number,
+    final: number,
+    lead: number,
+    lastPacket: number | undefined,
+    expected: number | null,
+  ][] = [
+    [1.449433, 54, 30, 30, 24, 5.125, 0.021016, 0.041641, 30],
+    [0.518339, 287, 60, 60, 24, 6.208281, 0.021016, 0.041641, 59],
+    [0.809885, 54, 24, 24, 25, 4.92, 0.021016, 0.04, 24],
+    [0.625, 63, 24, 24, 30, 4.1, 0.021016, 0.033281, 22],
+    [0.101615, 247, 60, 60, 24, 5.125, 0.021016, 0.020625, null],
+    [1.333333, 123, 60, 60, 25, 4.92, 0.021016, 0.018984, null],
+    [0.72, 48, 25, 25, 30, 4.1, 0.021016, 0.012344, null],
+    [0.625, 63, 24, 24, 30, 4.1, 0.021016, undefined, null],
+  ];
+
+  it.each(LATE)(
+    "late stream, start %d, first %d, %d slots at %d fps over %d fps: packet %s",
+    (
+      startTime,
+      firstFrame,
+      tailFrames,
+      outputFps,
+      sourceFps,
+      final,
+      lead,
+      lastPacket,
+      expected,
+    ) => {
+      expect(
+        tailFramesFromFinalFrame({
+          startTime,
+          firstFrame,
+          tailFrames,
+          outputFps,
+          sourceFps,
+          finalFrameSeconds: final,
+          streamLeadSeconds: lead,
+          lastPacketSeconds: lastPacket,
+        }),
+      ).toBe(expected);
+    },
+  );
+
   const base = {
     startTime: 0.68,
     firstFrame: 13,
@@ -61,9 +113,8 @@ describe("tailFramesFromFinalFrame", () => {
     streamLeadSeconds: 0,
   };
 
-  it("declines a stream that starts after the file does, an unknown source rate and an empty tail", () => {
+  it("declines an unknown source rate and an empty tail", () => {
     expect(tailFramesFromFinalFrame(base)).toBe(22);
-    expect(tailFramesFromFinalFrame({ ...base, streamLeadSeconds: 0.3 })).toBeNull();
     expect(tailFramesFromFinalFrame({ ...base, sourceFps: 12.37 })).toBeNull();
     expect(tailFramesFromFinalFrame({ ...base, startTime: 9 })).toBeNull();
   });

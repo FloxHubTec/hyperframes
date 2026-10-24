@@ -45,7 +45,7 @@ import {
   extractMediaMetadata,
   mediaFileIdentity,
   readMetadataCache,
-  readStoredFinalFrameSeconds,
+  readStoredFinalFrame,
   resolvePlayableVideoDuration,
   writeMetadataCache,
   type MediaProbeCacheEntry,
@@ -219,7 +219,7 @@ function exactSourceRate(probed: number): number | null {
  * How many of the `tailFrames` slots from `firstFrame` a constant-rate window yields when it reaches
  * the source's end, from the stored final-frame time alone: slot j holds a frame while its time,
  * `startTime + (firstFrame + j) / outputFps`, is before the last frame's end. A slot exactly at the
- * end is empty. Null where the answer is not certain (a stream starting late, an unrecognised rate,
+ * end is empty. Null where the answer is not certain (a late stream without a full last packet, an unrecognised rate,
  * a slot within a few microseconds of the end, or no slot at all); callers decode the tail instead.
  */
 export function tailFramesFromFinalFrame(input: {
@@ -230,11 +230,18 @@ export function tailFramesFromFinalFrame(input: {
   sourceFps: number;
   finalFrameSeconds: number;
   streamLeadSeconds: number;
+  lastPacketSeconds?: number;
 }): number | null {
   const sourceRate = exactSourceRate(input.sourceFps);
-  if (!sourceRate || input.streamLeadSeconds !== 0 || !(input.outputFps > 0)) return null;
+  if (!sourceRate || !(input.outputFps > 0)) return null;
+  // A late-starting stream ends where its last packet does, and ffmpeg shortens the last frame
+  // to a short packet in ways the stored facts cannot predict: trust only a full-frame packet.
+  const lead = input.streamLeadSeconds;
+  if (lead !== 0 && !(Math.abs((input.lastPacketSeconds ?? NaN) - 1 / sourceRate) <= 1e-4)) {
+    return null;
+  }
   const seek = input.startTime + input.firstFrame / input.outputFps;
-  const slots = (input.finalFrameSeconds + 1 / sourceRate - seek) * input.outputFps;
+  const slots = (lead + input.finalFrameSeconds + 1 / sourceRate - seek) * input.outputFps;
   const distanceToSlot = Math.abs(slots - Math.round(slots));
   // ffprobe prints the final time to 1 us; a slot closer than 50 us/fps to the end is a tie, up to 500 us/fps unknown.
   if (distanceToSlot >= 5e-5 && distanceToSlot < 5e-4) return null;
@@ -2344,9 +2351,9 @@ export async function extractAllVideoFrames(
       return deferred(expectedFrames);
     }
     const firstTailFrame = expectedFrames - tailFrames;
-    const finalFrameSeconds = await readStoredFinalFrameSeconds(work.videoPath, work.metadata);
+    const storedFinalFrame = await readStoredFinalFrame(work.videoPath, work.metadata);
     const storedTailFrames =
-      finalFrameSeconds === undefined
+      storedFinalFrame === undefined
         ? null
         : tailFramesFromFinalFrame({
             startTime: work.extractionMediaStart,
@@ -2354,7 +2361,8 @@ export async function extractAllVideoFrames(
             tailFrames,
             outputFps: fps,
             sourceFps: work.metadata.fps,
-            finalFrameSeconds,
+            finalFrameSeconds: storedFinalFrame.seconds,
+            lastPacketSeconds: storedFinalFrame.lastPacketSeconds,
             streamLeadSeconds: work.metadata.videoStreamLeadSeconds ?? 0,
           });
     if (storedTailFrames !== null) {

@@ -11,6 +11,7 @@ import {
   declareContentAddressedUrl,
   declareProbeFactsUrl,
   readProbeJson,
+  readStoredFinalFrame,
   extractAudioMetadata,
   extractFinalVideoFrameTimestamp,
   extractMediaMetadata,
@@ -112,6 +113,16 @@ describe.skipIf(!HAS_FFMPEG)("probing a file held at a URL", { timeout: 60_000 }
 
     expect(seconds).toBeGreaterThan(2);
     expect(seconds).toBeLessThanOrEqual(3);
+  });
+
+  it("stores the final packet's duration beside the final frame, and reads it back", async () => {
+    const url = `${base}/gone/packet.mp4`;
+    declareProbeFactsUrl(url, `${base}/facts/packet.json`);
+    const metadata = await extractMediaMetadata(url);
+
+    const stored = await readStoredFinalFrame(url, metadata);
+
+    expect(stored?.lastPacketSeconds).toBeCloseTo(0.04, 3);
   });
 
   it("probes the media itself when its stored JSON cannot be read", async () => {
