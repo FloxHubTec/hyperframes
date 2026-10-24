@@ -110,6 +110,11 @@ const STALL_ADVICE =
  * when no writer was parked, i.e. every worker was wedged inside a capture
  * call. The two are distinct field signatures and stay distinguishable.
  */
+/** A pool failure with the probe session's console (and the failure's own page errors) attached. */
+function poolFailure(error: unknown, probeSession: CaptureSession | null) {
+  return wrapCaptureStageError(error, probeSession?.browserConsoleBuffer ?? []);
+}
+
 class ParallelCaptureStallError extends Error {
   readonly variant: "drain" | "pool";
 
@@ -871,7 +876,7 @@ export async function runCaptureStreamingStage(
         // Surface the TYPED drain error (DrawElementVerificationError) so the
         // orchestrator's verify-retry handler recognizes it — the worker pool
         // flattens worker errors into a plain message string.
-        if (parallelDrainError) throw parallelDrainError;
+        if (parallelDrainError) throw poolFailure(parallelDrainError, probeSession);
         // A watchdog trip aborts the pool via stallController, so the pool
         // rejects with a generic "[Parallel] Capture failed" string. Replace
         // it with a clear, non-cancellation stall error (the parent abort did
@@ -887,12 +892,12 @@ export async function runCaptureStreamingStage(
             phaseSummary: phaseSummary(),
           });
         }
-        throw err;
+        throw poolFailure(err, probeSession);
       } finally {
         clearInterval(stallTimer);
         abortSignal?.removeEventListener("abort", forwardParentAbort);
       }
-      if (parallelDrainError) throw parallelDrainError;
+      if (parallelDrainError) throw poolFailure(parallelDrainError, probeSession);
       pushWorkerDedupPerfs(workerResults, dedupPerfs);
       const workerPageErrors: string[] = [];
       pushWorkerPageErrors(workerResults, workerPageErrors);

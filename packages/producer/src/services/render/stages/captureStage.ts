@@ -399,6 +399,11 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
       },
       cfg: captureCfg,
       log,
+    }).catch((error: unknown) => {
+      throw wrapCaptureStageError(
+        error,
+        withWorkerPageErrors(probeSession?.browserConsoleBuffer ?? [], workerPageErrors),
+      );
     });
     captureAttempts.push(...attempts);
     const lastAttempt = attempts[attempts.length - 1];

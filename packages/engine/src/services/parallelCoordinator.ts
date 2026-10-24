@@ -956,6 +956,7 @@ async function executeWorkerTask(
     const failure = classifyCaptureFailure(error, {
       signal,
       workerDiagnostics: [workerDiagnostic],
+      pageErrorLines: session ? pageErrorLinesOf(session) : undefined,
     });
     onFailure?.(failure);
     return {

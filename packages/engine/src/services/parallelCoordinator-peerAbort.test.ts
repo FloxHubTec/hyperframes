@@ -108,6 +108,46 @@ describe("executeParallelCapture peer abort", () => {
     }
   });
 
+  it("hands the pool the failed worker's own page-error lines", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hf-worker-failure-lines-"));
+    vi.doMock("./frameCapture.js", () => ({
+      createCaptureSession: vi.fn(async () => ({
+        browserConsoleBuffer: ["[Browser:PAGEERROR] script threw at load"],
+      })),
+      initializeSession: vi.fn(async () => {
+        throw new Error("Protocol error (Target.createTarget): Target closed");
+      }),
+      captureFrame: vi.fn(),
+      captureFrameToBuffer: vi.fn(),
+      captureFrameToBufferPipelined: vi.fn(),
+      closeCaptureSession: vi.fn().mockResolvedValue(undefined),
+      getCapturePerfSummary: vi.fn(() => ({ frames: 0 })),
+    }));
+
+    try {
+      const { executeParallelCapture } = await import("./parallelCoordinator.js");
+      const failures: { pageErrorLines: readonly string[] }[] = [];
+      await executeParallelCapture(
+        "http://127.0.0.1",
+        root,
+        [{ workerId: 0, startFrame: 0, endFrame: 1, outputDir: join(root, "worker-0") }],
+        { width: 320, height: 180, fps: { num: 30, den: 1 } },
+        () => null,
+        undefined,
+        undefined,
+        async () => {},
+        undefined,
+        { onWorkerFailure: (failure) => failures.push(failure) },
+      ).catch(() => {});
+
+      expect(failures.map((failure) => failure.pageErrorLines)).toEqual([
+        ["[Browser:PAGEERROR] script threw at load"],
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("closes a browser whose launch finishes after the cancel before the render rejects", async () => {
     const root = mkdtempSync(join(tmpdir(), "hf-late-launch-"));
     const lateSession = {} as CaptureSession;
