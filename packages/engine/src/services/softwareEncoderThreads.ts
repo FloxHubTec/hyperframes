@@ -1,6 +1,5 @@
 import { availableParallelism } from "node:os";
 
-/** libx265 rejects more than 16 frame threads (X265_MAX_FRAME_THREADS); libx264 has no such cap. */
 export const X265_MAX_THREADS = 16;
 
 /** x264/x265 bitstreams depend on the thread count, so it comes from the CPU quota, never ffmpeg's host-core guess. */
