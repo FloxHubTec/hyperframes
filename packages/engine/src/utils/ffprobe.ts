@@ -940,6 +940,23 @@ function resolveStreamWindow(
   return { videoStreamStartSeconds, videoStreamDurationSeconds, cacheKey };
 }
 
+/** The final-frame time a site stored beside the video for this stream window; undefined when none matches. */
+export async function readStoredFinalFrameSeconds(
+  filePath: string,
+  metadata: Pick<VideoMetadata, "videoStreamDurationSeconds" | "videoStreamStartSeconds">,
+): Promise<number | undefined> {
+  const { videoStreamStartSeconds, videoStreamDurationSeconds } = resolveStreamWindow(
+    filePath,
+    metadata,
+  );
+  const stored = (await readStoredFacts(filePath))?.finalFrame;
+  return stored &&
+    stored.streamStart === videoStreamStartSeconds &&
+    stored.streamDuration === videoStreamDurationSeconds
+    ? stored.seconds
+    : undefined;
+}
+
 /**
  * Return the FFmpeg input-seek position of the final decoded video frame.
  *
@@ -981,14 +998,8 @@ export async function extractFinalVideoFrameTimestamp(
   if (cached) return cached;
 
   const probePromise = (async () => {
-    const stored = (await readStoredFacts(filePath))?.finalFrame;
-    if (
-      stored &&
-      stored.streamStart === videoStreamStartSeconds &&
-      stored.streamDuration === videoDurationSeconds
-    ) {
-      return stored.seconds;
-    }
+    const stored = await readStoredFinalFrameSeconds(filePath, metadata);
+    if (stored !== undefined) return stored;
     if (!(videoDurationSeconds > 0) || !Number.isFinite(videoDurationSeconds)) {
       throw new Error(
         `[FFmpeg] Cannot locate final video frame for invalid duration ${String(videoDurationSeconds)}`,

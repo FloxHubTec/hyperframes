@@ -45,6 +45,7 @@ import {
   extractMediaMetadata,
   mediaFileIdentity,
   readMetadataCache,
+  readStoredFinalFrameSeconds,
   resolvePlayableVideoDuration,
   writeMetadataCache,
   type MediaProbeCacheEntry,
@@ -203,6 +204,42 @@ export function extractionFrameCountForDuration(
     : (2n * frameNumerator + frameDenominator) / (2n * frameDenominator);
   const frames = Number(frameCount);
   return Math.max(1, Number.isSafeInteger(frames) ? frames : Number.MAX_SAFE_INTEGER);
+}
+
+/** The exact rate behind a probed one (rounded to 0.01): a whole number or its 1000/1001 NTSC form. */
+function exactSourceRate(probed: number): number | null {
+  const nominal = Math.round(probed * 1.001);
+  return (
+    [nominal, (nominal * 1000) / 1001].find((rate) => Math.abs(rate - probed) <= 0.005 + 1e-9) ??
+    null
+  );
+}
+
+/**
+ * How many of the `tailFrames` slots from `firstFrame` a constant-rate window yields when it reaches
+ * the source's end, from the stored final-frame time alone: slot j holds a frame while its time,
+ * `startTime + (firstFrame + j) / outputFps`, is before the last frame's end. A slot exactly at the
+ * end is empty. Null where the answer is not certain (a stream starting late, an unrecognised rate,
+ * a slot within a few microseconds of the end, or no slot at all); callers decode the tail instead.
+ */
+export function tailFramesFromFinalFrame(input: {
+  startTime: number;
+  firstFrame: number;
+  tailFrames: number;
+  outputFps: number;
+  sourceFps: number;
+  finalFrameSeconds: number;
+  streamLeadSeconds: number;
+}): number | null {
+  const sourceRate = exactSourceRate(input.sourceFps);
+  if (!sourceRate || input.streamLeadSeconds !== 0 || !(input.outputFps > 0)) return null;
+  const seek = input.startTime + input.firstFrame / input.outputFps;
+  const slots = (input.finalFrameSeconds + 1 / sourceRate - seek) * input.outputFps;
+  const distanceToSlot = Math.abs(slots - Math.round(slots));
+  // ffprobe prints the final time to 1 us; a slot closer than 50 us/fps to the end is a tie, up to 500 us/fps unknown.
+  if (distanceToSlot >= 5e-5 && distanceToSlot < 5e-4) return null;
+  const count = Math.min(input.tailFrames, Math.ceil(slots - 5e-5));
+  return count > 0 ? count : null;
 }
 
 export interface FrameRange {
@@ -2306,6 +2343,24 @@ export async function extractAllVideoFrames(
     ) {
       return deferred(expectedFrames);
     }
+    const firstTailFrame = expectedFrames - tailFrames;
+    const finalFrameSeconds = await readStoredFinalFrameSeconds(work.videoPath, work.metadata);
+    const storedTailFrames =
+      finalFrameSeconds === undefined
+        ? null
+        : tailFramesFromFinalFrame({
+            startTime: work.extractionMediaStart,
+            firstFrame: firstTailFrame,
+            tailFrames,
+            outputFps: fps,
+            sourceFps: work.metadata.fps,
+            finalFrameSeconds,
+            streamLeadSeconds: work.metadata.videoStreamLeadSeconds ?? 0,
+          });
+    if (storedTailFrames !== null) {
+      const totalFrames = firstTailFrame + storedTailFrames;
+      return totalFrames <= expectedFrames * 0.6 ? null : deferred(totalFrames);
+    }
     const probeDir = join(options.outputDir, `${work.video.id}.tail-probe`);
     try {
       const tail = await extractVideoFramesRange(
@@ -2315,14 +2370,14 @@ export async function extractAllVideoFrames(
         work.videoDuration,
         {
           ...scopedExtractionOptions(work),
-          frameRanges: [{ firstFrame: expectedFrames - tailFrames, frames: tailFrames }],
+          frameRanges: [{ firstFrame: firstTailFrame, frames: tailFrames }],
           tailProbe: isHttpUrl(work.videoPath),
         },
         signal,
         config,
         probeDir,
       );
-      const totalFrames = expectedFrames - tailFrames + tail.totalFrames;
+      const totalFrames = firstTailFrame + tail.totalFrames;
       // A full extraction this short rewrites the probed duration; let it.
       if (totalFrames <= expectedFrames * 0.6) return null;
       return deferred(totalFrames);
