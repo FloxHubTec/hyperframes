@@ -15,10 +15,13 @@ export default defineConfig({
     cli: "src/cli.ts",
     fontLocalizeCli: "src/fontLocalizeCli.ts",
     runtimeVersion: "src/runtimeVersion.ts",
+    warmCheck: "src/warmCheck.ts",
+    warmCheckClient: "src/warmCheckClient.ts",
     renderSetupWorker: "src/renderSetupWorker.ts",
     backgroundChecksWorker: "src/backgroundChecksWorker.ts",
     sherpaWorker: "src/whisper/sherpaWorker.ts",
     shaderTransitionWorker: "../producer/src/services/shaderTransitionWorker.ts",
+    api: "src/api.ts",
   },
   format: ["esm"],
   outDir: "dist",
@@ -27,6 +30,8 @@ export default defineConfig({
   bundle: true,
   splitting: true,
   sourcemap: false,
+  // Types for the `./api` export only; the other entries are programs, not libraries.
+  dts: { entry: { api: "src/api.ts" } },
   clean: true,
   banner: {
     js: `import { createRequire as __hf_createRequire } from "node:module";
@@ -98,6 +103,7 @@ var __dirname = __hf_dirname(__filename);`,
         "./chrome-host-ceiling",
         "./shader-transitions",
         "./system-memory",
+        "./wsl-host",
       ]),
     };
     options.loader = { ...options.loader, ".browser.js": "text" };

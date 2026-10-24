@@ -84,6 +84,11 @@ The plate keeps the original surroundings and leaves a transparent
 person-shaped hole. It is not an inpainted empty background. Place an opaque
 graphic or scene beneath the hole, then place `subject.webm` above it.
 
+`hyperframes check` judges text behind the cutout by the cutout's own alpha at
+each sample time. A word partly behind the subject is reported as info with the
+share it hides; a word 80% hidden, or two neighbouring words each half hidden,
+is an error. You do not need `data-layout-allow-occlusion` for this layering.
+
 ## Know when it will work well
 
 The included model is designed for people. It works best with a clear human
@@ -92,6 +97,8 @@ subject, stable framing, and reasonable contrast from the background.
 Use another segmentation or masking tool when:
 
 - the subject is a product, animal, or other object;
+- the person holds something, especially a dark microphone, phone, card, or
+  instrument: the model can drop all or part of it;
 - fine hair crosses a busy background;
 - frame-to-frame edge stability must meet high-end VFX standards;
 - you need the original background reconstructed after removing the person.
@@ -121,6 +128,7 @@ cutout sits directly over its original source and edge color must match; use
 | Processing is slow                | Check `--info`; CPU processing works but is much slower than an available accelerated provider. |
 | The subject has a color halo      | Use `--quality best`, especially when layering over the original source.                        |
 | The “background plate” has a hole | Expected: it is inverse alpha, not an inpainted clean plate.                                    |
+| Part of a held object is missing  | The model matches people, not what they hold. Use another matting tool for that shot.           |
 
 The [CLI reference](/packages/cli#remove-background) lists every flag and
 supported input.
