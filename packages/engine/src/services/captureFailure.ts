@@ -19,12 +19,14 @@ export class CaptureFailure extends Error {
   readonly kind: CaptureFailureKind;
   readonly cause: unknown;
   readonly workerDiagnostics: readonly CaptureWorkerDiagnostic[];
+  readonly pageErrorLines: readonly string[];
 
   constructor(input: {
     kind: CaptureFailureKind;
     message: string;
     cause?: unknown;
     workerDiagnostics?: readonly CaptureWorkerDiagnostic[];
+    pageErrorLines?: readonly string[];
   }) {
     super(input.message);
     this.name = "CaptureFailure";
@@ -35,6 +37,7 @@ export class CaptureFailure extends Error {
         Object.freeze({ ...diagnostic, lines: Object.freeze([...diagnostic.lines]) }),
       ),
     );
+    this.pageErrorLines = Object.freeze([...(input.pageErrorLines ?? [])]);
     if (input.cause instanceof Error && input.cause.stack) this.stack = input.cause.stack;
   }
 }

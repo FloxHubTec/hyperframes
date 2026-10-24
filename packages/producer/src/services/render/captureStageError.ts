@@ -31,5 +31,6 @@ export function wrapCaptureStageError(
 
 export function getCaptureStageBrowserConsole(error: unknown): string[] {
   if (error instanceof CaptureStageError) return error.browserConsole;
+  if (error instanceof CaptureFailure) return [...error.pageErrorLines];
   return [];
 }
