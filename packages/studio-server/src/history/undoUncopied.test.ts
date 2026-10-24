@@ -112,4 +112,22 @@ describe("undoing a change that made or replaced media", () => {
     for (const name of ["a.mp4", "b.mp4"])
       expect(readFileSync(join(projectDir, name)).equals(bytes)).toBe(true);
   });
+
+  it("does not fold the history away when the media it keeps is larger than the budget", async () => {
+    const projectDir = tempDir("hf-undo-media-project-");
+    const historyRoot = tempDir("hf-undo-media-root-");
+    writeFileSync(join(projectDir, "index.html"), "A");
+    const history = await openProjectHistory({ projectDir, historyRoot, budgetBytes: MiB });
+    cleanup.push(() => history.close());
+    const media = join(projectDir, "join.mp4");
+    const bytes = Buffer.alloc(2 * MiB, 5);
+    const made = await change(history, "Place join", () => writeFileSync(media, bytes));
+
+    const undone = await history.undo(made.id, { who: you });
+    const redone = await history.undo(undone.ok ? undone.entry!.id : "", { who: you });
+
+    expect(redone).toMatchObject({ ok: true });
+    expect(readFileSync(media).equals(bytes)).toBe(true);
+    expect(history.list().length).toBeGreaterThanOrEqual(3);
+  });
 });

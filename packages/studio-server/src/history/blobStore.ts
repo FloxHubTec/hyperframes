@@ -79,11 +79,11 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
   const pathOf = (hash: string) => blobPath(aside.has(hash) ? asideDir : dir, hash);
   const forget = async (hash: string) => {
     await rm(pathOf(hash), { force: true });
-    total -= sizes.get(hash) ?? 0;
+    if (!aside.has(hash)) total -= sizes.get(hash) ?? 0;
     sizes.delete(hash);
     aside.delete(hash);
   };
-  let total = [...sizes.values()].reduce((sum, size) => sum + size, 0);
+  let total = [...sizes].reduce((sum, [hash, size]) => sum + (aside.has(hash) ? 0 : size), 0);
 
   return {
     async put(absPath) {
@@ -129,7 +129,6 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
       if (!moved) await cloneOrStream(absPath, to);
       sizes.set(hash, (await stat(to)).size);
       aside.add(hash);
-      total += sizes.get(hash)!;
     },
     bytes: () => total,
     size: (hash) => sizes.get(hash) ?? 0,
