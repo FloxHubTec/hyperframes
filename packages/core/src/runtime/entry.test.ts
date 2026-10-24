@@ -472,6 +472,32 @@ describe("runtime entry", () => {
       expect(armed(...due)).toEqual([true, true, true, true, true]);
     });
 
+    it("prepares a queued split only after a prefetch slot opens", async () => {
+      spyLoad();
+      servePreview();
+      const [now, first, second, third, queued] = videos(
+        mountRoot(),
+        "0",
+        "1",
+        "1.2",
+        "1.4",
+        "1.6",
+      );
+      for (const video of [first, second, third, queued])
+        video.setAttribute("data-media-start", "6");
+
+      await evaluateRuntime();
+      expect(armed(now, first, second, third, queued)).toEqual([true, true, true, true, false]);
+      queued.dispatchEvent(new Event("loadedmetadata"));
+      expect(queued.currentTime).toBe(0);
+
+      first.dispatchEvent(new Event("error"));
+      queued.dispatchEvent(new Event("loadedmetadata"));
+      expect(queued.preload).toBe("auto");
+      expect(queued.currentTime).toBe(6);
+      expect(loadsOf(queued)).toEqual([1]);
+    });
+
     it("frees a clip the playhead has passed while it is still downloading, and keeps one that finished", async () => {
       spyLoad();
       servePreview();
