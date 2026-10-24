@@ -28,6 +28,8 @@ Run `npx hyperframes <command>` unless the project gives a wrapper; then use the
 
 ## The loop
 
+For a local video, check FFmpeg and FFprobe after project setup or resume and before planning or design: [dependency check](references/doctor-browser.md#check-local-video-dependencies-before-design). Reuse a passing result from this run.
+
 1. Write, then `npx hyperframes lint` after the first pass and after structural changes.
 2. `npx hyperframes check --json` and fix every error. While a lint error remains the layout and contrast audits don't run; "0 samples" means nothing was checked. Contrast failures carry a `suggestedColor`. A finding at a single sample (an entrance in flight) is info; a 3 s+ video with no visible change fails `sweep_static`.
 3. `npx hyperframes snapshot` and read the PNGs (under `.hyperframes/artifacts/snapshots/`): that is how you see the video. With sub-compositions, snapshot a midpoint of every scene; tiny unstyled content or a missing hero is a mount defect (`../hyperframes/references/format.md`).
@@ -71,7 +73,7 @@ After a verified render, send one `feedback --rating`, plus a report for anythin
 
 | Symptom | Fix |
 | --- | --- |
-| Chrome missing or won't start | `npx hyperframes browser ensure`; `doctor --json` always exits 0, gate on `.ok` |
+| Chrome missing or won't start | `npx hyperframes browser ensure`; `doctor --json` always exits 0, inspect the relevant checks (`.ok` includes optional tools) |
 | A heavy page isn't ready in time | Raise `--timeout` on `check` or `snapshot` |
 | Unusual codec looks blank | Keep `--proxy` on (the default) |
 | Render slow on Linux | The summary's second line says `screenshot` + `software gpu`: the slow path |

@@ -42,6 +42,7 @@ Studio edits the tags you write.
 
 ## Work loop
 
+- Before planning or designing a locally rendered video, check FFmpeg and FFprobe after project setup or resume: [local video dependencies](../hyperframes-cli/references/doctor-browser.md#check-local-video-dependencies-before-design). Keep a passing result for this run; deck, source-port and explicit cloud work use their own prerequisites.
 - An existing project: `npx hyperframes timeline --json` shows what plays when; before any change, `npx hyperframes history --since mine --who <you>` shows what the person changed since your last turn: build on it (`/hyperframes-cli`).
 - A new film over ~15 s that tells something: its type's file (below), then `references/story.md`: three storylines that are three different films, in words only; the person picks unless they asked for the file or no stops. Then `SPEC.md` (`references/spec.md`): every adjective as a number, the defaults banned by name, the shots by frame.
 - After your last edit: `npx hyperframes check --json`; fix every error, weigh every warning. A film: `npx hyperframes snapshot --review` and `references/review.md`, ending in `REVIEW.md`. A small edit: snapshot what you changed (`--at`, `--range`, `--composition`) and look before you reply.

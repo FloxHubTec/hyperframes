@@ -28,7 +28,7 @@ Run `doctor` first when:
 
 ### Check local video dependencies before design
 
-For a workflow that will render a video locally, run `npx hyperframes doctor --json` from the project directory immediately after setup or resume, before planning, sourcing, or design. Fresh setup writes its brief first. Keep this result for the current run; repeat after changing the binary configuration or environment.
+For a workflow that will render a video locally, run `npx hyperframes doctor --json` from the project directory immediately after setup or resume, before planning, sourcing, or design. Keep this result for the current run; repeat after changing the binary configuration or environment.
 
 Require both **FFmpeg** and **FFprobe** entries with `ok: true`, and inspect their reported paths. Use [the two-tool jq gate](#configure-ffmpeg-without-a-package-manager) when `jq` is available, or inspect the JSON directly. `doctor --json` exits 0 even when dependencies are missing, and its top-level `ok` includes optional tools.
 
