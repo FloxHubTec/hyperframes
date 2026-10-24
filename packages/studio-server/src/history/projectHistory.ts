@@ -1122,6 +1122,7 @@ class Engine {
     this.windows.push(group);
     try {
       for (const [path, hash] of changes) await this.writeProjectFile(path, hash);
+      await this.blobs.release(changes.flatMap(([, hash]) => (hash ? [hash] : [])));
       await this.sweep();
     } finally {
       this.windows = this.windows.filter((open) => open !== group);

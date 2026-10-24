@@ -84,4 +84,32 @@ describe("undoing a change that made or replaced media", () => {
     expect(back).toMatchObject({ ok: true });
     expect(readFileSync(media).equals(second)).toBe(true);
   });
+
+  it("does not spend the set-aside bytes when an old version is only checked out", async () => {
+    const { history, media } = await project();
+    const bytes = Buffer.alloc(2 * MiB, 3);
+    const made = await change(history, "Place join", () => writeFileSync(media, bytes));
+    const undone = await history.undo(made.id, { who: you });
+
+    await history.checkout(made.id, "after", tempDir("hf-undo-media-out-"));
+
+    const redone = await history.undo(undone.ok ? undone.entry!.id : "", { who: you });
+    expect(redone).toMatchObject({ ok: true });
+    expect(readFileSync(media).equals(bytes)).toBe(true);
+  });
+
+  it("brings back two files with the same bytes made in one change", async () => {
+    const { history, projectDir } = await project();
+    const bytes = Buffer.alloc(2 * MiB, 4);
+    const made = await change(history, "Place joins", () => {
+      writeFileSync(join(projectDir, "a.mp4"), bytes);
+      writeFileSync(join(projectDir, "b.mp4"), bytes);
+    });
+    const undone = await history.undo(made.id, { who: you });
+
+    const redone = await history.undo(undone.ok ? undone.entry!.id : "", { who: you });
+    expect(redone).toMatchObject({ ok: true });
+    for (const name of ["a.mp4", "b.mp4"])
+      expect(readFileSync(join(projectDir, name)).equals(bytes)).toBe(true);
+  });
 });

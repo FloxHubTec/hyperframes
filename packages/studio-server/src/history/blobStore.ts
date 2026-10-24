@@ -17,6 +17,7 @@ export interface BlobStore {
   bytes(): number;
   size(hash: string): number;
   keep(absPath: string, remove: boolean): Promise<void>;
+  release(hashes: Iterable<string>): Promise<void>;
   prune(keep: ReadonlySet<string>): Promise<void>;
   drop(hashes: Iterable<string>): Promise<void>;
 }
@@ -109,9 +110,10 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
     reference: (absPath) => hashFile(absPath),
     has: (hash) => sizes.has(hash),
     read: (hash) => readFile(pathOf(hash)),
-    async writeTo(hash, absPath, beforeReplace) {
-      await cloneOrCopy(pathOf(hash), absPath, beforeReplace);
-      if (aside.has(hash)) await forget(hash);
+    writeTo: async (hash, absPath, beforeReplace) =>
+      cloneOrCopy(pathOf(hash), absPath, beforeReplace),
+    async release(hashes) {
+      for (const hash of hashes) if (aside.has(hash)) await forget(hash);
     },
     async keep(absPath, remove) {
       const hash = await hashFile(absPath);
