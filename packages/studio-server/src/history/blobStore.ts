@@ -16,6 +16,7 @@ export interface BlobStore {
   writeTo(hash: string, absPath: string, beforeReplace?: () => void): Promise<void>;
   bytes(): number;
   size(hash: string): number;
+  keep(absPath: string, remove: boolean): Promise<void>;
   prune(keep: ReadonlySet<string>): Promise<void>;
   drop(hashes: Iterable<string>): Promise<void>;
 }
@@ -60,11 +61,27 @@ async function cloneOrCopy(from: string, to: string, beforeReplace?: () => void)
 
 export async function openBlobStore(dir: string): Promise<BlobStore> {
   const sizes = new Map<string, number>();
+  // Bytes history moved out of the project live apart from the blobs, so reclaiming old media copies never takes them.
+  const asideDir = join(dirname(dir), "aside");
+  const aside = new Set<string>();
   await mkdir(dir, { recursive: true });
-  for (const shard of await readdir(dir))
-    for (const hash of await readdir(join(dir, shard)).catch(() => []))
-      sizes.set(hash, (await stat(join(dir, shard, hash))).size);
-  const pathOf = (hash: string) => blobPath(dir, hash);
+  for (const [root, isAside] of [
+    [dir, false],
+    [asideDir, true],
+  ] as const)
+    for (const shard of await readdir(root).catch(() => []))
+      for (const hash of await readdir(join(root, shard)).catch(() => [])) {
+        if (sizes.has(hash)) continue;
+        sizes.set(hash, (await stat(join(root, shard, hash))).size);
+        if (isAside) aside.add(hash);
+      }
+  const pathOf = (hash: string) => blobPath(aside.has(hash) ? asideDir : dir, hash);
+  const forget = async (hash: string) => {
+    await rm(pathOf(hash), { force: true });
+    total -= sizes.get(hash) ?? 0;
+    sizes.delete(hash);
+    aside.delete(hash);
+  };
   let total = [...sizes.values()].reduce((sum, size) => sum + size, 0);
 
   return {
@@ -91,27 +108,34 @@ export async function openBlobStore(dir: string): Promise<BlobStore> {
     },
     reference: (absPath) => hashFile(absPath),
     has: (hash) => sizes.has(hash),
-    read: async (hash) => readBlob(dir, hash),
-    writeTo: async (hash, absPath, beforeReplace) =>
-      cloneOrCopy(pathOf(hash), absPath, beforeReplace),
+    read: (hash) => readFile(pathOf(hash)),
+    async writeTo(hash, absPath, beforeReplace) {
+      await cloneOrCopy(pathOf(hash), absPath, beforeReplace);
+      if (aside.has(hash)) await forget(hash);
+    },
+    async keep(absPath, remove) {
+      const hash = await hashFile(absPath);
+      if (sizes.has(hash)) return;
+      const to = blobPath(asideDir, hash);
+      await mkdir(dirname(to), { recursive: true });
+      const moved =
+        remove &&
+        (await rename(absPath, to).then(
+          () => true,
+          () => false,
+        ));
+      if (!moved) await cloneOrStream(absPath, to);
+      sizes.set(hash, (await stat(to)).size);
+      aside.add(hash);
+      total += sizes.get(hash)!;
+    },
     bytes: () => total,
     size: (hash) => sizes.get(hash) ?? 0,
     async drop(hashes) {
-      for (const hash of hashes) {
-        const size = sizes.get(hash);
-        if (size === undefined) continue;
-        await rm(pathOf(hash), { force: true });
-        sizes.delete(hash);
-        total -= size;
-      }
+      for (const hash of hashes) if (sizes.has(hash) && !aside.has(hash)) await forget(hash);
     },
     async prune(keep) {
-      for (const [hash, size] of sizes) {
-        if (keep.has(hash)) continue;
-        await rm(pathOf(hash), { force: true });
-        sizes.delete(hash);
-        total -= size;
-      }
+      for (const hash of [...sizes.keys()]) if (!keep.has(hash)) await forget(hash);
     },
   };
 }

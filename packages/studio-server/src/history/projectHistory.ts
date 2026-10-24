@@ -1138,6 +1138,9 @@ class Engine {
       const version = hash === null ? DELETED_VERSION : hashVersion(hash);
       recordFileWriteReceipt(absPath, { path, version, writeToken });
     }
+    const standing = lstatSync(absPath, { throwIfNoEntry: false });
+    if (standing?.isFile() && isUncopied(path, standing.size))
+      await this.blobs.keep(absPath, hash === null);
     if (hash === null) {
       this.assertWritable();
       rmSync(absPath, { force: true });
