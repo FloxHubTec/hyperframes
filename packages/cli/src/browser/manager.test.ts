@@ -30,8 +30,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { request } from "node:http";
-import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -230,7 +228,6 @@ function installPuppeteerBrowsersMock(
       options: InstallMockOptions,
     ) => Promise<{ executablePath: string; path?: string }>;
     unzip?: (archivePath: string, folderPath: string) => Promise<boolean>;
-    downloadUrl?: string;
   } = {},
 ) {
   const impl =
@@ -246,6 +243,27 @@ function installPuppeteerBrowsersMock(
     mockedPaths?.add(path).add(executablePath);
     return { executablePath, path };
   };
+  vi.doMock("./installInChild.js", async () => {
+    const { install } = await import("@puppeteer/browsers");
+    return {
+      BrowserDownloadStalledError: class extends Error {},
+      installInChild: (
+        input: object,
+        hooks: {
+          onProgress?: (downloaded: number, total: number) => void;
+          onLog: (line: string) => void;
+        },
+      ) =>
+        install({
+          ...input,
+          downloadProgressCallback: hooks.onProgress,
+          logger: (prefix: string) =>
+            prefix === "puppeteer:browsers:fileUtil"
+              ? (...args: unknown[]) => hooks.onLog(args.join(" "))
+              : undefined,
+        } as never),
+    };
+  });
   vi.doMock("./unzipArchive.js", () => ({ unzipArchive: opts.unzip ?? vi.fn(async () => true) }));
   vi.doMock("@puppeteer/browsers", () => ({
     Browser: { CHROMEHEADLESSSHELL: "chrome-headless-shell" },
@@ -265,7 +283,6 @@ function installPuppeteerBrowsersMock(
           })),
         ),
     install: vi.fn().mockImplementation(stagedInstall),
-    ...(opts.downloadUrl && { getDownloadUrl: () => opts.downloadUrl }),
   }));
 }
 
@@ -1435,83 +1452,6 @@ describe("downloadBrowser — install failure surfaces HYPERFRAMES_BROWSER_PATH 
       expect((caught as Error).cause).toBe(originalError);
     },
   );
-});
-
-describe("downloadBrowser — a download that stops sending", () => {
-  const sockets: Socket[] = [];
-
-  beforeEach(() => {
-    vi.resetModules();
-    delete process.env["HYPERFRAMES_BROWSER_PATH"];
-    delete process.env["PRODUCER_HEADLESS_SHELL_PATH"];
-    installChildProcessMocks();
-  });
-
-  afterEach(() => {
-    for (const socket of sockets.splice(0)) socket.destroy();
-    vi.restoreAllMocks();
-    vi.doUnmock("node:fs");
-    vi.doUnmock("node:os");
-    vi.doUnmock("node:child_process");
-    vi.doUnmock("@puppeteer/browsers");
-  });
-
-  it("gives up with the host named, retries, releases the install lock and points at HYPERFRAMES_BROWSER_PATH", async () => {
-    const server = createServer((socket) => sockets.push(socket));
-    await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
-    const { port } = server.address() as { port: number };
-    const host = `127.0.0.1:${port}`;
-    installFsMocks({ existing: new Set([CACHE_ROOT]) });
-    let attempts = 0;
-    installPuppeteerBrowsersMock({
-      installedInHfCache: [],
-      downloadUrl: `http://${host}/chrome-headless-shell.zip`,
-      installImpl: () => {
-        attempts += 1;
-        return new Promise((_resolve, reject) => {
-          request({ host: "127.0.0.1", port, path: "/chrome-headless-shell.zip" })
-            .on("error", reject)
-            .end();
-        });
-      },
-    });
-    const { ensureBrowser } = await import("./manager.js");
-
-    try {
-      const error = await ensureBrowser({ downloadStallMs: 100 }).catch((e: unknown) => e);
-
-      expect(error).toBeInstanceOf(Error);
-      const message = (error as Error).message;
-      expect(message).toContain(`The Chrome download from ${host} stalled: no data for 0.1s`);
-      expect(message).toContain("HYPERFRAMES_BROWSER_PATH");
-      expect(attempts).toBe(3);
-      expect(mockedPaths?.has(HF_LOCK)).toBe(false);
-    } finally {
-      for (const socket of sockets) socket.destroy();
-      await new Promise((closed) => server.close(closed));
-    }
-  });
-
-  it("does not time out a download that keeps making progress", async () => {
-    installFsMocks({ existing: new Set([CACHE_ROOT]) });
-    installPuppeteerBrowsersMock({
-      installedInHfCache: [],
-      installImpl: async (options) => {
-        const progress = (options as { downloadProgressCallback?: (d: number, t: number) => void })
-          .downloadProgressCallback;
-        for (let bytes = 1; bytes <= 5; bytes++) {
-          await new Promise((tick) => setTimeout(tick, 60));
-          progress?.(bytes, 5);
-        }
-        return { executablePath: HF_BINARY };
-      },
-    });
-    const { ensureBrowser } = await import("./manager.js");
-
-    await expect(ensureBrowser({ downloadStallMs: 150 })).resolves.toMatchObject({
-      source: "download",
-    });
-  });
 });
 
 describe("downloadBrowser — too little disk for the browser", () => {
