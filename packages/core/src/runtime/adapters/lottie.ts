@@ -8,7 +8,7 @@ import { swallow } from "../diagnostics";
  * discovery through lottie.getRegisteredAnimations(). Load dotLottie through
  * an ESM import and set a local WASM URL before constructing its player.
  * Browser setup and registration examples:
- * https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes-animation/adapters/lottie.md
+ * https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/references/runtimes.md
  */
 export function createLottieAdapter(params?: {
   resolveStartSeconds?: (element: Element) => number;
