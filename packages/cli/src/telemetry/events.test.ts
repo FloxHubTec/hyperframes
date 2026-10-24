@@ -118,6 +118,7 @@ describe("trackCheckReport", () => {
       motionWarnings: 8,
       contrastErrors: 9,
       contrastWarnings: 10,
+      craftWarnings: 16,
       launchSettleMs: 11,
       seekLoopMs: 12,
       contrastMs: 13,
@@ -144,6 +145,7 @@ describe("trackCheckReport", () => {
       motion_warnings: 8,
       contrast_errors: 9,
       contrast_warnings: 10,
+      craft_warnings: 16,
       launch_settle_ms: 11,
       seek_loop_ms: 12,
       contrast_ms: 13,
@@ -172,6 +174,7 @@ describe("trackCheckReport", () => {
       motionWarnings: 0,
       contrastErrors: 0,
       contrastWarnings: 0,
+      craftWarnings: 0,
       launchSettleMs: 0,
       seekLoopMs: 0,
       contrastMs: 0,
@@ -396,6 +399,35 @@ describe("render telemetry events", () => {
     const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(props.ffmpeg_version_major).toBe(6);
     expect(props.browser_version_major).toBe(118);
+  });
+
+  it("carries machine CPU use on render_complete and render_error", () => {
+    const cpu = {
+      cpuBusyAvgPct: 57,
+      cpuBusyPeakPct: 90,
+      cpuCoresBusyPeak: 2,
+      loadAvgStart: 1.23,
+      loadAvgEnd: 3.46,
+    };
+    trackRenderComplete({
+      durationMs: 1,
+      fps: 30,
+      quality: "draft",
+      docker: false,
+      gpu: false,
+      ...cpu,
+    });
+    trackRenderError({ fps: 30, quality: "draft", docker: false, ...cpu });
+    for (const [, props] of trackEvent.mock.calls) {
+      expect(props).toMatchObject({
+        cpu_busy_avg_pct: 57,
+        cpu_busy_peak_pct: 90,
+        cpu_cores_busy_peak: 2,
+        load_avg_start: 1.23,
+        load_avg_end: 3.46,
+      });
+    }
+    expect(trackEvent).toHaveBeenCalledTimes(2);
   });
 
   it("carries the browser install path facts on both render events, never the path", () => {
