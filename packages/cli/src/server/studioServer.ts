@@ -32,6 +32,7 @@ import {
   resolveCliTelemetryDistinctId,
 } from "./telemetryIdentity.js";
 import { emitStudioRenderComplete, emitStudioRenderError } from "./studioRenderTelemetry.js";
+import { startRenderCpuSampler } from "../telemetry/renderCpu.js";
 import { mountDesktopRoutes } from "./desktopRoutes.js";
 import { isDevMode } from "../utils/env.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
@@ -78,9 +79,11 @@ import {
   compositionRequiresWebGpu,
   resolveCaptureBrowserGpuMode,
   resolveLocalBrowserGpuMode,
+  resolveLocalWebGpu,
   type BrowserGpuMode,
   type ResolvedBrowserGpuMode,
 } from "../browser/gpuPolicy.js";
+import { loadSharpInBackground } from "../utils/optionalPackages.js";
 
 const STUDIO_MANUAL_EDITS_PATH = ".hyperframes/studio-manual-edits.json";
 
@@ -241,12 +244,14 @@ let _thumbnailBrowserInitializing: Promise<ThumbnailBrowserSession | null> | nul
 let _thumbnailBrowserModes: {
   requested: BrowserGpuMode;
   resolved: ResolvedBrowserGpuMode;
+  softwareWebGpu: boolean;
 } | null = null;
 
 interface ThumbnailBrowserSession {
   browser: import("puppeteer-core").Browser;
   requestedGpuMode: BrowserGpuMode;
   resolvedGpuMode: ResolvedBrowserGpuMode;
+  softwareWebGpu: boolean;
 }
 
 async function getThumbnailBrowser(
@@ -262,6 +267,7 @@ async function getThumbnailBrowser(
       browser: _thumbnailBrowserLease.browser,
       requestedGpuMode: _thumbnailBrowserModes.requested,
       resolvedGpuMode: _thumbnailBrowserModes.resolved,
+      softwareWebGpu: _thumbnailBrowserModes.softwareWebGpu,
     };
   }
   if (_thumbnailBrowserInitializing) {
@@ -288,22 +294,32 @@ async function getThumbnailBrowser(
       }
 
       const resolvedGpuMode = await resolveCaptureBrowserGpuMode(requestedGpuMode, executablePath);
+      const { gpuConfig, softwareWebGpu } = resolveLocalWebGpu(resolvedGpuMode, true);
       const acquired = await acquireBrowser(
         buildChromeArgs(
-          { width: 1920, height: 1080, captureMode: "screenshot" },
-          { browserGpuMode: resolvedGpuMode },
+          {
+            width: 1920,
+            height: 1080,
+            captureMode: "screenshot",
+            requiresWebGpu: softwareWebGpu,
+          },
+          gpuConfig,
         ),
         { forceScreenshot: true },
       );
       _thumbnailBrowserLease = acquired;
-      _thumbnailBrowserModes = { requested: requestedGpuMode, resolved: resolvedGpuMode };
+      _thumbnailBrowserModes = {
+        requested: requestedGpuMode,
+        resolved: resolvedGpuMode,
+        softwareWebGpu,
+      };
       acquired.browser.on("disconnected", () => {
         if (_thumbnailBrowserLease !== acquired) return;
         _thumbnailBrowserLease = null;
         _thumbnailBrowserModes = null;
         _thumbnailBrowserInitializing = null;
       });
-      return { browser: acquired.browser, requestedGpuMode, resolvedGpuMode };
+      return { browser: acquired.browser, requestedGpuMode, resolvedGpuMode, softwareWebGpu };
     } catch (err) {
       console.warn(
         "[Studio] Failed to launch thumbnail browser:",
@@ -348,6 +364,7 @@ export interface StudioServerOptions {
   browserGpuMode?: BrowserGpuMode;
   /** Where project histories are kept; defaults to ~/.cache/hyperframes/history. */
   historyRoot?: string;
+  origin?: () => string | undefined;
 }
 
 export interface StudioServer {
@@ -438,11 +455,16 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   // Opened on first use, so a server that never serves Studio's history never writes one. A failed open stays off
   // for this run; one another process was holding is tried again on the next request, which no write waits for.
   let ownerWaitMs: number | undefined;
+  const historyUrl = () => {
+    const origin = options.origin?.();
+    return origin && `${origin}/api/projects/${encodeURIComponent(projectId)}/history`;
+  };
   const histories = historyCache(() =>
     openProjectHistory({
       projectDir,
       historyRoot: options.historyRoot ?? DEFAULT_HISTORY_ROOT,
       ownerWaitMs,
+      ownerUrl: historyUrl(),
     })
       .then((history) => {
         ownerWaitMs = undefined;
@@ -469,6 +491,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
 
   const adapter: PreviewApiAdapter = {
     history: () => projectHistory(),
+    loadSharp: () => loadSharpInBackground("image thumbnails"),
     // Explicit option wins (preview's resolved --proxy/--no-proxy + config);
     // otherwise honor the project's hyperframes.json media.autoProxy so every
     // createStudioServer caller (e.g. the background preview child) gets the
@@ -534,7 +557,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       if (resolve(dir) === resolve(projectDir)) cachedProjectSignature = null;
     },
 
-    async lint(html: string, opts?: { filePath?: string; isSubComposition?: boolean }) {
+    async lint(html, opts) {
       const { lintHyperframeHtml } = await import("@hyperframes/lint");
       return await lintHyperframeHtml(html, { ...opts, host: "studio" });
     },
@@ -577,6 +600,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
 
       // Run render asynchronously, mutating the state object
       const startTime = Date.now();
+      const cpu = startRenderCpuSampler(opts.telemetryOptOut !== true);
       const run = (async () => {
         let renderJob: RenderJob | undefined;
         const removeCancelledOutput = () => {
@@ -613,6 +637,12 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             ...(manualEditsRenderScript ? { renderBodyScripts: [manualEditsRenderScript] } : {}),
             ...(opts.composition ? { entryFile: opts.composition } : {}),
             ...(opts.variables ? { variables: opts.variables } : {}),
+            ...(opts.crf !== undefined ? { crf: opts.crf } : {}),
+            ...(opts.videoBitrate ? { videoBitrate: opts.videoBitrate } : {}),
+            ...(opts.videoFrameFormat ? { videoFrameFormat: opts.videoFrameFormat } : {}),
+            ...(opts.hdrMode ? { hdrMode: opts.hdrMode } : {}),
+            ...(opts.useGpu ? { useGpu: true } : {}),
+            ...(opts.pageMotionBlur ? { pageMotionBlur: opts.pageMotionBlur } : {}),
           });
           renderJob = job;
           const onProgress = (j: { progress: number; currentStage?: string }) => {
@@ -650,7 +680,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           // /api/telemetry-identity, so this process would otherwise keep its
           // startup-cached posture for the life of the preview server.
           refreshTelemetryPosture();
-          emitStudioRenderComplete(opts, Date.now() - startTime, job.perfSummary);
+          emitStudioRenderComplete(opts, Date.now() - startTime, job.perfSummary, cpu.stop());
         } catch (err) {
           if (abortController.signal.aborted) {
             removeCancelledOutput();
@@ -660,13 +690,22 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           state.error = err instanceof Error ? err.message : String(err);
           // fallow-ignore-next-line code-duplication
           refreshTelemetryPosture();
-          emitStudioRenderError(opts, Date.now() - startTime, state.stage, err, renderJob);
+          emitStudioRenderError(
+            opts,
+            Date.now() - startTime,
+            state.stage,
+            err,
+            renderJob,
+            cpu.stop(),
+          );
           try {
             const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
             writeFileSync(metaPath, JSON.stringify({ status: "failed" }));
           } catch {
             /* ignore */
           }
+        } finally {
+          cpu.stop();
         }
       })();
       inFlightRenders.set(abortController, run);
@@ -714,7 +753,11 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           async (page) => {
             await page.setViewport(viewport);
             await page.goto(opts.previewUrl, { waitUntil: "domcontentloaded", timeout: 10000 });
-            await assertWebGpuAdapterAvailable(page, requiresWebGpu);
+            await assertWebGpuAdapterAvailable(
+              page,
+              requiresWebGpu,
+              requiresWebGpu && session.softwareWebGpu,
+            );
             await page
               .waitForFunction(
                 () => {
@@ -847,7 +890,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         (await loadRuntimeSource()) ?? readBundleFile(runtimePath)?.toString("utf-8") ?? null;
       if (!runtimeSource) return c.text("runtime not available", 404);
       return c.body(runtimeSource, 200, {
-        "Content-Type": "text/javascript",
+        "Content-Type": getMimeType("runtime.js"),
         "Cache-Control": "no-store",
       });
     };

@@ -1,11 +1,16 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { runCancellableProcess } from "./cancellableProcess.js";
+import { describe, expect, it, vi } from "vitest";
+import { runCancellableProcess, runRenderSetupWorker } from "./cancellableProcess.js";
 import { testProcessIsAlive, waitForTestCondition } from "./processTestUtils.js";
 
 const IS_POSIX = process.platform !== "win32";
+
+function processGroupOf(pid: number): string {
+  return execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).trim();
+}
 
 describe.skipIf(!IS_POSIX)("cancellable process tree teardown", () => {
   it("reaps a SIGTERM-resistant grandchild after the setup root exits", async () => {
@@ -78,4 +83,44 @@ describe.skipIf(!IS_POSIX)("cancellable process tree teardown", () => {
       rmSync(testDir, { recursive: true, force: true });
     }
   }, 5_000);
+
+  it("keeps a child it does not detach in the caller's process group, and a cancel still stops it", async () => {
+    const controller = new AbortController();
+    const abortReason = new Error("cancel unzip");
+    let childPid: number | undefined;
+    try {
+      const run = runCancellableProcess(
+        process.execPath,
+        ["--eval", "setTimeout(() => undefined, 10_000)"],
+        {
+          signal: controller.signal,
+          detached: false,
+          onSpawn: (pid) => {
+            childPid = pid;
+          },
+        },
+      );
+      expect(processGroupOf(childPid!)).toBe(processGroupOf(process.pid));
+
+      controller.abort(abortReason);
+      await expect(run).rejects.toBe(abortReason);
+
+      expect(testProcessIsAlive(childPid!)).toBe(false);
+    } finally {
+      if (childPid && testProcessIsAlive(childPid)) process.kill(childPid, "SIGKILL");
+    }
+  }, 5_000);
+});
+
+describe("render setup worker failure", () => {
+  it("rejects with only the worker's reason, not its crash output", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const failure = runRenderSetupWorker("bogus" as "lint", {}, {});
+
+      await expect(failure).rejects.toThrow(/^Unknown render setup mode: bogus$/);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
 });

@@ -13,13 +13,15 @@ import { launchManagedBrowser, resolveManagedGpuMode } from "../browser/launch.j
 
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { resolveDiagnosticNavigationTimeoutMs } from "../utils/renderArgs.js";
+import { pageNavigationTimeoutMs } from "../utils/renderArgs.js";
+import { gotoWhenSent } from "../capture/navigateForCapture.js";
 import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
 import { waitForRuntimeReady } from "../capture/captureCompositionFrame.js";
 import {
   assertWebGpuAdapterAvailable,
   compositionRequiresWebGpu,
   resolveLocalBrowserGpuMode,
+  resolveLocalWebGpu,
 } from "../browser/gpuPolicy.js";
 import {
   buildOnionSvg,
@@ -43,8 +45,8 @@ function pathsReferToSameFile(firstPath: string, secondPath: string): boolean {
   const second = resolve(secondPath);
   if (first === second) return true;
   try {
-    const firstStat = statSync(first);
-    const secondStat = statSync(second);
+    const firstStat = statSync(first, { bigint: true });
+    const secondStat = statSync(second, { bigint: true });
     return firstStat.dev === secondStat.dev && firstStat.ino === secondStat.ino;
   } catch {
     return false;
@@ -173,6 +175,19 @@ export async function sampleMarkerOnionElements(
           y: matrix.b * point.x + matrix.d * point.y + matrix.f,
         }));
       } else {
+        const w = rig.el.offsetWidth;
+        const h = rig.el.offsetHeight;
+        const local = [
+          [0, 0],
+          [w, 0],
+          [w, h],
+          [0, h],
+          [w / 2, h / 2],
+        ];
+        rig.markers!.forEach((marker, i) => {
+          marker.style.left = `${local[i]![0]! - rig.el.clientLeft + rig.el.scrollLeft}px`;
+          marker.style.top = `${local[i]![1]! - rig.el.clientTop + rig.el.scrollTop}px`;
+        });
         points = rig.markers!.map((marker) => {
           const rect = marker.getBoundingClientRect();
           return { x: rect.left, y: rect.top };
@@ -403,28 +418,30 @@ async function openCompositionPage(
   const requestedGpuMode = resolveLocalBrowserGpuMode();
   const resolvedGpuMode = await resolveManagedGpuMode(requestedGpuMode, executablePath);
   const requiresWebGpu = compositionRequiresWebGpu(html);
+  const { gpuConfig, softwareWebGpu } = resolveLocalWebGpu(resolvedGpuMode, requiresWebGpu);
   const browser = await launchManagedBrowser(puppeteer.default, {
     headless: true,
     executablePath,
-    args: buildChromeArgs(
-      { ...size, captureMode: "screenshot", requiresWebGpu },
-      { browserGpuMode: resolvedGpuMode },
-    ),
+    args: buildChromeArgs({ ...size, captureMode: "screenshot", requiresWebGpu }, gpuConfig),
   });
-  const page = await browser.newPage();
-  const navigationTimeout = resolveDiagnosticNavigationTimeoutMs();
-  await page.setViewport(size);
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: navigationTimeout });
-  await assertWebGpuAdapterAvailable(page, requiresWebGpu);
-  await waitForRuntimeReady(page, 10000);
-  await page
-    .evaluate(async () => {
-      const d = document as unknown as { fonts?: { ready?: Promise<unknown> } };
-      if (d.fonts?.ready) await d.fonts.ready;
-    })
-    .catch(() => {});
-  await installSeekHelper(page);
-  return { browser, page, size };
+  try {
+    const page = await browser.newPage();
+    await page.setViewport(size);
+    await gotoWhenSent(page, url, pageNavigationTimeoutMs());
+    await assertWebGpuAdapterAvailable(page, requiresWebGpu, softwareWebGpu);
+    await waitForRuntimeReady(page, 10000);
+    await page
+      .evaluate(async () => {
+        const d = document as unknown as { fonts?: { ready?: Promise<unknown> } };
+        if (d.fonts?.ready) await d.fonts.ready;
+      })
+      .catch(() => {});
+    await installSeekHelper(page);
+    return { browser, page, size };
+  } catch (err) {
+    await browser.close().catch(() => {});
+    throw err;
+  }
 }
 
 // Longest seekable duration (seconds) across registered timelines, player/root
