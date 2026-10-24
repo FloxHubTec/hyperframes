@@ -161,41 +161,127 @@ function isNestedInsideAnotherRule(rule: Rule): boolean {
   return false;
 }
 
+type ScopeOptions = { compoundAuthoredRoot?: boolean; scopeRootSelectors?: boolean };
+
 export function scopeCssToComposition(
   css: string,
   compositionId: string,
   scopeSelectorOverride?: string,
   authoredRootId?: string | null,
-  options?: { compoundAuthoredRoot?: boolean; scopeRootSelectors?: boolean },
+  options?: ScopeOptions,
 ): string {
   const trimmedCompositionId = compositionId.trim();
   if (!css || !trimmedCompositionId) return css;
   const scope =
     scopeSelectorOverride ||
     `[data-composition-id="${escapeCssAttributeValue(trimmedCompositionId)}"]`;
-  let root: postcss.Root;
-  try {
-    root = postcss.parse(css);
-  } catch {
-    return "";
-  }
+  const root = parseCss(css);
+  return root ? scopeParsedCss(root, scope, trimmedCompositionId, authoredRootId, options) : "";
+}
 
+function parseCss(css: string): postcss.Root | null {
+  try {
+    return postcss.parse(css);
+  } catch {
+    return null;
+  }
+}
+
+function forEachScopedRule(root: postcss.Root, visit: (rule: Rule) => void): void {
   root.walkRules((rule) => {
     if (isInsideGlobalAtRule(rule)) return;
     if (isNestedInsideAnotherRule(rule)) return;
+    visit(rule);
+  });
+}
+
+function scopeParsedCss(
+  root: postcss.Root,
+  scope: string,
+  compositionId: string,
+  authoredRootId: string | null | undefined,
+  options: ScopeOptions | undefined,
+): string {
+  forEachScopedRule(root, (rule) => {
     rule.selectors = rule.selectors.map((selector) =>
       scopeSelector(
         selector,
         scope,
-        trimmedCompositionId,
+        compositionId,
         authoredRootId,
         options?.compoundAuthoredRoot,
         options?.scopeRootSelectors,
       ),
     );
   });
-
   return root.toResult({ map: false }).css;
+}
+
+// Shaped like every scope it stands in for, so each selector test treats the two alike; its only `[` is
+// its first character, so no occurrence of it overlaps another or the text around it.
+const PLACEHOLDER_ID = "hf-scope-placeholder";
+const PLACEHOLDER_SCOPE = `[data-composition-id="${PLACEHOLDER_ID}"]`;
+// No quote, bracket, backslash, space or `$` (a String.replace pattern): such a scope lands verbatim.
+const PLAIN_ID = /^[\w.:-]+$/;
+const PLAIN_SCOPE = /^\[data-composition-id="([\w.:-]+)"\]$/;
+
+/** `scopeCssToComposition` for sheets mounted many times: each sheet is scoped once around a
+ * placeholder scope, which each mount's own scope then replaces. */
+export function createCompositionCssScoper(): typeof scopeCssToComposition {
+  const templates = new Map<string, string | null>();
+  return (css, compositionId, scopeSelectorOverride, authoredRootId, options) => {
+    const trimmedId = compositionId.trim();
+    const scope = scopeSelectorOverride ?? "";
+    const scopeId = PLAIN_SCOPE.exec(scope)?.[1];
+    if (
+      !scopeId ||
+      scopeId === trimmedId ||
+      !PLAIN_ID.test(trimmedId) ||
+      trimmedId === PLACEHOLDER_ID
+    )
+      return scopeCssToComposition(
+        css,
+        compositionId,
+        scopeSelectorOverride,
+        authoredRootId,
+        options,
+      );
+    const key = JSON.stringify([
+      trimmedId,
+      authoredRootId ?? null,
+      Boolean(options?.compoundAuthoredRoot),
+      Boolean(options?.scopeRootSelectors),
+      css,
+    ]);
+    let template = templates.get(key);
+    if (template === undefined) {
+      template = scopeTemplate(css, trimmedId, authoredRootId, options);
+      templates.set(key, template);
+    }
+    return template === null
+      ? scopeCssToComposition(css, compositionId, scopeSelectorOverride, authoredRootId, options)
+      : template.split(PLACEHOLDER_SCOPE).join(scope);
+  };
+}
+
+/** Null when the placeholder is already in the sheet, or a selector keeps its raw text (it holds a comment). */
+function scopeTemplate(
+  css: string,
+  compositionId: string,
+  authoredRootId: string | null | undefined,
+  options: ScopeOptions | undefined,
+): string | null {
+  if (css.includes(PLACEHOLDER_SCOPE)) return null;
+  if (!css) return css;
+  const root = parseCss(css);
+  if (!root) return "";
+  let rawSelector = false;
+  forEachScopedRule(root, (rule) => {
+    rawSelector ||= Boolean(rule.raws.selector);
+  });
+  return rawSelector
+    ? null
+    : scopeParsedCss(root, PLACEHOLDER_SCOPE, compositionId, authoredRootId, options);
 }
 
 function isFontFaceAtRule(node: { type: string; name?: string }): node is AtRule {
@@ -219,7 +305,14 @@ function fontFaceKey(atRule: AtRule): string {
 
 /** Drops repeats of an identical `@font-face` across the given style texts, keeping the last copy:
  * the last matching rule is the one the browser uses, so a rule in between never gains precedence. */
-export function dedupeFontFaceRules(styleTexts: string[]): string[] {
+export const dedupeFontFaceRules = (styleTexts: string[]): string[] => dropFontFaces(styleTexts);
+
+export function hoistFontFaceRules(styleTexts: string[]): { styles: string[]; faces: string[] } {
+  const faces: string[] = [];
+  return { styles: dropFontFaces(styleTexts, faces), faces };
+}
+
+function dropFontFaces(styleTexts: string[], hoisted?: string[]): string[] {
   const seen = new Set<string>();
   return [...styleTexts]
     .reverse()
@@ -235,12 +328,13 @@ export function dedupeFontFaceRules(styleTexts: string[]): string[] {
       for (const node of [...(root.nodes ?? [])].reverse()) {
         if (!isFontFaceAtRule(node)) continue;
         const key = fontFaceKey(node);
-        if (seen.has(key)) {
-          node.remove();
-          changed = true;
-        } else {
+        if (!seen.has(key)) {
           seen.add(key);
+          if (!hoisted) continue;
+          hoisted.unshift(node.toString());
         }
+        node.remove();
+        changed = true;
       }
       return changed ? root.toResult({ map: false }).css : css;
     })
@@ -415,10 +509,8 @@ export function wrapScopedCompositionScript(
           if (prop !== __hfCompId) {
             return Reflect.get(target, prop, target);
           }
-          var authoredValue = Reflect.get(target, prop, target);
-          return authoredValue === undefined
-            ? Reflect.get(target, __hfTimelineCompId, target)
-            : authoredValue;
+          var runtimeValue = Reflect.get(target, __hfTimelineCompId, target);
+          return runtimeValue === undefined ? Reflect.get(target, prop, target) : runtimeValue;
         },
         set: function(target, prop, value, receiver) {
           if (prop !== __hfCompId) {
@@ -426,11 +518,15 @@ export function wrapScopedCompositionScript(
           }
           // The authored node remains in the compiled DOM when its local id
           // differs from the runtime mount id, so readiness legitimately sees
-          // both compositions. Publish the same timeline under both identities
-          // instead of replacing one with the other.
-          var authoredSet = Reflect.set(target, __hfCompId, value, target);
+          // both compositions. Publish the same timeline under both identities,
+          // unless another mount of the same file already owns the authored one.
+          var authoredValue = Reflect.get(target, __hfCompId, target);
+          var ownsAuthored =
+            authoredValue === undefined ||
+            authoredValue === Reflect.get(target, __hfTimelineCompId, target);
           var runtimeSet = Reflect.set(target, __hfTimelineCompId, value, target);
-          return authoredSet && runtimeSet;
+          if (!ownsAuthored) return runtimeSet;
+          return Reflect.set(target, __hfCompId, value, target) && runtimeSet;
         },
       });
     }

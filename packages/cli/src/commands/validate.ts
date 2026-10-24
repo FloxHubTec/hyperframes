@@ -14,9 +14,11 @@ import { resolveProject, type ProjectDir } from "../utils/project.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import type { ProjectLintResult } from "../utils/lintProject.js";
 import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
+import { resolveNaturalMediaTimelineDuration } from "@hyperframes/core";
 import { c } from "../ui/colors.js";
 import { decodeWellFormedEscapes } from "@hyperframes/studio-server";
 import { printDeprecationNotice, withMeta } from "../utils/updateCheck.js";
+import { pageNavigationTimeoutMs } from "../utils/renderArgs.js";
 import {
   installPageFunctionGuard,
   resolveCliChromeGpuMode,
@@ -49,31 +51,17 @@ const CONTRAST_SAMPLES = 5;
 const SEEK_SETTLE_MS = 150;
 const PREFERRED_SEEK_TARGET_WAIT_MS = 500;
 const MEDIA_EXTENSIONS = /\.(aac|flac|m4a|mov|mp3|mp4|oga|ogg|wav|webm)$/i;
-// Floor for the initial page navigation. A blocking external <script> (GSAP
-// from a CDN, etc.) delays `domcontentloaded`; the actual render (much larger
-// budget) rides it out, so validate's navigation must be at least as patient as
-// the user's --timeout, never stuck below this floor.
-const NAV_TIMEOUT_FLOOR_MS = 10000;
-
-// Navigation budget = the larger of the floor and the user's --timeout, so
-// `--timeout` (already the "wait longer for slow loads" knob for media/settle)
-// also extends navigation instead of being ignored by a hardcoded 10s.
-export function resolveNavigationTimeoutMs(optTimeout?: number): number {
-  return Math.max(NAV_TIMEOUT_FLOOR_MS, optTimeout ?? 0);
-}
-
 // Turn Puppeteer's opaque "Navigation timeout of Nms exceeded" into an
-// actionable message: the usual cause is a blocking CDN <script> that render
-// tolerates but validate's tighter budget does not. Returns a replacement Error
-// for a navigation timeout, or null for any other error (caller rethrows as-is).
+// actionable message: the usual cause is a slow blocking CDN <script>. Returns a
+// replacement Error for a navigation timeout, or null for any other error.
 export function navigationTimeoutHint(err: unknown, navTimeoutMs: number): Error | null {
   const msg = err instanceof Error ? err.message : String(err);
   if (!/navigation timeout/i.test(msg)) return null;
   return new Error(
     `Page navigation timed out after ${navTimeoutMs}ms. A blocking external <script> ` +
-      `(e.g. GSAP loaded from a CDN) can delay page load past this budget even when the ` +
-      `full render succeeds. Vendor the script locally (recommended for deterministic ` +
-      `renders), or re-run with a longer --timeout.`,
+      `(e.g. GSAP loaded from a CDN) can delay page load past this budget, which render ` +
+      `shares. Vendor the script locally (recommended for deterministic renders), or ` +
+      `re-run with a longer --timeout or PRODUCER_PAGE_NAVIGATION_TIMEOUT_MS.`,
   );
 }
 
@@ -155,7 +143,7 @@ export function raceMediaReady(
  * can't see.
  */
 export async function auditClipDurations(
-  page: import("puppeteer-core").Page,
+  page: Pick<import("puppeteer-core").Page, "evaluate">,
   analyzeClipMediaFit: typeof import("@hyperframes/engine").analyzeClipMediaFit,
   extraWaitMs: number,
 ): Promise<ConsoleEntry[]> {
@@ -200,7 +188,7 @@ export async function auditClipDurations(
       id: string;
       kind: string;
       slot: number;
-      mediaStart: number;
+      attributes: Record<string, string | null>;
       duration: number;
       loop: boolean;
     }> = [];
@@ -211,7 +199,12 @@ export async function auditClipDurations(
         id: el.id || el.getAttribute("src") || `(${el.tagName.toLowerCase()})`,
         kind: el.tagName === "AUDIO" ? "Audio" : "Video",
         slot,
-        mediaStart: parseFloat(el.getAttribute("data-media-start") ?? "0") || 0,
+        attributes: {
+          "data-media-start": el.getAttribute("data-media-start"),
+          "data-playback-start": el.getAttribute("data-playback-start"),
+          "data-playback-rate": el.getAttribute("data-playback-rate"),
+          "data-automation": el.getAttribute("data-automation"),
+        },
         duration: el.duration,
         loop: el.loop || el.getAttribute("data-loop") === "true",
       });
@@ -228,7 +221,11 @@ export async function auditClipDurations(
       unreadable.push(clip.id);
       continue;
     }
-    const mediaSeconds = Math.max(0, clip.duration - clip.mediaStart);
+    const mediaSeconds = resolveNaturalMediaTimelineDuration(
+      { getAttribute: (name) => clip.attributes[name] ?? null },
+      clip.duration,
+    );
+    if (mediaSeconds === null) continue;
     const fit = analyzeClipMediaFit({ slotSeconds: clip.slot, mediaSeconds, loop: clip.loop });
     if (!fit) continue;
     warnings.push({
@@ -500,7 +497,7 @@ async function validateInBrowser(
         }
       });
 
-      const navTimeoutMs = resolveNavigationTimeoutMs(opts.timeout);
+      const navTimeoutMs = pageNavigationTimeoutMs(opts.timeout);
       try {
         await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: navTimeoutMs });
       } catch (err) {
