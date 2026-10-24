@@ -2205,6 +2205,131 @@ describe("createColorGradingRuntime", () => {
   });
 });
 
+describe("createColorGradingRuntime after a context loss", () => {
+  it("grades a clip that came on screen while the context was lost once it is restored", () => {
+    let lost = false;
+    const gl = createMockWebGl();
+    gl.createTexture = vi.fn(() => (lost ? null : ({} as WebGLTexture)));
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockImplementation(((type: string) =>
+        type === "webgl" ? gl : type === "2d" ? mock2d() : null) as never);
+    try {
+      document.body.innerHTML = "";
+      const first = makeDrawableVideo();
+      first.id = "first";
+      const second = makeDrawableVideo();
+      second.id = "second";
+      second.style.visibility = "hidden";
+      document.body.append(first, second);
+      const runtime = createColorGradingRuntime();
+      const shared = spy.mock.instances[0] as HTMLCanvasElement;
+
+      lost = true;
+      shared.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      second.style.visibility = "visible";
+      runtime.refresh();
+      expect(runtime.getStatus("#second").state).toBe("unavailable");
+
+      lost = false;
+      shared.dispatchEvent(new Event("webglcontextrestored"));
+
+      expect(runtime.getStatus("#first").state).toBe("active");
+      expect(runtime.getStatus("#second").state).toBe("active");
+      runtime.destroy();
+    } finally {
+      spy.mockRestore();
+      document.body.innerHTML = "";
+    }
+  });
+});
+
+describe("createColorGradingRuntime when a lost context is never restored", () => {
+  it("builds a new context and grades the clips again", () => {
+    vi.useFakeTimers();
+    const evicted = createMockWebGl();
+    let lost = false;
+    evicted.isContextLost = () => lost;
+    const replacement = createMockWebGl();
+    const contexts = [evicted, replacement];
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockImplementation(((type: string) =>
+        type === "webgl"
+          ? (contexts.shift() ?? replacement)
+          : type === "2d"
+            ? mock2d()
+            : null) as never);
+    try {
+      document.body.innerHTML = "";
+      const video = makeDrawableVideo();
+      video.id = "clip";
+      document.body.append(video);
+      const runtime = createColorGradingRuntime();
+      const shared = spy.mock.instances[0] as HTMLCanvasElement;
+      expect(runtime.getStatus("#clip").state).toBe("active");
+
+      lost = true;
+      shared.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      expect(runtime.getStatus("#clip").state).toBe("unavailable");
+
+      vi.advanceTimersByTime(3000);
+
+      expect(runtime.getStatus("#clip").state).toBe("active");
+      lost = false;
+      shared.dispatchEvent(new Event("webglcontextrestored"));
+      expect(runtime.getStatus("#clip").state).toBe("active");
+      runtime.destroy();
+    } finally {
+      spy.mockRestore();
+      vi.useRealTimers();
+      document.body.innerHTML = "";
+    }
+  });
+});
+
+describe("createColorGradingRuntime when no new context can be made yet", () => {
+  it("keeps the clips ungraded and tries again after the grace period", () => {
+    vi.useFakeTimers();
+    const evicted = createMockWebGl();
+    let lost = false;
+    evicted.isContextLost = () => lost;
+    const replacement = createMockWebGl();
+    const contexts: Array<WebGLRenderingContext | null> = [evicted, null];
+    const spy = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockImplementation(((type: string) =>
+        type === "webgl"
+          ? contexts.length > 0
+            ? contexts.shift()
+            : replacement
+          : type === "2d"
+            ? mock2d()
+            : null) as never);
+    try {
+      document.body.innerHTML = "";
+      const video = makeDrawableVideo();
+      video.id = "clip";
+      document.body.append(video);
+      const runtime = createColorGradingRuntime();
+      const shared = spy.mock.instances[0] as HTMLCanvasElement;
+
+      lost = true;
+      shared.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      vi.advanceTimersByTime(3000);
+      expect(runtime.getStatus("#clip").state).toBe("unavailable");
+
+      vi.advanceTimersByTime(3000);
+      expect(runtime.getStatus("#clip").state).toBe("active");
+      runtime.destroy();
+    } finally {
+      spy.mockRestore();
+      vi.useRealTimers();
+      document.body.innerHTML = "";
+    }
+  });
+});
+
 describe("installAuthoredOpacityCapture", () => {
   it("stamps graded elements at insertion and never overwrites the stamp", async () => {
     installAuthoredOpacityCapture();
