@@ -37,6 +37,8 @@ export async function measurePlanSecondsPerFrame(input: {
   html: string;
   planVideos: PlanVideosJson;
   totalFrames: number;
+  /** Estimated capture cost per frame; calibration samples by cost interval. */
+  frameWeights: Float64Array;
   fps: number;
   width: number;
   height: number;
@@ -49,7 +51,7 @@ export async function measurePlanSecondsPerFrame(input: {
 }): Promise<number> {
   const { planDir, workDir, planVideos, fps, log } = input;
   const fpsRatio = { num: fps, den: 1 };
-  const sampled = selectCaptureCalibrationFrames(input.totalFrames);
+  const sampled = selectCaptureCalibrationFrames(input.totalFrames, input.frameWeights);
   const extracted = [
     ...rebuildExtractedFramesFromPlanDir(
       planDir,
@@ -91,7 +93,13 @@ export async function measurePlanSecondsPerFrame(input: {
       createCaptureCalibrationConfig(input.cfg),
     );
     await initializeSession(session);
-    const { estimate } = await measureCaptureCostFromSession(session, input.totalFrames, fps, log);
+    const { estimate } = await measureCaptureCostFromSession(
+      session,
+      input.totalFrames,
+      fps,
+      log,
+      sampled,
+    );
     return (estimate.p95Ms ?? 0) / 1000;
   } finally {
     if (session) await closeCaptureSession(session).catch(() => {});

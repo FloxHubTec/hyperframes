@@ -239,16 +239,53 @@ export function estimateMeasuredCaptureCostMultiplier(
   };
 }
 
-export function selectCaptureCalibrationFrames(totalFrames: number): number[] {
+/** Per-frame cost estimates whose max/min stay within 5% count as uniform. */
+export function isUniformFrameCost(weights: Float64Array): boolean {
+  let lightest = Infinity;
+  let heaviest = 0;
+  for (const weight of weights) {
+    lightest = Math.min(lightest, weight);
+    heaviest = Math.max(heaviest, weight);
+  }
+  return heaviest <= lightest * 1.05;
+}
+
+/** Midpoints of four equal-cost intervals plus the heaviest frame, so a heavy window is always sampled. */
+function selectCostIntervalFrames(weights: Float64Array): number[] {
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const heaviest = weights.reduce(
+    (best, weight, frame) => (weight > weights[best]! ? frame : best),
+    0,
+  );
+  const frames = [heaviest];
+  let costBefore = 0;
+  let frame = 0;
+  for (const share of [0.125, 0.375, 0.625, 0.875]) {
+    while (frame < weights.length - 1 && costBefore + weights[frame]! < share * total) {
+      costBefore += weights[frame++]!;
+    }
+    frames.push(frame);
+  }
+  return frames;
+}
+
+/** `weights` (estimated cost per frame) picks frames by cost interval; uniform or absent keeps quartiles. */
+export function selectCaptureCalibrationFrames(
+  totalFrames: number,
+  weights?: Float64Array,
+): number[] {
   if (totalFrames <= 0) return [];
   const lastFrame = totalFrames - 1;
-  const candidates = [
-    0,
-    Math.floor(totalFrames * 0.25),
-    Math.floor(totalFrames * 0.5),
-    Math.floor(totalFrames * 0.75),
-    lastFrame,
-  ];
+  const candidates =
+    weights && !isUniformFrameCost(weights)
+      ? selectCostIntervalFrames(weights)
+      : [
+          0,
+          Math.floor(totalFrames * 0.25),
+          Math.floor(totalFrames * 0.5),
+          Math.floor(totalFrames * 0.75),
+          lastFrame,
+        ];
   return Array.from(
     new Set(candidates.map((frame) => Math.max(0, Math.min(lastFrame, frame)))),
   ).sort((a, b) => a - b);
@@ -259,8 +296,8 @@ export async function measureCaptureCostFromSession(
   totalFrames: number,
   fps: number,
   log?: ProducerLogger,
+  sampledFrames = selectCaptureCalibrationFrames(totalFrames),
 ): Promise<{ estimate: CaptureCostEstimate; samples: CaptureCalibrationSample[] }> {
-  const sampledFrames = selectCaptureCalibrationFrames(totalFrames);
   const samples: CaptureCalibrationSample[] = [];
   const totalSamples = sampledFrames.length;
 
