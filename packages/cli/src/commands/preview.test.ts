@@ -91,6 +91,108 @@ describe.each(["status", "stop"] as const)("preview --%s port scope", (operation
   });
 });
 
+describe("preview --status reporting", () => {
+  it("reports an unknown listener PID without borrowing the saved wrapper's PID", async () => {
+    const dir = tempProject();
+    writeFileSync(join(dir, "index.html"), "<html></html>");
+    vi.spyOn(previewLifecycle, "readBackgroundPreviewStatus").mockResolvedValue({
+      pid: null,
+      port: 32600,
+      projectDir: dir,
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await runCommand(previewCommand, { rawArgs: [dir, "--status", "--json"] });
+
+    const result = JSON.parse(log.mock.calls.flat().join("\n")).result;
+    expect(result).toMatchObject({ state: "running", pid: null, mode: "unknown" });
+    expect(result).not.toHaveProperty("logPath");
+  });
+
+  it("lists an unverified endpoint without inventing its PID or background mode", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await handlePreviewList(3002, true, {
+      scan: async () => [],
+      listManaged: async () => [{ pid: null, port: 32600, projectDir: "/tmp/preview-unverified" }],
+    });
+
+    const result = JSON.parse(log.mock.calls.flat().join("\n")).result;
+    expect(result.sessions).toMatchObject([{ port: 32600, pid: null, mode: "unknown" }]);
+  });
+
+  it("keeps existing stop targets when status cannot confirm a listener PID", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const stopManaged = vi.fn(async () => true);
+    await handlePreviewKillAll(3002, true, {
+      listManaged: async () => [{ pid: null, port: 32600, projectDir: "/tmp/preview-unverified" }],
+      stopManaged,
+      killScanned: async () => ({ killed: 0, unverified: [] }),
+    });
+
+    expect(stopManaged).toHaveBeenCalledExactlyOnceWith("/tmp/preview-unverified", 32600);
+  });
+
+  it("retains scanned metadata when the same endpoint has an unknown saved-status PID", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await handlePreviewList(3002, true, {
+      scan: async () => [
+        {
+          pid: "9876",
+          pidSource: "os",
+          port: 32600,
+          host: "[::1]",
+          projectDir: "/tmp/preview-unverified",
+          projectName: "scanned-project",
+          version: "test",
+        },
+      ],
+      listManaged: async () => [{ pid: null, port: 32600, projectDir: "/tmp/preview-unverified" }],
+    });
+
+    const result = JSON.parse(log.mock.calls.flat().join("\n")).result;
+    expect(result.sessions).toHaveLength(1);
+    expect(result.sessions[0]).toMatchObject({
+      pid: 9876,
+      host: "[::1]",
+      projectName: "scanned-project",
+      mode: "unknown",
+    });
+    expect(result.sessions[0]).not.toHaveProperty("logPath");
+  });
+
+  it.each([true, false])("reports log ownership in JSON=%s", async (json) => {
+    const dir = tempProject();
+    writeFileSync(join(dir, "index.html"), "<html></html>");
+    const readStatus = vi.spyOn(previewLifecycle, "readBackgroundPreviewStatus");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    for (const logPath of [undefined, "/tmp/owned-preview.log"]) {
+      readStatus.mockResolvedValue({ pid: 5555, port: 32530, projectDir: dir, logPath });
+      log.mockClear();
+      await runCommand(previewCommand, {
+        rawArgs: [dir, "--status", ...(json ? ["--json"] : [])],
+      });
+      const output = log.mock.calls.flat().join("\n");
+      if (json) {
+        const result = JSON.parse(output).result;
+        expect(result).toMatchObject({
+          state: "running",
+          pid: 5555,
+          port: 32530,
+          mode: logPath ? "background" : "unknown",
+        });
+        if (logPath) expect(result.logPath).toBe(logPath);
+        else expect(result).not.toHaveProperty("logPath");
+      } else if (logPath) {
+        expect(output).toContain(`Log: ${logPath}`);
+        expect(output).toContain("Background preview running");
+      } else {
+        expect(output).not.toContain("Log:");
+        expect(output).not.toContain("Background preview running");
+        expect(output).toContain("Preview running");
+      }
+    }
+  });
+});
+
 describe("Studio handoff URLs", () => {
   it("hands off the exact timeline project route", () => {
     expect(studioDeepLink("http://127.0.0.1:3002", "demo")).toBe(

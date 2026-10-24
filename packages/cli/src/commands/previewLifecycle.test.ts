@@ -37,6 +37,116 @@ function savePreviewSession(stateHome: string): void {
   );
 }
 
+describe("preview status selection and logs", () => {
+  const saved = {
+    pid: 4321,
+    wrapperIdentity: "wrapper-birth",
+    port: 32600,
+    projectDir,
+    logPath: "/tmp/managed-preview.log",
+  };
+  const managed: ActiveServer = { ...server, port: saved.port, pidSource: "os" };
+
+  it("prefers the saved preview over a lower sibling when the requested port is absent", async () => {
+    const stateHome = tempDir("hf-preview-status-");
+    writePreviewSession(saved, stateHome);
+    const before = readFileSync(previewSessionPath(projectDir, stateHome), "utf8");
+    const status = await readBackgroundPreviewStatus(projectDir, 32521, {
+      stateHome,
+      preferredPort: 32521,
+      scan: async () => [{ ...managed, port: 32530, pid: "5555" }, managed],
+      identity: () => saved.wrapperIdentity,
+    });
+
+    expect(status).toMatchObject({ port: 32600, pid: 4321, logPath: saved.logPath });
+    expect(readFileSync(previewSessionPath(projectDir, stateHome), "utf8")).toBe(before);
+  });
+
+  it("prefers the exact requested endpoint regardless of the supplied discovery order", async () => {
+    const stateHome = tempDir("hf-preview-status-");
+    writePreviewSession(saved, stateHome);
+    const requested = { ...managed, port: 32580, pid: "8888" };
+    const status = await readBackgroundPreviewStatus(projectDir, requested.port, {
+      stateHome,
+      preferredPort: requested.port,
+      scan: async () => [{ ...managed, port: 32530, pid: "5555" }, managed, requested],
+    });
+
+    expect(status).toMatchObject({ port: requested.port, pid: 8888 });
+    expect(status).not.toHaveProperty("logPath");
+  });
+
+  it.each(["4321", "9876"])("keeps the log for a confirmed managed listener %s", async (pid) => {
+    const stateHome = tempDir("hf-preview-status-");
+    writePreviewSession(saved, stateHome);
+    const status = await readBackgroundPreviewStatus(projectDir, saved.port, {
+      stateHome,
+      scan: async () => [{ ...managed, pid }],
+      identity: () => saved.wrapperIdentity,
+      isDescendant: (child, parent) => child === 9876 && parent === saved.pid,
+    });
+
+    expect(status).toMatchObject({ pid: Number(pid), port: saved.port, logPath: saved.logPath });
+  });
+
+  it.each([
+    { name: "another listener", pid: "5555", identity: "wrapper-birth", recorded: "wrapper-birth" },
+    {
+      name: "a recycled wrapper",
+      pid: "4321",
+      identity: "another-birth",
+      recorded: "wrapper-birth",
+    },
+    { name: "an unavailable identity", pid: "4321", identity: null, recorded: "wrapper-birth" },
+    { name: "a legacy record", pid: "4321", identity: null, recorded: undefined },
+    {
+      name: "an unknown listener PID",
+      pid: null,
+      identity: "wrapper-birth",
+      recorded: "wrapper-birth",
+    },
+  ])("does not attach a managed log to $name", async ({ pid, identity, recorded }) => {
+    const stateHome = tempDir("hf-preview-status-");
+    writePreviewSession({ ...saved, wrapperIdentity: recorded }, stateHome);
+    const before = readFileSync(previewSessionPath(projectDir, stateHome), "utf8");
+    const status = await readBackgroundPreviewStatus(projectDir, saved.port, {
+      stateHome,
+      scan: async () => [{ ...managed, pid }],
+      identity: () => identity,
+      isDescendant: () => false,
+    });
+
+    expect(status).toMatchObject({ port: saved.port, pid: pid === null ? null : Number(pid) });
+    expect(status).not.toHaveProperty("logPath");
+    expect(readFileSync(previewSessionPath(projectDir, stateHome), "utf8")).toBe(before);
+  });
+
+  it("does not trust a self-reported PID to associate a log", async () => {
+    const stateHome = tempDir("hf-preview-status-");
+    writePreviewSession(saved, stateHome);
+    const status = await readBackgroundPreviewStatus(projectDir, saved.port, {
+      stateHome,
+      scan: async () => [{ ...managed, pidSource: "self-reported" }],
+      identity: () => saved.wrapperIdentity,
+    });
+
+    expect(status).toMatchObject({ port: saved.port, pid: saved.pid });
+    expect(status).not.toHaveProperty("logPath");
+  });
+
+  it("reports an unmanaged endpoint without inventing a log path", async () => {
+    const stateHome = tempDir("hf-preview-status-");
+    const status = await readBackgroundPreviewStatus(projectDir, managed.port, {
+      stateHome,
+      scan: async () => [managed],
+    });
+
+    expect(status).toMatchObject({ port: managed.port, pid: saved.pid });
+    expect(status).not.toHaveProperty("logPath");
+    expect(existsSync(previewSessionPath(projectDir, stateHome))).toBe(false);
+  });
+});
+
 /** Launch deps whose wrapper (PID 4321) brings up `server` (PID 9876) on spawn and takes it down on kill. */
 function reachableChildDependencies(stateHome: string, { immortal = false } = {}) {
   let spawned = false;
@@ -330,6 +440,7 @@ describe("background preview lifecycle", () => {
     writePreviewSession(
       {
         pid: 8765,
+        wrapperIdentity: "custom-wrapper-birth",
         port: 41402,
         projectDir: otherProjectDir,
         logPath: "/tmp/custom.log",
@@ -348,6 +459,7 @@ describe("background preview lifecycle", () => {
 
     const statuses = await listBackgroundPreviewStatuses({
       stateHome,
+      identity: () => "custom-wrapper-birth",
       scan: async (startPort) =>
         startPort === 41402
           ? [
@@ -357,6 +469,7 @@ describe("background preview lifecycle", () => {
                 projectDir: otherProjectDir,
                 version: "test",
                 pid: "8765",
+                pidSource: "os",
               },
             ]
           : [],

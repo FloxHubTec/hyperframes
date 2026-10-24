@@ -47,6 +47,11 @@ export interface PreviewSession {
   logPath: string;
 }
 
+type PreviewStatus = Pick<PreviewSession, "port" | "projectDir"> & {
+  pid: number | null;
+  logPath?: string;
+};
+
 type SpawnResult = {
   pid?: number;
   unref(): void;
@@ -302,27 +307,69 @@ export function buildBackgroundPreviewArgs(argv: string[]): string[] {
   return [...filtered, "--foreground", "--no-open", "--force-new"];
 }
 
+function statusServer(
+  servers: ActiveServer[],
+  projectDir: string,
+  saved: PreviewSession | null,
+  preferredPort: number | undefined,
+): ActiveServer | null {
+  const candidates = sameProjectServers(servers, projectDir);
+  return (
+    candidates.find((server) => server.port === preferredPort) ??
+    candidates.find((server) => server.port === saved?.port) ??
+    candidates[0] ??
+    null
+  );
+}
+
+function isCurrentPreviewWrapper(
+  saved: PreviewSession,
+  dependencies: LifecycleDependencies,
+): boolean {
+  return (
+    !!saved.wrapperIdentity &&
+    (dependencies.identity ?? processIdentity)(saved.pid) === saved.wrapperIdentity
+  );
+}
+
+function managedStatusLogPath(
+  server: ActiveServer,
+  saved: PreviewSession | null,
+  pid: number,
+  dependencies: LifecycleDependencies,
+): string | undefined {
+  if (!saved || saved.port !== server.port || server.pidSource !== "os") {
+    return undefined;
+  }
+  if (!isCurrentPreviewWrapper(saved, dependencies)) {
+    return undefined;
+  }
+  const isDescendant = dependencies.isDescendant ?? isProcessDescendant;
+  return pid === saved.pid || isDescendant(pid, saved.pid) ? saved.logPath : undefined;
+}
+
 export async function readBackgroundPreviewStatus(
   projectDir: string,
   startPort: number,
   dependencies: LifecycleDependencies = {},
-): Promise<PreviewSession | null> {
+): Promise<PreviewStatus | null> {
   const { stateHome, saved, scanned } = await readPreviewLifecycleState(
     projectDir,
     startPort,
     dependencies,
   );
-  const server = matchingServer(scanned, projectDir);
+  const server = statusServer(scanned, projectDir, saved, dependencies.preferredPort);
   if (server) {
-    const pid = Number(server.pid ?? saved?.pid);
-    if (Number.isInteger(pid) && pid > 0) {
-      return {
-        pid,
-        port: server.port,
-        projectDir: resolve(projectDir),
-        logPath: saved?.logPath ?? previewLogPath(projectDir, stateHome),
-      };
-    }
+    const listenerPid = Number(server.pid);
+    const pid = Number.isInteger(listenerPid) && listenerPid > 0 ? listenerPid : null;
+    const logPath =
+      pid === null ? undefined : managedStatusLogPath(server, saved, pid, dependencies);
+    return {
+      pid,
+      port: server.port,
+      projectDir: resolve(projectDir),
+      ...(logPath ? { logPath } : {}),
+    };
   }
 
   // A missed probe is not proof the preview is gone: a server whose event loop
@@ -385,7 +432,7 @@ function wrapperProcessIsAlive(
 
 export async function listBackgroundPreviewStatuses(
   dependencies: LifecycleDependencies = {},
-): Promise<PreviewSession[]> {
+): Promise<PreviewStatus[]> {
   const stateHome = dependencies.stateHome ?? defaultStateHome();
   const directory = sessionDirectory(stateHome);
   let files: string[];
@@ -408,7 +455,7 @@ export async function listBackgroundPreviewStatuses(
       }),
     ),
   );
-  return statuses.filter((status): status is PreviewSession => status !== null);
+  return statuses.filter((status): status is PreviewStatus => status !== null);
 }
 
 function readyPreviewSession(
