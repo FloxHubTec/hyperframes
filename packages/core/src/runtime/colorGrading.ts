@@ -2181,6 +2181,16 @@ function moveToContext(
   return true;
 }
 
+function adoptContext(
+  entry: ColorGradingEntry,
+  context: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext },
+): void {
+  entry.contextLost = !moveToContext(entry, context);
+  entry.drawError = entry.contextLost ? "WebGL context rebuild failed" : null;
+  if (entry.contextLost) restoreSourceElement(entry);
+  else drawEntry(entry);
+}
+
 function hideFrameBorder(entry: ColorGradingEntry, frame: HTMLElement): void {
   if (entry.borderlessFrame !== frame) restoreFrameBorder(entry);
   entry.borderlessFrame = frame;
@@ -3879,8 +3889,7 @@ export function createColorGradingRuntime(pausedMediaLease?: {
         entry.canvas.style.display = "none";
         restoreSourceElement(entry);
       }
-      clearTimeout(rebuildTimer);
-      rebuildTimer = setTimeout(() => rebuildLostContext(canvas, gl), CONTEXT_RESTORE_GRACE_MS);
+      watchForRestore(canvas, gl);
     });
     canvas.addEventListener("webglcontextrestored", () => {
       if (shared?.canvas !== canvas) return;
@@ -3897,6 +3906,11 @@ export function createColorGradingRuntime(pausedMediaLease?: {
     return shared;
   };
 
+  const watchForRestore = (canvas: HTMLCanvasElement, gl: WebGLRenderingContext): void => {
+    clearTimeout(rebuildTimer);
+    rebuildTimer = setTimeout(() => rebuildLostContext(canvas, gl), CONTEXT_RESTORE_GRACE_MS);
+  };
+
   const rebuildLostContext = (canvas: HTMLCanvasElement, gl: WebGLRenderingContext): void => {
     if (destroyed || shared?.canvas !== canvas || !gl.isContextLost?.()) return;
     const stale = shared;
@@ -3904,15 +3918,10 @@ export function createColorGradingRuntime(pausedMediaLease?: {
     const next = sharedContext();
     if (!next) {
       shared = stale;
-      rebuildTimer = setTimeout(() => rebuildLostContext(canvas, gl), CONTEXT_RESTORE_GRACE_MS);
+      watchForRestore(canvas, gl);
       return;
     }
-    for (const entry of trackedEntries()) {
-      entry.contextLost = !moveToContext(entry, next);
-      entry.drawError = entry.contextLost ? "WebGL context rebuild failed" : null;
-      if (entry.contextLost) restoreSourceElement(entry);
-      else drawEntry(entry);
-    }
+    for (const entry of trackedEntries()) adoptContext(entry, next);
     refresh();
   };
 
