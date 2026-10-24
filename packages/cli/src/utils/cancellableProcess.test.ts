@@ -25,13 +25,14 @@ describe("cancellable process output", () => {
   it.each(["é", "项目/音声.wav", "🎬 render", "ASCII output"])(
     "preserves split output on both streams for %s",
     async (output) => {
-      const result = await runCancellableProcess(process.execPath, [
-        "--eval",
-        splitOutputSource,
-        output,
-        "0",
-      ]);
+      const chunks: string[] = [];
+      const result = await runCancellableProcess(
+        process.execPath,
+        ["--eval", splitOutputSource, output, "0"],
+        { onStdout: (chunk) => chunks.push(chunk) },
+      );
       expect(result).toEqual({ stdout: output, stderr: output });
+      expect(chunks.join("")).toBe(output);
     },
   );
 
@@ -60,11 +61,17 @@ describe("cancellable process output", () => {
   });
 
   it("flushes incomplete trailing UTF-8 bytes when the streams end", async () => {
-    const result = await runCancellableProcess(process.execPath, [
-      "--eval",
-      "process.stdout.write(Buffer.from([0xe2, 0x82])); process.stderr.write(Buffer.from([0xf0, 0x9f]));",
-    ]);
+    const chunks: string[] = [];
+    const result = await runCancellableProcess(
+      process.execPath,
+      [
+        "--eval",
+        "process.stdout.write(Buffer.from([0xe2, 0x82])); process.stderr.write(Buffer.from([0xf0, 0x9f]));",
+      ],
+      { onStdout: (chunk) => chunks.push(chunk) },
+    );
     expect(result).toEqual({ stdout: "�", stderr: "�" });
+    expect(chunks.join("")).toBe("�");
   });
 });
 
