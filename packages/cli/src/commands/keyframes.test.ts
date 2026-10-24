@@ -183,15 +183,31 @@ describe("keyframes composed-ancestor surfacing (nested elements)", () => {
   it("keeps animated ancestors ordered from the parent to the outer group", () => {
     const html = `<template><div id="stage"><div id="hero"><div id="core"></div></div></div><script>
       const tl = gsap.timeline({ paused: true });
-      tl.to("#stage", { y: 100, duration: 4 }, 0);
-      tl.to("#hero", { x: 300, duration: 4 }, 0);
-      tl.to("#core", { scale: 1.5, duration: 4 }, 0);
+      tl.fromTo("#stage", { y: 0 }, { y: 100, duration: 4 }, 0);
+      tl.fromTo("#hero", { x: 0 }, { x: 300, duration: 4 }, 0);
+      tl.fromTo("#core", { scale: 1 }, { scale: 1.5, duration: 4 }, 0);
       window.__timelines = { beat: tl };
     </script></template>`;
     const { tweens } = surfaceComposition(html, "beat.html", "beat.html");
     expect(tweens.find((t) => t.target === "#core")?.composedWith).toEqual([
       { selector: "#hero", summary: "x 0..300" },
       { selector: "#stage", summary: "y 0..100" },
+    ]);
+  });
+
+  it("keeps implicit parent starting values unresolved inside a template", () => {
+    const html = `<template><div id="hero"><div id="core"></div></div><script>
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#hero", { x: 300, duration: 4 }, 0);
+      tl.to("#core", { scale: 1.5, duration: 4 }, 0);
+      window.__timelines = { beat: tl };
+    </script></template>`;
+    const { tweens } = surfaceComposition(html, "beat.html", "beat.html");
+    const hero = tweens.find((t) => t.target === "#hero");
+    expect(hero?.keyframes[0]?.properties.x).toBeUndefined();
+    expect(hero?.unresolved).toContain("endpointProperties");
+    expect(tweens.find((t) => t.target === "#core")?.composedWith).toEqual([
+      { selector: "#hero", summary: "(no resolved variation; runtime verification required)" },
     ]);
   });
 
