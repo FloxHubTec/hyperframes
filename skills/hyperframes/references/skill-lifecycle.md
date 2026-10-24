@@ -15,6 +15,10 @@ For a plugin installation, follow [plugin execution rules](plugin-installation.m
 
 `HYPERFRAMES_SKIP_SKILLS=1` also makes `skills update` (bare or named) and bare `skills` exit 0 without installing, so an install pinned to one commit stays pinned.
 
+## Stale-skills notice
+
+After `render`, `lint` and `validate`, the CLI prints `N HyperFrames skills out of date or missing` to stderr when the cached check finds stale skills, so an agent run without a terminal sees it too. It is off in CI, in dev, with `HYPERFRAMES_NO_UPDATE_CHECK=1` and with `HYPERFRAMES_SKIP_SKILLS=1`, and never touches `--json` stdout.
+
 ## Diagnose and update
 
 ```bash

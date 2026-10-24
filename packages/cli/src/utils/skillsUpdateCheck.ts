@@ -9,7 +9,7 @@
 import { readConfig, readConfigFresh, writeConfig } from "../telemetry/config.js";
 import { hostAnswers } from "./hostAnswers.js";
 import { checkSkills } from "./skillsManifest.js";
-import { updateNoticesSuppressed } from "./updateCheck.js";
+import { updateCheckDisabled } from "./updateCheck.js";
 
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -88,9 +88,14 @@ export function invalidateSkillsCache(): void {
   }
 }
 
+/** Not tied to a TTY: agents run the CLI without one and are the ones that need to hear it. */
+function skillsNoticeOff(): boolean {
+  return process.env["HYPERFRAMES_SKIP_SKILLS"] === "1" || updateCheckDisabled();
+}
+
 /** Whether a background skills check is due: this run shows notices and the 24 h cache is stale. */
 export function skillsCheckDue(): boolean {
-  if (process.env["HYPERFRAMES_SKIP_SKILLS"] === "1" || updateNoticesSuppressed()) return false;
+  if (skillsNoticeOff()) return false;
   return !cacheFresh(readConfig().lastSkillsCheck, Date.now());
 }
 
@@ -103,11 +108,11 @@ function skillsNoticeText(meta: SkillsUpdateMeta): string | null {
 }
 
 /**
- * Print a one-line nudge to stderr if installed skills are stale. Same gating
- * as the CLI self-update notice (CI, non-TTY, dev, HYPERFRAMES_NO_UPDATE_CHECK).
+ * Print a one-line nudge to stderr if installed skills are stale. Off in CI, dev,
+ * HYPERFRAMES_NO_UPDATE_CHECK and HYPERFRAMES_SKIP_SKILLS; on without a TTY.
  */
 export function printSkillsUpdateNotice(): void {
-  if (process.env["HYPERFRAMES_SKIP_SKILLS"] === "1" || updateNoticesSuppressed()) return;
+  if (skillsNoticeOff()) return;
   const text = skillsNoticeText(getSkillsUpdateMeta());
   if (text) process.stderr.write(text);
 }

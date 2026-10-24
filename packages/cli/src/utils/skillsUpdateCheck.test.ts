@@ -16,9 +16,10 @@ vi.mock("../telemetry/config.js", () => ({
   },
 }));
 
-const gate = vi.hoisted(() => ({ suppressed: false, answers: true }));
+const gate = vi.hoisted(() => ({ disabled: false, noTty: false, answers: true }));
 vi.mock("./updateCheck.js", () => ({
-  updateNoticesSuppressed: () => gate.suppressed,
+  updateCheckDisabled: () => gate.disabled,
+  updateNoticesSuppressed: () => gate.disabled || gate.noTty,
 }));
 vi.mock("./hostAnswers.js", () => ({ hostAnswers: async () => gate.answers }));
 
@@ -33,7 +34,8 @@ describe("skillsUpdateCheck", () => {
     config = {};
     cachedRead = null;
     mockCheckSkills.mockReset();
-    gate.suppressed = false;
+    gate.disabled = false;
+    gate.noTty = false;
     gate.answers = true;
     vi.stubEnv("HYPERFRAMES_SKIP_SKILLS", "");
   });
@@ -44,12 +46,18 @@ describe("skillsUpdateCheck", () => {
 
   it.each([
     ["HYPERFRAMES_SKIP_SKILLS is set", () => vi.stubEnv("HYPERFRAMES_SKIP_SKILLS", "1")],
-    ["the run shows no notices", () => (gate.suppressed = true)],
+    ["the update check is disabled (CI, dev, opt-out)", () => (gate.disabled = true)],
   ])("no background check is due when %s", async (_, arrange) => {
     const { skillsCheckDue } = await import("./skillsUpdateCheck.js");
     expect(skillsCheckDue()).toBe(true);
     arrange();
     expect(skillsCheckDue()).toBe(false);
+  });
+
+  it("a run without a TTY (an agent) still has its background check due", async () => {
+    gate.noTty = true;
+    const { skillsCheckDue } = await import("./skillsUpdateCheck.js");
+    expect(skillsCheckDue()).toBe(true);
   });
 
   it("does not check skills when DNS does not answer", async () => {
@@ -121,6 +129,17 @@ describe("skillsUpdateCheck", () => {
   it("suppresses a cached stale-skills notice in an attended plugin run", async () => {
     vi.stubEnv("HYPERFRAMES_SKIP_SKILLS", "1");
     // The normal notice gate permits output (the attended TTY case).
+    expect(await noticeTextFor({ skillsOutdatedCount: 2, skillsMissingCount: 1 })).toBeNull();
+  });
+
+  it("prints the stale-skills notice without a TTY, so an agent hears it", async () => {
+    gate.noTty = true;
+    const text = await noticeTextFor({ skillsOutdatedCount: 2, skillsMissingCount: 1 });
+    expect(text).toContain("3 HyperFrames skills out of date or missing");
+  });
+
+  it("prints nothing when the update check is disabled (CI, dev, opt-out)", async () => {
+    gate.disabled = true;
     expect(await noticeTextFor({ skillsOutdatedCount: 2, skillsMissingCount: 1 })).toBeNull();
   });
 
