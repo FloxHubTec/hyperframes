@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -114,5 +122,24 @@ describe("project history and media files", () => {
     expect(await reopened.readBlob(reopened.peek("start")!["index.html"]!)).toEqual(
       Buffer.from("A"),
     );
+  });
+
+  it("keeps TypeScript source edits undoable, and reclaim leaves their copies", async () => {
+    const { history, historyRoot, projectDir, write } = await project({
+      "index.html": "A",
+      "setup.ts": "export const a = 1;",
+      "intro.mts": "export const b = 1;",
+    });
+    await history.flush();
+    const edit = await history.beginWindow(you, "Edit");
+    write("setup.ts", "export const a = 2;");
+    write("intro.mts", "export const b = 2;");
+    const entry = (await edit.close())!;
+    expect(blobBytes(historyRoot, history)).toBeGreaterThan(40);
+    await history.close();
+    const reopened = await open(projectDir, historyRoot);
+    expect(blobBytes(historyRoot, reopened)).toBeGreaterThan(40);
+    expect((await reopened.undo(entry.id, { who: you })).ok).toBe(true);
+    expect(readFileSync(join(projectDir, "setup.ts"), "utf-8")).toBe("export const a = 1;");
   });
 });
