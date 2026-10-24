@@ -202,6 +202,8 @@ interface EffectRenderState {
   effectError: string | null;
 }
 
+const CONTEXT_RESTORE_GRACE_MS = 3000;
+
 interface ColorGradingRenderer extends EffectRenderState {
   canvas: HTMLCanvasElement;
   glCanvas: HTMLCanvasElement;
@@ -1055,6 +1057,15 @@ const FRAGMENT_SHADER = [
   `  vec4 after = texture2D(u_advanced, vec2((upper + 0.5) / ${ADVANCED_TEXTURE_WIDTH_GLSL}, y));`,
   "  return mix(before, after, position - lower);",
   "}",
+  "vec4 sampleHueCurve(float coordinate){",
+  `  float position = fract(coordinate) * ${ADVANCED_TEXTURE_WIDTH_GLSL};`,
+  "  float lower = floor(position);",
+  `  float upper = mod(lower + 1.0, ${ADVANCED_TEXTURE_WIDTH_GLSL});`,
+  `  float y = 1.5 / ${ADVANCED_TEXTURE_HEIGHT_GLSL};`,
+  `  vec4 before = texture2D(u_advanced, vec2((lower + 0.5) / ${ADVANCED_TEXTURE_WIDTH_GLSL}, y));`,
+  `  vec4 after = texture2D(u_advanced, vec2((upper + 0.5) / ${ADVANCED_TEXTURE_WIDTH_GLSL}, y));`,
+  "  return mix(before, after, position - lower);",
+  "}",
   "vec4 advancedConfig(float index){",
   `  return texture2D(u_advanced, vec2((index + 0.5) / ${ADVANCED_TEXTURE_WIDTH_GLSL}, ${ADVANCED_CONFIG_Y_GLSL}));`,
   "}",
@@ -1100,7 +1111,7 @@ const FRAGMENT_SHADER = [
   "vec3 applyHueCurves(vec3 color){",
   "  if (u_hueCurvesEnabled < 0.5) return color;",
   "  vec3 hsv = rgbToHsv(clamp(color, 0.0, 1.0));",
-  "  vec3 curves = sampleAdvancedCurve(hsv.x, 1.0).rgb;",
+  "  vec3 curves = sampleHueCurve(hsv.x).rgb;",
   "  float originalLuma = lumaOf(color);",
   "  hsv.x = fract(hsv.x + decodeSigned(curves.r) * 0.5);",
   "  hsv.y = clamp(hsv.y * max(0.0, 1.0 + decodeSigned(curves.g)), 0.0, 1.0);",
@@ -2160,6 +2171,33 @@ function replaceProgramResources(entry: ColorGradingEntry): boolean {
   entry.lutError = null;
   entry.effectError = null;
   return true;
+}
+
+function moveToContext(
+  entry: ColorGradingEntry,
+  context: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext },
+): boolean {
+  const program = createProgramResources(context.gl);
+  if (!program) return false;
+  destroyProgramResources(entry);
+  entry.gl = context.gl;
+  entry.glCanvas = context.canvas;
+  entry.program = program;
+  entry.lut = null;
+  entry.lutLoadingSrc = null;
+  entry.lutError = null;
+  entry.effectError = null;
+  return true;
+}
+
+function adoptContext(
+  entry: ColorGradingEntry,
+  context: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext },
+): void {
+  entry.contextLost = !moveToContext(entry, context);
+  entry.drawError = entry.contextLost ? "WebGL context rebuild failed" : null;
+  if (entry.contextLost) restoreSourceElement(entry);
+  else drawEntry(entry);
 }
 
 function hideFrameBorder(entry: ColorGradingEntry, frame: HTMLElement): void {
@@ -3842,6 +3880,7 @@ export function createColorGradingRuntime(pausedMediaLease?: {
   let previewQueue = Promise.resolve();
   let destroyed = false;
   let shared: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext } | null = null;
+  let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   const trackedEntries = () =>
     [...trackedElements].flatMap((element) => entries.get(element) ?? []);
 
@@ -3859,17 +3898,40 @@ export function createColorGradingRuntime(pausedMediaLease?: {
         entry.canvas.style.display = "none";
         restoreSourceElement(entry);
       }
+      watchForRestore(canvas, gl);
     });
     canvas.addEventListener("webglcontextrestored", () => {
+      if (shared?.canvas !== canvas) return;
+      clearTimeout(rebuildTimer);
       for (const entry of trackedEntries()) {
         entry.contextLost = !replaceProgramResources(entry);
         entry.drawError = entry.contextLost ? "WebGL context restore failed" : null;
         if (entry.contextLost) restoreSourceElement(entry);
         else drawEntry(entry);
       }
+      refresh();
     });
     shared = { canvas, gl };
     return shared;
+  };
+
+  const watchForRestore = (canvas: HTMLCanvasElement, gl: WebGLRenderingContext): void => {
+    clearTimeout(rebuildTimer);
+    rebuildTimer = setTimeout(() => rebuildLostContext(canvas, gl), CONTEXT_RESTORE_GRACE_MS);
+  };
+
+  const rebuildLostContext = (canvas: HTMLCanvasElement, gl: WebGLRenderingContext): void => {
+    if (destroyed || shared?.canvas !== canvas || !gl.isContextLost?.()) return;
+    const stale = shared;
+    shared = null;
+    const next = sharedContext();
+    if (!next) {
+      shared = stale;
+      watchForRestore(canvas, gl);
+      return;
+    }
+    for (const entry of trackedEntries()) adoptContext(entry, next);
+    refresh();
   };
 
   const newRenderer = (element: ColorGradingMediaElement): ColorGradingRenderer | null => {
@@ -4198,6 +4260,7 @@ export function createColorGradingRuntime(pausedMediaLease?: {
   const destroy = (): void => {
     if (destroyed) return;
     destroyed = true;
+    clearTimeout(rebuildTimer);
     observer?.disconnect();
     observer = null;
     for (const element of trackedElements) removeElement(element);
