@@ -158,6 +158,7 @@ async function loadModule(
   hdrTransfer: string | null = isHdr ? "pq" : null,
   codecName?: string,
   durationSeconds?: number,
+  streams?: string[],
 ): Promise<typeof import("./proxyTranscoder.js")> {
   vi.resetModules();
   vi.doMock("node:child_process", () => {
@@ -172,6 +173,7 @@ async function loadModule(
       kind: "video",
       color: { isHdr, hdrTransfer, codecName },
       durationSeconds,
+      streams,
     }),
     probeFirstFrameColour: async () => ({}),
   }));
@@ -1470,8 +1472,9 @@ describe("resolveProxy", () => {
 
     await expect(resultPromise).rejects.toBeInstanceOf(ProxyTranscodeError);
     await expect(resultPromise).rejects.toMatchObject({
-      message:
-        "ffmpeg exited with code 1: Error submitting a packet to the muxer: No space left on device",
+      message: expect.stringContaining(
+        "ffmpeg exited with code 1: [hevc] Error while decoding stream #0:0: Invalid data found when processing input; Error submitting a packet to the muxer: No space left on device (source: video,",
+      ),
       exitCode: 1,
       stderrTail: expect.stringContaining("unsupported codec"),
     });
@@ -1540,6 +1543,28 @@ describe("resolveProxy", () => {
     expect(String(await result)).toContain(
       "ffmpeg exited with code 234: [out#0/mp4 @ 0x1] Output file does not contain any stream; Error opening output files: Invalid argument",
     );
+  });
+
+  it("ends a failure with what the source is, without its name or folder", async () => {
+    const { spawn, calls } = createSpawnSpy();
+    const { resolveProxy } = await loadModule(spawn, FFMPEG_PATH, false, null, "hevc", undefined, [
+      "video:hevc[default]",
+      "data:?[]",
+    ]);
+    const projectDir = tmpProject();
+    const sourcePath = join(projectDir, "Phone Clip.mov");
+    writeFileSync(sourcePath, "source-bytes");
+
+    const result = resolveProxy(projectDir, sourcePath).catch((error: unknown) => error);
+    await flush();
+    fail(calls[0]!, 234, "Error opening output files: Invalid argument");
+
+    const message = String(await result);
+    expect(message).toContain(
+      "(source: video, hevc, no audio, streams video:hevc[default] data:?[], 0 MB, local)",
+    );
+    expect(message).not.toContain("Phone Clip");
+    expect(message).not.toContain(projectDir);
   });
 
   it("remembers a failure per cache key: a second call rethrows without respawning ffmpeg", async () => {
@@ -1820,5 +1845,21 @@ describe("resolveProxy", () => {
     calls[0]!.proc.emit("error", new Error("EACCES"));
 
     await expect(result).rejects.toBeInstanceOf(FfmpegUnavailableError);
+  });
+});
+
+describe("sourceFolderKind", () => {
+  it.each([
+    ["/Users/a/Library/Mobile Documents/com~apple~CloudDocs/clip.mov", "icloud"],
+    ["/Users/a/Library/CloudStorage/Dropbox/p/clip.mov", "cloud-storage"],
+    ["/Users/a/Dropbox (Team)/p/clip.mov", "cloud-storage"],
+    ["C:\\Users\\a\\OneDrive - Co\\p\\clip.mov", "cloud-storage"],
+    ["/Volumes/Phone Backup/clip.mov", "external-volume"],
+    ["/Users/a/Movies/clip.mov", "local"],
+    ["/Users/a/Dropboxes/clip.mov", "local"],
+  ])("tells %s apart as %s", async (path, kind) => {
+    const { spawn } = createSpawnSpy();
+    const { sourceFolderKind } = await loadModule(spawn, FFMPEG_PATH);
+    expect(sourceFolderKind(path)).toBe(kind);
   });
 });

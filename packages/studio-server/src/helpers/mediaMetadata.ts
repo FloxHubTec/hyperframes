@@ -79,6 +79,8 @@ export interface MediaMetadata {
   hasAlpha?: boolean;
   durationSeconds?: number;
   source?: PreviewSourceFacts;
+  /** Every stream as `type:codec[flags]`, for a failure report. */
+  streams?: string[];
   probeError?: string;
 }
 
@@ -94,7 +96,7 @@ interface FfprobeStream {
   width?: number;
   height?: number;
   bit_rate?: string;
-  disposition?: { attached_pic?: number };
+  disposition?: Record<string, number | undefined>;
   tags?: Record<string, string | undefined>;
 }
 
@@ -216,6 +218,14 @@ function sourceFactsOf(
     bitDepth: bitDepthOf(stream),
     bitrate: Number.isFinite(bitrate) ? bitrate : 0,
   };
+
+const STREAM_SUMMARY_MAX = 12;
+
+function summarizeStream(stream: FfprobeStream): string {
+  const flags = Object.entries(stream.disposition ?? {})
+    .filter(([, on]) => on === 1)
+    .map(([name]) => name);
+  return `${stream.codec_type ?? "?"}:${stream.codec_name ?? "?"}[${flags.join(",")}]`;
 }
 
 export async function probeMediaMetadata(
@@ -242,7 +252,7 @@ export async function probeMediaMetadata(
       "-v",
       "error",
       "-show_entries",
-      "stream=codec_type,codec_name,profile,pix_fmt,color_space,color_transfer,color_primaries,bits_per_raw_sample,width,height,bit_rate:stream_disposition=attached_pic:stream_tags=alpha_mode:format=duration,bit_rate",
+      "stream=codec_type,codec_name,profile,pix_fmt,color_space,color_transfer,color_primaries,bits_per_raw_sample,width,height,bit_rate:stream_disposition:stream_tags=alpha_mode:format=duration,bit_rate",
       "-of",
       "json",
       "--",
@@ -267,7 +277,11 @@ export async function probeMediaMetadata(
       if (kind === "image") return item.codec_type === "video";
       return item.codec_type === kind && item.disposition?.attached_pic !== 1;
     });
-    const metadata: MediaMetadata = { kind, color: classifyMediaColor(stream) };
+    const metadata: MediaMetadata = {
+      kind,
+      color: classifyMediaColor(stream),
+      streams: (parsed.streams ?? []).slice(0, STREAM_SUMMARY_MAX).map(summarizeStream),
+    };
     if (kind === "video") {
       metadata.hasAudio = (parsed.streams ?? []).some((item) => item.codec_type === "audio");
       metadata.hasAlpha = stream !== undefined && videoStreamHasAlpha(stream);

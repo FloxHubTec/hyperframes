@@ -413,23 +413,69 @@ function proxyScaleFilter(box?: PreviewProxyBox): string {
 const STDERR_ERROR_LINE = /error|invalid|denied|no space|not found|unknown/i;
 
 const OPEN_OUTPUT_LINE = /^Error opening output file /;
+const ABSOLUTE_PATH = /(?:[A-Za-z]:)?(?:[\\/][^\\/\s'"]+){2,}/g;
+const REASON_LINES = 3;
 
-/** ffmpeg ends most failures with "Conversion failed!"; the cause is the last error-looking line above it.
- * When it only says the output could not open, the line before that names why. */
+/** ffmpeg ends most failures with "Conversion failed!"; its causes are the last few error-looking lines above it,
+ * and the line before "Error opening output file" names why the output could not open. Paths are dropped. */
 function stderrReason(stderrTail: string): string {
   const lines = stderrTail
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  const errorLines = lines.filter((line) => STDERR_ERROR_LINE.test(line));
-  const line = errorLines.at(-1) ?? lines.at(-1);
-  if (!line) return "";
   const openedAt = lines.map((candidate) => OPEN_OUTPUT_LINE.test(candidate)).lastIndexOf(true);
-  const cause = openedAt > 0 ? lines[openedAt - 1] : undefined;
-  return `: ${[cause, line]
+  const causes = lines.filter(
+    (line, index) =>
+      !OPEN_OUTPUT_LINE.test(line) && (STDERR_ERROR_LINE.test(line) || index === openedAt - 1),
+  );
+  const shown = (causes.length ? causes : lines.slice(-1)).slice(-REASON_LINES);
+  const reason = shown.map((line) => line.replace(ABSOLUTE_PATH, "<path>").replace(/[.!]+$/, ""));
+  return reason.length ? `: ${reason.join("; ")}` : "";
+}
+
+export type SourceFolderKind = "icloud" | "cloud-storage" | "external-volume" | "local";
+
+const CLOUD_FOLDER = /\/(?:Library\/CloudStorage|Dropbox|OneDrive|Google Drive)(?:[ \-/]|$)/i;
+
+/** Where a source lives, in the terms that decide whether its file can be read and written normally. */
+export function sourceFolderKind(sourcePath: string): SourceFolderKind {
+  const path = sourcePath.replace(/\\/g, "/");
+  if (path.includes("/Library/Mobile Documents/")) return "icloud";
+  if (CLOUD_FOLDER.test(path)) return "cloud-storage";
+  return path.startsWith("/Volumes/") ? "external-volume" : "local";
+}
+
+/** What a failure report needs about the source, without its name or folder. */
+function describeSource(
+  sourcePath: string,
+  metadata: Awaited<ReturnType<typeof probeMediaMetadata>>,
+): string {
+  const { codecName, pixelFormat, colorTransfer } = metadata.color;
+  return [
+    metadata.kind,
+    codecName,
+    pixelFormat,
+    colorTransfer,
+    metadata.hasAudio ? "with audio" : "no audio",
+    metadata.streams?.length ? `streams ${metadata.streams.join(" ")}` : undefined,
+    metadata.durationSeconds ? `${Math.round(metadata.durationSeconds)}s` : undefined,
+    `${Math.round(statSync(sourcePath).size / 1e6)} MB`,
+    sourceFolderKind(sourcePath),
+  ]
     .filter(Boolean)
-    .join("; ")
-    .replace(/[.!]+$/, "")}`;
+    .join(", ");
+}
+
+/** A copy's failure message ends with the source it was made from; other errors pass through. */
+function withSource(err: unknown, source: string): unknown {
+  if (err instanceof ProxyTranscodeError && err.name === "ProxyTranscodeError") {
+    return new ProxyTranscodeError(
+      `${err.message} (source: ${source})`,
+      err.exitCode,
+      err.stderrTail,
+    );
+  }
+  return err;
 }
 
 interface ChunkRange {
@@ -704,22 +750,26 @@ async function runFfmpeg(
       onEncoded,
     );
   const ranges = chunkRanges(totalSeconds);
-  if (!ranges) {
-    return encode(outputPath, undefined, signal, (encodedSeconds) =>
-      onProgress({ doneSeconds: encodedSeconds, totalSeconds }),
+  try {
+    if (!ranges) {
+      return await encode(outputPath, undefined, signal, (encodedSeconds) =>
+        onProgress({ doneSeconds: encodedSeconds, totalSeconds }),
+      );
+    }
+    await encodeInChunks(
+      ranges,
+      chunkPrefix,
+      outputPath,
+      encode,
+      (listPath, target) =>
+        spawnFfmpeg(ffmpegPath, concatArgs(listPath, target, variant), CONCAT_TIMEOUT_MS, signal),
+      signal,
+      gate,
+      (doneSeconds) => onProgress({ doneSeconds, totalSeconds }),
     );
+  } catch (err) {
+    throw withSource(err, describeSource(sourcePath, metadata));
   }
-  await encodeInChunks(
-    ranges,
-    chunkPrefix,
-    outputPath,
-    encode,
-    (listPath, target) =>
-      spawnFfmpeg(ffmpegPath, concatArgs(listPath, target, variant), CONCAT_TIMEOUT_MS, signal),
-    signal,
-    gate,
-    (doneSeconds) => onProgress({ doneSeconds, totalSeconds }),
-  );
 }
 
 function concatArgs(listPath: string, target: string, variant: ProxyVariant): string[] {
