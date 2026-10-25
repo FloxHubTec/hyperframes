@@ -206,7 +206,6 @@ export async function blitHdrVideoLayer(
 
   try {
     if (hdrPerf) hdrPerf.hdrVideoLayerBlits += 1;
-    // The scratch buffer is shared by concurrent workers, so nothing below may await after the read.
     const lease = await frameSource.windows.lease(effectiveIndex);
     if (!lease) return;
     let bytesRead: number;
