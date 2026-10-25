@@ -54,7 +54,7 @@ export type PreviewSourceFacts = {
   bitrate: number;
 };
 
-/** A copy of a file Chrome can play is worth making when the copy's box has at most this share of its pixels. */
+/** A playable file is worth a lighter copy when the copy has at most this share of its pixels. */
 export const HEAVY_PIXEL_SHARE = 0.5;
 export const HEAVY_BITRATE = 40_000_000;
 

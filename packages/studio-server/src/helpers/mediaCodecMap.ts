@@ -399,11 +399,7 @@ export interface ProjectMediaScan {
   sourceFacts: Record<string, PreviewSourceFacts>;
 }
 
-/**
- * Scans a project's composition HTML for local `<video src>` references.
- * Best-effort throughout — a video whose codec can't be determined (missing
- * ffprobe, probe error, no video stream) is simply omitted, never thrown.
- */
+/** Scans composition HTML for local `<video src>` references; a video that can't be probed is omitted. */
 export async function scanProjectMedia(
   projectDir: string,
   htmlSources: HtmlSourceLike[],
