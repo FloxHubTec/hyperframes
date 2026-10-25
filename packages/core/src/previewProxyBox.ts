@@ -33,3 +33,38 @@ export function parsePreviewProxyBox(raw: string): PreviewProxyBox | null {
   const height = Number(match[2]);
   return RUNGS.includes(width) && RUNGS.includes(height) ? { width, height } : null;
 }
+
+/** Preview quality levels: 1 is today's preview, lower ones draw lighter copies of heavy files. */
+export const PREVIEW_QUALITY_LEVELS = [1, 0.5, 0.25, 0.125] as const;
+export type PreviewQuality = (typeof PREVIEW_QUALITY_LEVELS)[number];
+
+export function isPreviewQuality(value: unknown): value is PreviewQuality {
+  return PREVIEW_QUALITY_LEVELS.some((level) => level === value);
+}
+
+/** What the server reads from a video to tell whether playing it as it is will be heavy. */
+export type PreviewSourceFacts = {
+  width: number;
+  height: number;
+  bitDepth: number;
+  /** Bits per second; 0 when the file does not say. */
+  bitrate: number;
+};
+
+/** A copy of a file Chrome can play is worth making when the copy's box has at most this share of its pixels. */
+export const HEAVY_PIXEL_SHARE = 0.5;
+export const HEAVY_BITRATE = 40_000_000;
+
+/** The box a lighter copy is made at: the shown box times the level, on the size ladder. */
+export function scalePreviewProxyBox(box: PreviewProxyBox, level: PreviewQuality): PreviewProxyBox {
+  return quantizePreviewProxyBox(box.width * level, box.height * level) ?? box;
+}
+
+/** Whether a file Chrome can play still deserves a lighter copy: a much larger source, 10-bit or deeper, or a high bitrate. */
+export function isHeavyForPreview(facts: PreviewSourceFacts, copyBox: PreviewProxyBox): boolean {
+  return (
+    copyBox.width * copyBox.height <= HEAVY_PIXEL_SHARE * facts.width * facts.height ||
+    facts.bitDepth > 8 ||
+    facts.bitrate >= HEAVY_BITRATE
+  );
+}
