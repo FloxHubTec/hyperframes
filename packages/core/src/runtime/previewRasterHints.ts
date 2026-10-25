@@ -70,6 +70,10 @@ function setMark(element: Element, on: boolean): void {
   else marked.delete(element);
 }
 
+function adoptCopiedMark(element: Element): void {
+  if (element.hasAttribute(PREVIEW_RASTER_ATTR)) marked.add(element);
+}
+
 function writeMark(element: Element, drop: boolean): void {
   if (drop !== marked.has(element)) setMark(element, drop);
 }
@@ -132,6 +136,7 @@ function followTree(root: Element, batch: FollowBatch): void {
   for (const element of [root, ...root.querySelectorAll("*")]) {
     if (batch.checked.has(element)) continue;
     batch.checked.add(element);
+    adoptCopiedMark(element);
     const readOwnHints = element === root || batch.changed.has(element);
     decidedBeforeAnyWrite.push([element, mayHint(element) && fits(element, readOwnHints)]);
   }

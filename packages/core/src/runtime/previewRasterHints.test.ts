@@ -258,6 +258,33 @@ describe("setPreviewRasterScale", () => {
     expect(count).toBe(0);
   });
 
+  it("gives the hint back to a marked layer re-attached after removal once a child needs it", async () => {
+    const words = layer(POSITIONED);
+    const child = layer("", words);
+    setPreviewRasterScale(0.5);
+    expect(marked(words)).toBe(true);
+    words.remove();
+    await Promise.resolve();
+    document.body.append(words);
+    await Promise.resolve();
+    child.style.position = "fixed";
+    await Promise.resolve();
+    expect(marked(words)).toBe(false);
+  });
+
+  it("follows a copy of a marked layer that arrives with the mark", async () => {
+    const words = layer(POSITIONED);
+    layer("", words);
+    setPreviewRasterScale(0.5);
+    const copy = words.cloneNode(true) as HTMLElement;
+    words.remove();
+    document.body.append(copy);
+    await Promise.resolve();
+    (copy.firstElementChild as HTMLElement).style.position = "fixed";
+    await Promise.resolve();
+    expect(marked(copy)).toBe(false);
+  });
+
   it("re-checks the page when a linked stylesheet loads", async () => {
     const sheet = document.createElement("style");
     document.head.append(sheet);
