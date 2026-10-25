@@ -634,16 +634,8 @@ jobs:
 
   test:
     name: Test
-    needs:
-      [
-        changes,
-        producer-source-tests,
-        test-studio,
-        test-runtime,
-        test-cli,
-        test-support,
-        test-skills,
-      ]
+    # prettier-ignore
+    needs: [changes, producer-source-tests, test-studio, test-runtime, test-cli, test-support, test-skills]
     # Keep the existing required `Test` context authoritative for producer
     # failures too. It also fails closed if any package shard fails or is cancelled.
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.skills == 'true')
