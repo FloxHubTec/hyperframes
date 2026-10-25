@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createTimingRecordFilter } from "./timingMutations";
+import { createTimingRecordFilter } from "./mutationRecords";
 
 const recordsMoveTiming = createTimingRecordFilter(["data-start", "data-duration", "id"]);
 
