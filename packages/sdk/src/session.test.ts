@@ -920,4 +920,39 @@ describe("editing duplicate inline declarations", () => {
     });
     comp.dispose();
   });
+
+  it.each([
+    ["color", "red!important", "green!important/*", "green!important/**/"],
+    [
+      "--label",
+      "first!important",
+      "second!important/* unfinished",
+      "second!important/* unfinished*/",
+    ],
+  ])(
+    "closes an EOF comment on %s before appending an unrelated edit",
+    async (prop, first, last, value) => {
+      const persist = createMemoryAdapter();
+      const comp = await openComposition(
+        `<h1 data-hf-id="hf-title" style="${prop}:${first};${prop}:${last}">Release notes</h1>`,
+        { persist, coalesceMs: 0 },
+      );
+      comp.setStyle("hf-title", { opacity: "0.5" });
+      await comp.flush();
+      const saved = await persist.read("composition.html");
+      if (saved === undefined) throw new Error("Composition was not saved");
+      const reopened = await openComposition(saved);
+      expect(reopened.getElement("hf-title")?.inlineStyles).toEqual({
+        [prop]: value,
+        opacity: "0.5",
+      });
+      expect(saved).toContain(`${value}; opacity: 0.5`);
+      comp.undo();
+      expect(comp.getElement("hf-title")?.inlineStyles).toEqual({ [prop]: value });
+      comp.redo();
+      expect(comp.getElement("hf-title")?.inlineStyles).toEqual({ [prop]: value, opacity: "0.5" });
+      reopened.dispose();
+      comp.dispose();
+    },
+  );
 });

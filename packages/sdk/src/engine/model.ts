@@ -276,7 +276,12 @@ function splitStyleAtTopLevel(style: string, delimiter: ";" | "!"): string[] {
     // Unquoted URL tokens can contain literal comment markers inside parentheses.
     if (topLevel && style.startsWith("/*", i)) {
       const end = style.indexOf("*/", i + 2);
-      i = end === -1 ? style.length : end + 1;
+      if (end === -1) {
+        // EOF ends the comment; close it so later serialized properties stay outside.
+        declarations.push(`${style.slice(start)}*/`);
+        return declarations;
+      }
+      i = end + 1;
       continue;
     }
     if (ch === delimiter && topLevel) {
@@ -290,7 +295,7 @@ function splitStyleAtTopLevel(style: string, delimiter: ";" | "!"): string[] {
   return declarations;
 }
 
-function skipStyleTrivia(text: string, start: number): number | null {
+function skipStyleTrivia(text: string, start: number): number {
   let i = start;
   while (i < text.length) {
     if (/[ \t\r\n\f]/.test(text.charAt(i))) {
@@ -299,7 +304,7 @@ function skipStyleTrivia(text: string, start: number): number | null {
     }
     if (!text.startsWith("/*", i)) break;
     const end = text.indexOf("*/", i + 2);
-    if (end === -1) return null;
+    if (end === -1) return text.length;
     i = end + 2;
   }
   return i;
@@ -310,7 +315,6 @@ function hasImportant(value: string): boolean {
   if (parts.length === 1) return false;
   const suffix = parts.at(-1) ?? "";
   const start = skipStyleTrivia(suffix, 0);
-  if (start === null) return false;
   const identifier = suffix
     .slice(start)
     .match(
@@ -320,13 +324,21 @@ function hasImportant(value: string): boolean {
   return skipStyleTrivia(suffix, start + identifier.length) === suffix.length;
 }
 
+function trimStyleWhitespace(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (/[ \t\r\n\f]/.test(value.charAt(start))) start++;
+  while (end > start && /[ \t\r\n\f]/.test(value.charAt(end - 1))) end--;
+  return value.slice(start, end);
+}
+
 function parseStyleAttr(styleAttr: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const decl of splitStyleAtTopLevel(styleAttr, ";")) {
     const idx = decl.indexOf(":");
     if (idx === -1) continue;
     const rawProp = decl.slice(0, idx).trim();
-    const value = decl.slice(idx + 1).replace(/^[ \t\r\n\f]+|[ \t\r\n\f]+$/g, "");
+    const value = trimStyleWhitespace(decl.slice(idx + 1));
     if (!rawProp) continue;
     const prop = toCamel(rawProp);
     const previous = result[prop];

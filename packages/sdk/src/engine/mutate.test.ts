@@ -969,6 +969,18 @@ describe("inline style priority", () => {
     });
   });
 
+  it.each(["first", String.raw`first !\69`])(
+    "handles a long internal whitespace run after %s",
+    (prefix) => {
+      const parsed = parseMutable("<h1></h1>");
+      const el = parsed.document.querySelector("h1");
+      if (!el) throw new Error("missing fixture element");
+      el.setAttribute("style", `--value: ${prefix}${" ".repeat(100_000)}last; --value: later`);
+      setElementStyles(el, { opacity: "0.5" });
+      expect(getElementStyles(el)).toEqual({ "--value": "later", opacity: "0.5" });
+    },
+  );
+
   it("distinguishes custom property literals and identifier boundaries from priority", () => {
     const parsed = parseMutable("<h1></h1>");
     const el = parsed.document.querySelector("h1");
