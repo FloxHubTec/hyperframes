@@ -37,7 +37,7 @@ describe("studio UI preferences", () => {
     writeStudioUiPreferences({ previewQuality: 0.25 }, storage);
     expect(readStudioUiPreferences(storage)).toEqual({ previewQuality: 0.25 });
 
-    storage.setItem("hyperframes-studio-ui", JSON.stringify({ previewQuality: 0.75 }));
+    storage.setItem("hf-studio-ui-preferences", JSON.stringify({ previewQuality: 0.75 }));
     expect(readStudioUiPreferences(storage).previewQuality).toBeUndefined();
   });
 
