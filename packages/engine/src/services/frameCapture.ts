@@ -1393,6 +1393,21 @@ export async function completeDeferredDrawElementInit(session: CaptureSession): 
   session.deInitDeferred = false;
 }
 
+/**
+ * Media elements are addressed by a document-unique render id, not by the per-file element id.
+ * Installed before any page script runs, on the render page and the self-check's truth page alike.
+ */
+async function installMediaPageHooks(page: Page, options: CaptureOptions): Promise<void> {
+  await installMediaRenderIdBridge(page);
+  if (options.skipReadinessVideoIds?.length) {
+    await page.evaluateOnNewDocument(
+      holdRenderFrameVideos,
+      options.skipReadinessVideoIds,
+      MEDIA_RENDER_ID_ATTR,
+    );
+  }
+}
+
 // fallow-ignore-next-line unit-size
 export async function createCaptureSession(
   serverUrl: string,
@@ -1612,16 +1627,7 @@ async function constructCaptureSession(
       w.__name = <T>(fn: T, _name: string): T => fn;
     }
   });
-  // Media elements are addressed by a document-unique render id, not by the
-  // per-file element id. Install the resolvers before any page script runs.
-  await installMediaRenderIdBridge(page);
-  if (options.skipReadinessVideoIds?.length) {
-    await page.evaluateOnNewDocument(
-      holdRenderFrameVideos,
-      options.skipReadinessVideoIds,
-      MEDIA_RENDER_ID_ATTR,
-    );
-  }
+  await installMediaPageHooks(page, options);
   // Fast capture: record accelerated canvases (webgl/webgl2/webgpu) and force
   // preserveDrawingBuffer before any page script can create a context — their
   // paint records freeze at the first frame, so captureDrawElementFrame
@@ -3676,6 +3682,7 @@ export async function createStaticVerificationPage(session: CaptureSession): Pro
         w.__name = <T>(fn: T, _name: string): T => fn;
       }
     });
+    await installMediaPageHooks(page, session.options);
     if (session.options.variables && Object.keys(session.options.variables).length > 0) {
       const variablesJson = JSON.stringify(session.options.variables);
       await page.evaluateOnNewDocument((json: string) => {
@@ -5327,7 +5334,9 @@ async function captureDeVerificationFrames(
         });
   const isolated = disposable !== null;
   const truthPage = disposable ?? page;
-  const injectFrames = isolated ? (truthInjector ?? session.onBeforeCapture) : session.onBeforeCapture;
+  const injectFrames = isolated
+    ? (truthInjector ?? session.onBeforeCapture)
+    : session.onBeforeCapture;
   const seekTo = (t: number): Promise<void> => seekDeVerifyTruth(truthPage, t, !isolated);
   const frames = new Map<number, Buffer>();
   try {
