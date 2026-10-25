@@ -267,7 +267,6 @@ export function hasMediaSyncStateForTest(el: HTMLMediaElement): boolean {
 export const MEDIA_HARD_SYNC_SECONDS = 0.5;
 export const VIDEO_PRESEEK_SECONDS = 1.5;
 
-/** Where `clip`'s element belongs in its source at timeline time `timeSeconds`. */
 export function mediaSourceTimeAt(clip: RuntimeMediaClip, timeSeconds: number): number {
   const elapsed = Math.max(0, Math.min(timeSeconds, clip.end) - (clip.origin ?? clip.start));
   const target = clip.mediaStart + sourceTimeAt(clip.rate ?? clip.playbackRate, elapsed);

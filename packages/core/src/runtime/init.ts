@@ -3456,8 +3456,7 @@ export function initSandboxRuntimeModular(): void {
   };
   window.__hf.leasePausedMedia = leasePausedMedia;
   window.__hf.releasePausedMedia = releasePausedMedia;
-  // The clips the transport may move now; null while the host drives media itself (slideshow).
-  // A leased clip is not the transport's while paused; during playback it owns everything again.
+  // Clips the transport may move now (not a paused lease); null while the host drives media.
   const transportMovableClips = (clips: RuntimeMediaClip[]): RuntimeMediaClip[] | null => {
     if (state.nativeMediaSyncDisabled) return null;
     return state.isPlaying ? clips : clips.filter((clip) => !pausedMediaLeases.has(clip.el));
