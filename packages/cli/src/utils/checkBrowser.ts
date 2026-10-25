@@ -259,7 +259,7 @@ function proxyFailedDraft(message: string): RuntimeDraft {
   return { code: "media_proxy_failed", severity: "warning", message, time: 0 };
 }
 
-/** Studio's capture mode: only media near the playhead loads, so a long project's decoders cannot exhaust the page's memory. */
+/** Studio's capture mode loads only media near the playhead, so a long project's decoders cannot exhaust memory. */
 async function loadCheckHtml(dir: string): Promise<string> {
   const { bundleWithLocalizedFonts } = await import("./bundleWithLocalizedFonts.js");
   return injectTagsAtHeadStart(
