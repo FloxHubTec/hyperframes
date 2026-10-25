@@ -11,7 +11,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import type { Page } from "puppeteer-core";
-import { detectCssEffectRisk } from "./threeDProjection.js";
+import { detectCssEffectRisk, scanCssEffects } from "./threeDProjection.js";
 
 interface ShimEnv {
   /** Computed style returned for every element. */
@@ -24,6 +24,9 @@ interface ShimEnv {
   }>;
   /** Raw cssText of stylesheet rules visible to the scan. */
   styleRules?: string[];
+  /** Style rules with a selector, and the elements that selector matches under the root. */
+  selectorRules?: Array<{ cssText: string; selectorText: string }>;
+  matches?: Record<string, object[]>;
   /** GSAP-shaped timelines exposed as window.__timelines. */
   timelines?: Record<string, unknown>;
 }
@@ -32,13 +35,17 @@ const SHIMMED_GLOBALS = ["document", "window", "getComputedStyle"] as const;
 const saved = new Map<string, unknown>();
 
 function installShim(env: ShimEnv): void {
-  const el = { tagName: "DIV", querySelectorAll: () => [] };
+  const el = {
+    tagName: "DIV",
+    querySelectorAll: (selector: string) => env.matches?.[selector] ?? [],
+  };
   const doc = {
     querySelector: (sel: string) => (sel === "[data-composition-id]" ? el : null),
     querySelectorAll: () => [],
-    styleSheets: (env.styleRules ?? []).map((cssText) => ({
-      cssRules: [{ cssText }],
-    })),
+    styleSheets: [
+      ...(env.styleRules ?? []).map((cssText) => ({ cssRules: [{ cssText }] })),
+      ...(env.selectorRules ?? []).map((rule) => ({ cssRules: [rule] })),
+    ],
   };
   const win = { __timelines: env.timelines ?? {} };
   const computed = {
@@ -116,5 +123,61 @@ describe("detectCssEffectRisk drop-shadow gating", () => {
 
   it("returns null for an effect-free composition", async () => {
     expect(await detectCssEffectRisk(makeMockPage({}))).toBe(null);
+  });
+});
+
+describe("scanCssEffects", () => {
+  it("ties a computed effect to its element", async () => {
+    const scan = await scanCssEffects(makeMockPage({ computed: { filter: "blur(4px)" } }), true);
+    expect(scan).toEqual({ reason: "filter:blur", bounded: true });
+    expect(
+      (globalThis as { window?: { __hfCssFxTargets?: unknown[] } }).window?.__hfCssFxTargets,
+    ).toHaveLength(1);
+  });
+
+  it("ties a stylesheet rule to the elements its selector matches", async () => {
+    const target = {};
+    const scan = await scanCssEffects(
+      makeMockPage({
+        selectorRules: [
+          { cssText: ".x { filter: drop-shadow(0 0 4px #000); }", selectorText: ".x" },
+        ],
+        matches: { ".x": [target] },
+      }),
+      true,
+    );
+    expect(scan).toEqual({ reason: "filter:drop-shadow", bounded: true });
+    expect(
+      (globalThis as { window?: { __hfCssFxTargets?: unknown[] } }).window?.__hfCssFxTargets,
+    ).toEqual([target]);
+  });
+
+  it("is unbounded when a rule matches nothing yet, since a class swap could apply it on any frame", async () => {
+    const scan = await scanCssEffects(
+      makeMockPage({
+        selectorRules: [{ cssText: ".later { filter: blur(2px); }", selectorText: ".later" }],
+      }),
+      true,
+    );
+    expect(scan).toEqual({ reason: "filter:blur", bounded: false });
+  });
+
+  it("is unbounded for a CSS animation", async () => {
+    expect(
+      (
+        await scanCssEffects(
+          makeMockPage({ computed: { animationName: "spin", animationDuration: "2s" } }),
+          true,
+        )
+      ).bounded,
+    ).toBe(false);
+  });
+
+  it("stops at the first match when not collecting", async () => {
+    const scan = await scanCssEffects(
+      makeMockPage({ computed: { filter: "blur(4px)", mixBlendMode: "multiply" } }),
+      false,
+    );
+    expect(scan.reason).toBe("filter:blur");
   });
 });

@@ -416,6 +416,8 @@ export interface CapturePerfSummary {
   deVerifyInitMs: number;
   /** Clip-cut boundary frames routed to per-frame screenshot (Lim 6). */
   deBoundaryFrames: number;
+  /** Frames captured by screenshot because drawElement cannot reproduce them (per-frame fallback). */
+  deRiskFrames: number;
   /** Per-frame "No cached paint record" screenshot fallbacks during capture. */
   deNcprFallbacks: number;
   /**
