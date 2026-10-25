@@ -211,7 +211,14 @@ export function parseCodexUsage(text: string, now = Date.now()): HarnessUsage {
     if (window === null || windows[kind] !== null) return unknownUsage("invalid_usage_response");
     windows[kind] = window;
   }
-  return knownUsage("codex", windows.session, windows.weekly, usage.plan_type ?? null, null, windows.monthly);
+  return knownUsage(
+    "codex",
+    windows.session,
+    windows.weekly,
+    usage.plan_type ?? null,
+    null,
+    windows.monthly,
+  );
 }
 
 export function parseGrokUsage(text: string): HarnessUsage {
