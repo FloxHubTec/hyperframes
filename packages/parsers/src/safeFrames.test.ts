@@ -123,6 +123,11 @@ describe("snap and output size", () => {
     expect(outputSizeForCrop(crop, "9:16")).toEqual({ x: 0, y: 0, width: 844, height: 1080 });
   });
 
+  it("rounds an odd crop down to even output dimensions", () => {
+    const crop = { x: 0, y: 0, width: 133, height: 133 };
+    expect(outputSizeForCrop(crop, "1:1")).toEqual({ x: 0, y: 0, width: 132, height: 132 });
+  });
+
   it("returns null when the ratio is more than one pixel off", () => {
     expect(snapPixelSizeToRatio(844, 1080, "9:16")).toBeNull();
   });

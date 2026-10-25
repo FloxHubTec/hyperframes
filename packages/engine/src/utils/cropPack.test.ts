@@ -174,6 +174,28 @@ describe("planCropPackMembersForMaster", () => {
     expect(members[0]?.outputHeight).toBe(2160);
   });
 
+  it("scales an odd crop to an even output size for 4:2:0 encoders", () => {
+    const [member] = planCropPackMembers(
+      [{ id: "square", ratio: "1:1", x: 0, y: 0, width: (0.123 * 1080) / 1920, height: 0.123 }],
+      1920,
+      1080,
+      "renders/launch.mp4",
+    );
+    expect(member?.crop).toEqual({ x: 0, y: 0, width: 133, height: 133 });
+    expect(member?.outputWidth).toBe(132);
+    expect(member?.outputHeight).toBe(132);
+    const args = buildCropPackArgs({
+      masterPath: "renders/launch.mp4",
+      outputPath: "renders/launch.square.mp4",
+      crop: member!.crop,
+      outputWidth: member!.outputWidth,
+      outputHeight: member!.outputHeight,
+      copyAudio: true,
+      encode: mp4Encode,
+    });
+    expect(args[args.indexOf("-filter:v") + 1]).toBe("crop=133:133:0:0,scale=132:132");
+  });
+
   it("falls back to the composition size when the probe has no dimensions", async () => {
     extractVideoMetadataMock.mockResolvedValue({ width: 0, height: 0 });
     const members = await planCropPackMembersForMaster(

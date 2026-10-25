@@ -141,6 +141,9 @@ export function tryPixelRect(frame: SafeFrame, width: number, height: number): P
  * Largest integer output that fits `ratio` and does not upscale past the
  * cropped source. A 844×1080 crop from a 1920×1080 9:16 window stays
  * 844×1080 — cropping is not letterboxing or a second capture.
+ *
+ * Both sides round down to even: 4:2:0 encoders (libx264 with yuv420p)
+ * refuse odd dimensions, and the crop pass has no pad like the master's.
  */
 export function outputSizeForCrop(crop: PixelRect, ratio: SafeFrameRatio): PixelRect {
   const snapped = snapPixelSizeToRatio(crop.width, crop.height, ratio);
@@ -149,9 +152,13 @@ export function outputSizeForCrop(crop: PixelRect, ratio: SafeFrameRatio): Pixel
   return {
     x: 0,
     y: 0,
-    width: Math.min(width, crop.width),
-    height: Math.min(height, crop.height),
+    width: floorToEven(Math.min(width, crop.width)),
+    height: floorToEven(Math.min(height, crop.height)),
   };
+}
+
+function floorToEven(value: number): number {
+  return Math.max(2, Math.floor(value / 2) * 2);
 }
 
 /**
