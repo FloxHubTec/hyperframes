@@ -5164,8 +5164,14 @@ async function captureDeVerificationFrames(
   const fractions = computeDeVerifySampleFractions(k);
   // A video-free comp reads its truth on a disposable page: callbacks that run there
   // cannot leave the render's own page changed. The video injector is tied to the render page.
-  const isolated = !session.onBeforeCapture;
-  const truthPage = isolated ? await createStaticVerificationPage(session) : page;
+  const disposable = session.onBeforeCapture
+    ? null
+    : await createStaticVerificationPage(session).catch(() => {
+        logInitPhase("self-verify truth page unavailable; reading it on the render page");
+        return null;
+      });
+  const isolated = disposable !== null;
+  const truthPage = disposable ?? page;
   const seekTo = (t: number): Promise<void> => seekDeVerifyTruth(truthPage, t, !isolated);
   const frames = new Map<number, Buffer>();
   try {
