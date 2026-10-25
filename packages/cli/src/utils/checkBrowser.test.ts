@@ -1218,7 +1218,7 @@ describe("preResolveHostileMediaProxies", () => {
     await preResolveHostileMediaProxies(projectDir, html);
 
     // The page asks for the quantized stage size, so the copy and its cache check use that box.
-    const box = { width: 2048, height: 1448 };
+    const box = { width: 2048, height: 1218 };
     expect(mocks.resolveProxy).toHaveBeenCalledWith(
       projectDir,
       join(projectDir, "clip.mp4"),
