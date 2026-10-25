@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.145",
+  "version": "0.8.198",
   "description": "",
   "repository": {
     "type": "git",
@@ -44,6 +44,12 @@
       "import": "./src/telemetryRedaction.ts",
       "types": "./src/telemetryRedaction.ts"
     },
+    "./distributed-fps": {
+      "bun": "./src/distributedFps.ts",
+      "node": "./dist/distributedFps.js",
+      "import": "./src/distributedFps.ts",
+      "types": "./src/distributedFps.ts"
+    },
     "./beats": {
       "bun": "./src/beats/index.ts",
       "node": "./dist/beats/index.js",
@@ -68,11 +74,23 @@
       "import": "./src/safePath.ts",
       "types": "./src/safePath.ts"
     },
+    "./browser-marker": {
+      "bun": "./src/browserMarker.ts",
+      "node": "./dist/browserMarker.js",
+      "import": "./src/browserMarker.ts",
+      "types": "./src/browserMarker.ts"
+    },
     "./atomic-file": {
       "bun": "./src/atomicFile.ts",
       "node": "./dist/atomicFile.js",
       "import": "./src/atomicFile.ts",
       "types": "./src/atomicFile.ts"
+    },
+    "./project-folders": {
+      "bun": "./src/projectFolders.ts",
+      "node": "./dist/projectFolders.js",
+      "import": "./src/projectFolders.ts",
+      "types": "./src/projectFolders.ts"
     },
     "./asset-paths": {
       "bun": "./src/compiler/rewriteSubCompPaths.ts",
@@ -103,6 +121,24 @@
       "node": "./dist/studioPreviewMark.js",
       "import": "./src/studioPreviewMark.ts",
       "types": "./src/studioPreviewMark.ts"
+    },
+    "./keyframe-defaults": {
+      "bun": "./src/keyframeDefaults.ts",
+      "node": "./dist/keyframeDefaults.js",
+      "import": "./src/keyframeDefaults.ts",
+      "types": "./src/keyframeDefaults.ts"
+    },
+    "./html-in-canvas": {
+      "bun": "./src/htmlInCanvas.ts",
+      "node": "./dist/htmlInCanvas.js",
+      "import": "./src/htmlInCanvas.ts",
+      "types": "./src/htmlInCanvas.ts"
+    },
+    "./motion-blur-settings": {
+      "bun": "./src/motionBlurSettings.ts",
+      "node": "./dist/motionBlurSettings.js",
+      "import": "./src/motionBlurSettings.ts",
+      "types": "./src/motionBlurSettings.ts"
     },
     "./gsap-cdn": {
       "bun": "./src/gsapCdn.ts",
@@ -260,6 +296,12 @@
       "import": "./src/audibleVideo.ts",
       "types": "./src/audibleVideo.ts"
     },
+    "./audio-analysis": {
+      "bun": "./src/audioAnalysis.ts",
+      "node": "./dist/audioAnalysis.js",
+      "import": "./src/audioAnalysis.ts",
+      "types": "./src/audioAnalysis.ts"
+    },
     "./audio-gain": {
       "bun": "./src/audioGain.ts",
       "node": "./dist/audioGain.js",
@@ -350,6 +392,12 @@
       "node": "./dist/runtime/clipWindow.js",
       "import": "./src/runtime/clipWindow.ts",
       "types": "./src/runtime/clipWindow.ts"
+    },
+    "./runtime/clip-reveal": {
+      "bun": "./src/runtime/clipReveal.ts",
+      "node": "./dist/runtime/clipReveal.js",
+      "import": "./src/runtime/clipReveal.ts",
+      "types": "./src/runtime/clipReveal.ts"
     },
     "./runtime/stacking-context": {
       "bun": "./src/runtime/stackingContext.ts",
@@ -548,6 +596,10 @@
         "import": "./dist/telemetryRedaction.js",
         "types": "./dist/telemetryRedaction.d.ts"
       },
+      "./distributed-fps": {
+        "import": "./dist/distributedFps.js",
+        "types": "./dist/distributedFps.d.ts"
+      },
       "./beats": {
         "import": "./dist/beats/index.js",
         "types": "./dist/beats/index.d.ts"
@@ -564,9 +616,17 @@
         "import": "./dist/safePath.js",
         "types": "./dist/safePath.d.ts"
       },
+      "./browser-marker": {
+        "import": "./dist/browserMarker.js",
+        "types": "./dist/browserMarker.d.ts"
+      },
       "./atomic-file": {
         "import": "./dist/atomicFile.js",
         "types": "./dist/atomicFile.d.ts"
+      },
+      "./project-folders": {
+        "import": "./dist/projectFolders.js",
+        "types": "./dist/projectFolders.d.ts"
       },
       "./asset-paths": {
         "import": "./dist/compiler/rewriteSubCompPaths.js",
@@ -587,6 +647,18 @@
       "./studio-preview-mark": {
         "import": "./dist/studioPreviewMark.js",
         "types": "./dist/studioPreviewMark.d.ts"
+      },
+      "./keyframe-defaults": {
+        "import": "./dist/keyframeDefaults.js",
+        "types": "./dist/keyframeDefaults.d.ts"
+      },
+      "./html-in-canvas": {
+        "import": "./dist/htmlInCanvas.js",
+        "types": "./dist/htmlInCanvas.d.ts"
+      },
+      "./motion-blur-settings": {
+        "import": "./dist/motionBlurSettings.js",
+        "types": "./dist/motionBlurSettings.d.ts"
       },
       "./gsap-cdn": {
         "import": "./dist/gsapCdn.js",
@@ -692,6 +764,10 @@
         "import": "./dist/audibleVideo.js",
         "types": "./dist/audibleVideo.d.ts"
       },
+      "./audio-analysis": {
+        "import": "./dist/audioAnalysis.js",
+        "types": "./dist/audioAnalysis.d.ts"
+      },
       "./audio-gain": {
         "import": "./dist/audioGain.js",
         "types": "./dist/audioGain.d.ts"
@@ -752,6 +828,10 @@
       "./runtime/clip-window": {
         "import": "./dist/runtime/clipWindow.js",
         "types": "./dist/runtime/clipWindow.d.ts"
+      },
+      "./runtime/clip-reveal": {
+        "import": "./dist/runtime/clipReveal.js",
+        "types": "./dist/runtime/clipReveal.d.ts"
       },
       "./runtime/stacking-context": {
         "import": "./dist/runtime/stackingContext.js",
@@ -876,7 +956,7 @@
     "types": "./dist/index.d.ts"
   },
   "scripts": {
-    "build": "bun run build:fonts && bun run build:svg-selector-aliases && bun run build:hyperframes-runtime && bun run build:position-edits-render && bun run build:audio-fx-runtime && tsc && tsx scripts/rewrite-esm-extensions.ts",
+    "build": "bun run build:fonts && bun run build:svg-selector-aliases && bun run build:hyperframes-runtime && bun run build:position-edits-render && bun run build:audio-fx-runtime && tsc && node ../../scripts/rewrite-relative-import-extensions.mjs dist",
     "build:fonts": "node scripts/build-fonts.mjs",
     "test": "bun run check:position-edits-render && bun run check:svg-selector-aliases && bun run build:audio-fx-runtime && vitest run",
     "test:watch": "vitest",
@@ -911,7 +991,6 @@
     "@hyperframes/parsers": "workspace:*",
     "@hyperframes/studio-server": "workspace:*",
     "acorn": "^8.17.0",
-    "bpm-detective": "^2.0.5",
     "linkedom": "^0.18.12",
     "postcss": "^8.5.8",
     "wawoff2": "^2.0.1"
@@ -945,6 +1024,6 @@
     "vitest": "^4.1.11"
   },
   "optionalDependencies": {
-    "esbuild": "^0.25.12"
+    "esbuild": "^0.28.2"
   }
 }

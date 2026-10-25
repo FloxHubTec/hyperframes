@@ -9,7 +9,7 @@ import {
   isUnresolvedAssetPlaceholder,
   resolveExistingLocalAsset as resolveAsset,
 } from "@hyperframes/parsers/asset-resolution";
-import { pixelFormatHasAlpha, probeMediaMetadata, type FfprobeRunner } from "./mediaMetadata.js";
+import { probeMediaMetadata, type FfprobeRunner } from "./mediaMetadata.js";
 
 /**
  * One reusable answer to "what codec is this asset, and is it browser-hostile?",
@@ -24,7 +24,7 @@ export interface AssetCodecFacts {
    * when no representative mime exists (ProRes: browsers never decode it, so
    * the runtime always proxies rather than probing `canPlayType`). */
   representativeMime: string | null;
-  /** Source carries an alpha channel (ffprobe pix_fmt). Alpha sources use a
+  /** Source carries an alpha channel (`MediaMetadata.hasAlpha`). Alpha sources use a
    * VP8/WebM proxy so their transparency is preserved across Chromium builds. */
   hasAlpha: boolean;
 }
@@ -58,6 +58,7 @@ export const BROWSER_HOSTILE_CODECS: Record<string, BrowserHostileCodec> = {
   // Windows/Linux and Firefox everywhere need the substitute.
   hevc: { representativeMime: 'video/mp4; codecs="hvc1.1.6.L120.B0"', prewarm: true },
   prores: { representativeMime: null, prewarm: true },
+  theora: { representativeMime: 'video/ogg; codecs="theora"', prewarm: true },
   // Every mainstream engine decodes AV1 and VP9, so canPlayType keeps the
   // original and only the rare browser that cannot pays for a transcode.
   av1: { representativeMime: 'video/mp4; codecs="av01.0.08M.08"', prewarm: false },
@@ -204,7 +205,7 @@ async function probeCodecFacts(
   if (metadata.kind !== "video") return null;
   const codecName = metadata.color.codecName;
   if (!codecName) return null;
-  return codecFactsFor(codecName, pixelFormatHasAlpha(metadata.color.pixelFormat));
+  return codecFactsFor(codecName, metadata.hasAlpha === true);
 }
 
 interface CachedAssetProbe {

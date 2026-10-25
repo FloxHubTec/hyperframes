@@ -67,8 +67,8 @@ function seedPartialDir(entry: { dir: string; keyHash: string }, frameContent: s
 }
 
 describe("extractionCache constants", () => {
-  it("exposes the v6 schema prefix", () => {
-    expect(SCHEMA_PREFIX).toBe("hfcache-v6-");
+  it("exposes the v7 schema prefix", () => {
+    expect(SCHEMA_PREFIX).toBe("hfcache-v8-");
   });
 
   it("exposes the frame filename prefix shared with the extractor", () => {
@@ -286,6 +286,19 @@ describe("lookupCacheEntry / markCacheEntryComplete", () => {
     expect(lookup.entry.dir).toBe(join(tmpRoot, `${SCHEMA_PREFIX}${keyHash.slice(0, 16)}`));
   });
 
+  it("does not reuse a complete v6 entry, whose VFR frames were sampled by packet duration", () => {
+    const input = base(sourceFile);
+    const keyHash = computeCacheKey(input);
+    const staleV6Dir = join(tmpRoot, `hfcache-v6-${keyHash.slice(0, 16)}`);
+    mkdirSync(staleV6Dir, { recursive: true });
+    writeFileSync(join(staleV6Dir, "frame_00001.jpg"), "old", "utf-8");
+    writeFileSync(join(staleV6Dir, COMPLETE_SENTINEL), "", "utf-8");
+
+    const lookup = lookupCacheEntry(tmpRoot, input);
+    expect(lookup.hit).toBe(false);
+    expect(lookup.entry.dir).toBe(join(tmpRoot, `${SCHEMA_PREFIX}${keyHash.slice(0, 16)}`));
+  });
+
   it("misses on an empty cache root", () => {
     const lookup = lookupCacheEntry(tmpRoot, base(sourceFile));
     expect(lookup.hit).toBe(false);
@@ -407,6 +420,21 @@ describe("publishCacheEntry", () => {
     expect(existsSync(partialDir)).toBe(false);
     expect(statSync(join(cacheEntry.dir, "frame_00001.jpg")).size).toBe("fresh".length);
     expect(existsSync(join(cacheEntry.dir, COMPLETE_SENTINEL))).toBe(true);
+  });
+
+  it("replaces a sentineled winner whose frames are gone instead of discarding fresh frames", () => {
+    const cacheEntry = entry();
+    ensureCacheEntryDir(cacheEntry);
+    markCacheEntryComplete(cacheEntry);
+    expect(lookupCacheEntry(tmpRoot, keyFor(sourceFile)).hit).toBe(false);
+    const partialDir = seedPartialDir(cacheEntry, "fresh");
+
+    const result = publishCacheEntry(cacheEntry, partialDir);
+
+    expect(result).toEqual({ dir: cacheEntry.dir, published: true });
+    expect(existsSync(partialDir)).toBe(false);
+    expect(lookupCacheEntry(tmpRoot, keyFor(sourceFile)).hit).toBe(true);
+    expect(statSync(join(cacheEntry.dir, "frame_00001.jpg")).size).toBe("fresh".length);
   });
 });
 

@@ -7,7 +7,7 @@
 
 import type { Page } from "puppeteer-core";
 import type { ExtractedHtml } from "./types.js";
-import { isPrivateUrl } from "./assetDownloader.js";
+import { safeFetch } from "./assetDownloader.js";
 import { CAPTURE_USER_AGENT } from "./userAgent.js";
 
 const DEFAULT_SETTLE_TIME = 3000;
@@ -15,7 +15,7 @@ const DEFAULT_SETTLE_TIME = 3000;
 // Pre-existing capture pipeline size — surfaced by a one-line escape fix, not new logic.
 // fallow-ignore-next-line complexity
 export async function extractHtml(
-  page: Page,
+  page: Pick<Page, "evaluate" | "url">,
   opts: { settleTime?: number } = {},
 ): Promise<ExtractedHtml> {
   const settleTime = opts.settleTime ?? DEFAULT_SETTLE_TIME;
@@ -33,12 +33,14 @@ export async function extractHtml(
 
   for (const href of stylesheetUrls) {
     try {
-      if (isPrivateUrl(href)) continue;
-      const res = await fetch(href, {
+      const res = await safeFetch(href, {
         signal: AbortSignal.timeout(10000),
         headers: { "User-Agent": CAPTURE_USER_AGENT },
       });
-      if (!res.ok) continue;
+      if (!res?.ok) {
+        await res?.body?.cancel().catch(() => {});
+        continue;
+      }
       let css = await res.text();
       // Fix relative url() references
       // fallow-ignore-next-line complexity
@@ -50,18 +52,22 @@ export async function extractHtml(
           return match;
         }
       });
-      // Add the CSS as a <style> tag in <head> via Puppeteer's addStyleTag
-      await page.addStyleTag({ content: css });
-      // Remove the original <link> tag (use parameterized evaluate to avoid injection)
-      await page.evaluate((targetHref: string) => {
-        const links = document.querySelectorAll('link[rel="stylesheet"]');
-        for (const link of links) {
-          if ((link as HTMLLinkElement).href === targetHref) {
-            link.remove();
-            break;
+      await page.evaluate(
+        (targetHref: string, content: string) => {
+          const links = document.querySelectorAll('link[rel="stylesheet"]');
+          for (const link of links) {
+            if (link instanceof HTMLLinkElement && link.href === targetHref) {
+              const style = document.createElement("style");
+              style.textContent = content;
+              style.media = link.media;
+              link.replaceWith(style);
+              break;
+            }
           }
-        }
-      }, href);
+        },
+        href,
+        css,
+      );
     } catch {
       /* network error — skip */
     }
@@ -90,6 +96,15 @@ export async function extractHtml(
       el.style.cssText = el.style.cssText.replace(/url\\(['"]?([^'"\\)\\s]+)['"]?\\)/g, function(_, url) {
         try { return "url('" + new URL(url, location.href).href + "')"; } catch(e) { return "url('" + url + "')"; }
       });
+    });
+    // A page's own <style> blocks too: the font download only fetches absolute urls.
+    document.querySelectorAll("style").forEach(function(el) {
+      var css = el.textContent || "";
+      var fixed = css.replace(/url\\(\\s*['"]?([^'"\\)\\s]+)['"]?\\s*\\)/g, function(match, url) {
+        if (/^(data:|https?:|\\/\\/|#)/i.test(url)) return match;
+        try { return "url('" + new URL(url, document.baseURI).href + "')"; } catch(e) { return match; }
+      });
+      if (fixed !== css) el.textContent = fixed;
     });
   })()`);
 

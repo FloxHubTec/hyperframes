@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -212,6 +220,80 @@ describe("timeline edit command", () => {
     }
   });
 
+  it("deletes only the --start/--end range of a video clip, keeping both sides", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-timeline-range-delete-"));
+    try {
+      const indexPath = join(dir, "index.html");
+      writeFileSync(
+        indexPath,
+        `<div data-composition-id="main" data-duration="12"><video id="clip" src="a.mp4" data-start="1" data-duration="4" data-track-index="0"></video></div>`,
+      );
+      const planned = run(dir, "delete", "#clip", "--start", "2", "--end", "3", "--plan");
+      expect(planned.status, planned.stderr).toBe(0);
+      const kept = [
+        expect.objectContaining({ ref: "#clip", start: 1, end: 2 }),
+        expect.objectContaining({ ref: "#clip-2", start: 3, end: 5 }),
+      ];
+      expect(JSON.parse(planned.stdout).after).toEqual(kept);
+      const applied = run(dir, "delete", "#clip", "--start", "2", "--end", "3");
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(JSON.parse(applied.stdout).after).toEqual(kept);
+      const html = readFileSync(indexPath, "utf8");
+      const tag = (id: string) => html.match(new RegExp(`<[^>]*\\sid="${id}"[^>]*>`))?.[0];
+      expect(tag("clip-2")).toContain('data-media-start="2"');
+      expect(html).not.toContain('id="clip-3"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a delete range that reaches outside the clip, without writing", () => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const result = run(dir, "delete", "#clip", "--start", "2", "--end", "4");
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("is not inside #clip");
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["--at", ["delete", "#clip", "--at", "2"]],
+    ["--start", ["split", "#clip", "2", "--start", "1"]],
+    ["--duration", ["move", "#clip", "+1", "--duration", "1"]],
+    ["--overwrite", ["duplicate", "#clip", "--overwrite"]],
+    ["--end", ["set", "#clip", "volume=0.5", "--end", "2"]],
+  ])("refuses a flag its verb does not use (%s), without writing", (flag, args) => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const result = run(dir, ...args);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(`Unknown flag: ${flag}`);
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an apply edit with a key its verb does not use, without writing", () => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const planPath = join(dir, "edits.json");
+      writeFileSync(planPath, JSON.stringify([{ verb: "delete", ref: "#clip", at: "2" }]));
+      const result = run(dir, "apply", planPath);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("delete does not use at");
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses the next free numeric split suffix on repeat", () => {
     const dir = project();
     try {
@@ -248,6 +330,27 @@ describe("timeline edit command", () => {
   };
   const endOf = (html: string, id: string) =>
     Number(clip(html, id).start) + Number(clip(html, id).duration);
+
+  it.each([
+    ["moves a hidden clip into its wrapper's window", ["move", "#lost", "8"], "lost", "8"],
+    ["moves a wrapper without colliding with its own clips", ["move", "#shot2", "4"], "shot2", "4"],
+    ["duplicates a clip inside its wrapper", ["duplicate", "#seen"], "seen", "6"],
+  ])("%s", (_name, args, id, start) => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-timeline-nested-"));
+    writeFileSync(
+      join(dir, "index.html"),
+      `<div data-composition-id="main" data-duration="12"><div id="shot2" data-hf-id="shot2" data-start="5" data-duration="5" data-track-index="0"><div id="seen" data-hf-id="seen" data-start="6" data-duration="2">In</div><div id="lost" data-hf-id="lost" data-start="0" data-duration="2">Out</div></div></div>`,
+    );
+    try {
+      const result = run(dir, ...args);
+      expect(result.stderr).not.toContain("overlap");
+      expect(result.status).toBe(0);
+      expect(clip(readFileSync(join(dir, "index.html"), "utf8"), id).start).toBe(start);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   const visibleAt = (html: string, time: number, ids: string[]) =>
     ids.filter((id) => isClipVisibleAt(time, Number(clip(html, id).start), endOf(html, id), 40));
 
@@ -683,6 +786,55 @@ describe("timeline edit command", () => {
     },
   );
 
+  it.each([
+    { format: "single", missing: "target", index: 1 },
+    { format: "single", missing: "backup", index: 1 },
+    { format: "batch", missing: "target", index: 1 },
+    { format: "batch", missing: "backup", index: 1 },
+    { format: "single", missing: "target", index: 0 },
+    { format: "batch", missing: "target", index: 0 },
+  ])(
+    "refuses a $format undo when its $missing at index $index is missing",
+    ({ format, missing, index }) => {
+      const { dir, files, planPath } = batchProject();
+      try {
+        const applied = run(dir, "apply", planPath);
+        expect(applied.status, applied.stderr).toBe(0);
+        const receipt: { file: string; backupPath: string } = JSON.parse(applied.stdout).receipt[
+          index
+        ];
+        const missingFile = missing === "target" ? receipt.file : receipt.backupPath;
+        const missingPath = join(dir, missingFile);
+        rmSync(missingPath);
+        const remainingFiles = files.filter((file) => join(dir, file) !== missingPath);
+        const sources = () => remainingFiles.map((file) => readFileSync(join(dir, file), "utf8"));
+        const current = sources();
+        const backupDir = join(dir, ".hyperframes", "backup");
+        const backups = () =>
+          readdirSync(backupDir)
+            .sort()
+            .map((file) => [file, readFileSync(join(backupDir, file), "utf8")]);
+        const currentBackups = backups();
+        const input = format === "single" ? JSON.stringify(receipt) : applied.stdout;
+
+        const undone = run(dir, "undo", input);
+
+        expect(undone.status, undone.stderr).toBe(2);
+        expect(undone.stdout).toBe("");
+        expect(JSON.parse(undone.stderr)).toEqual({
+          ok: false,
+          reason: `timeline undo: undo file is missing: ${missingFile}`,
+          fix: "restore the missing target or backup file before retrying undo",
+        });
+        expect(sources()).toEqual(current);
+        expect(backups()).toEqual(currentBackups);
+        expect(existsSync(missingPath)).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("undoes a complete timeline ids response", () => {
     const dir = project();
     try {
@@ -718,4 +870,84 @@ describe("timeline edit command", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("timeline move preserves clip length", () => {
+  const cases = [
+    {
+      name: "end-authored clip moving forward",
+      clip: '<div id="clip" data-hf-id="clip" data-start="1" data-end="3" data-track-index="0"></div>',
+      start: 2,
+      duration: 2,
+    },
+    {
+      name: "end-authored clip moving backward",
+      clip: '<div id="clip" data-hf-id="clip" data-start="4" data-end="6" data-track-index="0"></div>',
+      start: 1,
+      duration: 2,
+    },
+    {
+      name: "duration-authored clip",
+      clip: '<div id="clip" data-hf-id="clip" data-start="1" data-duration="2" data-track-index="0"></div>',
+      start: 2,
+      duration: 2,
+    },
+    {
+      name: "image with its default duration",
+      clip: '<img id="clip" data-hf-id="clip" data-start="1" data-track-index="0">',
+      start: 2,
+      duration: 3,
+    },
+  ];
+  for (const planned of [false, true]) {
+    it.each(cases)(
+      `moves $name without changing its length (plan=${planned})`,
+      ({ clip, start, duration }) => {
+        const dir = mkdtempSync(join(tmpdir(), "hf-timeline-move-length-"));
+        const indexPath = join(dir, "index.html");
+        const source = `<div data-composition-id="main" data-duration="12">${clip}</div>`;
+        writeFileSync(indexPath, source);
+        try {
+          const result = run(dir, "move", "#clip", String(start), ...(planned ? ["--plan"] : []));
+          expect(result.status, result.stderr).toBe(0);
+          const output: unknown = JSON.parse(result.stdout);
+          expect(output).toMatchObject({
+            planned,
+            before: expect.arrayContaining([expect.objectContaining({ ref: "#clip", duration })]),
+            after: expect.arrayContaining([
+              expect.objectContaining({ ref: "#clip", start, duration, end: start + duration }),
+            ]),
+          });
+          if (planned) expect(readFileSync(indexPath, "utf8")).toBe(source);
+          else {
+            const inspected = spawnSync("bun", ["run", cliEntry, "timeline", dir, "--json"], {
+              cwd: dir,
+              encoding: "utf8",
+              timeout: 30_000,
+              env: { ...process.env, HYPERFRAMES_SKIP_UPDATE_CHECK: "1" },
+            });
+            expect(inspected.status, inspected.stderr).toBe(0);
+            expect(JSON.parse(inspected.stdout)).toMatchObject({
+              timeline: {
+                tracks: expect.arrayContaining([
+                  expect.objectContaining({
+                    rows: expect.arrayContaining([
+                      expect.objectContaining({
+                        ref: "#clip",
+                        start,
+                        duration,
+                        end: start + duration,
+                      }),
+                    ]),
+                  }),
+                ]),
+              },
+            });
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+    );
+  }
 });

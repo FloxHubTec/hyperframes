@@ -66,6 +66,12 @@ export interface GsapAnimation {
   ease?: string;
   /** Non-editable GSAP config (stagger, yoyo, repeat, etc.) preserved for round-trips. */
   extras?: Record<string, unknown>;
+  inspectionTiming?: {
+    repeat: number | null;
+    repeatDelay: number | null;
+    delay: number | null;
+    stagger: { each: number } | { amount: number } | null;
+  };
   /** Native GSAP keyframes data — present when the tween uses keyframes: { ... }. */
   keyframes?: GsapKeyframesData;
   /** Arc motion path config — present when the tween uses motionPath for curved position interpolation. */
@@ -139,6 +145,19 @@ export function mergePercentageKeyframes(
     if (keyframe.auto !== undefined) existing.auto = keyframe.auto;
   }
   return [...byPercentage.values()].sort((a, b) => a.percentage - b.percentage);
+}
+
+export function distributeArrayKeyframes(
+  channels: ReadonlyMap<string, readonly (number | string)[]>,
+): GsapPercentageKeyframe[] {
+  return mergePercentageKeyframes(
+    [...channels].flatMap(([key, values]) =>
+      values.map((value, index) => ({
+        percentage: values.length > 1 ? Math.round((index / (values.length - 1)) * 100) : 0,
+        properties: { [key]: value },
+      })),
+    ),
+  );
 }
 
 export type GsapKeyframeFormat = "percentage" | "object-array" | "simple-array";

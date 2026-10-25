@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import * as clack from "@clack/prompts";
 import { c } from "../ui/colors.js";
-import { desktopHint } from "../utils/desktopApp.js";
+import { desktopHint, insideHostApp } from "../utils/desktopApp.js";
 import { isDevMode } from "../utils/env.js";
 import { normalizeErrorMessage as errorMessage } from "../utils/errorMessage.js";
 import { buildNpxCommand } from "../utils/npxCommand.js";
@@ -316,7 +316,9 @@ export default defineCommand({
       try {
         const project = args.json ? resolveProjectOrThrow(args.dir) : resolveProject(args.dir);
         if (args.stop) {
-          const stopped = await stopBackgroundPreview(project.dir, startPort);
+          const stopped = await stopBackgroundPreview(project.dir, startPort, {
+            preferredPort: explicitPort,
+          });
           if (args.json) {
             writeLifecycleJson(
               lifecyclePayload(
@@ -335,7 +337,9 @@ export default defineCommand({
           }
           return;
         }
-        const status = await readBackgroundPreviewStatus(project.dir, startPort);
+        const status = await readBackgroundPreviewStatus(project.dir, startPort, {
+          preferredPort: explicitPort,
+        });
         if (!status) {
           if (args.json) {
             writeLifecycleJson(
@@ -355,7 +359,7 @@ export default defineCommand({
               "status",
               previewLifecycleSession({
                 state: "running",
-                mode: "background",
+                mode: status.logPath ? "background" : "unknown",
                 projectName: project.name,
                 projectDir: project.dir,
                 port: status.port,
@@ -367,7 +371,10 @@ export default defineCommand({
           return;
         }
         printStudioSummary(project.name, previewBaseUrl(status.port), project.dir, {
-          details: [`Background preview running (PID ${status.pid}).`, `Log: ${status.logPath}`],
+          details: [
+            `${status.logPath ? "Background preview" : "Preview"} running${status.pid === null ? "" : ` (PID ${status.pid})`}.`,
+            ...(status.logPath ? [`Log: ${status.logPath}`] : []),
+          ],
         });
         return;
       } catch (error) {
@@ -477,10 +484,24 @@ export default defineCommand({
     // modes all receive identical --proxy/--no-proxy + config semantics.
     const autoProxy = resolveAutoProxy(dir, args.proxy as boolean | undefined);
 
+    const launchMode = previewLaunchMode({
+      background: Boolean(args.background),
+      foreground: Boolean(args.foreground),
+      interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+      devMode: isDevMode(),
+      localStudio: hasLocalStudio(dir),
+    });
+
+    const hostAppError = previewHostAppError(launchMode);
+    if (hostAppError) {
+      reportPreviewFailure(Boolean(args.json), "start", "host-app-owns-preview", hostAppError);
+      return;
+    }
+
     // Kill orphaned chrome-headless-shell processes from previous crashed
     // sessions. Deliberately last: this reaches outside the process and kills
     // other people's PIDs, so it must not run for an invocation that turns out
-    // to be a validation error and never starts anything.
+    // to be a validation error or a refusal and never starts anything.
     const orphansKilled = killOrphanedProcesses();
     if (orphansKilled > 0 && !args.json) {
       console.log(
@@ -490,14 +511,6 @@ export default defineCommand({
 
     // Runs in the CLI worker while Studio starts, so it never delays the opening; --json skips it.
     const startupLint = args.json ? null : printStartupLint(dir, Boolean(args["lint-verbose"]));
-
-    const launchMode = previewLaunchMode({
-      background: Boolean(args.background),
-      foreground: Boolean(args.foreground),
-      interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
-      devMode: isDevMode(),
-      localStudio: hasLocalStudio(dir),
-    });
 
     if (launchMode === "background") {
       let background;
@@ -643,6 +656,18 @@ export function previewLaunchMode(options: {
   return options.localStudio ? "local" : "embedded";
 }
 
+export function previewHostAppError(
+  mode: PreviewLaunchMode,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (mode !== "background" || !insideHostApp(env)) return null;
+  return (
+    "A host app is running this project and owns its preview, so a background preview " +
+    "here would outlive this run and keep the project's history locked. Use the host " +
+    "app's preview, or run with --foreground to keep a preview attached to this run."
+  );
+}
+
 export function previewLaunchModeError(options: {
   background: boolean;
   foreground: boolean;
@@ -710,17 +735,27 @@ export async function handlePreviewList(
       (dependencies.scan ?? scanActiveServers)(startPort),
       (dependencies.listManaged ?? listBackgroundPreviewStatuses)(),
     ]);
+    const listedSessions = managedSessions.filter(
+      (session) =>
+        session.pid !== null ||
+        !scannedServers.some(
+          (server) =>
+            publicPreviewPid(server.pid, null) !== null &&
+            server.port === session.port &&
+            resolve(server.projectDir) === resolve(session.projectDir),
+        ),
+    );
     const managedKeys = new Set(
-      managedSessions.map((session) => `${resolve(session.projectDir)}\0${session.port}`),
+      listedSessions.map((session) => `${resolve(session.projectDir)}\0${session.port}`),
     );
     const servers = [
-      ...managedSessions.map((session) => ({
+      ...listedSessions.map((session) => ({
         port: session.port,
         host: "127.0.0.1",
         projectName: basename(session.projectDir),
         projectDir: session.projectDir,
-        version: "managed",
-        pid: String(session.pid),
+        version: session.logPath ? "managed" : "unknown",
+        pid: session.pid === null ? null : String(session.pid),
       })),
       ...scannedServers.filter(
         (server) => !managedKeys.has(`${resolve(server.projectDir)}\0${server.port}`),
@@ -1542,7 +1577,7 @@ export async function runLocalStudioMode(
  * If an existing HyperFrames server for the same project is detected,
  * reuses it instead of starting a new one (unless --force-new is set).
  */
-async function runEmbeddedMode(
+export async function runEmbeddedMode(
   dir: string,
   startPort: number,
   options?: EmbeddedStudioOptions,
@@ -1578,6 +1613,7 @@ async function runEmbeddedMode(
   // Compute everything that may throw before acquiring the fs.watch handle.
   // Once createStudioServer returns, every subsequent exit path must close it.
   const serverBuildSignature = await loadPreviewServerBuildSignature();
+  let listening: string | undefined;
   const {
     app,
     watcher,
@@ -1587,6 +1623,7 @@ async function runEmbeddedMode(
     projectName: pName,
     autoProxy: options?.autoProxy,
     browserGpuMode: options?.browserGpuMode,
+    origin: () => listening,
   });
   let result: FindPortResult;
   try {
@@ -1601,6 +1638,7 @@ async function runEmbeddedMode(
     );
   } catch (err: unknown) {
     watcher.close();
+    if (!options?.json) s.stop(c.error("Could not start studio"));
     reportPreviewFailure(
       Boolean(options?.json),
       "start",
@@ -1642,6 +1680,7 @@ async function runEmbeddedMode(
   }
 
   const url = `http://localhost:${result.port}`;
+  listening = `http://127.0.0.1:${result.port}`;
   if (options?.json) {
     writeLifecycleJson(foregroundPreviewReadyPayload(pName, url, dir, process.pid));
   } else {

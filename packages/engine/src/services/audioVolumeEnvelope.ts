@@ -11,11 +11,12 @@
  * output (and the golden baselines) only change where a fade is actually applied.
  *
  * The prepared tracks are always `pcm_s16le`, 48 kHz, stereo (see
- * `prepareAudioTrack` / `extractAudioFromVideo`). Anything else is rejected so
+ * `extractAudioSegment`). Anything else is rejected so
  * the caller can fall back to the expression path rather than corrupting audio.
  */
 
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { renameWithRetry } from "../utils/renameWithRetry.js";
 import { dirname, join } from "path";
 import type { AudioVolumeKeyframe } from "./audioMixer.types.js";
 import { normaliseEnvelope } from "@hyperframes/core/media-volume-envelope";
@@ -179,7 +180,7 @@ export function applyVolumeEnvelopeToWav(
     stagingDir = mkdtempSync(join(dirname(wavPath), ".hf-volume-"));
     const tempPath = join(stagingDir, "audio.wav");
     writeFileSync(tempPath, buffer, { flag: "wx" });
-    renameSync(tempPath, wavPath);
+    renameWithRetry(tempPath, wavPath);
     return true;
   } catch {
     // Any read/parse/write failure → leave the file untouched and let the
