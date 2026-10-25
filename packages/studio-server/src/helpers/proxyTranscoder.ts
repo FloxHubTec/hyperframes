@@ -60,7 +60,7 @@ export const TRANSCODE_STALL_MS = boundedEnvInteger(
   10_000,
   60 * 60 * 1000,
 );
-/** A longer source is copied in pieces this long; a stopped copy keeps its finished pieces, so a stop loses at most one. */
+/** A longer source is copied in pieces this long; a stopped copy keeps its finished pieces and loses at most one. */
 export const PROXY_CHUNK_SECONDS = 15;
 const CHUNK_PREFIX = ".part-";
 const CONCAT_TIMEOUT_MS = 2 * 60 * 1000;

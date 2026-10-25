@@ -144,7 +144,7 @@ function elapsedText(ms: number): string {
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
-/** Says on stderr how far each copy is, so a slow copy reads as slow (the percentage moves) and a stuck one as stuck. */
+/** Says on stderr how far each copy is, so a slow copy reads as slow and a stuck one as stuck. */
 function startCopyHeartbeat(
   sources: ReadonlyArray<{ file: string }>,
   cached: readonly boolean[],
