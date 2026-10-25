@@ -1,6 +1,7 @@
 import { reportArtifacts } from "../utils/toolContext.js";
 import { withProjectLock } from "../utils/projectLock.js";
 import {
+  parseSnapshotAt,
   parseSnapshotRange,
   sampleSnapshotRange,
   resolveSnapshotCompositionRange,
@@ -119,6 +120,9 @@ const VIDEO_FRAME_EXTRACT_CONCURRENCY = 4;
 export function formatSnapshotTimestamp(time: number): string {
   return `${Number(time.toFixed(3))}s`;
 }
+
+export const SNAPSHOT_IMAGE_NAME =
+  /^(?:(?:frame-\d+-|ref-(?:\d+-)?)?at-[\d.]+s\.png|pair-(?:\d+-)?at-[\d.]+s\.jpg|(?:beat-\d+|seam-\d+-\d+)-at-[\d.]+s\.png|(?:contact-sheet|review-beats|review-phone)(?:-\d+)?\.jpg|review-seam-\d+\.jpg)$/;
 
 /** --keep names a still by its millisecond label, so two distinct times may not share one. */
 function assertDistinctKeepNames(times: number[]): void {
@@ -241,7 +245,7 @@ export function containingSourceFrameIndex(timestamps: readonly number[], time: 
 }
 
 /** Keyframe seek plus the decoded-time threshold that selects the frame containing `time`, or null. */
-async function probeContainingSourceFrameSeek(
+export async function probeContainingSourceFrameSeek(
   videoPath: string,
   time: number,
   holdLastFrame: boolean,
@@ -335,6 +339,9 @@ async function probeContainingSourceFrameSeek(
     const landed = await landing(candidate.pts);
     if (landed === null) break;
     if (landed <= 0 || landed > frame) continue;
+    // An index that places this keyframe after its own time lands on the one before; an accurate seek
+    // to the keyframe's time decodes from there and drops everything before it.
+    if (landed < candidate.pts - 1e-6) return { seek: candidate.pts, select: mid - candidate.pts };
     const again = Math.abs(landed - candidate.pts) < 1e-6 ? landed : await landing(landed);
     if (again !== null && Math.abs(again - landed) < 1e-6)
       return { seek: landed, select: mid - landed };
@@ -683,7 +690,7 @@ async function captureSnapshots(
       try {
         const { readdirSync } = await import("node:fs");
         for (const file of opts.keep ? [] : readdirSync(snapshotDir)) {
-          if (/\.(png|jpg|jpeg)$/i.test(file)) {
+          if (SNAPSHOT_IMAGE_NAME.test(file)) {
             const path = resolve(snapshotDir, file);
             replaced.push(path);
             rmSync(path, { force: true });
@@ -1274,6 +1281,8 @@ export default defineCommand({
     }
     const frames = parseInt(args.frames as string, 10) || 5;
     const range = args.range === undefined ? undefined : parseSnapshotRange(String(args.range));
+    const atTimestamps = args.at === undefined ? undefined : parseSnapshotAt(String(args.at));
+    if (args.keep === true && atTimestamps) assertDistinctKeepNames(atTimestamps);
     const composition =
       args.composition === undefined ? undefined : String(args.composition).trim();
     if (composition === "") throw new Error("--composition requires a composition ID");
@@ -1310,13 +1319,6 @@ export default defineCommand({
       failCommand();
     }
     const timeout = parseInt(args.timeout as string, 10) || 5000;
-    const atTimestamps = args.at
-      ? String(args.at)
-          .split(",")
-          .map((s) => parseFloat(s.trim()))
-          .filter((n) => !isNaN(n))
-      : undefined;
-    if (args.keep === true && atTimestamps) assertDistinctKeepNames(atTimestamps);
     // Gemini frame analysis runs by default (silently skipped if
     // GEMINI_API_KEY is not set). `--describe "custom question"` overrides
     // the default prompt with a targeted question. `--describe false` opts
@@ -1373,11 +1375,8 @@ export default defineCommand({
           log,
         });
         const paths = captured.paths;
-        reportArtifacts(
-          "snapshot",
-          "frame",
-          paths.map((path) => resolve(project.dir, path)),
-        );
+        const framePaths = paths.map((path) => resolve(project.dir, path));
+        reportArtifacts("snapshot", "frame", framePaths);
 
         if (paths.length === 0) {
           fail(`\n${c.error("✗")} Could not determine composition duration — no frames captured`);
@@ -1411,7 +1410,7 @@ export default defineCommand({
             printReview(captured.review, reviewSheets, log);
           } else if (args.keep !== true) {
             contactSheets = await createSnapshotContactSheet(
-              snapshotDir,
+              framePaths,
               join(snapshotDir, "contact-sheet.jpg"),
             );
           }

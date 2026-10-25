@@ -150,6 +150,10 @@ The positional name is a registry item, or a tag — a tag installs every block
 carrying it. `--dir` picks the project directory, `--json` prints the written
 files and paste snippet, and `--no-clipboard` skips the clipboard copy for CI.
 
+If any block in a tag fails to install, `add` keeps the successful installs and
+exits with code 1. With `--json`, `ok` is `false` and `errors` lists each failed
+block's `name` and `error`; `installed` lists the blocks that succeeded.
+
 Every install produces files plus a **paste snippet**: the `<iframe>` tag for a
 block, or the fragment path for a component. It goes to your clipboard by
 default. Naming an example instead of a registry item (`add warm-grain`) gets
@@ -277,6 +281,11 @@ the page exposed. It is raw material for an agent, not a finished composition;
 the `/hyperframes` skill uses it when a real product has to appear on screen. Dynamic sites, protected pages, and unusual media loaders produce
 partial results, so read `dropped`, the warnings, and the contact sheets before
 you build.
+
+Downloaded fonts are saved under `assets/fonts/`, and their CSS references point
+to those local files. Distinct URLs such as `demo.woff2?v=1` and
+`demo.woff2?v=10` keep separate files. A failed font download leaves its original
+URL unchanged.
 
 For AI image descriptions, set `GEMINI_API_KEY` in a `.env` file
 (~$0.001/image), or `OPENROUTER_API_KEY` to route any vision model through
@@ -869,6 +878,11 @@ The server picks one of three modes by itself: **embedded** (the default for
 (Vite with full HMR, when `@hyperframes/studio` is in your `node_modules`), or
 **monorepo** (the studio dev server, when you run from the source repo).
 `--background` works with the embedded server only.
+
+To load the GSAP dependencies Studio adds from a local or private mirror, set
+`HYPERFRAMES_GSAP_BASE_URL` before starting the server. See
+[Serve GSAP from your own mirror](/packages/studio-server#serve-gsap-from-your-own-mirror)
+for the directory layout, restart requirements, and authored-resource scope.
 
 <Note>
   Preview plays in real time, so paint-heavy compositions can stutter on your
