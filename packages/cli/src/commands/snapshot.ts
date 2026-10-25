@@ -348,7 +348,8 @@ export async function probeContainingSourceFrameSeek(
       return { seek: landed, select: mid - landed };
   }
   // No usable keyframe landing: an accurate seek to the gap before the frame decodes up to it and drops the rest.
-  const from = Math.max(0, mid - FALLBACK_SEEK_LEAD_SECONDS);
+  // An exact frame time keeps start_t at 0; a time between frames would shift the select by the gap to the next frame.
+  const from = timestamps.filter((t) => t > 0 && t <= mid - FALLBACK_SEEK_LEAD_SECONDS).at(-1) ?? 0;
   return from > 0
     ? { seek: from, select: mid - from }
     : { select: mid - (timestamps.find((t) => t >= 0) ?? frame) };

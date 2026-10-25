@@ -648,51 +648,61 @@ describe("extractVideoFrameToBuffer", () => {
     },
   );
 
-  it.skipIf(noProbe)("decodes from near the target when no keyframe seek is usable", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-onegop-"));
-    try {
-      const clip = join(dir, "clip.mp4");
-      execFileSync(ffmpeg!, [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc=d=12:r=24:s=160x90",
-        "-pix_fmt",
-        "yuv420p",
-        "-g",
-        "1000",
-        "-sc_threshold",
-        "0",
-        clip,
-      ]);
-      const seek = await probeContainingSourceFrameSeek(clip, 10.02, false);
-      expect(seek?.seek).toBeGreaterThan(4);
-      const expected = join(dir, "expected.png");
-      execFileSync(ffmpeg!, [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        clip,
-        "-vf",
-        "select=eq(n\\,240)",
-        "-frames:v",
-        "1",
-        "-q:v",
-        "2",
-        "-y",
-        expected,
-      ]);
-      expect((await extractVideoFrameToBuffer(clip, 10.02))?.equals(readFileSync(expected))).toBe(
-        true,
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it.skipIf(noProbe).each([
+    [24, 10.02],
+    [60, 10.02],
+    [60, 11.3],
+    [12, 10.02],
+    [12.04, 10.02],
+  ])(
+    "decodes from near the target at %s fps, %ss, when no keyframe seek is usable",
+    async (fps, time) => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-onegop-"));
+      try {
+        const clip = join(dir, "clip.mp4");
+        execFileSync(ffmpeg!, [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          `testsrc=d=13:r=${fps}:s=160x90`,
+          "-pix_fmt",
+          "yuv420p",
+          "-g",
+          "10000",
+          "-sc_threshold",
+          "0",
+          clip,
+        ]);
+        const seek = await probeContainingSourceFrameSeek(clip, time, false);
+        expect(seek?.seek).toBeGreaterThan(4);
+        const index = Math.floor(time * fps + 1e-6);
+        const expected = join(dir, "expected.png");
+        execFileSync(ffmpeg!, [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-i",
+          clip,
+          "-vf",
+          `select=eq(n\\,${index})`,
+          "-frames:v",
+          "1",
+          "-q:v",
+          "2",
+          "-y",
+          expected,
+        ]);
+        expect((await extractVideoFrameToBuffer(clip, time))?.equals(readFileSync(expected))).toBe(
+          true,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(noProbe)(
     "leaves an unreadable video blank instead of failing the snapshot",
