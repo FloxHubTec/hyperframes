@@ -131,6 +131,11 @@ async function answerUntilIdle(
 
 const tempDirs: string[] = [];
 
+/** The copies in a cache folder, leaving out the small index files that find them again. */
+function copiesIn(cacheDir: string): string[] {
+  return readdirSync(cacheDir).filter((name) => !/^\.(?:fast|content)-/.test(name));
+}
+
 function tmpProject(): string {
   const dir = mkdtempSync(join(tmpdir(), "hf-proxy-transcoder-"));
   tempDirs.push(dir);
@@ -229,7 +234,7 @@ describe("resolveProxy on a long source", () => {
     expect(heard[0]).toEqual({ doneSeconds: PIECE_SECONDS, totalSeconds: LONG_SECONDS });
     expect(heard.at(-1)).toEqual({ doneSeconds: LONG_SECONDS, totalSeconds: LONG_SECONDS });
     expect(calls.at(-1)!.args).toEqual(expect.arrayContaining(["-f", "concat", "-c", "copy"]));
-    expect(readdirSync(cacheDirectory)).toEqual([cachePath.split("/").at(-1)]);
+    expect(copiesIn(cacheDirectory)).toEqual([cachePath.split("/").at(-1)]);
   });
 
   it("copies alpha pieces side by side, shares the cores out, and counts them together", async () => {
@@ -394,7 +399,7 @@ describe("resolveProxy", () => {
     expect(result).toBe(expectedCachePath);
     expect(existsSync(expectedCachePath)).toBe(true);
     // No leftover temp file next to the final cache entry.
-    const cacheDirEntries = readdirSync(join(projectDir, ".transcode-cache"));
+    const cacheDirEntries = copiesIn(join(projectDir, ".transcode-cache"));
     expect(cacheDirEntries).toEqual([expectedCachePath.split("/").at(-1)]);
   });
 
@@ -1707,7 +1712,7 @@ describe("resolveProxy", () => {
 
       expect(paths[1]).toBe(paths[0]);
       expect(second.calls).toHaveLength(0);
-      expect(readdirSync(join(projectDir, ".transcode-cache"))).toEqual([basename(paths[0]!)]);
+      expect(copiesIn(join(projectDir, ".transcode-cache"))).toEqual([basename(paths[0]!)]);
     });
 
     it("takes over from a process that died, and clears its lock when done", async () => {
