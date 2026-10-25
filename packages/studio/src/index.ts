@@ -34,6 +34,8 @@ export {
   formatTime,
 } from "./player";
 export { usePreviewIframeStore } from "./player/store/previewIframeStore";
+export { PREVIEW_QUALITY_LEVELS, type PreviewQuality } from "@hyperframes/core";
+export type { PreviewCopies } from "./player/store/previewQualitySlice";
 export {
   openAudioGainDialog,
   useAudioGainDialogStore,

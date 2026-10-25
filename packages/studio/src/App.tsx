@@ -1,4 +1,5 @@
 import { useOwnPreviewIframe, usePreviewIframeStore } from "./player/store/previewIframeStore";
+import { usePreviewQualityForwarding } from "./player/hooks/usePreviewQualityForwarding";
 import { buildProjectApiPath } from "./utils/projectRouting";
 import { useState, useCallback, useRef, useMemo, type SetStateAction } from "react";
 import { useStableHandlers } from "./hooks/useStableHandlers";
@@ -79,6 +80,7 @@ export function StudioApp({ readOnlyPreview = false, readOnlyPreviewReason }: St
   useStudioSessionStart(projectId, resolving, waitingForServer);
   const [compIdToSrc, setCompIdToSrc] = useState<Map<string, string>>(new Map());
   const previewIframe = useOwnPreviewIframe();
+  usePreviewQualityForwarding(previewIframe);
   const [compositionLoading, setCompositionLoading] = useState(true);
   const [refreshKey, setRefreshKeyState] = useState(0);
   const [previewDocumentVersion, refreshPreviewDocumentVersion] = usePreviewDocumentVersion();

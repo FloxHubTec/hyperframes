@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { usePlayerStore } from "../store/playerStore";
 import { createPreviewMessageHandler } from "./previewMessageRouter";
 
 function route(isPlaying: boolean) {
@@ -19,5 +20,50 @@ describe("preview state messages", () => {
   it("re-reads the preview for missing compositions only while it is stopped", () => {
     expect(route(true)).not.toHaveBeenCalled();
     expect(route(false)).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("preview quality messages", () => {
+  function routeMessage(data: unknown, frame?: { postMessage: (message: unknown) => void }) {
+    const iframe = frame ? ({ contentWindow: frame } as unknown as HTMLIFrameElement) : null;
+    createPreviewMessageHandler({
+      iframeRef: { current: iframe },
+      processTimelineMessageRef: { current: vi.fn() },
+      enrichMissingCompositionsRef: { current: vi.fn() },
+      lastTimelineMessageRef: { current: 0 },
+      getAdapter: () => null,
+      syncTimelineElements: vi.fn(),
+    })(new MessageEvent("message", { data }));
+  }
+
+  it("keeps what the preview says about its lighter copies, and clears it when it says none", () => {
+    routeMessage({
+      source: "hf-preview",
+      type: "preview-copies",
+      copies: { total: 3, ready: 1, failed: 0, progress: 0.5, error: null },
+    });
+    expect(usePlayerStore.getState().previewCopies).toEqual({
+      total: 3,
+      ready: 1,
+      failed: 0,
+      progress: 0.5,
+      error: null,
+    });
+
+    routeMessage({ source: "hf-preview", type: "preview-copies", copies: null });
+    expect(usePlayerStore.getState().previewCopies).toBeNull();
+  });
+
+  it("sends the chosen quality to a preview that has just loaded", () => {
+    usePlayerStore.getState().setPreviewQuality(0.25);
+    const postMessage = vi.fn();
+
+    routeMessage({ source: "hf-preview", type: "ready" }, { postMessage });
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "set-preview-quality", level: 0.25 }),
+      "*",
+    );
+    usePlayerStore.getState().setPreviewQuality(1);
   });
 });

@@ -16,6 +16,7 @@ import {
   type AutomationSelectionSlice,
 } from "./automationSelectionSlice";
 import { createEditingModeSlice, type EditingModeSlice } from "./editingModeSlice";
+import { createPreviewQualitySlice, type PreviewQualitySlice } from "./previewQualitySlice";
 import { createTimelineFocusRequest, type TimelineFocusRequest } from "./timelineFocusState";
 import { createThumbnailSlice, type ThumbnailSlice } from "./thumbnailSlice";
 import { createPlaybackReadinessSlice } from "./readinessSlice";
@@ -62,6 +63,7 @@ type PlayerStoreSlices = KeyframeSlice &
   AutomationSelectionSlice &
   ThumbnailSlice &
   EditingModeSlice &
+  PreviewQualitySlice &
   ReturnType<typeof createPlaybackReadinessSlice> &
   RangeSelectionSlice;
 interface PlayerState extends PlayerStoreSlices {
@@ -301,6 +303,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
 
   ...createAutomationSelectionSlice(set),
   ...createEditingModeSlice(set),
+  ...createPreviewQualitySlice(set),
   ...createRangeSelectionSlice(),
   ...createPlaybackReadinessSlice(set),
 
