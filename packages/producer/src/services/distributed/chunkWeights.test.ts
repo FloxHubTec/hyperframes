@@ -6,6 +6,7 @@ import {
   MAX_CHUNK_SIZE,
   MIN_CHUNK_SIZE,
   resolveChunkPlan,
+  resolveMaxFramesPerChunk,
 } from "./plan.js";
 import type { PlanVideosJson } from "./shared.js";
 
@@ -192,5 +193,27 @@ describe("planFrameWeights", () => {
     expect(weights).toHaveLength(100);
     expect(weights[0]).toBeCloseTo(0.7 + (1920 * 1080) / 1e6);
     expect(weights[99]).toBeCloseTo(0.7 + (1920 * 1080) / 1e6);
+  });
+
+  it("holds every chunk to the worker time limit's frame cap", () => {
+    const frames = 1500;
+    const { chunkCount, effectiveChunkSize } = resolveChunkPlan(frames, undefined, 18);
+    const weights = weightsWithHeavyWindow(frames, 700, 783, 4);
+    const capped = buildPlanChunkSlices(weights, {}, chunkCount, effectiveChunkSize, 90);
+    expectExactCover(capped, frames);
+    for (const slice of capped) expect(slice.endFrame - slice.startFrame).toBeLessThanOrEqual(90);
+
+    const uncapped = buildPlanChunkSlices(weights, {}, chunkCount, effectiveChunkSize);
+    expect(Math.max(...uncapped.map((s) => s.endFrame - s.startFrame))).toBeGreaterThan(90);
+  });
+
+  it("derives the cap from the worker time limit only for time-limited cost-sized plans", () => {
+    expect(resolveMaxFramesPerChunk({}, 2)).toBeUndefined();
+    expect(
+      resolveMaxFramesPerChunk({ workerTimeoutSeconds: 900, chunkSize: 60 }, 2),
+    ).toBeUndefined();
+    const cap = resolveMaxFramesPerChunk({ workerTimeoutSeconds: 900 }, 8.3);
+    expect(cap).toBeGreaterThan(0);
+    expect(resolveMaxFramesPerChunk({ workerTimeoutSeconds: 900 }, 8.3, 1)).toBeLessThan(cap ?? 0);
   });
 });

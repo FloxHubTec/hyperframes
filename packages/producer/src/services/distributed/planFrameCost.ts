@@ -37,7 +37,6 @@ export async function measurePlanSecondsPerFrame(input: {
   html: string;
   planVideos: PlanVideosJson;
   totalFrames: number;
-  /** Estimated capture cost per frame; calibration samples by cost interval. */
   frameWeights: Float64Array;
   fps: number;
   width: number;

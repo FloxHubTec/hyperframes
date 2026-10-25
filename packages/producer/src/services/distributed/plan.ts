@@ -502,6 +502,27 @@ export class ChunkExceedsWorkerTimeoutError extends Error {
   }
 }
 
+/** Frames one chunk can capture inside the worker time limit, after the per-chunk overhead. */
+function framesWithinWorkerTimeout(workerTimeoutSeconds: number, secondsPerFrame: number): number {
+  return Math.floor(
+    (workerTimeoutSeconds * WORKER_TIMEOUT_MARGIN - ESTIMATED_CHUNK_OVERHEAD_SECONDS) /
+      secondsPerFrame,
+  );
+}
+
+/** The frame ceiling a time-limited, cost-sized plan holds every chunk to; `undefined` when none applies. */
+export function resolveMaxFramesPerChunk(
+  config: Parameters<typeof chunkSizingUsesFrameCost>[0],
+  megapixels: number,
+  measuredSecondsPerFrame?: number,
+): number | undefined {
+  if (!chunkSizingUsesFrameCost(config) || config.workerTimeoutSeconds === undefined) {
+    return undefined;
+  }
+  const secondsPerFrame = estimateFrameSeconds(megapixels, measuredSecondsPerFrame);
+  return framesWithinWorkerTimeout(config.workerTimeoutSeconds, secondsPerFrame);
+}
+
 /**
  * The `maxParallelChunks` a plan uses: an explicit value, else one wave across `workerConcurrency`
  * (16 if unknown), widened to fit `workerTimeoutSeconds` unless chunkSize/targetChunkFrames pin it.
@@ -534,10 +555,7 @@ export function resolveMaxParallelChunks(
   const wide = Math.max(1, Math.min(wave, Math.floor(totalFrames / minFramesPerChunk)));
   if (workerTimeoutSeconds === undefined) return wide;
 
-  const maxFramesPerChunk = Math.floor(
-    (workerTimeoutSeconds * WORKER_TIMEOUT_MARGIN - ESTIMATED_CHUNK_OVERHEAD_SECONDS) /
-      secondsPerFrame,
-  );
+  const maxFramesPerChunk = framesWithinWorkerTimeout(workerTimeoutSeconds, secondsPerFrame);
   const needed = maxFramesPerChunk < 1 ? Infinity : Math.ceil(totalFrames / maxFramesPerChunk);
   if (needed > MAX_PARALLEL_CHUNKS_CEILING) {
     const framesAtCeiling = Math.ceil(totalFrames / MAX_PARALLEL_CHUNKS_CEILING);
@@ -842,13 +860,14 @@ export function buildChunkSlices(
 
 /**
  * The plan's chunk cut: auto-sized plans re-cut the same chunk count by estimated capture cost;
- * an explicit `chunkSize` or uniform cost keeps {@link buildChunkSlices}. `targetChunkFrames` stays a frame ceiling.
+ * an explicit `chunkSize` or uniform cost keeps {@link buildChunkSlices}. `targetChunkFrames` and the worker time limit stay frame ceilings.
  */
 export function buildPlanChunkSlices(
   frameWeights: Float64Array,
   config: Pick<DistributedRenderConfig, "chunkSize" | "targetChunkFrames">,
   chunkCount: number,
   effectiveChunkSize: number,
+  maxFramesPerChunk = Infinity,
 ): ChunkSliceJson[] {
   const weighted =
     config.chunkSize === undefined
@@ -856,7 +875,7 @@ export function buildPlanChunkSlices(
           frameWeights,
           chunkCount,
           MIN_CHUNK_SIZE,
-          Math.min(config.targetChunkFrames ?? MAX_CHUNK_SIZE, MAX_CHUNK_SIZE),
+          Math.min(config.targetChunkFrames ?? MAX_CHUNK_SIZE, MAX_CHUNK_SIZE, maxFramesPerChunk),
         )
       : null;
   return weighted ?? buildChunkSlices(frameWeights.length, chunkCount, effectiveChunkSize);
@@ -1614,7 +1633,13 @@ export async function buildLocalExecutionPlan(
     maxParallel,
     config.targetChunkFrames,
   );
-  const chunks = buildPlanChunkSlices(frameWeights, config, chunkCount, effectiveChunkSize);
+  const chunks = buildPlanChunkSlices(
+    frameWeights,
+    config,
+    chunkCount,
+    effectiveChunkSize,
+    resolveMaxFramesPerChunk(config, megapixels, frameCostOutcome.value),
+  );
   const audioResult = audioOutcome.value;
   if (audioResult?.audioError) {
     applyDistributedAudioWarningPolicy(job, audioResult.audioError, audioResult.audioFailures, log);
