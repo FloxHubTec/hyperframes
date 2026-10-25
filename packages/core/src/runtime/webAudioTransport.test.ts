@@ -1660,5 +1660,13 @@ describe("WebAudioTransport", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1); // the buffer it was told to keep is still there
       vi.unstubAllGlobals();
     });
+
+    it("keys a clip whose src cannot be read as a URL without throwing", () => {
+      const transport = transportWithDecode(async () => ({}) as AudioBuffer);
+      const bad = document.createElement("audio");
+      bad.setAttribute("src", "http://localhost:PORT/vo.mp3");
+
+      expect(() => transport.releaseDecodedExcept([bad])).not.toThrow();
+    });
   });
 });

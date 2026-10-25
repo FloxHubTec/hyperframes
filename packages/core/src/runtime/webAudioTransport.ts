@@ -148,7 +148,12 @@ function isBufferSource(
 
 const decodeKey = (el: HTMLMediaElement): string | null => {
   const src = el.currentSrc || el.getAttribute("src");
-  return src ? assetUrl(src) : null;
+  if (!src) return null;
+  try {
+    return assetUrl(src);
+  } catch {
+    return src;
+  }
 };
 
 // A pause to scrub or a reschedule mid-play keeps the output awake; a real idle lets it sleep.
