@@ -31,6 +31,7 @@ interface PreviewMessage {
   type?: string;
   clips?: unknown;
   isPlaying?: unknown;
+  copies?: unknown;
 }
 
 export interface PreviewMessageRouterDeps {

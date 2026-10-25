@@ -40,6 +40,7 @@ import { shouldResumeForwardPlaybackAfterSeek, shouldStopAfterSeek } from "../li
 import { applyPreviewVariablesToUrl } from "../../hooks/previewVariablesStore";
 import { isStudioManualEditGestureLiveIn } from "../../components/editor/manualEditsDom";
 import { createPreviewMessageHandler } from "./previewMessageRouter";
+import { usePreviewQualityForwarding } from "./usePreviewQualityForwarding";
 import { timelineElementsChanged } from "./timelinePlayerSync";
 import { safeContentDocument } from "./timelineSyncHydration";
 import { sceneSwapFor, supersededByNewerEdit } from "../sceneSwap";
@@ -515,6 +516,8 @@ export function useTimelinePlayer({
   }, [reloadWholeFilm, previewGeneration]);
   const pauseRef = useRef(pause);
   pauseRef.current = pause;
+
+  usePreviewQualityForwarding(iframeRef);
 
   useMountEffect(() => {
     const handleWindowKeyDown = (e: KeyboardEvent) => playbackKeyDownRef.current(e);

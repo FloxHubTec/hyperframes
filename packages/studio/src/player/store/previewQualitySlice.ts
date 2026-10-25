@@ -1,5 +1,6 @@
 import type { StoreApi } from "zustand";
 import type { PreviewQuality } from "@hyperframes/core";
+import { readStudioUiPreferences, writeStudioUiPreferences } from "../../utils/studioUiPreferences";
 
 /** The lighter copies of heavy videos the preview wants at its current quality. */
 export interface PreviewCopies {
@@ -25,8 +26,11 @@ export function createPreviewQualitySlice(
   set: StoreApi<PreviewQualitySlice>["setState"],
 ): PreviewQualitySlice {
   return {
-    previewQuality: 1,
-    setPreviewQuality: (previewQuality) => set({ previewQuality }),
+    previewQuality: readStudioUiPreferences().previewQuality ?? 1,
+    setPreviewQuality: (previewQuality) => {
+      writeStudioUiPreferences({ previewQuality });
+      set({ previewQuality });
+    },
     previewCopies: null,
     setPreviewCopies: (previewCopies) => set({ previewCopies }),
     previewCopiesRetry: 0,
