@@ -8,7 +8,8 @@
 
 import {
   encodeCropPackMember,
-  planCropPackMembers,
+  planCropPackMembersForMaster,
+  type CropPackEncodeSettings,
   type CropPackMemberResult,
 } from "@hyperframes/engine";
 import type { RenderJob } from "../../renderOrchestrator.js";
@@ -17,6 +18,8 @@ export interface CropPackStageInput {
   job: RenderJob;
   masterPath: string;
   format: string;
+  /** The master's encoder settings, so siblings match its quality. */
+  encode?: CropPackEncodeSettings;
   abortSignal?: AbortSignal;
 }
 
@@ -33,7 +36,7 @@ export async function runCropPackStage(input: CropPackStageInput): Promise<CropP
   if (!spec || spec.members.length === 0) return { members: [] };
   if (!isCropPackContainer(input.format)) return { members: [] };
 
-  const plans = planCropPackMembers(
+  const plans = await planCropPackMembersForMaster(
     spec.members,
     spec.compositionWidth,
     spec.compositionHeight,
@@ -45,6 +48,7 @@ export async function runCropPackStage(input: CropPackStageInput): Promise<CropP
       await encodeCropPackMember(plan, input.masterPath, {
         copyAudio: true,
         signal: input.abortSignal,
+        encode: input.encode,
       }),
     );
   }

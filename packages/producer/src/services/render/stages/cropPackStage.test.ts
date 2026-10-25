@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { encodeCropPackMemberMock, planCropPackMembersMock } = vi.hoisted(() => ({
+const { encodeCropPackMemberMock, planCropPackMembersForMasterMock } = vi.hoisted(() => ({
   encodeCropPackMemberMock: vi.fn(),
-  planCropPackMembersMock: vi.fn(),
+  planCropPackMembersForMasterMock: vi.fn(),
 }));
 
 vi.mock("@hyperframes/engine", () => ({
   encodeCropPackMember: encodeCropPackMemberMock,
-  planCropPackMembers: planCropPackMembersMock,
+  planCropPackMembersForMaster: planCropPackMembersForMasterMock,
 }));
 
 import { runCropPackStage } from "./cropPackStage.js";
@@ -45,7 +45,7 @@ function makeJob(overrides: Partial<RenderJob["config"]> = {}): RenderJob {
 describe("runCropPackStage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    planCropPackMembersMock.mockReturnValue([
+    planCropPackMembersForMasterMock.mockResolvedValue([
       {
         id: "vertical",
         crop: { x: 656, y: 0, width: 608, height: 1080 },
@@ -69,11 +69,22 @@ describe("runCropPackStage", () => {
     expect(masterPath).toBe("/tmp/launch.mp4");
     expect(result.members[0]?.outputPath).toBe("/tmp/launch.vertical.mp4");
     expect(job.cropPack?.[0]?.outputPath).toBe("/tmp/launch.vertical.mp4");
-    expect(planCropPackMembersMock).toHaveBeenCalledWith(
+    expect(planCropPackMembersForMasterMock).toHaveBeenCalledWith(
       job.config.cropPack?.members,
       1920,
       1080,
       masterPath,
+    );
+  });
+
+  it("passes the master's encoder settings to every member", async () => {
+    const job = makeJob();
+    const encode = { preset: "slow", quality: 18 };
+    await runCropPackStage({ job, masterPath: "/tmp/launch.mp4", format: "mp4", encode });
+    expect(encodeCropPackMemberMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "vertical" }),
+      "/tmp/launch.mp4",
+      expect.objectContaining({ encode }),
     );
   });
 

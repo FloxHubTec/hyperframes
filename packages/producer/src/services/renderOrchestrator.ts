@@ -3971,6 +3971,7 @@ async function executeRenderPipeline(input: {
       job,
       masterPath: stagedOutputPath,
       format: outputFormat,
+      encode: { preset: preset.preset, quality: effectiveQuality, bitrate: effectiveBitrate },
       abortSignal: executionSignal,
     });
     if (cropPackRes.members.length > 0) {

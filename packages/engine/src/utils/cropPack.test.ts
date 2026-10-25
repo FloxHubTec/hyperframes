@@ -22,7 +22,12 @@ vi.mock("./hdr.js", () => ({
     cs?.colorTransfer === "smpte2084" || cs?.colorTransfer === "arib-std-b67",
 }));
 
-import { buildCropPackArgs, encodeCropPackMember, planCropPackMembers } from "./cropPack.js";
+import {
+  buildCropPackArgs,
+  encodeCropPackMember,
+  planCropPackMembers,
+  planCropPackMembersForMaster,
+} from "./cropPack.js";
 
 describe("buildCropPackArgs", () => {
   const crop = { x: 656, y: 0, width: 608, height: 1080 };
@@ -57,6 +62,51 @@ describe("buildCropPackArgs", () => {
     expect(args).toContain("-an");
     expect(args).not.toContain("-c:a");
   });
+
+  it("encodes an mp4 sibling with the master's preset and CRF", () => {
+    const args = buildCropPackArgs({
+      masterPath: "renders/launch.mp4",
+      outputPath: "renders/launch.vertical.mp4",
+      crop,
+      outputWidth: 608,
+      outputHeight: 1080,
+      copyAudio: true,
+      encode: { preset: "slow", quality: 18 },
+    });
+    expect(args[args.indexOf("-preset") + 1]).toBe("slow");
+    expect(args[args.indexOf("-crf") + 1]).toBe("18");
+    expect(args).not.toContain("-b:v");
+  });
+
+  it("uses the master's bitrate instead of CRF when one is set", () => {
+    const args = buildCropPackArgs({
+      masterPath: "renders/launch.mp4",
+      outputPath: "renders/launch.vertical.mp4",
+      crop,
+      outputWidth: 608,
+      outputHeight: 1080,
+      copyAudio: true,
+      encode: { preset: "medium", quality: 23, bitrate: "10M" },
+    });
+    expect(args[args.indexOf("-b:v") + 1]).toBe("10M");
+    expect(args).not.toContain("-crf");
+  });
+
+  it("encodes a webm sibling in VP9 constant-quality mode", () => {
+    const args = buildCropPackArgs({
+      masterPath: "renders/launch.webm",
+      outputPath: "renders/launch.vertical.webm",
+      crop,
+      outputWidth: 608,
+      outputHeight: 1080,
+      copyAudio: true,
+      encode: { preset: "good", quality: 18 },
+    });
+    expect(args[args.indexOf("-c:v") + 1]).toBe("libvpx-vp9");
+    expect(args[args.indexOf("-b:v") + 1]).toBe("0");
+    expect(args[args.indexOf("-crf") + 1]).toBe("18");
+    expect(args[args.indexOf("-deadline") + 1]).toBe("good");
+  });
 });
 
 describe("planCropPackMembers", () => {
@@ -83,6 +133,47 @@ describe("planCropPackMembers", () => {
       outputHeight: 1080,
       crop: { x: 656, y: 0, width: 608, height: 1080 },
     });
+  });
+});
+
+describe("planCropPackMembersForMaster", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const vertical = {
+    id: "vertical",
+    ratio: "9:16" as const,
+    x: (1920 - 608) / 2 / 1920,
+    y: 0,
+    width: 608 / 1920,
+    height: 1,
+  };
+
+  it("crops the supersampled master at its probed size", async () => {
+    extractVideoMetadataMock.mockResolvedValue({ width: 3840, height: 2160 });
+    const members = await planCropPackMembersForMaster(
+      [vertical],
+      1920,
+      1080,
+      "renders/launch.mp4",
+    );
+    expect(extractVideoMetadataMock).toHaveBeenCalledWith("renders/launch.mp4");
+    expect(members[0]?.crop).toEqual(planCropPackMembers([vertical], 3840, 2160, "x.mp4")[0]?.crop);
+    expect(members[0]?.crop.x).toBe(1312);
+    expect(members[0]?.crop.height).toBe(2160);
+    expect(members[0]?.outputHeight).toBe(2160);
+  });
+
+  it("falls back to the composition size when the probe has no dimensions", async () => {
+    extractVideoMetadataMock.mockResolvedValue({ width: 0, height: 0 });
+    const members = await planCropPackMembersForMaster(
+      [vertical],
+      1920,
+      1080,
+      "renders/launch.mp4",
+    );
+    expect(members[0]?.crop).toEqual({ x: 656, y: 0, width: 608, height: 1080 });
   });
 });
 

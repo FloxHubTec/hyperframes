@@ -419,8 +419,9 @@ export {
 export {
   buildCropPackArgs,
   encodeCropPackMember,
-  planCropPackMembers,
+  planCropPackMembersForMaster,
   cropPackOutputPath,
+  type CropPackEncodeSettings,
   type CropPackMemberPlan,
   type CropPackMemberResult,
   type BuildCropPackArgsInput,
