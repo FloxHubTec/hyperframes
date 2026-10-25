@@ -1,6 +1,6 @@
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { openComposition } from "./index.js";
 
 setFlagsFromString("--expose-gc");
@@ -36,5 +36,21 @@ describe("session disposal releases the parsed film", () => {
     gc();
     expect(stale).toHaveLength(SWAPS);
     expect(films.filter((film) => film.deref() !== undefined)).toHaveLength(0);
+  });
+
+  it("warns once outside production when a disposed session is read, and answers empty", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const comp = await openComposition(HTML, { history: false });
+      expect(comp.getElements()).not.toHaveLength(0);
+      expect(warn).not.toHaveBeenCalled();
+      comp.dispose();
+      expect(comp.getElements()).toEqual([]);
+      expect(comp.getRootElements()).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("disposed Composition was read");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
