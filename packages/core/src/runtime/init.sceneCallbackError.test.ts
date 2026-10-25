@@ -68,4 +68,21 @@ describe("a scene callback that throws", () => {
     expect(reported[0]!.join(" ")).toContain("scene");
     expect(reported[0]!.join(" ")).toMatch(/textContent|null/);
   });
+
+  it("reports nothing for a scene registered with a placeholder instead of a timeline", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    document.body.innerHTML =
+      `<div data-composition-id="main" data-root="true" data-duration="2">` +
+      `<div class="clip" data-composition-id="scene" data-start="0" data-duration="2"></div></div>`;
+    window.__timelines = {
+      main: gsap.timeline({ paused: true }).to({}, { duration: 2 }, 0),
+      scene: {},
+    } as unknown as Record<string, RuntimeTimelineLike>;
+    initSandboxRuntimeModular();
+
+    window.__player!.renderSeek(1);
+    window.__player!.seek(1.5);
+
+    expect(errors).not.toHaveBeenCalled();
+  });
 });
