@@ -25,6 +25,15 @@ import {
 import type { ProjectDir } from "./project.js";
 
 const mocks = vi.hoisted(() => ({
+  stopListeners: new Set<() => void>(),
+  proxyProgress: {
+    feed: undefined as
+      | undefined
+      | ((
+          report: (index: number, progress: { doneSeconds: number; totalSeconds?: number }) => void,
+        ) => void),
+  },
+  proxySignal: undefined as AbortSignal | undefined,
   bundleWithLocalizedFonts: vi.fn(async () => "<html></html>"),
   serverClose: vi.fn(async () => undefined),
   resolveProxy:
@@ -56,6 +65,13 @@ const mocks = vi.hoisted(() => ({
   >(async () => ({})),
 }));
 
+vi.mock("../browser/launch.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../browser/launch.js")>()),
+  onStopSignal: (listener: () => void) => {
+    mocks.stopListeners.add(listener);
+    return () => mocks.stopListeners.delete(listener);
+  },
+}));
 vi.mock("./bundleWithLocalizedFonts.js", () => ({
   // Keep browser-check unit tests focused on the page driver and audit pipeline.
   // The real helper cold-loads the producer/font graph, which is covered by its
@@ -103,16 +119,24 @@ vi.mock("@hyperframes/studio-server/proxy-transcoder", () => ({
       variant: string;
       box?: { width: number; height: number };
     }>,
-    onSettled: () => void = () => {},
-  ) =>
-    Promise.allSettled(
-      sources.map(({ sourcePath, variant, box }) =>
+    onSettled: (index: number) => void = () => {},
+    onProgress: (
+      index: number,
+      progress: { doneSeconds: number; totalSeconds?: number },
+    ) => void = () => {},
+    signal?: AbortSignal,
+  ) => {
+    mocks.proxySignal = signal;
+    mocks.proxyProgress.feed?.(onProgress);
+    return Promise.allSettled(
+      sources.map(({ sourcePath, variant, box }, index) =>
         (box
           ? mocks.resolveProxy(projectDir, sourcePath, variant, box)
           : mocks.resolveProxy(projectDir, sourcePath, variant)
-        ).finally(onSettled),
+        ).finally(() => onSettled(index)),
       ),
-    ),
+    );
+  },
 }));
 
 const PROJECT: ProjectDir = {
@@ -213,12 +237,16 @@ it("carries raw browser geometry through the page driver and pipeline", async ()
 it("splits the samples over a second Chrome and reports what one Chrome reports", async () => {
   mountCanvasFixture(`<p id="copy" data-layout-name="copy">Hi</p>`);
   type Message = ReturnType<typeof fakeConsoleMessage>;
-  const run = async (cores: number, helper: "works" | "crashes" | "never opens" = "works") => {
+  const run = async (
+    cores: number,
+    helper: "works" | "crashes" | "hangs after crashing" | "never opens" = "works",
+  ) => {
     vi.mocked(os.availableParallelism).mockReturnValue(cores);
     let helperSeeks = 0;
     const pages: ReturnType<typeof fakePage>[] = [];
     const helperPages = new Set<unknown>();
     const handlers = new Map<unknown, ((message: Message) => void)[]>();
+    const errorHandlers = new Map<unknown, ((error: Error) => void)[]>();
     const log = (page: unknown, text: string) =>
       handlers.get(page)?.forEach((handler) => handler(fakeConsoleMessage("error", text)));
     const browser = Object.assign(Object.create(null), {
@@ -230,6 +258,8 @@ it("splits the samples over a second Chrome and reports what one Chrome reports"
         const page = fakePage();
         page.on = vi.fn((event: string, handler: (message: Message) => void) => {
           if (event === "console") handlers.set(page, [...(handlers.get(page) ?? []), handler]);
+          if (event === "error")
+            errorHandlers.set(page, [...(errorHandlers.get(page) ?? []), handler as never]);
         });
         const opened = pages.push(page);
         // Only the first page's open takes prelaunched Chromes.
@@ -246,6 +276,12 @@ it("splits the samples over a second Chrome and reports what one Chrome reports"
       if (helperPages.has(page) && helper === "crashes" && ++helperSeeks === 2) {
         log(page, "renderer crashed");
         throw new Error("Target closed");
+      }
+      // A crashed puppeteer page emits "error" and leaves the call pending for good.
+      if (helperPages.has(page) && helper === "hangs after crashing" && ++helperSeeks === 2) {
+        log(page, "renderer crashed");
+        errorHandlers.get(page)?.forEach((handler) => handler(new Error("Page crashed!")));
+        return new Promise<never>(() => undefined);
       }
       log(page, `seeked to ${time}`);
     });
@@ -280,6 +316,10 @@ it("splits the samples over a second Chrome and reports what one Chrome reports"
   expect(crashed.seekingPages).toBe(2);
   expect(loads(crashed.messages)).toHaveLength(1);
   expect(sampled(crashed.messages)).toEqual(sampled(serial.messages));
+  const hung = await run(4, "hangs after crashing");
+  expect(hung.seekingPages).toBe(2);
+  expect(loads(hung.messages)).toHaveLength(1);
+  expect(sampled(hung.messages)).toEqual(sampled(serial.messages));
   const unopened = await run(4, "never opens");
   expect(unopened.pages).toHaveLength(2);
   expect(unopened.seekingPages).toBe(1);
@@ -429,7 +469,7 @@ it("measures text on its own opaque fill without a contrast screenshot", async (
   expect(page.screenshot).not.toHaveBeenCalled();
 });
 
-it("uses check --timeout for both navigation and render-ready settling", async () => {
+it("uses check --timeout for both navigation and render-ready settling, and loads media near the playhead", async () => {
   mountCanvasFixture();
   const page = fakePage();
   installSessionMock(page);
@@ -442,13 +482,44 @@ it("uses check --timeout for both navigation and render-ready settling", async (
   );
 
   expect(openSettledCompositionPage).toHaveBeenCalledWith(
-    "<html></html>",
+    expect.stringMatching(
+      /<meta name="hyperframes-studio-preview" content="capture">[\s\S]*<html>/,
+    ),
     "http://127.0.0.1:3000",
     expect.objectContaining({
       navigationTimeoutMs: 30_000,
       renderReadyTimeoutMs: 30_000,
     }),
   );
+});
+
+it("fails at once when the page crashes, instead of waiting out the deadline", async () => {
+  mountCanvasFixture(`<p id="copy" data-layout-name="copy">Hi</p>`);
+  const page = fakePage();
+  const onError: Array<(error: Error) => void> = [];
+  page.on = vi.fn((event: string, handler: (error: Error) => void) => {
+    if (event === "error") onError.push(handler);
+  });
+  installSessionMock(page);
+  // A crashed puppeteer page emits "error" and leaves the call pending for good.
+  vi.mocked(seekCompositionTimeline).mockImplementation(async () => {
+    for (const handler of onError) handler(new Error("Page crashed!"));
+    return new Promise<never>(() => undefined);
+  });
+
+  try {
+    await expect(
+      runBrowserCheck(
+        PROJECT,
+        { ...DEFAULT_CHECK_OPTIONS, contrast: false },
+        { kind: "none" },
+        runAuditGrid,
+      ),
+    ).rejects.toThrow("The page crashed: Page crashed!");
+  } finally {
+    // clearAllMocks keeps implementations, and a seek that never settles would hang every later test.
+    vi.mocked(seekCompositionTimeline).mockImplementation(async () => undefined);
+  }
 });
 
 it("round-trips the browser script's raw contrast candidates back into finish", async () => {
@@ -1147,7 +1218,7 @@ describe("preResolveHostileMediaProxies", () => {
     await preResolveHostileMediaProxies(projectDir, html);
 
     // The page asks for the quantized stage size, so the copy and its cache check use that box.
-    const box = { width: 2048, height: 1448 };
+    const box = { width: 2048, height: 1218 };
     expect(mocks.resolveProxy).toHaveBeenCalledWith(
       projectDir,
       join(projectDir, "clip.mp4"),
@@ -1254,6 +1325,105 @@ describe("preResolveHostileMediaProxies", () => {
     expect(infoSpy).not.toHaveBeenCalled();
     expect(logSpy).not.toHaveBeenCalled();
     expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("says how far a copy has got every few seconds, so a slow copy reads as slow", async () => {
+    vi.useFakeTimers();
+    try {
+      const projectDir = mkProjectDir();
+      mocks.scanProjectMediaCodecMap.mockResolvedValue({
+        "/clip.mov": {
+          codecName: "hevc",
+          browserHostile: true,
+          representativeMime: null,
+          hasAlpha: false,
+        },
+      });
+      let finish: (() => void) | undefined;
+      mocks.resolveProxy.mockImplementation(
+        () => new Promise<string>((done) => (finish = () => done("/cache/clip.mp4"))),
+      );
+      mocks.proxyProgress.feed = (report) => report(0, { doneSeconds: 30, totalSeconds: 120 });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      const pending = preResolveHostileMediaProxies(projectDir, "<html></html>");
+      await vi.advanceTimersByTimeAsync(10_000);
+      mocks.proxyProgress.feed = undefined;
+      finish?.();
+      await pending;
+
+      expect(errorSpy.mock.calls.map(([line]) => line)).toContain(
+        "[hyperframes] browser-playable copy of clip.mov: 25% (10s so far)",
+      );
+    } finally {
+      mocks.proxyProgress.feed = undefined;
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops reporting a copy once it is done, so a finished one is not read as stuck", async () => {
+    vi.useFakeTimers();
+    try {
+      const projectDir = mkProjectDir();
+      const hostile = {
+        codecName: "hevc",
+        browserHostile: true,
+        representativeMime: null,
+        hasAlpha: false,
+      };
+      mocks.scanProjectMediaCodecMap.mockResolvedValue({ "/a.mov": hostile, "/b.mov": hostile });
+      let finishB: (() => void) | undefined;
+      mocks.resolveProxy.mockImplementation((_dir, sourcePath) =>
+        sourcePath.endsWith("a.mov")
+          ? Promise.resolve("/cache/a.mp4")
+          : new Promise<string>((done) => (finishB = () => done("/cache/b.mp4"))),
+      );
+      mocks.proxyProgress.feed = (report) => {
+        report(0, { doneSeconds: 118, totalSeconds: 120 });
+        report(1, { doneSeconds: 30, totalSeconds: 120 });
+      };
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      const pending = preResolveHostileMediaProxies(projectDir, "<html></html>");
+      await vi.advanceTimersByTimeAsync(10_000);
+      mocks.proxyProgress.feed = undefined;
+      finishB?.();
+      await pending;
+
+      const lines = errorSpy.mock.calls.map(([line]) => String(line));
+      expect(lines).toContain("[hyperframes] browser-playable copy of b.mov: 25% (10s so far)");
+      expect(lines.some((line) => line.includes("copy of a.mov"))).toBe(false);
+    } finally {
+      mocks.proxyProgress.feed = undefined;
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends the copies it is making when it is stopped by a signal", async () => {
+    const projectDir = mkProjectDir();
+    mocks.scanProjectMediaCodecMap.mockResolvedValue({
+      "/clip.mov": {
+        codecName: "hevc",
+        browserHostile: true,
+        representativeMime: null,
+        hasAlpha: false,
+      },
+    });
+    let finish: (() => void) | undefined;
+    mocks.resolveProxy.mockImplementation(
+      () => new Promise<string>((done) => (finish = () => done("/cache/clip.mp4"))),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const pending = preResolveHostileMediaProxies(projectDir, "<html></html>");
+    await vi.waitFor(() => expect(mocks.proxySignal).toBeDefined());
+    expect(mocks.proxySignal!.aborted).toBe(false);
+    for (const listener of mocks.stopListeners) listener();
+
+    expect(mocks.proxySignal!.aborted).toBe(true);
+    finish?.();
+    await pending;
+    expect(mocks.stopListeners.size).toBe(0);
   });
 
   it("says it is making copies, and counts them, only when some are not made yet", async () => {
