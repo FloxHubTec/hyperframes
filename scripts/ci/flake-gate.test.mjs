@@ -28,8 +28,10 @@ test("flags added retries only", () => {
 test("picks the runner from the import and bounds runs by file count", () => {
   assert.equal(runnerFor('import { test } from "bun:test";'), "bun");
   assert.equal(runnerFor('import { it } from "vitest";'), "vitest");
-  assert.equal(runsFor(20), 10);
-  assert.equal(runsFor(21), 3);
+  assert.equal(runnerFor('import test from "node:test";'), "node");
+  assert.equal(runsFor(3), 10);
+  assert.equal(runsFor(20), 3);
+  assert.equal(runsFor(100), 2);
 });
 
 test("names a file that fails every run differently from a partial failure", () => {

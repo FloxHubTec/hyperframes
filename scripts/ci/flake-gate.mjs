@@ -26,13 +26,17 @@ export function addsRetry(patch) {
 }
 
 export function runnerFor(source) {
-  return /\bfrom\s+["']bun:test["']/.test(source) ? "bun" : "vitest";
+  if (/\bfrom\s+["']bun:test["']/.test(source)) return "bun";
+  return /\bfrom\s+["']node:test["']/.test(source) ? "node" : "vitest";
 }
 
-// Fixed by file count, never by elapsed time, so the gate's verdict depends only on test results.
+// Fixed by file count, never by elapsed time: about 60 runs in total, between 2 and 10 per file.
 export function runsFor(fileCount) {
-  return fileCount <= 20 ? 10 : 3;
+  return Math.min(10, Math.max(2, Math.floor(60 / fileCount)));
 }
+
+// A run that hangs is a failing run, not a reason to wait for the job limit.
+const RUN_TIMEOUT_MS = 120_000;
 
 function git(...args) {
   const r = spawnSync("git", args, { encoding: "utf8", maxBuffer: 1 << 28 });
@@ -40,11 +44,38 @@ function git(...args) {
   return r.stdout;
 }
 
+const MEDIA_USE = "packages/cli/src/media-use/";
+
 function command(file) {
   const [, pkg, rel] = file.match(/^(packages\/[^/]+)\/(.+)$/);
-  const source = readFileSync(file, "utf8");
-  if (runnerFor(source) === "bun") return { cwd: pkg, cmd: "bun", args: ["test", rel], env: {} };
-  return { cwd: pkg, cmd: "bun", args: ["x", "vitest", "run", "--maxWorkers=2", rel], env: {} };
+  const runner = runnerFor(readFileSync(file, "utf8"));
+  if (runner === "bun") return { cwd: pkg, cmd: "bun", args: ["test", rel], env: {} };
+  if (runner === "node") return nodeCommand(file);
+  return {
+    cwd: pkg,
+    cmd: "bun",
+    args: ["x", "vitest", "run", "--maxWorkers=2", rel],
+    env: {},
+    vitest: true,
+  };
+}
+
+// Same flags as the lanes that own these files: `test:skills` for media-use, `test:scripts` otherwise.
+function nodeCommand(file) {
+  const mediaUse = file.startsWith(MEDIA_USE);
+  const env = mediaUse ? { HYPERFRAMES_MEDIA_HOME_REQUIRED: "1" } : {};
+  const loader = mediaUse ? "./packages/cli/scripts/test-home.mjs" : "tsx";
+  return { cwd: ".", cmd: "node", args: ["--import", loader, "--test", file], env };
+}
+
+// A vitest file outside the package's `include` has no lane that runs it, so there is nothing to re-run.
+function isCollected(file) {
+  const [, pkg, rel] = file.match(/^(packages\/[^/]+)\/(.+)$/);
+  const list = spawnSync("bun", ["x", "vitest", "list", "--filesOnly", rel], {
+    cwd: pkg,
+    encoding: "utf8",
+  });
+  return list.stdout.includes(rel);
 }
 
 function startBurners() {
@@ -59,8 +90,11 @@ function runOnce({ cwd, cmd, args, env }) {
     env: { ...process.env, ...env },
     encoding: "utf8",
     maxBuffer: 1 << 28,
+    timeout: RUN_TIMEOUT_MS,
   });
-  return { ok: r.status === 0, output: `${r.stdout}${r.stderr}` };
+  const timedOut =
+    r.error?.code === "ETIMEDOUT" ? `timed out after ${RUN_TIMEOUT_MS / 1000}s\n` : "";
+  return { ok: r.status === 0, output: `${timedOut}${r.stdout}${r.stderr}` };
 }
 
 export function verdictFor(failed, runs) {
@@ -78,6 +112,10 @@ const CONFIG_AND_TESTS = [
 
 function runFile(file, runs) {
   const spec = command(file);
+  if (spec.vitest && !isCollected(file)) {
+    console.log(`skipped: ${file}: not collected by the package's vitest config`);
+    return [];
+  }
   let failed = 0;
   for (let i = 1; i <= runs; i++) {
     const { ok, output } = runOnce(spec);
