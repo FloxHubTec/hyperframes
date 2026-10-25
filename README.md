@@ -45,8 +45,10 @@ claude plugin marketplace add heygen-com/hyperframes
 claude plugin install hyperframes@hyperframes
 ```
 
-Enable auto-update for the **hyperframes** marketplace in `/plugin` → **Marketplaces**,
-then use `/hyperframes:hyperframes`. See the [plugin guide](docs/guides/plugins.mdx)
+To enable auto-update for the **hyperframes** marketplace, run `claude` in a
+terminal in your project. In Claude Code's terminal UI, run `/plugin`, then select
+**Marketplaces** → **hyperframes** → **Enable auto-update**. Afterward, use
+`/hyperframes:hyperframes`. See the [plugin guide](docs/guides/plugins.mdx)
 for Copilot, VS Code, Cursor, Gemini CLI, updates, and migration.
 
 For standalone skills (including OpenCode), use:
@@ -58,6 +60,11 @@ npx skills add heygen-com/hyperframes
 > The picker opens with nothing pre-selected — the **Core Skills** group is all you need; `/slideshow`, `/remotion-to-hyperframes` and `/figma` install on demand. Agents and non-interactive runs should use `npx hyperframes skills update` instead — it installs exactly the core set, whereas `skills add --all` installs all 7 published skills. The six repo-internal skills under `.claude/skills` / `.agents/skills` are excluded by default. For the full published set use `npx hyperframes skills`.
 >
 > `skills add` resolves the skills.sh registry blob, which can lag `main` by hours. `npx hyperframes skills update` installs from the current `main`, so reach for it when you need the newest copy of a skill.
+
+Run project-local installs from your video project's directory. From a HyperFrames
+checkout, use `npx hyperframes skills update` for a global install instead: a
+project-local installer target can overlap the tracked `skills/` source and
+overwrite uncommitted edits. See [contributor setup](CONTRIBUTING.md#getting-started).
 
 Try a prompt like:
 
