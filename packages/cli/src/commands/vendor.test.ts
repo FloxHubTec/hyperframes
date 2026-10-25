@@ -155,6 +155,11 @@ describe("scriptLoadsDependencies", () => {
     expect(scriptLoadsDependencies('new URL("./w.wasm", import.meta.url)')).toBe(true);
   });
 
+  it("flags imports and re-exports that follow a block comment directly", () => {
+    expect(scriptLoadsDependencies('/*! license */import{a}from"./b.js";')).toBe(true);
+    expect(scriptLoadsDependencies('/*! license */export*from"./b.js";')).toBe(true);
+  });
+
   it("allows classic scripts and self-contained modules", () => {
     expect(scriptLoadsDependencies('!function(t){t.gsap={import:1,a:x.import("y")}}(this)')).toBe(
       false,

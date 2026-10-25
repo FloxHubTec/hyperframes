@@ -203,8 +203,9 @@ export function stylesheetLoadsDependencies(css: string): boolean {
   return outsideUrls.replace(CSS_STRING_RE, "").includes("\\");
 }
 
-const STATIC_IMPORT_RE = /(?:^|[;\s{}()])import\s*(?:[\w$*{},\s]+?from\s*)?["'`]/;
-const EXPORT_FROM_RE = /(?:^|[;\s{}()])export\s*(?:\*|\{[^}]*\})\s*(?:as\s+[\w$]+\s*)?from\s*["'`]/;
+const STATIC_IMPORT_RE = /(?:^|[;\s{}()/])import\s*(?:[\w$*{},\s]+?from\s*)?["'`]/;
+const EXPORT_FROM_RE =
+  /(?:^|[;\s{}()/])export\s*(?:\*|\{[^}]*\})\s*(?:as\s+[\w$]+\s*)?from\s*["'`]/;
 const DYNAMIC_IMPORT_RE = /(?<![.\w$])import\s*(?:\(|\.meta\b)/;
 
 /**
@@ -446,7 +447,7 @@ export default defineCommand({
         console.log(c.warn(`   ${remaining.length} remote reference(s) remain:`));
         for (const url of remaining) console.log(`   ${c.warn("•")} ${url}`);
       } else {
-        console.log(c.success("   0 remote references remain — project renders offline."));
+        console.log(c.success("   0 remote references remain in HTML or CSS."));
       }
       if (strictViolation) {
         console.log();

@@ -71,7 +71,7 @@ $ npx hyperframes vendor
 ↓  https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js → assets/vendor/gsap.min-8c6a2d81f0.js
 
 ◆  Vendored 1 asset(s) into assets/vendor, rewrote 1 reference(s).
-   0 remote references remain — project renders offline.
+   0 remote references remain in HTML or CSS.
 
 $ npx hyperframes ledger --strict-offline && npx hyperframes render
 ```
@@ -93,6 +93,12 @@ The `<script>` tag now reads
   reported for the same reason. Use the library's single-file build.
 - **Runtime-constructed URLs.** The ledger reads declared markup, not script
   behavior. `hyperframes check` (headless Chrome) remains the runtime gate.
+- **Players that fetch files at startup.** Some self-contained scripts vendor
+  cleanly but download more at runtime. `@lottiefiles/dotlottie-web`, for
+  example, loads `dotlottie-player.wasm` from a CDN when it starts. After
+  `vendor` the ledger and `--strict-offline` pass, yet the render still needs
+  the network. Self-host the wasm file and point the player at it (for
+  dotlottie-web, `DotLottie.setWasmUrl`).
 
 ## Lint nudge
 

@@ -12,7 +12,8 @@ commands make that property inspectable and enforceable:
   iframes, text tracks — and classifies each as `remote`, `local`, `data`, or
   `missing`. No browser, no network.
 - `hyperframes vendor` **downloads** the remote references, rewrites the HTML
-  to relative paths, and records provenance, so the project renders offline.
+  to relative paths, and records provenance, so no remote references remain in
+  the HTML or CSS.
 
 For the workflow view (why and when), see
 [Offline & deterministic renders](/guides/offline-deterministic-renders).
