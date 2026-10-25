@@ -8,6 +8,7 @@ import {
   classifyAssetUrl,
   collectProjectHtmlFiles,
   extractAssetRefs,
+  extractFileAssetRefs,
 } from "./ledger";
 
 // A representative composition: one CDN script (jsDelivr), local media, a
@@ -156,6 +157,37 @@ describe("extractAssetRefs", () => {
   });
 });
 
+describe("reference spans", () => {
+  const spanText = (source: string, ref: { start: number; end: number }) =>
+    source.slice(ref.start, ref.end);
+
+  it("points each reference at its exact source text", () => {
+    const html = `<!-- <img src="https://x/old.png"> -->
+<link rel="stylesheet" href="  https://x/a.css?v=1&amp;b=2 ">
+<img srcset="https://x/1.png 1x, https://x/2.png 2x">
+<div style="background: url(&quot;https://x/bg.png&quot;)"></div>
+<script src='https://x/a.js'></script>
+<style>@import "https://x/b.css"; @font-face { src: url(https://x/f.woff2); }</style>`;
+    const refs = extractAssetRefs(html);
+    expect(refs.map((ref) => spanText(html, ref))).toEqual([
+      "https://x/a.css?v=1&amp;b=2",
+      "https://x/1.png",
+      "https://x/2.png",
+      "https://x/bg.png",
+      "https://x/a.js",
+      "https://x/b.css",
+      "https://x/f.woff2",
+    ]);
+  });
+
+  it("scans a .css file as a stylesheet with spans into the file", () => {
+    const css = `/* url(https://x/old.png) */ .a { background: url('https://x/bg.png'); }`;
+    const [ref] = extractFileAssetRefs("styles/theme.css", css);
+    expect(ref).toMatchObject({ kind: "image", url: "https://x/bg.png" });
+    expect(ref && spanText(css, ref)).toBe("https://x/bg.png");
+  });
+});
+
 describe("buildAssetLedger", () => {
   it("classifies statuses via the resolver and counts them", () => {
     const localFiles = new Set([
@@ -251,5 +283,23 @@ describe("buildProjectAssetLedger", () => {
       (a) => a.file === "scenes/intro.html" && a.status === "local",
     );
     expect(fromScene?.localPath).toBe("assets/img/logo.png");
+  });
+
+  it("includes remote references declared in local .css files", () => {
+    dir = mkdtempSync(join(tmpdir(), "hf-ledger-css-"));
+    mkdirSync(join(dir, "styles"));
+    writeFileSync(join(dir, "index.html"), `<link rel="stylesheet" href="styles/theme.css">`);
+    writeFileSync(
+      join(dir, "styles", "theme.css"),
+      `@font-face { src: url("https://fonts.example.com/inter.woff2"); }`,
+    );
+
+    const ledger = buildProjectAssetLedger(dir);
+    expect(ledger.files).toEqual(["index.html", "styles/theme.css"]);
+    expect(ledger.remoteUrls).toEqual(["https://fonts.example.com/inter.woff2"]);
+    expect(ledger.assets.find((a) => a.status === "remote")).toMatchObject({
+      kind: "font",
+      file: "styles/theme.css",
+    });
   });
 });

@@ -1,5 +1,6 @@
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { extractFileAssetRefs } from "@hyperframes/core/asset-ledger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { consumeCommandResult } from "../utils/commandResult.js";
 import {
@@ -14,10 +15,18 @@ import {
 vi.mock("../utils/updateCheck.js", () => ({ withMeta: (o: unknown) => o }));
 // resolveProject reports invalid-dir failures to telemetry; keep tests silent.
 vi.mock("../telemetry/events.js", () => ({ trackCommandFailure: () => {} }));
+// Every download must go through capture's pinned public transport.
+const { publicRequest } = vi.hoisted(() => ({
+  publicRequest: vi.fn<(url: string | URL, init?: RequestInit) => Promise<Response>>(),
+}));
+vi.mock("../capture/publicNetwork.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../capture/publicNetwork.js")>()),
+  publicRequest,
+}));
 
 import vendorCommand, {
   resolveVendorTarget,
-  rewriteHtmlReferences,
+  rewriteFileReferences,
   toFetchableUrl,
   vendorFileName,
 } from "./vendor.js";
@@ -71,29 +80,55 @@ describe("resolveVendorTarget", () => {
   });
 });
 
-describe("rewriteHtmlReferences", () => {
-  it("rewrites to a path relative to the referencing file", () => {
-    const html = `<script src="${GSAP_URL}"></script>`;
-    const fromRoot = rewriteHtmlReferences(html, "index.html", [
-      { rawUrl: GSAP_URL, vendorPath: "assets/vendor/gsap.min-abc.js" },
-    ]);
-    expect(fromRoot.rewritten).toBe(1);
-    expect(fromRoot.html).toContain('src="assets/vendor/gsap.min-abc.js"');
+describe("rewriteFileReferences", () => {
+  const rewrite = (text: string, file: string, vendored: Record<string, string>) =>
+    rewriteFileReferences(
+      text,
+      file,
+      extractFileAssetRefs(file, text),
+      new Map(Object.entries(vendored)),
+    );
 
-    const fromScene = rewriteHtmlReferences(html, "scenes/intro.html", [
-      { rawUrl: GSAP_URL, vendorPath: "assets/vendor/gsap.min-abc.js" },
-    ]);
-    expect(fromScene.html).toContain('src="../assets/vendor/gsap.min-abc.js"');
+  it("leaves a longer URL that starts with a vendored one untouched", () => {
+    const html = '<link rel="stylesheet" href="https://x.com/a.css?v=2">';
+    expect(rewrite(html, "index.html", { "https://x.com/a.css": "v/a.css" })).toEqual({
+      text: html,
+      rewritten: 0,
+    });
   });
 
-  it("replaces longer URLs first so prefixes cannot clobber", () => {
-    const html = `<script src="https://x.com/a.js"></script><script src="https://x.com/a.js.map"></script>`;
-    const { html: out } = rewriteHtmlReferences(html, "index.html", [
-      { rawUrl: "https://x.com/a.js", vendorPath: "v/a.js" },
-      { rawUrl: "https://x.com/a.js.map", vendorPath: "v/a.js.map" },
-    ]);
-    expect(out).toContain('src="v/a.js"');
-    expect(out).toContain('src="v/a.js.map"');
+  it("rewrites only declared references, not the same URL in prose or script text", () => {
+    const html = `<script src="${GSAP_URL}"></script><p>${GSAP_URL}</p><script>load("${GSAP_URL}")</script>`;
+    const { text, rewritten } = rewrite(html, "index.html", { [GSAP_URL]: "v/gsap.js" });
+    expect(rewritten).toBe(1);
+    expect(text).toBe(
+      `<script src="v/gsap.js"></script><p>${GSAP_URL}</p><script>load("${GSAP_URL}")</script>`,
+    );
+  });
+
+  it("rewrites to a path relative to the referencing file", () => {
+    const html = `<script src="${GSAP_URL}"></script>`;
+    const vendored = { [GSAP_URL]: "assets/vendor/gsap.min-abc.js" };
+    const fromRoot = rewrite(html, "index.html", vendored);
+    expect(fromRoot.rewritten).toBe(1);
+    expect(fromRoot.text).toContain('src="assets/vendor/gsap.min-abc.js"');
+    expect(rewrite(html, "scenes/intro.html", vendored).text).toContain(
+      'src="../assets/vendor/gsap.min-abc.js"',
+    );
+  });
+
+  it("matches entity-encoded references by their decoded URL", () => {
+    const html = '<script src="https://x.com/a.js?v=1&amp;b=2"></script>';
+    const { text } = rewrite(html, "index.html", { "https://x.com/a.js?v=1&b=2": "v/a.js" });
+    expect(text).toBe('<script src="v/a.js"></script>');
+  });
+
+  it("rewrites url() references in a local stylesheet relative to that stylesheet", () => {
+    const css = `.a { background: url("https://x.com/bg.png"); }`;
+    const { text } = rewrite(css, "styles/theme.css", {
+      "https://x.com/bg.png": "assets/vendor/bg.png",
+    });
+    expect(text).toBe(`.a { background: url("../assets/vendor/bg.png"); }`);
   });
 });
 
@@ -108,16 +143,13 @@ describe("vendor command", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.unstubAllGlobals();
+    publicRequest.mockReset();
     consumeCommandResult();
     rmSync(dir, { recursive: true, force: true });
   });
 
   it("downloads remotes, rewrites HTML, and writes the manifest", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => fetchResponse("/* gsap */", "text/javascript")),
-    );
+    publicRequest.mockImplementation(async () => fetchResponse("/* gsap */", "text/javascript"));
 
     await run({ dir, out: "assets/vendor", json: true, "strict-offline": true });
     expect(consumeCommandResult().exitCode).toBe(0);
@@ -126,6 +158,7 @@ describe("vendor command", () => {
     expect(output.ok).toBe(true);
     expect(output.remainingRemoteUrls).toEqual([]);
     expect(output.rewrittenReferences).toBe(1);
+    expect(publicRequest).toHaveBeenCalledWith(GSAP_URL, expect.anything());
 
     const html = readFileSync(join(dir, "index.html"), "utf-8");
     expect(html).not.toContain("https://");
@@ -144,22 +177,16 @@ describe("vendor command", () => {
   });
 
   it("--dry-run lists candidate downloads without touching the project", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-
     await run({ dir, out: "assets/vendor", json: true, "dry-run": true });
     expect(consumeCommandResult().exitCode).toBe(0);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(publicRequest).not.toHaveBeenCalled();
     expect(lastJsonOutput().wouldDownload).toEqual([GSAP_URL]);
     expect(existsSync(join(dir, "assets", "vendor"))).toBe(false);
     expect(readFileSync(join(dir, "index.html"), "utf-8")).toContain(GSAP_URL);
   });
 
   it("reports failed downloads and exits 1 without rewriting their references", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("nope", { status: 404 })),
-    );
+    publicRequest.mockImplementation(async () => new Response("nope", { status: 404 }));
 
     await run({ dir, out: "assets/vendor", json: true });
     expect(consumeCommandResult().exitCode).toBe(1);
@@ -171,10 +198,7 @@ describe("vendor command", () => {
   });
 
   it("rejects downloads over the size cap without rewriting their references", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => fetchResponse("0123456789", "text/javascript")),
-    );
+    publicRequest.mockImplementation(async () => fetchResponse("0123456789", "text/javascript"));
 
     await run({ dir, out: "assets/vendor", json: true, "max-bytes": "4" });
     expect(consumeCommandResult().exitCode).toBe(1);
@@ -188,18 +212,92 @@ describe("vendor command", () => {
   });
 
   it("refuses an --out directory outside the project", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-
     await run({ dir, out: "../outside-vendor", json: true });
     expect(consumeCommandResult().exitCode).toBe(1);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(publicRequest).not.toHaveBeenCalled();
     expect(lastJsonOutput().error).toMatch(/inside the project directory/);
+  });
+
+  it("enforces the size cap while streaming a body with no content-length", async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        controller.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    publicRequest.mockImplementation(
+      async () =>
+        new Response(endless, { status: 200, headers: { "content-type": "text/javascript" } }),
+    );
+
+    await run({ dir, out: "assets/vendor", json: true, "max-bytes": "4096" });
+    expect(consumeCommandResult().exitCode).toBe(1);
+    expect(lastJsonOutput().failed).toEqual([
+      { url: GSAP_URL, error: expect.stringMatching(/exceeds size cap/) },
+    ]);
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThanOrEqual(8);
+    expect(existsSync(join(dir, "assets", "vendor", "vendor-manifest.json"))).toBe(false);
+  });
+
+  it("refuses private addresses without making a request", async () => {
+    writeFileSync(join(dir, "index.html"), `<script src="http://169.254.169.254/x.js"></script>`);
+
+    await run({ dir, out: "assets/vendor", json: true });
+    expect(consumeCommandResult().exitCode).toBe(1);
+    expect(publicRequest).not.toHaveBeenCalled();
+    expect(lastJsonOutput().failed).toEqual([
+      { url: "http://169.254.169.254/x.js", error: expect.stringMatching(/refused/) },
+    ]);
+  });
+
+  it("refuses a redirect to a private address", async () => {
+    publicRequest.mockImplementation(
+      async () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1/x" } }),
+    );
+
+    await run({ dir, out: "assets/vendor", json: true });
+    expect(consumeCommandResult().exitCode).toBe(1);
+    expect(publicRequest).toHaveBeenCalledTimes(1);
+    expect(readFileSync(join(dir, "index.html"), "utf-8")).toContain(GSAP_URL);
+  });
+
+  it("keeps a stylesheet remote when it loads its own dependencies", async () => {
+    const cssUrl = "https://cdn.example.com/fa/all.min.css";
+    writeFileSync(join(dir, "index.html"), `<link rel="stylesheet" href="${cssUrl}">`);
+    publicRequest.mockImplementation(async () =>
+      fetchResponse(`@font-face { src: url(../webfonts/fa.woff2); }`, "text/css"),
+    );
+
+    await run({ dir, out: "assets/vendor", json: true, "strict-offline": true });
+    expect(consumeCommandResult().exitCode).toBe(1);
+    const output = lastJsonOutput();
+    expect(output.failed).toEqual([{ url: cssUrl, error: expect.stringMatching(/stylesheet/) }]);
+    expect(output.remainingRemoteUrls).toEqual([cssUrl]);
+    expect(readFileSync(join(dir, "index.html"), "utf-8")).toContain(cssUrl);
+  });
+
+  it("vendors remote url() references in local stylesheets and gates on them", async () => {
+    const fontUrl = "https://fonts.example.com/inter.woff2";
+    mkdirSync(join(dir, "styles"));
+    writeFileSync(join(dir, "styles", "theme.css"), `@font-face { src: url("${fontUrl}"); }`);
+    publicRequest.mockImplementation(async () => fetchResponse("font", "font/woff2"));
+
+    await run({ dir, out: "assets/vendor", json: true, "strict-offline": true });
+    expect(consumeCommandResult().exitCode).toBe(0);
+    expect(lastJsonOutput().remainingRemoteUrls).toEqual([]);
+    expect(readFileSync(join(dir, "styles", "theme.css"), "utf-8")).toMatch(
+      /url\("\.\.\/assets\/vendor\/inter-[0-9a-f]{10}\.woff2"\)/,
+    );
   });
 
   it("--strict-offline exits 1 when a non-vendorable remote (iframe) remains", async () => {
     writeFileSync(join(dir, "index.html"), `<iframe src="https://example.com/embed"></iframe>`);
-    vi.stubGlobal("fetch", vi.fn());
 
     await run({ dir, out: "assets/vendor", json: true, "strict-offline": true });
     expect(consumeCommandResult().exitCode).toBe(1);

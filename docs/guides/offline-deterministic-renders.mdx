@@ -24,7 +24,7 @@ the first: getting to — and staying at — **zero network references**.
     npx hyperframes ledger --json
     ```
 
-    The ledger scans every HTML file and classifies each declared asset as
+    The ledger scans every HTML and CSS file and classifies each declared asset as
     `remote`, `local`, `data`, or `missing` — scripts, stylesheets, fonts,
     images, audio, video, iframes, and text tracks, including URLs inside
     `<style>` blocks and inline styles. It is purely static (no browser, no
@@ -84,9 +84,10 @@ The `<script>` tag now reads
 - **Remote iframes.** A live embedded page can never be deterministic.
   `vendor` leaves iframes alone and `--strict-offline` keeps failing until you
   replace the embed with captured media (`hyperframes capture`).
-- **Fonts hidden behind remote CSS.** A Google Fonts stylesheet is vendored as
-  the CSS file it is, but the font binaries it references are not crawled.
-  Self-host fonts with `@font-face` for text-critical typography.
+- **Stylesheets that load their own files.** A remote stylesheet containing
+  `url(…)` or `@import` (Google Fonts, Font Awesome, KaTeX) is left remote and
+  reported, because its relative URLs would break once vendored. Self-host
+  those fonts and files with `@font-face` instead.
 - **Runtime-constructed URLs.** The ledger reads declared markup, not script
   behavior. `hyperframes check` (headless Chrome) remains the runtime gate.
 

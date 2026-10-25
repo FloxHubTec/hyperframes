@@ -25,11 +25,11 @@ npx hyperframes ledger ./my-video --json  # machine-readable asset graph
 npx hyperframes ledger --strict-offline   # exit 1 if any remote ref remains
 ```
 
-The scan is purely static: every `.html` file under the project directory
-(excluding `node_modules`, dot-directories, `dist`, `coverage`) is parsed for
-declared URLs in tag attributes (`src`, `href`, `srcset`, `poster`), inline
-`style=""` attributes, and `<style>` blocks (`url(…)`, `@import`,
-`@font-face src`). URLs constructed at runtime inside scripts are out of
+The scan is purely static: every `.html` and `.css` file under the project
+directory (excluding `node_modules`, dot-directories, `dist`, `coverage`) is
+parsed for declared URLs in tag attributes (`src`, `href`, `srcset`, `poster`),
+inline `style=""` attributes, `<style>` blocks and local stylesheets
+(`url(…)`, `@import`, `@font-face src`). URLs constructed at runtime inside scripts are out of
 scope, as are assets nested inside remote stylesheets.
 
 Classification:
@@ -90,14 +90,20 @@ npx hyperframes vendor --strict-offline         # exit 1 if remotes remain after
 For every unique remote URL in the ledger, `vendor`:
 
 1. Downloads it (only `http:`/`https:` are ever fetched; protocol-relative URLs
-   are fetched over `https:`). Each file is saved as
-   `<basename>-<sha256-prefix><ext>` so re-runs are stable and names never
-   collide.
-2. Rewrites every reference in every HTML file to a path **relative to the
-   declaring file** (`assets/vendor/gsap.min-1a2b3c4d5e.js` from `index.html`,
-   `../assets/vendor/…` from `scenes/intro.html`). The rewrite is text-level,
-   so your formatting is preserved and URLs mentioned in inline scripts are
-   localized too.
+   are fetched over `https:`). Downloads use the same public-address transport
+   as `hyperframes capture`: hosts that resolve to private, loopback,
+   link-local or other special-use addresses are refused, and every redirect
+   hop is checked again. The `--max-bytes` cap (default 100 MB) is counted
+   while the body streams, so an oversized response is cut off rather than
+   buffered. Each file is saved as `<basename>-<sha256-prefix><ext>` so re-runs
+   are stable and names never collide.
+2. Rewrites each declared reference in every scanned HTML and CSS file to a
+   path **relative to the declaring file** (`assets/vendor/gsap.min-1a2b3c4d5e.js`
+   from `index.html`, `../assets/vendor/…` from `scenes/intro.html`). Only the
+   exact spans the ledger found are replaced, so the rest of the file keeps its
+   formatting, and a different URL that starts with a vendored one (such as
+   the same file with another `?v=` query) is left alone. URLs mentioned in
+   script code are not references and are not rewritten.
 3. Writes `vendor-manifest.json` into the output directory recording `url`,
    `file`, `bytes`, `sha256`, and `contentType` per asset — the provenance
    record for review and licensing checks.
@@ -106,9 +112,12 @@ Remote **iframes** are never vendored: a live page cannot be made
 deterministic by downloading it. They stay remote and still fail
 `--strict-offline`, which is the point — replace them with captured media.
 
-Google Fonts stylesheets are downloaded as declared, but font binaries nested
-inside a remote CSS response are not crawled. Prefer self-hosted `@font-face`
-files (see [media guide](/guides/media)) for text-critical fonts.
+A remote stylesheet that loads anything itself (`url(…)`, `@import`, or CSS
+escapes) is not vendored: moved under `assets/vendor/`, its relative URLs
+would point at files that do not exist. It is reported as a failed download
+and stays remote, so `--strict-offline` keeps failing. Google Fonts and icon
+font stylesheets fall in this group; self-host their files with
+`@font-face` (see [media guide](/guides/media)) instead.
 
 ### Exit codes
 

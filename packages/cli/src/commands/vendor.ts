@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, posix, resolve, sep } from "node:path";
 import { defineCommand } from "citty";
+import { safeFetch } from "../capture/assetDownloader.js";
+import { readBoundedResponse } from "../capture/readBoundedResponse.js";
 import type { Example } from "./_examples.js";
 import type { LedgerAssetKind } from "@hyperframes/core/asset-ledger";
 import { setCommandExitCode } from "../utils/commandResult.js";
@@ -134,16 +136,11 @@ async function downloadAsset(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal, redirect: "follow" });
+    const response = await safeFetch(url, { signal: controller.signal });
+    if (!response) throw new Error("download refused: non-public URL or redirect");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const declared = Number(response.headers.get("content-length") ?? Number.NaN);
-    if (Number.isFinite(declared) && declared > maxBytes) {
-      throw new Error(`asset exceeds size cap (${declared} > ${maxBytes} bytes)`);
-    }
-    const body = Buffer.from(await response.arrayBuffer());
-    if (body.length > maxBytes) {
-      throw new Error(`asset exceeds size cap (${body.length} > ${maxBytes} bytes)`);
-    }
+    const body = await readBoundedResponse(response, maxBytes);
+    if (!body) throw new Error(`asset exceeds size cap (${maxBytes} bytes) or has no body`);
     const contentType = response.headers.get("content-type") ?? undefined;
     return { body, ...(contentType !== undefined ? { contentType } : {}) };
   } finally {
@@ -151,29 +148,42 @@ async function downloadAsset(
   }
 }
 
+interface ReferenceSpan {
+  /** Decoded URL, the key vendored downloads are stored under. */
+  url: string;
+  start: number;
+  end: number;
+}
+
 /**
- * Rewrite every occurrence of each vendored URL (its raw as-written form) in
- * one HTML file to a path relative to that file. Text-level on purpose: it
- * preserves the author's formatting and also rewrites URLs mentioned inside
- * inline scripts/styles, which is exactly what an offline render needs.
+ * Replace exactly the declared reference spans whose URL was vendored with a
+ * path relative to `file`. Other text, including a longer URL that merely
+ * starts with a vendored one, is never touched.
  */
-export function rewriteHtmlReferences(
-  html: string,
+export function rewriteFileReferences(
+  text: string,
   file: string,
-  replacements: Array<{ rawUrl: string; vendorPath: string }>,
-): { html: string; rewritten: number } {
+  refs: ReadonlyArray<ReferenceSpan>,
+  vendorPathByUrl: ReadonlyMap<string, string>,
+): { text: string; rewritten: number } {
   const fileDir = posix.dirname(file);
-  let out = html;
+  let out = "";
+  let cursor = 0;
   let rewritten = 0;
-  // Longest first so one URL that is a prefix of another can't clobber it.
-  const ordered = [...replacements].sort((a, b) => b.rawUrl.length - a.rawUrl.length);
-  for (const { rawUrl, vendorPath } of ordered) {
+  for (const ref of [...refs].sort((a, b) => a.start - b.start)) {
+    const vendorPath = vendorPathByUrl.get(ref.url);
+    if (!vendorPath || ref.start < cursor) continue;
     const relative = posix.relative(fileDir === "." ? "" : fileDir, vendorPath) || vendorPath;
-    if (!out.includes(rawUrl)) continue;
-    rewritten += out.split(rawUrl).length - 1;
-    out = out.split(rawUrl).join(relative);
+    out += text.slice(cursor, ref.start) + relative;
+    cursor = ref.end;
+    rewritten++;
   }
-  return { html: out, rewritten };
+  return { text: out + text.slice(cursor), rewritten };
+}
+
+/** A stylesheet that loads anything itself would break once moved under the vendor directory. */
+function stylesheetLoadsDependencies(body: Buffer): boolean {
+  return /url\s*\(|@import|\\/i.test(body.toString("utf-8"));
 }
 
 function isVendoredEntry(value: unknown): value is VendoredEntry {
@@ -251,7 +261,8 @@ export default defineCommand({
     const maxBytes = Number.parseInt(String(args["max-bytes"]), 10) || DEFAULT_MAX_BYTES;
     try {
       const project = resolveProject(args.dir, { requireIndex: false });
-      const { buildProjectAssetLedger } = await import("@hyperframes/core/asset-ledger");
+      const { buildProjectAssetLedger, extractFileAssetRefs } =
+        await import("@hyperframes/core/asset-ledger");
       const ledger = buildProjectAssetLedger(project.dir);
 
       const outRel = String(args.out ?? "assets/vendor").replace(/\\/g, "/");
@@ -293,6 +304,14 @@ export default defineCommand({
       for (const [declaredUrl, fetchUrl] of candidates) {
         try {
           const { body, contentType } = await downloadAsset(fetchUrl, timeoutMs, maxBytes);
+          const stylesheet =
+            contentType?.toLowerCase().includes("text/css") ||
+            ledger.assets.some((a) => a.url === declaredUrl && a.kind === "stylesheet");
+          if (stylesheet && stylesheetLoadsDependencies(body)) {
+            throw new Error(
+              "stylesheet loads url(), @import or escaped dependencies that would break once vendored; keeping the remote reference",
+            );
+          }
           const fileName = vendorFileName(fetchUrl, contentType);
           const vendorPath = posix.join(outRel, fileName);
           // Network→file is this command's entire purpose (download remote
@@ -319,24 +338,17 @@ export default defineCommand({
         }
       }
 
-      // Rewrite each HTML file's references to the vendored copies.
+      // Rewrite each scanned file's declared references to the vendored copies.
       let totalRewritten = 0;
-      for (const file of ledger.files) {
-        const replacements: Array<{ rawUrl: string; vendorPath: string }> = [];
-        const seenRaw = new Set<string>();
-        for (const asset of ledger.assets) {
-          if (asset.file !== file || asset.status !== "remote") continue;
-          const vendorPath = vendorPathByUrl.get(asset.url);
-          if (!vendorPath || seenRaw.has(asset.rawUrl)) continue;
-          seenRaw.add(asset.rawUrl);
-          replacements.push({ rawUrl: asset.rawUrl, vendorPath });
-        }
-        if (replacements.length === 0) continue;
+      for (const file of vendorPathByUrl.size > 0 ? ledger.files : []) {
         const absolute = join(project.dir, file);
-        const html = readFileSync(absolute, "utf-8");
-        const { html: next, rewritten } = rewriteHtmlReferences(html, file, replacements);
+        const source = readFileSync(absolute, "utf-8");
+        const refs = extractFileAssetRefs(file, source).filter((ref) =>
+          VENDORABLE_KINDS.has(ref.kind),
+        );
+        const { text, rewritten } = rewriteFileReferences(source, file, refs, vendorPathByUrl);
         if (rewritten > 0) {
-          writeFileSync(absolute, next);
+          writeFileSync(absolute, text);
           totalRewritten += rewritten;
         }
       }

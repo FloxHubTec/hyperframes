@@ -1,4 +1,4 @@
-// Scans HTML text only, so it runs without a browser or network. URLs built at runtime and
+// Scans HTML and CSS text only, so it runs without a browser or network. URLs built at runtime and
 // assets nested inside remote stylesheets are out of scope. Node-only: import it via
 // `@hyperframes/core/asset-ledger` so the main entry stays browser-safe.
 
@@ -39,7 +39,7 @@ export interface LedgerAssetRef {
   /** The URL exactly as written in the source, for text-level rewriting. */
   rawUrl: string;
   status: LedgerAssetStatus;
-  /** Project-root-relative path of the HTML file holding the reference. */
+  /** Project-root-relative path of the HTML or CSS file holding the reference. */
   file: string;
   via: LedgerAssetVia;
   /** Project-root-relative path of the resolved file when status is `local`. */
@@ -47,7 +47,7 @@ export interface LedgerAssetRef {
 }
 
 export interface AssetLedger {
-  /** Project-root-relative HTML files that were scanned, in scan order. */
+  /** Project-root-relative HTML and CSS files that were scanned, in scan order. */
   files: string[];
   assets: LedgerAssetRef[];
   counts: { total: number } & Record<LedgerAssetStatus, number>;
@@ -76,7 +76,13 @@ interface ExtractedRef {
   url: string;
   rawUrl: string;
   via: LedgerAssetVia;
+  /** Source offsets of this one reference, so a rewrite never touches other text. */
+  start: number;
+  end: number;
 }
+
+/** Maps an index in the scanned text back to an offset in the source file. */
+type OffsetMap = (index: number) => number;
 
 // ── URL classification ──────────────────────────────────────────────────────
 
@@ -123,9 +129,25 @@ const HTML_ENTITY_MAP: Record<string, string> = {
  * never `<`).
  */
 function decodeHtmlEntities(value: string): string {
-  return value.replace(/&(?:(amp|quot|apos|lt|gt)|#0*39);/gi, (match, name: string | undefined) =>
-    name === undefined ? "'" : (HTML_ENTITY_MAP[name.toLowerCase()] ?? match),
-  );
+  return decodeHtmlEntitiesMapped(value).text;
+}
+
+/** Entity decode that also maps each decoded index back to its raw index. */
+function decodeHtmlEntitiesMapped(value: string): { text: string; rawIndex: OffsetMap } {
+  const starts: number[] = [];
+  let text = "";
+  let cursor = 0;
+  for (const match of value.matchAll(/&(?:(amp|quot|apos|lt|gt)|#0*39);/gi)) {
+    for (let i = cursor; i < match.index; i++) starts.push(i);
+    text += value.slice(cursor, match.index);
+    const name = match[1];
+    text += name === undefined ? "'" : (HTML_ENTITY_MAP[name.toLowerCase()] ?? match[0]);
+    starts.push(match.index);
+    cursor = match.index + match[0].length;
+  }
+  for (let i = cursor; i < value.length; i++) starts.push(i);
+  text += value.slice(cursor);
+  return { text, rawIndex: (index) => starts[index] ?? value.length };
 }
 
 /** Length-preserving `<!-- … -->` blanking so commented-out tags never count. */
@@ -144,20 +166,38 @@ function maskHtmlComments(html: string): string {
   return chunks.length === 0 ? html : chunks.join("") + html.slice(cursor);
 }
 
+interface LocatedValue {
+  value: string;
+  /** Index of `value` inside the text it was read from. */
+  start: number;
+}
+
+/** First defined capture group among `groups`, with its index. */
+function firstGroup(match: RegExpExecArray, groups: number[]): LocatedValue | null {
+  for (const group of groups) {
+    const value = match[group];
+    const span = match.indices?.[group];
+    if (value !== undefined && span) return { value, start: span[0] };
+  }
+  return null;
+}
+
 /** Read one attribute value from a single already-delimited tag's source. */
-function readTagAttr(tagSource: string, attr: string): string | null {
-  const re = new RegExp(`\\b${attr}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i");
+function readTagAttr(tagSource: string, attr: string): LocatedValue | null {
+  const re = new RegExp(`\\b${attr}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "di");
   const match = re.exec(tagSource);
-  if (!match) return null;
-  return match[2] ?? match[3] ?? match[4] ?? null;
+  return match ? firstGroup(match, [1, 2, 3]) : null;
 }
 
 /** Split a `srcset` value into its URL parts (descriptors dropped). */
-function parseSrcset(value: string): string[] {
-  const urls: string[] = [];
+function parseSrcset(value: string): LocatedValue[] {
+  const urls: LocatedValue[] = [];
+  let offset = 0;
   for (const entry of value.split(",")) {
-    const url = entry.trim().split(/\s+/, 1)[0];
-    if (url) urls.push(url);
+    const lead = entry.length - entry.trimStart().length;
+    const url = entry.trimStart().split(/\s+/, 1)[0];
+    if (url) urls.push({ value: url, start: offset + lead });
+    offset += entry.length + 1;
   }
   return urls;
 }
@@ -172,13 +212,17 @@ const LINK_PRELOAD_AS_KIND: Record<string, LedgerAssetKind> = {
   track: "track",
 };
 
+function lowerAttr(tagSource: string, attr: string): string {
+  return (readTagAttr(tagSource, attr)?.value ?? "").toLowerCase();
+}
+
 function linkKind(tagSource: string): LedgerAssetKind | null {
-  const rel = (readTagAttr(tagSource, "rel") ?? "").toLowerCase();
+  const rel = lowerAttr(tagSource, "rel");
   const relParts = rel.split(/\s+/);
   if (relParts.includes("stylesheet")) return "stylesheet";
   if (relParts.includes("modulepreload")) return "script";
   if (relParts.includes("preload") || relParts.includes("prefetch")) {
-    const as = (readTagAttr(tagSource, "as") ?? "").toLowerCase();
+    const as = lowerAttr(tagSource, "as");
     return LINK_PRELOAD_AS_KIND[as] ?? null;
   }
   if (relParts.some((part) => part === "icon" || part === "apple-touch-icon")) return "image";
@@ -188,13 +232,22 @@ function linkKind(tagSource: string): LedgerAssetKind | null {
 function pushRef(
   refs: ExtractedRef[],
   kind: LedgerAssetKind,
-  rawUrl: string | null,
+  located: LocatedValue | null,
   via: LedgerAssetVia,
+  at: OffsetMap,
 ): void {
-  if (!rawUrl) return;
-  const trimmed = rawUrl.trim();
+  if (!located) return;
+  const trimmed = located.value.trim();
   if (!trimmed) return;
-  refs.push({ kind, url: decodeHtmlEntities(trimmed), rawUrl: trimmed, via });
+  const from = located.start + located.value.length - located.value.trimStart().length;
+  refs.push({
+    kind,
+    url: decodeHtmlEntities(trimmed),
+    rawUrl: trimmed,
+    via,
+    start: at(from),
+    end: at(from + trimmed.length),
+  });
 }
 
 /** Media elements whose nested `<source>` children inherit their kind. */
@@ -225,6 +278,16 @@ function collectTagRefs(html: string, refs: ExtractedRef[]): void {
     cursor = close + 1;
 
     const tagSource = scannable.slice(open, cursor);
+    const at: OffsetMap = (index) => open + index;
+    const attr = (kind: LedgerAssetKind, name: string, via: LedgerAssetVia) =>
+      pushRef(refs, kind, readTagAttr(tagSource, name), via, at);
+    const srcset = (kind: LedgerAssetKind) => {
+      const value = readTagAttr(tagSource, "srcset");
+      if (!value) return;
+      for (const url of parseSrcset(value.value)) {
+        pushRef(refs, kind, { value: url.value, start: value.start + url.start }, "srcset", at);
+      }
+    };
     const nameMatch = /^<\/?\s*([a-zA-Z][\w-]*)/.exec(tagSource);
     if (!nameMatch) continue;
     const name = (nameMatch[1] ?? "").toLowerCase();
@@ -242,45 +305,41 @@ function collectTagRefs(html: string, refs: ExtractedRef[]): void {
     switch (name) {
       case "link": {
         const kind = linkKind(tagSource);
-        if (kind) pushRef(refs, kind, readTagAttr(tagSource, "href"), "href");
+        if (kind) attr(kind, "href", "href");
         break;
       }
       case "img": {
-        pushRef(refs, "image", readTagAttr(tagSource, "src"), "src");
-        const srcset = readTagAttr(tagSource, "srcset");
-        if (srcset) for (const url of parseSrcset(srcset)) pushRef(refs, "image", url, "srcset");
+        attr("image", "src", "src");
+        srcset("image");
         break;
       }
       case "source": {
         const parent = parentStack[parentStack.length - 1] ?? "";
-        const srcset = readTagAttr(tagSource, "srcset");
-        if (srcset) {
-          for (const url of parseSrcset(srcset)) pushRef(refs, "image", url, "srcset");
-        }
-        const parentKind = SOURCE_PARENT_KIND[parent] ?? "video";
-        pushRef(refs, parentKind, readTagAttr(tagSource, "src"), "src");
+        srcset("image");
+        attr(SOURCE_PARENT_KIND[parent] ?? "video", "src", "src");
         break;
       }
       case "video": {
-        pushRef(refs, "video", readTagAttr(tagSource, "src"), "src");
-        pushRef(refs, "image", readTagAttr(tagSource, "poster"), "poster");
+        attr("video", "src", "src");
+        attr("image", "poster", "poster");
         break;
       }
       case "audio":
-        pushRef(refs, "audio", readTagAttr(tagSource, "src"), "src");
-        break;
       case "iframe":
-        pushRef(refs, "iframe", readTagAttr(tagSource, "src"), "src");
-        break;
       case "track":
-        pushRef(refs, "track", readTagAttr(tagSource, "src"), "src");
+        attr(name, "src", "src");
         break;
       default:
         break;
     }
 
     const styleAttr = readTagAttr(tagSource, "style");
-    if (styleAttr) collectCssRefs(decodeHtmlEntities(styleAttr), refs, "style-attr");
+    if (styleAttr) {
+      const decoded = decodeHtmlEntitiesMapped(styleAttr.value);
+      collectCssRefs(decoded.text, refs, "style-attr", (index) =>
+        at(styleAttr.start + decoded.rawIndex(index)),
+      );
+    }
   }
 }
 
@@ -289,15 +348,16 @@ function collectScriptRefs(html: string, refs: ExtractedRef[]): void {
   const scriptOpenRe = /<script\b[^>]*>/gi;
   let match: RegExpExecArray | null;
   while ((match = scriptOpenRe.exec(html)) !== null) {
-    pushRef(refs, "script", readTagAttr(match[0], "src"), "src");
+    const tagStart = match.index;
+    pushRef(refs, "script", readTagAttr(match[0], "src"), "src", (index) => tagStart + index);
   }
 }
 
 // ── CSS scanning ────────────────────────────────────────────────────────────
 
-const CSS_URL_RE = /url\(\s*(?:"([^"]+)"|'([^']+)'|([^"')\s]+))\s*\)/gi;
+const CSS_URL_RE = /url\(\s*(?:"([^"]+)"|'([^']+)'|([^"')\s]+))\s*\)/dgi;
 const CSS_IMPORT_RE =
-  /@import\s+(?:url\(\s*(?:"([^"]+)"|'([^']+)'|([^"')\s]+))\s*\)|"([^"]+)"|'([^']+)')/gi;
+  /@import\s+(?:url\(\s*(?:"([^"]+)"|'([^']+)'|([^"')\s]+))\s*\)|"([^"]+)"|'([^']+)')/dgi;
 const FONT_FACE_BLOCK_RE = /@font-face\s*\{[^}]*\}/gi;
 
 /**
@@ -325,23 +385,27 @@ function collectCssUrls(
   refs: ExtractedRef[],
   kind: LedgerAssetKind,
   via: LedgerAssetVia,
+  at: OffsetMap,
 ): void {
   let match: RegExpExecArray | null;
   CSS_URL_RE.lastIndex = 0;
   while ((match = CSS_URL_RE.exec(css)) !== null) {
-    pushRef(refs, kind, match[1] ?? match[2] ?? match[3] ?? null, via);
+    pushRef(refs, kind, firstGroup(match, [1, 2, 3]), via, at);
   }
 }
 
-function collectCssRefs(css: string, refs: ExtractedRef[], via: LedgerAssetVia): void {
+function collectCssRefs(
+  css: string,
+  refs: ExtractedRef[],
+  via: LedgerAssetVia,
+  at: OffsetMap,
+): void {
   let source = stripCssComments(css);
 
   let importMatch: RegExpExecArray | null;
   CSS_IMPORT_RE.lastIndex = 0;
   while ((importMatch = CSS_IMPORT_RE.exec(source)) !== null) {
-    const url =
-      importMatch[1] ?? importMatch[2] ?? importMatch[3] ?? importMatch[4] ?? importMatch[5];
-    pushRef(refs, "stylesheet", url ?? null, "css-import");
+    pushRef(refs, "stylesheet", firstGroup(importMatch, [1, 2, 3, 4, 5]), "css-import", at);
   }
   // Blank @import statements so their url() doesn't double-count as an image.
   source = source.replace(CSS_IMPORT_RE, (m) => " ".repeat(m.length));
@@ -351,18 +415,20 @@ function collectCssRefs(css: string, refs: ExtractedRef[], via: LedgerAssetVia):
   let fontMatch: RegExpExecArray | null;
   FONT_FACE_BLOCK_RE.lastIndex = 0;
   while ((fontMatch = FONT_FACE_BLOCK_RE.exec(source)) !== null) {
-    collectCssUrls(fontMatch[0], refs, "font", via);
+    const blockStart = fontMatch.index;
+    collectCssUrls(fontMatch[0], refs, "font", via, (index) => at(blockStart + index));
   }
   source = source.replace(FONT_FACE_BLOCK_RE, (m) => " ".repeat(m.length));
 
-  collectCssUrls(source, refs, "image", via);
+  collectCssUrls(source, refs, "image", via, at);
 }
 
 function collectStyleBlockRefs(html: string, refs: ExtractedRef[]): void {
-  const styleBlockRe = /<style\b[^>]*>([\s\S]*?)<\/style\b[^>]*>/gi;
+  const styleBlockRe = /<style\b[^>]*>([\s\S]*?)<\/style\b[^>]*>/dgi;
   let match: RegExpExecArray | null;
   while ((match = styleBlockRe.exec(html)) !== null) {
-    collectCssRefs(match[1] ?? "", refs, "css-url");
+    const body = firstGroup(match, [1]);
+    if (body) collectCssRefs(body.value, refs, "css-url", (index) => body.start + index);
   }
 }
 
@@ -375,6 +441,14 @@ export function extractAssetRefs(html: string): ExtractedRef[] {
   collectTagRefs(withoutComments, refs);
   collectScriptRefs(withoutComments, refs);
   collectStyleBlockRefs(withoutComments, refs);
+  return refs;
+}
+
+/** Every declared reference in one project file; a `.css` file is scanned as a stylesheet. */
+export function extractFileAssetRefs(file: string, text: string): ExtractedRef[] {
+  if (!/\.css$/i.test(file)) return extractAssetRefs(text);
+  const refs: ExtractedRef[] = [];
+  collectCssRefs(text, refs, "css-url", (index) => index);
   return refs;
 }
 
@@ -415,7 +489,7 @@ export function buildAssetLedger(
   const counts = { total: 0, remote: 0, local: 0, data: 0, missing: 0 };
 
   for (const input of inputs) {
-    for (const ref of extractAssetRefs(input.html)) {
+    for (const ref of extractFileAssetRefs(input.file, input.html)) {
       const asset = toLedgerAsset(input.file, ref, options);
       if (!asset) continue;
       counts.total += 1;
@@ -435,7 +509,7 @@ export function buildAssetLedger(
 
 const SKIPPED_DIRS = new Set(["node_modules", ".git", "dist", "coverage", ".cache"]);
 
-/** Recursively list project-root-relative `.html` files, sorted for stability. */
+/** Recursively list project-root-relative `.html` and `.css` files, sorted for stability. */
 export function collectProjectHtmlFiles(projectDir: string): string[] {
   const root = resolve(projectDir);
   const files: string[] = [];
@@ -451,7 +525,7 @@ export function collectProjectHtmlFiles(projectDir: string): string[] {
         if (!SKIPPED_DIRS.has(entry.name) && !entry.name.startsWith(".")) {
           walk(join(dir, entry.name));
         }
-      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".html")) {
+      } else if (entry.isFile() && /\.(html|css)$/i.test(entry.name)) {
         // Posix separators keep ledger output identical across platforms.
         files.push(relative(root, join(dir, entry.name)).replace(/\\/g, "/"));
       }
