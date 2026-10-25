@@ -154,6 +154,11 @@ import {
   type CaptureRouting,
 } from "./render/capturePlan.js";
 import { runCaptureSegmentedStage } from "./render/stages/captureSegmentedStage.js";
+import {
+  RenderTooSlowError,
+  checkRenderEta,
+  startRenderEtaGuard,
+} from "./render/renderEtaGuard.js";
 import { resolveSegmentFrames } from "./render/segmentPlan.js";
 import { resolveSegmentBrowserRecycle } from "./render/segmentRecycle.js";
 import {
@@ -400,6 +405,8 @@ export interface RenderConfig {
   motionBlur?: MotionBlurOptions;
   pageMotionBlur?: "off";
   workers?: number;
+  /** Wall-time budget in ms for the whole render. Absent or 0 disables the ETA guard. */
+  maxRenderMs?: number;
   useGpu?: boolean;
   debug?: boolean;
   /** Strict rejects correctness warnings; best-effort returns a qualified outcome. */
@@ -1812,6 +1819,35 @@ function colorGradingValueHasLut(rawAttributeValue: string): boolean {
   }
 }
 
+/** Longest a live probe-page read may hold the render; a busy page otherwise waits out the CDP timeout. */
+export const PROBE_READ_TIMEOUT_MS = 5_000;
+
+/** `page.evaluate` that rejects after `PROBE_READ_TIMEOUT_MS`, so callers fall back to their static answer. */
+async function evaluateWithinBound<T>(
+  page: Pick<CaptureSession["page"], "evaluate">,
+  fn: () => T,
+  what: string,
+  log: Pick<ProducerLogger, "warn">,
+): Promise<Awaited<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`no answer within ${PROBE_READ_TIMEOUT_MS} ms (page busy)`)),
+      PROBE_READ_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([page.evaluate(fn) as Promise<Awaited<T>>, timedOut]);
+  } catch (err) {
+    log.warn(`[Render] live ${what} read skipped; using the static answer`, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Element count for the short-comp band's gate, WITH PROVENANCE.
  *
@@ -1837,6 +1873,7 @@ function colorGradingValueHasLut(rawAttributeValue: string): boolean {
 export async function resolveCompositionElementCount(
   probeSession: Pick<CaptureSession, "isInitialized" | "page"> | null,
   html: string,
+  log: Pick<ProducerLogger, "warn"> = defaultLogger,
 ): Promise<{
   count: number;
   source: "live" | "static";
@@ -1857,10 +1894,13 @@ export async function resolveCompositionElementCount(
 }> {
   if (probeSession?.isInitialized) {
     try {
-      const liveCount = await probeSession.page.evaluate(
+      const liveCount = await evaluateWithinBound(
+        probeSession.page,
         // Live HTMLCollection length — avoids materializing a static NodeList
         // on the large-DOM comps this gate exists to catch (review nit).
         () => document.getElementsByTagName("*").length,
+        "element count",
+        log,
       );
       if (typeof liveCount === "number" && Number.isFinite(liveCount)) {
         return { count: liveCount, source: "live" };
@@ -1999,11 +2039,12 @@ function probeAdaptersUsed(): string[] {
 export async function resolveAdaptersUsed(
   probeSession: Pick<CaptureSession, "isInitialized" | "page"> | null,
   html: string,
+  log: Pick<ProducerLogger, "warn"> = defaultLogger,
 ): Promise<readonly RuntimeAdapterName[]> {
   const staticAdapters = detectAdaptersStatic(html);
   if (!probeSession?.isInitialized) return staticAdapters;
   try {
-    const live = await probeSession.page.evaluate(probeAdaptersUsed);
+    const live = await evaluateWithinBound(probeSession.page, probeAdaptersUsed, "adapters", log);
     if (!Array.isArray(live)) return staticAdapters;
     const detected = new Set<string>([...staticAdapters, ...live]);
     return KNOWN_RUNTIME_ADAPTERS.filter((name) => detected.has(name));
@@ -2107,19 +2148,17 @@ export function resolveDeShortBand(args: {
 }
 
 /**
- * DE priority inversion predicate: should an AUTO-resolved multi-worker render
- * drop to single-worker verified drawElement streaming?
+ * DE priority inversion predicate: should a multi-worker render drop to
+ * single-worker verified drawElement streaming?
  *
  * Benchmarked 2026-07-08: above ~900 frames DE-single beats screenshot-parallel
  * at every worker count (2,380f: 66s vs 109–127s at W2–W5); below it DE's fixed
  * init cost (verify + dedup arming) loses by a small margin. Only fires for the
  * exact benchmarked configuration: default-on DE, mp4, streaming-eligible,
- * no compile gate, no forced screenshot, workers not explicitly requested.
+ * no compile gate, no forced screenshot.
  */
 export function shouldPreferSingleWorkerDrawElement(args: {
   workerCount: number;
-  /** job.config.workers — a number means the user explicitly chose. */
-  requestedWorkers: number | "auto" | undefined;
   useDrawElement: boolean;
   deCompileGate: string | undefined;
   forceScreenshot: boolean;
@@ -2153,7 +2192,6 @@ export function shouldPreferSingleWorkerDrawElement(args: {
 }): boolean {
   return (
     args.workerCount > 1 &&
-    typeof args.requestedWorkers !== "number" &&
     args.useDrawElement &&
     !args.deCompileGate &&
     !args.forceScreenshot &&
@@ -2864,7 +2902,11 @@ async function executeRenderPipeline(input: {
   const log = execution.logger;
   const eventPublisher = execution.events;
   const onProgress = execution.onProgress;
-  const executionSignal = execution.signal;
+  const tooSlow = new AbortController();
+  let tooSlowError: RenderTooSlowError | undefined;
+  const executionSignal = job.config.maxRenderMs
+    ? AbortSignal.any([tooSlow.signal, ...(execution.signal ? [execution.signal] : [])])
+    : execution.signal;
   let fileServer: FileServerHandle | null = null;
   let probeSession: CaptureSession | null = null;
   let lastBrowserConsole: string[] = [];
@@ -2903,6 +2945,9 @@ async function executeRenderPipeline(input: {
   const artifactTransaction = new ArtifactTransaction(
     outputPath,
     isPngSequence || isHls ? "directory" : "file",
+    undefined,
+    undefined,
+    log,
   );
   const stagedOutputPath = artifactTransaction.stagingPath;
   const needsAlpha = outputNeedsAlpha(outputFormat);
@@ -3629,8 +3674,8 @@ async function executeRenderPipeline(input: {
       vfxHostCount,
       vfxCapture,
       vfxTypes,
-    } = await resolveCompositionElementCount(probeSession, compiled.html);
-    const adaptersUsed = await resolveAdaptersUsed(probeSession, compiled.html);
+    } = await resolveCompositionElementCount(probeSession, compiled.html, log);
+    const adaptersUsed = await resolveAdaptersUsed(probeSession, compiled.html, log);
     // HF_DE_SHORT_MAX_ELEMENTS=0 is the documented kill switch (symmetric
     // with HF_DE_SHORT_MIN_FRAMES=0, which disables via the predicate's own
     // minFrames > 0 guard). Gated explicitly here too — without it, a fired
@@ -3660,7 +3705,6 @@ async function executeRenderPipeline(input: {
     const WOULD_RESOLVE_MULTI_WORKER = 2;
     const deInversionArgs = {
       workerCount: WOULD_RESOLVE_MULTI_WORKER,
-      requestedWorkers: job.config.workers,
       useDrawElement: cfg.useDrawElement,
       deCompileGate,
       forceScreenshot: captureForceScreenshot,
@@ -3980,7 +4024,7 @@ async function executeRenderPipeline(input: {
         "[Render] Fast capture: single-worker drawElement streaming preferred over " +
           `${workerCount}-worker screenshot capture (${totalFrames} frames >= ` +
           `${deInversionEffectiveMinFrames}; verified path, measured faster at every worker count). ` +
-          "Set HF_DE_SINGLE_MIN_FRAMES=0 or --workers N to override.",
+          "Set HF_DE_SINGLE_MIN_FRAMES=0 to override.",
       );
       workerCount = 1;
     }
@@ -4024,6 +4068,30 @@ async function executeRenderPipeline(input: {
       deWorkerInversion: deWorkerInversion ?? "none",
       deParallelRouter: deParallelRouter ?? "none",
     });
+
+    // No calibration estimate (explicit workers, short or forced-screenshot renders) skips the
+    // pre-capture check; the measured-rate guard below still covers capture.
+    const calibratedTooSlow = checkRenderEta("capture_calibration", {
+      maxRenderMs: job.config.maxRenderMs,
+      elapsedMs: Date.now() - pipelineStart,
+      framesCompleted: 0,
+      totalFrames,
+      msPerFrame: (captureCalibration?.estimate.p95Ms ?? 0) / workerCount,
+    });
+    if (calibratedTooSlow) throw calibratedTooSlow;
+    execution.defer(
+      "stop render ETA guard",
+      startRenderEtaGuard({
+        maxRenderMs: job.config.maxRenderMs,
+        job,
+        totalFrames,
+        pipelineStartMs: pipelineStart,
+        onTooSlow: (error) => {
+          tooSlowError = error;
+          tooSlow.abort(error);
+        },
+      }),
+    );
 
     // Streaming encode pipes captured frames through ffmpeg's stdin to produce
     // a single video file. Keep the default enabled for sequential capture, but
@@ -5223,8 +5291,9 @@ async function executeRenderPipeline(input: {
     job.outputPath = outputPath;
     updateJobStatus(job, "complete", "Render complete", 100, onProgress);
     await eventPublisher.flush();
-  } catch (error) {
-    if (error instanceof RenderCancelledError || executionSignal?.aborted) {
+  } catch (caught) {
+    const error = tooSlowError ?? caught;
+    if (!tooSlowError && (error instanceof RenderCancelledError || executionSignal?.aborted)) {
       job.error = error instanceof Error ? error.message : "render_cancelled";
       updateJobStatus(job, "cancelled", "Render cancelled", job.progress, onProgress);
       await eventPublisher.flush();
