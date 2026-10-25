@@ -9,11 +9,11 @@ let reportedAny = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let dirtyWhileWaiting = false;
 
-function report(): void {
+function report(): boolean {
   for (const el of copies.keys()) if (!el.isConnected) copies.delete(el);
   const states = [...copies.values()];
   const wanted = reporting && states.length > 0;
-  if (!wanted && !reportedAny) return;
+  if (!wanted && !reportedAny) return false;
   reportedAny = wanted;
   const made = states.reduce(
     (sum, copy) => sum + (copy.state === "ready" ? 1 : (copy.progress ?? 0)),
@@ -32,6 +32,7 @@ function report(): void {
         }
       : null,
   });
+  return true;
 }
 
 function scheduleReport(): void {
@@ -39,7 +40,7 @@ function scheduleReport(): void {
     dirtyWhileWaiting = true;
     return;
   }
-  report();
+  if (!report()) return;
   timer = setTimeout(() => {
     timer = undefined;
     if (dirtyWhileWaiting) {
