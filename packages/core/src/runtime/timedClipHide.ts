@@ -31,9 +31,13 @@ const hideHiddenClipContents = (clip: string) => {
 };
 
 export function showHiddenClips(only: (el: HTMLElement) => boolean = () => true): () => void {
-  const hidden = Array.from(document.querySelectorAll<HTMLElement>(`[${CLIP_HIDDEN_ATTR}]`)).filter(
-    only,
+  return showClips(
+    Array.from(document.querySelectorAll<HTMLElement>(`[${CLIP_HIDDEN_ATTR}]`)).filter(only),
   );
+}
+
+/** Shows the given hidden clips; returns a function that hides them again. */
+export function showClips(hidden: Array<Element & ElementCSSInlineStyle>): () => void {
   const putMarksBack = hidden.map((el) => revealClip(el));
   return () => {
     for (const el of hidden) el.style.visibility = "hidden";

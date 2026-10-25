@@ -609,6 +609,38 @@ describe("initSandboxRuntimeModular", () => {
       }
     });
 
+    it("styles each hidden clip visible once, far scene included, so its cut does not do it first", () => {
+      document.body.innerHTML =
+        `<div data-composition-id="main" data-root="true" data-start="0" data-duration="10" data-width="1920" data-height="1080">` +
+        `<div id="later" style="position: absolute" data-start="8" data-duration="1" data-hf-far-scene><p></p></div>` +
+        `</div>`;
+      window.__timelines = { main: createMockTimeline(10) };
+      const later = document.getElementById("later")!;
+      let styledVisible = 0;
+      const original = window.getComputedStyle.bind(window);
+      const style = vi.spyOn(window, "getComputedStyle").mockImplementation((el, pseudo) => {
+        const shown =
+          later.style.visibility === "visible" && !later.hasAttribute("data-hf-clip-hidden");
+        if (el === later && shown && !later.hasAttribute("data-hf-far-scene")) styledVisible++;
+        return original(el, pseudo);
+      });
+      try {
+        initSandboxRuntimeModular();
+        window.__player?.seek(1);
+        const once = styledVisible;
+        window.__player?.seek(2);
+        window.__player?.seek(3);
+        expect([once, styledVisible]).toEqual([1, 1]);
+        expect([later.style.visibility, later.hasAttribute("data-hf-clip-hidden")]).toEqual([
+          "hidden",
+          true,
+        ]);
+        expect(later.hasAttribute("data-hf-far-scene")).toBe(true);
+      } finally {
+        style.mockRestore();
+      }
+    });
+
     it("keeps a hidden scene's contents hidden when a rewound GSAP set marks one visible inline", () => {
       hideTimedClipsUntilFirstPass();
       try {

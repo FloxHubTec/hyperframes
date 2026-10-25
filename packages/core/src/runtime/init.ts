@@ -31,6 +31,7 @@ import {
   CLIP_HIDDEN_ATTR,
   revealTimedClipsAfterFirstPass,
   SKIPPED_CLIP,
+  showClips,
   showHiddenClips,
   defersMedia,
   skipsHiddenImages,
@@ -38,6 +39,7 @@ import {
 import {
   PREVIEW_ONLY_ATTRS,
   RUNTIME_STAMPED_ATTR,
+  STUDIO_PREVIEW_FAR_SCENE_ATTR as FAR_SCENE_ATTR,
   STUDIO_PREVIEW_PARKED_SCENE_ATTR,
   STUDIO_PREVIEW_LAZY_ATTR,
   STUDIO_PREVIEW_UPCOMING_ATTR,
@@ -2887,6 +2889,23 @@ export function initSandboxRuntimeModular(): void {
       resolver: timingResolverFor(true),
     }),
   );
+  // A clip's first visible style pass is slow; each hidden clip gets it once on a seek, so its cut does not.
+  const clipsNeverStyledVisible = new Set<StylableElement>();
+  const clipsStyledVisible = new WeakSet<Element>();
+  const styleHiddenClipsVisibleOnce = () => {
+    const clips = Array.from(clipsNeverStyledVisible).filter(
+      (el) => el.isConnected && el.hasAttribute(CLIP_HIDDEN_ATTR),
+    );
+    clipsNeverStyledVisible.clear();
+    if (clips.length === 0) return;
+    const farHosts = new Set(clips.flatMap((el) => el.closest(`[${FAR_SCENE_ATTR}]`) ?? []));
+    for (const host of farHosts) host.removeAttribute(FAR_SCENE_ATTR);
+    const hideAgain = showClips(clips);
+    void getComputedStyle(clips[0]!).visibility;
+    hideAgain();
+    for (const host of farHosts) host.setAttribute(FAR_SCENE_ATTR, "");
+    for (const el of clips) clipsStyledVisible.add(el);
+  };
   // Set once the scene swap is in place; true while a scene playing at the time is still parked.
   let moveSceneWindow = (_time: number): boolean => false;
   const LOOKAHEAD_SECONDS = 2;
@@ -3185,6 +3204,8 @@ export function initSandboxRuntimeModular(): void {
       const isRuntimeStamped = isDiscoveryStamped(rawNode);
       if (!isRuntimeStamped) rawNode.style.visibility = isVisibleNow ? "visible" : "hidden";
       rawNode.toggleAttribute(CLIP_HIDDEN_ATTR, !isRuntimeStamped && !isVisibleNow);
+      if (!isRuntimeStamped && !isVisibleNow && !clipsStyledVisible.has(rawNode))
+        clipsNeverStyledVisible.add(rawNode);
       const upcoming =
         (hiddenImagesSkipped || mediaDeferred) &&
         !isVisibleNow &&
@@ -5190,6 +5211,7 @@ export function initSandboxRuntimeModular(): void {
     const revision = opts?.revision ?? readCompositionTimingRevision();
     if (revision !== tweensRenderedThrough.revision)
       tweensRenderedThrough = { revision, time: Number.NEGATIVE_INFINITY };
+    styleHiddenClipsVisibleOnce();
     const firstRenders = t > tweensRenderedThrough.time;
     // Only clips holding a tween that renders for the first time on this seek need their authored style read.
     const firstRendered =
