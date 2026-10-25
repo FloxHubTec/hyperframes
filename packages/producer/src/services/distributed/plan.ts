@@ -510,19 +510,6 @@ function framesWithinWorkerTimeout(workerTimeoutSeconds: number, secondsPerFrame
   );
 }
 
-/** The frame ceiling a time-limited, cost-sized plan holds every chunk to; `undefined` when none applies. */
-export function resolveMaxFramesPerChunk(
-  config: Parameters<typeof chunkSizingUsesFrameCost>[0],
-  megapixels: number,
-  measuredSecondsPerFrame?: number,
-): number | undefined {
-  if (!chunkSizingUsesFrameCost(config) || config.workerTimeoutSeconds === undefined) {
-    return undefined;
-  }
-  const secondsPerFrame = estimateFrameSeconds(megapixels, measuredSecondsPerFrame);
-  return framesWithinWorkerTimeout(config.workerTimeoutSeconds, secondsPerFrame);
-}
-
 /**
  * The `maxParallelChunks` a plan uses: an explicit value, else one wave across `workerConcurrency`
  * (16 if unknown), widened to fit `workerTimeoutSeconds` unless chunkSize/targetChunkFrames pin it.
@@ -1637,7 +1624,12 @@ export async function buildLocalExecutionPlan(
     config,
     chunkCount,
     effectiveChunkSize,
-    resolveMaxFramesPerChunk(config, megapixels, frameCostOutcome.value),
+    chunkSizingUsesFrameCost(config) && config.workerTimeoutSeconds !== undefined
+      ? framesWithinWorkerTimeout(
+          config.workerTimeoutSeconds,
+          estimateFrameSeconds(megapixels, frameCostOutcome.value),
+        )
+      : undefined,
   );
   const audioResult = audioOutcome.value;
   if (audioResult?.audioError) {

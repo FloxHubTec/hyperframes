@@ -6,7 +6,6 @@ import {
   MAX_CHUNK_SIZE,
   MIN_CHUNK_SIZE,
   resolveChunkPlan,
-  resolveMaxFramesPerChunk,
 } from "./plan.js";
 import type { PlanVideosJson } from "./shared.js";
 
@@ -205,15 +204,5 @@ describe("planFrameWeights", () => {
 
     const uncapped = buildPlanChunkSlices(weights, {}, chunkCount, effectiveChunkSize);
     expect(Math.max(...uncapped.map((s) => s.endFrame - s.startFrame))).toBeGreaterThan(90);
-  });
-
-  it("derives the cap from the worker time limit only for time-limited cost-sized plans", () => {
-    expect(resolveMaxFramesPerChunk({}, 2)).toBeUndefined();
-    expect(
-      resolveMaxFramesPerChunk({ workerTimeoutSeconds: 900, chunkSize: 60 }, 2),
-    ).toBeUndefined();
-    const cap = resolveMaxFramesPerChunk({ workerTimeoutSeconds: 900 }, 8.3);
-    expect(cap).toBeGreaterThan(0);
-    expect(resolveMaxFramesPerChunk({ workerTimeoutSeconds: 900 }, 8.3, 1)).toBeLessThan(cap ?? 0);
   });
 });
