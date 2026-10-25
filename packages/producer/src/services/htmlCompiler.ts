@@ -72,7 +72,7 @@ import {
 } from "@hyperframes/parsers/asset-resolution";
 import { extractMediaMetadata, extractAudioMetadata } from "../utils/ffprobe.js";
 import { isPathInside, toExternalAssetKey } from "../utils/paths.js";
-import { collectRenderMedia } from "./renderMediaCollector.js";
+import { collectHiddenVideoIds, collectRenderMedia } from "./renderMediaCollector.js";
 import {
   type VideoElement,
   type ImageElement,
@@ -126,8 +126,6 @@ export interface CompiledComposition {
   hasShaderTransitions: boolean;
   /** Author HTML/CSS/scripts use a CSS 3D rendering context (pre-CDN-inline scan). */
   usesThreeDTransforms: boolean;
-  /** Author HTML/CSS use mix-blend-mode (pre-CDN-inline scan). */
-  usesMixBlendMode: boolean;
   /** Ancestors of the composition root carry a background-image (gradient/url). */
   hasAncestorBackgroundImage: boolean;
 }
@@ -409,12 +407,6 @@ export function detectThreeDTransformUsage(html: string): boolean {
   return THREE_D_CONTEXT_PATTERN.test(html);
 }
 
-const MIX_BLEND_MODE_PATTERN = /mix-blend-mode\s*:/i;
-
-function detectMixBlendModeUsage(html: string): boolean {
-  return MIX_BLEND_MODE_PATTERN.test(html);
-}
-
 /** A background declaration whose value paints an image (gradient or url). */
 const BACKGROUND_IMAGE_DECL_PATTERN =
   /(?:^|;|\{)\s*background(?:-image)?\s*:[^;}]*(?:\bgradient\s*\(|url\s*\()/i;
@@ -672,9 +664,10 @@ async function compileHtmlFile(
   // Phase 2: Bound authored audio to playable source (parallel ffprobe).
   // Explicit video slots may outlive their source and hold the final frame.
   const preResolved = extractResolvedMedia(compiledHtml);
+  const hiddenVideoIds = collectHiddenVideoIds(compiledHtml);
   const clampResults = await Promise.all(
     preResolved
-      .filter((el) => !!el.src && !el.loop)
+      .filter((el) => !!el.src && !el.loop && !hiddenVideoIds.has(el.id))
       .map(async (el) => {
         const { duration: maxDuration } = await resolveMediaDuration(
           el.src!,
@@ -2094,7 +2087,6 @@ export async function compileForRender(
   // `transformPerspective`, so scanning post-inline HTML would flag every
   // composition that loads GSAP from a CDN.
   const usesThreeDTransforms = detectThreeDTransformUsage(sanitizedHtml);
-  const usesMixBlendMode = detectMixBlendModeUsage(sanitizedHtml);
   const hasAncestorBackgroundImage = detectAncestorBackgroundImage(sanitizedHtml);
 
   const normalizedFontHtml = normalizeSystemFontPrimaryFamilies(
@@ -2273,7 +2265,6 @@ export async function compileForRender(
     renderModeHints,
     hasShaderTransitions,
     usesThreeDTransforms,
-    usesMixBlendMode,
     hasAncestorBackgroundImage,
   };
 }
