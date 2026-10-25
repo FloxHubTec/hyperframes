@@ -35,7 +35,11 @@ import {
 } from "../helpers/safePath.js";
 import { getMimeType } from "../helpers/mime.js";
 import { buildSubCompositionHtml, hasBaseElement } from "../helpers/subComposition.js";
-import { htmlHasGsapCore, isGsapCoreUrl } from "../helpers/gsapCoreScript.js";
+import {
+  htmlHasGsapCore,
+  insertGsapCoreBeforeHeadPlugin,
+  isGsapCoreUrl,
+} from "../helpers/gsapCoreScript.js";
 import {
   createProjectSignature,
   resolveProjectAndSignature,
@@ -222,8 +226,10 @@ function injectStudioMotionDependencies(
   const manifest = parseStudioMotionManifestContent(manifestContent);
   if (!manifest.hasMotion) return html;
   let next = html;
-  if (!htmlHasGsapCore(next))
-    next = injectScriptTagIntoHead(next, gsapScriptTag("gsap.min.js", baseUrl));
+  if (!htmlHasGsapCore(next)) {
+    const core = gsapScriptTag("gsap.min.js", baseUrl);
+    next = insertGsapCoreBeforeHeadPlugin(next, core) ?? injectScriptTagIntoHead(next, core);
+  }
   if (manifest.hasCustomEase && !htmlHasCustomEase(next)) {
     next = injectScriptTagIntoHead(next, gsapScriptTag("CustomEase.min.js", baseUrl));
   }

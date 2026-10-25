@@ -1,8 +1,10 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { htmlHasGsapCore } from "./gsapCoreScript";
+import { htmlHasGsapCore, insertGsapCoreBeforeHeadPlugin } from "./gsapCoreScript";
 
 const script = (src: string) => `<html><head><script src="${src}"></script></head></html>`;
+const PLUGIN = "https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/MotionPathPlugin.min.js";
+const CORE = `<script src="core/gsap.min.js"></script>`;
 
 describe("htmlHasGsapCore", () => {
   it.each([
@@ -42,8 +44,54 @@ describe("htmlHasGsapCore", () => {
     expect(htmlHasGsapCore(banner("MotionPathPlugin"))).toBe(false);
   });
 
+  it.each([
+    "gsap.registerPlugin(MotionPathPlugin);",
+    'gsap.defaults({ ease: "none" }); gsap.config({ nullTargetWarn: false });',
+    'gsap.to("#a", { x: 1 }); /* GreenSock */',
+  ])("does not treat the authored usage %s as GSAP core", (usage) => {
+    const html = `<head><script src="${PLUGIN}"></script><script>${usage}</script></head>`;
+    expect(htmlHasGsapCore(html)).toBe(false);
+  });
+
+  it("reads core from its library body", () => {
+    const body = `function S(t,e){console.warn("Invalid property",t,"set to",e,"Missing plugin? gsap.registerPlugin()")}`;
+    expect(htmlHasGsapCore(`<script>${body}</script>`)).toBe(true);
+  });
+
   it("ignores GSAP core inside a <template>", () => {
     const src = "https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js";
     expect(htmlHasGsapCore(`<template><script src="${src}"></script></template>`)).toBe(false);
+  });
+});
+
+describe("insertGsapCoreBeforeHeadPlugin", () => {
+  it.each([
+    ["a plugin src", `<script src="${PLUGIN}"></script>`],
+    ["a local plugin", `<script src="./vendor/CustomEase.min.js"></script>`],
+    ["an inlined plugin", `<script>/* inlined: ${PLUGIN} */</script>`],
+    [
+      "a plugin license banner",
+      `<script>/*!\n * MotionPathPlugin 3.15.0\n * https://gsap.com\n */</script>`,
+    ],
+  ])("puts core before %s in the head", (_name, plugin) => {
+    const html = `<html><head><script>var a;</script>${plugin}</head><body></body></html>`;
+    const out = insertGsapCoreBeforeHeadPlugin(html, CORE) ?? "";
+    expect(out.indexOf(CORE)).toBeGreaterThan(out.indexOf("var a;"));
+    expect(out.indexOf(CORE)).toBeLessThan(out.indexOf(plugin));
+  });
+
+  it("works on a bare head fragment", () => {
+    const out = insertGsapCoreBeforeHeadPlugin(`<script src="${PLUGIN}"></script>`, CORE) ?? "";
+    expect(out.startsWith(CORE)).toBe(true);
+  });
+
+  it("leaves the head alone when the only plugin is in the body or a template", () => {
+    const tag = `<script src="${PLUGIN}"></script>`;
+    expect(
+      insertGsapCoreBeforeHeadPlugin(`<html><head></head><body>${tag}</body></html>`, CORE),
+    ).toBeNull();
+    expect(
+      insertGsapCoreBeforeHeadPlugin(`<head><template>${tag}</template></head>`, CORE),
+    ).toBeNull();
   });
 });

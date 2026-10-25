@@ -1404,17 +1404,15 @@ export const gsapRules: LintRule<LintContext>[] = [
     const isGsapCoreSrc = (src: string) =>
       /(^|\/)gsap(-\d+(\.\d+)*)?(\.min)?\.js$/i.test(src.split(/[?#]/)[0] ?? "");
     const hasGsapScript = allScriptSrcs.some(isGsapCoreSrc);
-    // Detect GSAP bundled inline (no src attribute). Match:
-    // - Producer's CDN-inlining comment: /* inlined: ...gsap... */
-    // - GSAP library internals: _gsScope, GreenSock, gsap.config
-    // - Large inline scripts (>5KB) that reference gsap (likely bundled library)
+    // Inline core is its inlining marker, license banner or library body, never usage like gsap.defaults().
     const hasInlineGsap = allScriptTexts.some(
       (t) =>
-        /\/\*\s*inlined:.*gsap/i.test(t) ||
-        /\b_gsScope\b/.test(t) ||
-        /\bGreenSock\b/.test(t) ||
-        /\bgsap\.(config|defaults|version)\b/.test(t) ||
-        (t.length > 5000 && /\bgsap\b/i.test(t)),
+        [...t.matchAll(/\/\*\s*inlined:\s*(\S+)\s*\*\//gi)].some((m) =>
+          isGsapCoreSrc(m[1] ?? ""),
+        ) ||
+        /\/\*!\s*\*\s*GSAP\s+\d/.test(t) ||
+        /Missing plugin\? gsap\.registerPlugin\(\)/.test(t) ||
+        /\b_gsScope\b/.test(t),
     );
 
     if (!usesGsap || hasGsapScript || hasInlineGsap || canInheritGsapFromHost) return [];
