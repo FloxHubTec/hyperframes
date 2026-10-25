@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.193",
+  "version": "0.8.198",
   "description": "",
   "repository": {
     "type": "git",
@@ -386,6 +386,12 @@
       "node": "./dist/runtime/clipWindow.js",
       "import": "./src/runtime/clipWindow.ts",
       "types": "./src/runtime/clipWindow.ts"
+    },
+    "./runtime/clip-reveal": {
+      "bun": "./src/runtime/clipReveal.ts",
+      "node": "./dist/runtime/clipReveal.js",
+      "import": "./src/runtime/clipReveal.ts",
+      "types": "./src/runtime/clipReveal.ts"
     },
     "./runtime/stacking-context": {
       "bun": "./src/runtime/stackingContext.ts",
@@ -813,6 +819,10 @@
         "import": "./dist/runtime/clipWindow.js",
         "types": "./dist/runtime/clipWindow.d.ts"
       },
+      "./runtime/clip-reveal": {
+        "import": "./dist/runtime/clipReveal.js",
+        "types": "./dist/runtime/clipReveal.d.ts"
+      },
       "./runtime/stacking-context": {
         "import": "./dist/runtime/stackingContext.js",
         "types": "./dist/runtime/stackingContext.d.ts"
@@ -1004,6 +1014,6 @@
     "vitest": "^4.1.11"
   },
   "optionalDependencies": {
-    "esbuild": "^0.25.12"
+    "esbuild": "^0.28.2"
   }
 }
