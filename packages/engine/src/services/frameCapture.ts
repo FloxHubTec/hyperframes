@@ -5186,13 +5186,9 @@ async function captureDeVerificationFrames(
       // it, <video> elements screenshot black and every video comp would
       // false-positive into the screenshot fallback.
       if (session.onBeforeCapture) await session.onBeforeCapture(truthPage, t);
-      // Double-capture: the first screenshot forces a frame, which is what runs
-      // rAF-driven callbacks (count-up text counters land a tick after seek()
-      // returns — a single immediate screenshot captures stale text and
-      // false-positives the verify: 3bea8c73 28.7dB vs a truth missing its stat
-      // values while the DE frame was correct). NOTE: waiting on rAF via
-      // evaluate instead deadlocks — headless only fires rAF when a frame is
-      // produced, and nothing produces one until a screenshot asks.
+      // The first screenshot forces a frame, which runs rAF-driven callbacks (a count-up lands
+      // a tick after seek()); waiting on rAF via evaluate deadlocks, headless fires it only
+      // when a frame is produced.
       await pageScreenshotCapture(truthPage, session.options);
       frames.set(idx, await pageScreenshotCapture(truthPage, session.options));
     }
