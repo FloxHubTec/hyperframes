@@ -184,6 +184,27 @@ function installStateLatchedFired(): boolean {
 }
 
 /**
+ * Lift the router latch from both stores. The latch is otherwise one-way (a
+ * stale writer or a config re-mint must never re-arm a failed router), so the
+ * state file is cleared first or the next config write would copy it back.
+ */
+export function releaseDeParallelRouterLatch(): void {
+  const read = readInstallState();
+  if (isInstallState(read) && read.deParallelRouterTrialFired) {
+    try {
+      writeInstallState({ ...read, deParallelRouterTrialFired: undefined });
+    } catch {
+      return;
+    }
+  }
+  latchedFiredSeen = false;
+  stateFiredSynced = false;
+  const config = readConfigFresh();
+  config.deParallelRouterTrialFired = undefined;
+  writeConfig(config);
+}
+
+/**
  * The seed install-state has recorded for this machine, if any.
  *
  * Deliberately NOT memoized, unlike the latch above. This is only reached on a
@@ -388,6 +409,53 @@ function mintConfig(): HyperframesConfig {
   };
 }
 
+/** What the router's self-verify rejected, kept so the bad frame can be found and fixed. */
+export interface DeRouterRevert {
+  /** The router outcome, or the fallback reason the render reported (psnr, blank, capture_error...). */
+  reason: string;
+  frameIndex?: number;
+  failedDb?: number;
+  thresholdDb?: number;
+  at: string;
+  /** CLI version that recorded it: a different version re-arms the router. */
+  version: string;
+  /** deParallelRouterTrialRenderCount when it happened. */
+  atRender: number;
+}
+
+/** A lone revert (`strike`) is remembered; a second inside the window turns the router off (`trip`). */
+export interface DeRouterBreaker {
+  strike?: DeRouterRevert;
+  trip?: DeRouterRevert & { cleanRenders: number };
+}
+
+function isDeRouterRevert(value: unknown): value is DeRouterRevert {
+  if (typeof value !== "object" || value === null) return false;
+  return (
+    "reason" in value &&
+    typeof value.reason === "string" &&
+    "at" in value &&
+    typeof value.at === "string" &&
+    "version" in value &&
+    typeof value.version === "string" &&
+    "atRender" in value &&
+    typeof value.atRender === "number"
+  );
+}
+
+function parseDeRouterBreaker(value: unknown): DeRouterBreaker | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const strike = "strike" in value && isDeRouterRevert(value.strike) ? value.strike : undefined;
+  const trip =
+    "trip" in value &&
+    isDeRouterRevert(value.trip) &&
+    "cleanRenders" in value.trip &&
+    typeof value.trip.cleanRenders === "number"
+      ? { ...value.trip, cleanRenders: value.trip.cleanRenders }
+      : undefined;
+  return strike || trip ? { strike, trip } : undefined;
+}
+
 export interface HyperframesConfig {
   /** Has the user agreed to download the on-device search model? Undefined means never asked. */
   localEmbeddingEnabled?: boolean;
@@ -460,6 +528,8 @@ export interface HyperframesConfig {
    * `maybeEnableDeParallelRouterTrial`/`maybeConsumeDeParallelRouterTrial`.
    */
   deParallelRouterTrialFired?: boolean;
+  /** Why and when the router went off (or its lone strike); the latch above mirrors `trip`. */
+  deParallelRouterBreaker?: DeRouterBreaker;
   /**
    * Count of engaged (routed or reverted) trial renders so far — the
    * backstop that caps exposure even absent an actual failure. See
@@ -678,6 +748,7 @@ function guardedFields(parsed: Partial<HyperframesConfig>): Partial<HyperframesC
     // wins over an untripped config.json, never the reverse.
     deParallelRouterTrialFired:
       parsed.deParallelRouterTrialFired === true || installStateLatchedFired() ? true : undefined,
+    deParallelRouterBreaker: parseDeRouterBreaker(parsed.deParallelRouterBreaker),
     deParallelRouterTrialRenderCount:
       typeof parsed.deParallelRouterTrialRenderCount === "number"
         ? parsed.deParallelRouterTrialRenderCount

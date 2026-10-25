@@ -422,6 +422,8 @@ export function trackRenderComplete(
     deFallbackFailedDb?: number;
     deFallbackFrameIndex?: number;
     deFallbackThresholdDb?: number;
+    /** The install's breaker held the parallel router off for this render. */
+    deRouterBreakerOff?: boolean;
     deBlankSuspects?: number;
     deBlankDeterministicAccepts?: number;
     deBlankRecaptures?: number;
@@ -595,6 +597,7 @@ export function trackRenderComplete(
         props.deFallbackThresholdDb,
         props.captureDeFallbackThresholdDb,
       ),
+      de_router_breaker_off: props.deRouterBreakerOff,
       de_blank_suspects: props.deBlankSuspects,
       de_blank_deterministic_accepts: props.deBlankDeterministicAccepts,
       de_blank_recaptures: props.deBlankRecaptures,
