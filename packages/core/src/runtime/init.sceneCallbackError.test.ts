@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initSandboxRuntimeModular } from "./init";
 import type { RuntimeTimelineLike } from "./types";
 import { resetRuntimeFixtureDom } from "./runtimeSeekFixture.test-helpers";
+import { SCENE_CALLBACK_ERROR_PREFIX } from "./diagnostics";
 
 // A scene callback that throws must not stop the root timeline, in render as in preview.
 describe("a scene callback that throws", () => {
@@ -55,22 +56,24 @@ describe("a scene callback that throws", () => {
     expect(x("#late")).toBe(100);
   });
 
-  it("reports the error once as a composition script error", () => {
+  it("warns about the error once, never as a composition script error", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
     load();
 
     for (const t of [1, 2.5, 3, 4]) window.__player!.renderSeek(t);
 
-    const reported = errors.mock.calls.filter((args) =>
-      String(args[0]).startsWith("[HyperFrames] composition script error:"),
+    const reported = warnings.mock.calls.filter((args) =>
+      String(args[0]).startsWith(SCENE_CALLBACK_ERROR_PREFIX),
     );
+    expect(errors).not.toHaveBeenCalled();
     expect(reported).toHaveLength(1);
     expect(reported[0]!.join(" ")).toContain("scene");
     expect(reported[0]!.join(" ")).toMatch(/textContent|null/);
   });
 
   it("reports nothing for a scene registered with a placeholder instead of a timeline", () => {
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
     document.body.innerHTML =
       `<div data-composition-id="main" data-root="true" data-duration="2">` +
       `<div class="clip" data-composition-id="scene" data-start="0" data-duration="2"></div></div>`;
@@ -83,6 +86,6 @@ describe("a scene callback that throws", () => {
     window.__player!.renderSeek(1);
     window.__player!.seek(1.5);
 
-    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).not.toHaveBeenCalled();
   });
 });

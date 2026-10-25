@@ -386,12 +386,10 @@ ${wrapScopedCompositionScript("", timelineCompositionId)}
 `;
 }
 
-export const COMPOSITION_SCRIPT_ERROR_LABEL = "[HyperFrames] composition script error:";
-
 export function wrapScopedCompositionScript(
   source: string,
   compositionId: string,
-  errorLabel = COMPOSITION_SCRIPT_ERROR_LABEL,
+  errorLabel = "[HyperFrames] composition script error:",
   scopeSelectorOverride?: string,
   timelineCompositionId = compositionId,
   authoredRootId?: string | null,

@@ -20,11 +20,11 @@ export type SubTimelineWaitOutcome = "ready" | "timeout" | "script_failure";
 
 /**
  * Shared by every capture session of one render: timeline waits that already timed out
- * (so later sessions skip the wait), and script errors the render log already shows.
+ * (so later sessions skip the wait), and scene callback errors the render log already shows.
  */
 export interface SubTimelineWaitMemo {
   unregisteredIds?: readonly string[];
-  loggedScriptErrors?: string[];
+  loggedSceneCallbackErrors?: string[];
 }
 
 export type CaptureWarningCode =

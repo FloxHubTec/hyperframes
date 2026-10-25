@@ -58,7 +58,6 @@ import {
   wrapInlineScriptWithErrorBoundary,
   scopedModulePrelude,
   wrapScopedCompositionScript,
-  COMPOSITION_SCRIPT_ERROR_LABEL,
 } from "./compositionScoping";
 import { validateHyperframeHtmlContract } from "./staticGuard";
 import { getHyperframeRuntimeScript } from "../generated/runtime-inline";
@@ -1056,14 +1055,14 @@ function hoistCompositionScripts(
           ? wrapScopedCompositionScript(
               scriptEl.textContent || "",
               opts.compId,
-              COMPOSITION_SCRIPT_ERROR_LABEL,
+              "[HyperFrames] composition script error:",
               opts.runtimeScope,
               opts.runtimeCompId || opts.compId,
               opts.authoredRootId,
             )
           : wrapInlineScriptWithErrorBoundary(
               scriptEl.textContent || "",
-              COMPOSITION_SCRIPT_ERROR_LABEL,
+              "[HyperFrames] composition script error:",
             ),
       );
     }
@@ -1228,7 +1227,7 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
     readVariableDefaults: readDeclaredDefaults,
     parseHostVariables: parseHostVariableValues,
     buildScopeSelector: (compId: string) => cssAttributeSelector("data-composition-id", compId),
-    scriptErrorLabel: COMPOSITION_SCRIPT_ERROR_LABEL,
+    scriptErrorLabel: "[HyperFrames] composition script error:",
     onMissingComposition: (srcPath: string, reason?: string) => {
       console.warn(
         `[Bundler] Skipping sub-composition "${srcPath}": ${reason ?? "the file could not be found"}.`,
