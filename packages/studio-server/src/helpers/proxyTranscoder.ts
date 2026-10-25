@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
   mkdtempSync,
+  openSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -146,18 +149,14 @@ export async function waitForProxy<T>(
 }
 
 /**
- * Cache key inputs per the plan: project-relative source path (portable across
- * checkouts), canonical source identity (so retargeted external symlinks do
- * not reuse a proxy), mtime and file size (mtime alone can collide on
- * same-second re-exports on coarse-timestamp filesystems; size catches nearly
- * all such cases at zero cost), and a params version token so changing the
- * ffmpeg recipe below invalidates every cached proxy cleanly.
+ * A copy is keyed by what the source holds, not where it sits: its size and a hash of a few blocks of its
+ * bytes. A project copied elsewhere, a clip reached through a symlink, or a touched file reuses its copy;
+ * a replaced file or a retargeted link to other bytes misses. An edit that changes no sampled byte and not
+ * the size is the one case this cannot see. A params version token invalidates every copy when the recipe changes.
  */
 type CanonicalProxySource = {
   projectDir: string;
   sourcePath: string;
-  relativePath: string;
-  cacheIdentity: string;
 };
 
 function canonicalizeProxySource(
@@ -174,25 +173,33 @@ function canonicalizeProxySource(
   ) {
     throw new ProxySourceOutsideProjectError();
   }
+  return { projectDir: realProjectRoot(projectDir), sourcePath: realpath(absoluteSourcePath) };
+}
 
-  const canonicalProjectDir = realProjectRoot(projectDir);
-  const canonicalSourcePath = realpath(absoluteSourcePath);
-  const canonicalRelativePath = relative(canonicalProjectDir, canonicalSourcePath);
-  const sourceIsInsideCanonicalProject =
-    canonicalRelativePath !== ".." &&
-    !canonicalRelativePath.startsWith(`..${sep}`) &&
-    !isAbsolute(canonicalRelativePath);
-  return {
-    projectDir: canonicalProjectDir,
-    sourcePath: canonicalSourcePath,
-    relativePath: requestedRelativePath.normalize("NFC"),
-    // An external target needs a stable identity in addition to its project-local
-    // symlink path, otherwise retargeting the link can reuse an unrelated proxy.
-    cacheIdentity: (sourceIsInsideCanonicalProject
-      ? canonicalRelativePath
-      : canonicalSourcePath
-    ).normalize("NFC"),
-  };
+const SAMPLE_BYTES = 64 * 1024;
+const SAMPLE_COUNT = 4;
+
+function sampleOffsets(size: number): number[] {
+  if (size <= SAMPLE_BYTES * SAMPLE_COUNT) return [0];
+  return Array.from({ length: SAMPLE_COUNT }, (_, index) =>
+    Math.floor(((size - SAMPLE_BYTES) * index) / (SAMPLE_COUNT - 1)),
+  );
+}
+
+function contentFingerprint(sourcePath: string): string {
+  const stat = statSync(sourcePath);
+  const hash = createHash("sha256").update(String(stat.size));
+  const fd = openSync(sourcePath, "r");
+  try {
+    const block = Buffer.alloc(Math.min(SAMPLE_BYTES, stat.size) || 1);
+    for (const offset of sampleOffsets(stat.size)) {
+      const read = readSync(fd, block, 0, block.length, offset);
+      hash.update(block.subarray(0, read));
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest("hex");
 }
 
 function buildProxyCacheKey(
@@ -200,11 +207,10 @@ function buildProxyCacheKey(
   variant: ProxyVariant,
   box: PreviewProxyBox | undefined,
 ): string {
-  const stat = statSync(source.sourcePath);
   const size = box ? `\0${formatPreviewProxyBox(box)}` : "";
   return createHash("sha256")
     .update(
-      `${source.relativePath}\0${source.cacheIdentity}\0${stat.mtimeMs}\0${stat.size}\0${PROXY_PARAMS_VERSION}\0${variant}${size}`,
+      `${contentFingerprint(source.sourcePath)}\0${PROXY_PARAMS_VERSION}\0${variant}${size}`,
     )
     .digest("hex");
 }

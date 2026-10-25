@@ -1330,11 +1330,8 @@ describe("resolveProxy", () => {
     await expect(first).resolves.toBeTruthy();
   });
 
-  it("produces a new cache key when the source mtime changes", async () => {
-    const { resolveProxy: _unused, getProxyCachePath } = await loadModule(
-      () => createFakeProc(),
-      FFMPEG_PATH,
-    );
+  it("keeps the cache key when only the mtime changes, as a copied or touched file does", async () => {
+    const { getProxyCachePath } = await loadModule(() => createFakeProc(), FFMPEG_PATH);
     const projectDir = tmpProject();
     const sourcePath = join(projectDir, "video.mov");
     writeFileSync(sourcePath, "source-bytes");
@@ -1344,10 +1341,57 @@ describe("resolveProxy", () => {
 
     const future = new Date(Date.now() + 60_000);
     utimesSync(sourcePath, future, future);
-    const keyAfter = getProxyCachePath(projectDir, sourcePath);
 
-    expect(keyAfter).not.toBe(keyBefore);
-    void _unused;
+    expect(getProxyCachePath(projectDir, sourcePath)).toBe(keyBefore);
+  });
+
+  it("gives a copied project, and a clip reached through a symlink, the copy the original has", async () => {
+    const { getProxyCachePath } = await loadModule(() => createFakeProc(), FFMPEG_PATH);
+    const original = tmpProject();
+    const copied = tmpProject();
+    writeFileSync(join(original, "video.mov"), "source-bytes");
+    mkdirSync(join(copied, "media"));
+    writeFileSync(join(copied, "media", "renamed.mov"), "source-bytes");
+    symlinkSync(join(original, "video.mov"), join(original, "linked.mov"));
+    const name = (path: string) => basename(path);
+
+    const base = name(getProxyCachePath(original, join(original, "video.mov")));
+
+    expect(name(getProxyCachePath(copied, join(copied, "media", "renamed.mov")))).toBe(base);
+    expect(name(getProxyCachePath(original, join(original, "linked.mov")))).toBe(base);
+  });
+
+  it("makes a new copy for a changed file, a replaced file of the same size, and a link retargeted to other bytes", async () => {
+    const { getProxyCachePath } = await loadModule(() => createFakeProc(), FFMPEG_PATH);
+    const projectDir = tmpProject();
+    const sourcePath = join(projectDir, "video.mov");
+    const otherPath = join(projectDir, "other.mov");
+    const linkPath = join(projectDir, "linked.mov");
+    writeFileSync(sourcePath, "source-bytes");
+    writeFileSync(otherPath, "SOURCE-BYTES");
+    symlinkSync(sourcePath, linkPath);
+    const before = getProxyCachePath(projectDir, linkPath);
+
+    rmSync(linkPath);
+    symlinkSync(otherPath, linkPath);
+    expect(getProxyCachePath(projectDir, linkPath)).not.toBe(before);
+
+    writeFileSync(sourcePath, "other-bytes!");
+    expect(getProxyCachePath(projectDir, sourcePath)).not.toBe(before);
+  });
+
+  it("tells files apart by blocks sampled across a large file, not only its start", async () => {
+    const { getProxyCachePath } = await loadModule(() => createFakeProc(), FFMPEG_PATH);
+    const projectDir = tmpProject();
+    const sourcePath = join(projectDir, "big.mov");
+    const bytes = Buffer.alloc(1024 * 1024, 1);
+    writeFileSync(sourcePath, bytes);
+    const before = getProxyCachePath(projectDir, sourcePath);
+
+    bytes[bytes.length - 10] = 2;
+    writeFileSync(sourcePath, bytes);
+
+    expect(getProxyCachePath(projectDir, sourcePath)).not.toBe(before);
   });
 
   it("produces a new cache key when size changes but mtime is pinned the same", async () => {
@@ -1592,7 +1636,7 @@ describe("resolveProxy", () => {
     expect(cachePath.startsWith(join(realpathSync(projectDir), ".transcode-cache"))).toBe(true);
   });
 
-  it("retries after the source file changes (mtime in the cache key invalidates the remembered failure)", async () => {
+  it("retries after the source file changes (its content in the cache key invalidates the remembered failure)", async () => {
     const { spawn, calls } = createSpawnSpy();
     const { resolveProxy, ProxyTranscodeError } = await loadModule(spawn, FFMPEG_PATH);
     const projectDir = tmpProject();
@@ -1606,9 +1650,8 @@ describe("resolveProxy", () => {
     fail(calls[0]!, 1, "boom");
     await expect(first).rejects.toBeInstanceOf(ProxyTranscodeError);
 
-    // Re-exported file (new mtime) → new key → a fresh transcode attempt.
-    const future = new Date(Date.now() + 60_000);
-    utimesSync(sourcePath, future, future);
+    // Re-exported file (new bytes) → new key → a fresh transcode attempt.
+    writeFileSync(sourcePath, "re-exported-bytes");
     const retry = resolveProxy(projectDir, sourcePath);
     await flush();
     expect(calls).toHaveLength(2);
