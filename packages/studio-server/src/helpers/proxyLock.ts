@@ -47,11 +47,7 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/**
- * The right to make the copy at `cachePath`, so two processes sharing a cache never make it at once. Waits
- * while another process holds it and returns null when that process finished the copy; takes over from an
- * owner that died, so its finished pieces are reused. Call the returned function when done.
- */
+/** The right to make the copy at `cachePath`; null once another process finished it. Takes over a dead owner's lock. */
 export async function acquireCopyLock(
   cachePath: string,
   signal: AbortSignal,
