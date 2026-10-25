@@ -146,8 +146,6 @@ function isBufferSource(
   return source.sourceKind === "buffer";
 }
 
-// Absolute, so the cache and the release pass cannot key the same asset two ways: an element
-// between resources reports no `currentSrc`, and the attribute behind it is usually relative.
 const decodeKey = (el: HTMLMediaElement): string | null => {
   const src = el.currentSrc || el.getAttribute("src");
   return src ? assetUrl(src) : null;
