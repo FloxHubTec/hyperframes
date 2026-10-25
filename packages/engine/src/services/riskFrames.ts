@@ -19,9 +19,8 @@ export const MAX_RISK_FRAME_FRACTION = 0.6;
 export const RISK_RANGE_HYSTERESIS_FRAMES = 12;
 
 /**
- * Frames where an element recorded by `scanCssEffects` shows, seeking forward from frame 0 as a
- * render does. Seeks leave the page changed, so run it on a page no render will use. Null once
- * more than `maxFrames` frames qualify.
+ * Frames where a recorded effect element shows. Seeks the page forward, so use a throwaway one.
+ * Null once more than `maxFrames` frames qualify.
  */
 export async function scanCssEffectLiveFrames(
   page: Page,
