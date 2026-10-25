@@ -124,4 +124,37 @@ describe("blitHdrVideoLayer", () => {
       }
     },
   );
+
+  it("fails the render when a window cannot be extracted, instead of dropping the layer", async () => {
+    const frameSize = 2 * 2 * 6;
+    const source = {
+      dir: "unused",
+      windows: {
+        totalFrames: 2,
+        lease: async () => {
+          throw new Error("HDR frame extraction failed");
+        },
+        close: () => {},
+      },
+      width: 2,
+      height: 2,
+      frameSize,
+      frameCount: 2,
+      scratch: Buffer.alloc(frameSize),
+    };
+    const el = makeEl("v", { width: 2, height: 2, layoutWidth: 2, layoutHeight: 2, isHdr: true });
+
+    await expect(
+      blitHdrVideoLayer(
+        Buffer.alloc(frameSize),
+        el,
+        1,
+        1,
+        new Map([["v", source]]),
+        new Map([["v", 0]]),
+        2,
+        2,
+      ),
+    ).rejects.toThrow("HDR frame extraction failed");
+  });
 });

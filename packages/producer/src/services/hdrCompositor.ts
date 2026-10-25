@@ -12,7 +12,7 @@
  */
 
 import { readSync } from "fs";
-import type { HdrFrameWindows } from "./hdrFrameWindows.js";
+import type { HdrFrameLease, HdrFrameWindows } from "./hdrFrameWindows.js";
 import { join } from "path";
 import {
   type CaptureSession,
@@ -169,7 +169,6 @@ export function resolveHdrVideoFrameIndex(
   return loop ? frameIndex % frameCount : Math.min(frameIndex, frameCount - 1);
 }
 
-// fallow-ignore-next-line complexity
 export async function blitHdrVideoLayer(
   canvas: Buffer,
   el: ElementStackingInfo,
@@ -204,18 +203,44 @@ export async function blitHdrVideoLayer(
   const mediaTime = (frameSource.mediaStart ?? 0) + effectiveIndex / fps;
   if (isVideoHiddenBeforeStreamStart(frameSource.videoStreamLeadSeconds, mediaTime)) return;
 
+  if (hdrPerf) hdrPerf.hdrVideoLayerBlits += 1;
+  const lease = await frameSource.windows.lease(effectiveIndex);
+  if (!lease) return;
   try {
-    if (hdrPerf) hdrPerf.hdrVideoLayerBlits += 1;
-    const lease = await frameSource.windows.lease(effectiveIndex);
-    if (!lease) return;
-    let bytesRead: number;
-    try {
-      bytesRead = timeHdrPhase(hdrPerf, "hdrVideoReadDecodeMs", () =>
-        readSync(lease.fd, frameSource.scratch, 0, frameSource.frameSize, lease.offset),
-      );
-    } finally {
-      lease.release();
-    }
+    blitScratchFrameWithoutYielding(
+      canvas,
+      el,
+      frameSource,
+      lease,
+      width,
+      height,
+      log,
+      sourceTransfer,
+      targetTransfer,
+      hdrPerf,
+    );
+  } finally {
+    lease.release();
+  }
+}
+
+// fallow-ignore-next-line complexity
+function blitScratchFrameWithoutYielding(
+  canvas: Buffer,
+  el: ElementStackingInfo,
+  frameSource: HdrVideoFrameSource,
+  lease: HdrFrameLease,
+  width: number,
+  height: number,
+  log: ProducerLogger | undefined,
+  sourceTransfer: HdrTransfer | undefined,
+  targetTransfer: HdrTransfer | undefined,
+  hdrPerf: HdrPerfCollector | undefined,
+): void {
+  try {
+    const bytesRead = timeHdrPhase(hdrPerf, "hdrVideoReadDecodeMs", () =>
+      readSync(lease.fd, frameSource.scratch, 0, frameSource.frameSize, lease.offset),
+    );
     if (bytesRead !== frameSource.frameSize) return;
     const hdrRgb = frameSource.scratch;
     const srcW = frameSource.width;
