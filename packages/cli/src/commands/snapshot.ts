@@ -120,10 +120,8 @@ function orbitStageSource(): string {
  * `hyperframes snapshot` indefinitely. */
 const FFMPEG_EXTRACT_TIMEOUT_MS = 30_000;
 const FALLBACK_SEEK_LEAD_SECONDS = 5;
-/** A render waits this long for the composition to be ready, so a snapshot does too. */
 const RENDER_READY_TIMEOUT_MS = DEFAULT_CONFIG.playerReadyTimeout;
 
-/** A frame taken before the composition finished building is a stale frame, so none is saved. */
 export async function renderNotReadyError(page: Page, timeoutMs: number): Promise<Error> {
   const diagnostic = await evaluateHfDiagnostic(page).then(buildZeroDurationDiagnostic, () => "");
   return new Error(
