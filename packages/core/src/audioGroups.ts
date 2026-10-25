@@ -236,11 +236,9 @@ function isGroupableMember(el: Element): boolean {
 /**
  * Make `<hf-audio-group>` inert, once per document.
  *
- * The element is metadata — an id, a label, a chain, an automation lane — but
- * an unknown custom element still makes a box: a flex or grid item (taking a
- * `gap`, shifting `justify-content`) or an inline line box. A mixing decision
- * must not shift authored layout. `contents`, not `none`: what sits inside one
- * (a self-closed `<hf-audio-group />` takes in every later sibling) still renders.
+ * An unknown custom element still makes a box (a flex or grid item, a line box), and a
+ * mixing decision must not shift authored layout. `contents`, not `none`: what sits
+ * inside one (a self-closed `<hf-audio-group />` takes in every later sibling) still renders.
  *
  * `!important` because an author rule can outrank a bare type selector on
  * specificity — inertness here is a contract, not a default. Emitted from the

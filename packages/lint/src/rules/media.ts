@@ -1143,7 +1143,7 @@ function findAudioGroupTimingAttrFindings(ctx: LintContext): HyperframeLintFindi
   return findings;
 }
 
-/** A bus holds nothing. A self-closed `<hf-audio-group />` is still open in HTML, so it takes in every later sibling. */
+/** A bus holds nothing; a self-closed `<hf-audio-group />` stays open in HTML and takes in every later sibling. */
 function findAudioGroupHoldsElementsFindings(ctx: LintContext): HyperframeLintFinding[] {
   const findings: HyperframeLintFinding[] = [];
   for (const group of ctx.tags) {
