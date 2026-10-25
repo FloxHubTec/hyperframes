@@ -17,7 +17,16 @@ const snapshotState = vi.hoisted(() => ({
   settle: vi.fn(async (_page: unknown, _options?: unknown) => ({ pending: [], failed: [] })),
   closeServer: vi.fn(async () => undefined),
   ffmpegTimesOut: false,
+  noFfmpeg: false,
 }));
+
+vi.mock("../browser/ffmpeg.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../browser/ffmpeg.js")>();
+  return {
+    ...actual,
+    findFFmpeg: () => (snapshotState.noFfmpeg ? undefined : actual.findFFmpeg()),
+  };
+});
 
 vi.mock("../capture/captureCompositionFrame.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../capture/captureCompositionFrame.js")>();
@@ -527,6 +536,17 @@ describe("extractVideoFrameToBuffer", () => {
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still stops with the install hint when FFmpeg is missing, instead of blanking every clip", async () => {
+    snapshotState.noFfmpeg = true;
+    try {
+      await expect(extractVideoFrameOrWarn([], "clip.mp4", 0.5)).rejects.toThrow(
+        /FFmpeg is required to extract video frames for snapshots/,
+      );
+    } finally {
+      snapshotState.noFfmpeg = false;
     }
   });
 

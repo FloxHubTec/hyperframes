@@ -379,6 +379,8 @@ async function probeSeekLanding(
   }
 }
 
+class FrameExtractTimeoutError extends Error {}
+
 export async function extractVideoFrameToBuffer(
   videoPath: string,
   timeSeconds: number,
@@ -412,7 +414,7 @@ export async function extractVideoFrameToBuffer(
     args.push("-frames:v", "1", "-q:v", "2", "-y", outPath);
     const result = await runFfmpegOnce(ffmpegPath, args, FFMPEG_EXTRACT_TIMEOUT_MS);
     if (result.timedOut) {
-      throw new Error(
+      throw new FrameExtractTimeoutError(
         `FFmpeg timed out after ${FFMPEG_EXTRACT_TIMEOUT_MS / 1000}s extracting the frame of ${videoPath} at ${timeSeconds.toFixed(2)}s`,
       );
     }
@@ -435,9 +437,9 @@ export async function extractVideoFrameOrWarn(
   try {
     return await extractVideoFrameToBuffer(...args);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    warnings.push(message);
-    console.warn(`   ${c.warn("⚠")} ${message}`);
+    if (!(error instanceof FrameExtractTimeoutError)) throw error;
+    warnings.push(error.message);
+    console.warn(`   ${c.warn("⚠")} ${error.message}`);
     return null;
   }
 }
