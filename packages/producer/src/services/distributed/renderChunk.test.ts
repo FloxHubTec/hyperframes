@@ -266,6 +266,7 @@ describe("renderChunk()", () => {
         "sessionBootMs",
         "captureStageMs",
         "encodeStageMs",
+        "videoExtractMs",
         "workers",
       ]) {
         expect(typeof perf[key]).toBe("number");
