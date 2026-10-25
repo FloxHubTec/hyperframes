@@ -894,7 +894,7 @@ export default defineCommand({
     "update-golden": {
       type: "boolean",
       description:
-        "Refresh the committed golden baselines (golden/<compositionId>/<timeMs>.png) instead of capturing review snapshots; --at overrides the sample times",
+        "Refresh the committed golden baselines (golden/<compositionId>/<timeMs>.png) instead of capturing review snapshots; --at refreshes only those times and keeps the other baselines",
       default: false,
     },
   },

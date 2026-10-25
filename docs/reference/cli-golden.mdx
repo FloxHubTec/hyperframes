@@ -41,7 +41,7 @@ hyperframes check --golden --json    # agent-readable envelope
 | `--golden`                  | `check`           | Run the gate after the normal check pipeline; either failing makes the exit code non-zero.         |
 | `--update-golden`           | `check`, `snapshot` | Capture at the resolved sample times and (re)write `golden/<compositionId>/` plus its manifest.  |
 | `--golden-threshold <0-1>`  | `check`           | Per-channel pixel tolerance override for this run (does not enable the gate by itself).            |
-| `--at <times>`              | `snapshot`        | With `--update-golden`: explicit sample times in seconds, written into the manifest.               |
+| `--at <times>`              | `snapshot`        | With `--update-golden`: refresh only these times (seconds); other baselines and their manifest times stay. |
 
 Sample times resolve in precedence order: explicit `--at` (snapshot only) →
 manifest `times` → times encoded in existing baseline filenames → the snapshot

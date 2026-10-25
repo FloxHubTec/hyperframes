@@ -350,7 +350,7 @@ async function captureGoldenFrames(
   }
 }
 
-function writeGoldenBaselines(
+export function writeGoldenBaselines(
   project: ProjectDir,
   captured: CapturedComposition,
   opts: GoldenGateOptions,
@@ -358,13 +358,10 @@ function writeGoldenBaselines(
   const dir = goldenCompositionDir(project.dir, captured.compositionId);
   mkdirSync(dir, { recursive: true });
 
-  // Drop stale baselines whose time is no longer sampled — they would gate
-  // nothing but still look authoritative in review.
-  const keep = new Set(captured.captures.map((capture) => goldenTimeFileName(capture.timeMs)));
-  for (const file of readdirSync(dir)) {
-    if (parseGoldenTimeFileName(file) !== null && !keep.has(file)) {
-      rmSync(join(dir, file), { force: true });
-    }
+  // Merge into the existing set so refreshing one frame (`--at 2`) keeps the others.
+  const timesMs = new Set(listGoldenBaselineTimesMs(project.dir, captured.compositionId));
+  for (const time of [...(captured.manifest?.times ?? []), ...captured.times]) {
+    timesMs.add(timeMsFromSeconds(time));
   }
 
   const baselines: string[] = [];
@@ -376,7 +373,7 @@ function writeGoldenBaselines(
 
   const manifest: GoldenManifest = {
     ...(captured.manifest ?? {}),
-    times: captured.times,
+    times: [...timesMs].sort((a, b) => a - b).map((ms) => ms / 1000),
   };
   if (opts.threshold !== undefined) manifest.threshold = opts.threshold;
   writeFileSync(join(dir, GOLDEN_MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`);

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -13,6 +13,7 @@ import {
   resolveGoldenConfig,
   resolveGoldenSampleTimes,
   timeMsFromSeconds,
+  writeGoldenBaselines,
 } from "./baseline.js";
 import type { PixelDiffResult } from "./pixelDiff.js";
 
@@ -111,6 +112,32 @@ describe("golden directory scanning", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+it("merges partial updates while preserving uncaptured frames and manifest settings", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hf-golden-update-"));
+  const project = { dir, name: "intro", indexPath: join(dir, "index.html") };
+  try {
+    for (const time of [3.5, 0.5, 2, 2, 1]) {
+      const png = Buffer.from(`frame-${time}`);
+      const captures = [{ time, timeMs: time * 1000, png }];
+      const manifest = readGoldenManifest(dir, "intro");
+      writeGoldenBaselines(
+        project,
+        { compositionId: "intro", times: [time], captures, manifest },
+        { threshold: 0.02 },
+      );
+      if (time === 3.5) rmSync(join(dir, "golden", "intro", "golden.json"));
+    }
+    expect(readGoldenManifest(dir, "intro")).toEqual({ times: [0.5, 1, 2, 3.5], threshold: 0.02 });
+    expect(listGoldenBaselineTimesMs(dir, "intro")).toEqual([500, 1000, 2000, 3500]);
+    for (const time of [0.5, 1, 2, 3.5]) {
+      const path = goldenBaselinePath(dir, "intro", time * 1000);
+      expect(readFileSync(path, "utf8")).toBe(`frame-${time}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 describe("resolveGoldenSampleTimes", () => {
