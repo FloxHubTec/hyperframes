@@ -476,7 +476,8 @@ export async function extractHdrVideoFrames(args: {
         : await probeFirstTick(srcPath, extractionMediaStart, fps, runFfmpegImpl, abortSignal);
       const totalFrames = window.finalFrameOnly
         ? 1
-        : Math.max(1, Math.ceil(window.durationSeconds * fps - firstTick - 1e-9));
+        : Math.max(1, Math.ceil(window.durationSeconds * fps - firstTick - 1e-9)) +
+          Number(video.loop);
       const windowFrames = Math.min(totalFrames, hdrWindowFrames(frameSize, windowBytes));
       const windows = createHdrFrameWindows({
         dir: frameDir,
@@ -529,6 +530,7 @@ export async function extractHdrVideoFrames(args: {
         );
       }
       first.release();
+      if (video.loop) (await windows.lease(totalFrames - 1))?.release();
       out.set(videoId, {
         dir: frameDir,
         windows,

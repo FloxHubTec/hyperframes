@@ -43,14 +43,21 @@ function ffmpegResult(success: boolean): RunFfmpegResult {
 
 const HAS_FFMPEG = spawnSync("ffmpeg", ["-version"]).status === 0;
 
-/** A mock FFmpeg: answers the first-frame probe and fills each extraction's output with its frames. */
-function windowWriter(calls: string[][], frameBytes = 6) {
+/**
+ * A mock FFmpeg: answers the first-frame probe and fills each extraction's output with its frames,
+ * stopping where the source's `realFrames` (at the fixture's 2 fps) run out.
+ */
+function windowWriter(calls: string[][], realFrames = Infinity) {
   return async (args: string[]): Promise<RunFfmpegResult> => {
     if (args.at(-1) === "-") return { ...ffmpegResult(true), stderr: "pts_time:0.000000" };
     calls.push(args);
     const out = args.at(-1);
     if (!out) throw new Error("mock FFmpeg output path missing");
-    writeFileSync(out, Buffer.alloc(Number(args[args.indexOf("-frames:v") + 1]) * frameBytes));
+    const filter = args[args.indexOf("-vf") + 1] ?? "";
+    const lead = Number(/trim=start_frame=(\d+)/.exec(filter)?.[1] ?? 0);
+    const first = Math.round(Number(args[args.indexOf("-ss") + 1]) * 2) + lead;
+    const wanted = Number(args[args.indexOf("-frames:v") + 1]);
+    writeFileSync(out, Buffer.alloc(Math.max(0, Math.min(wanted, realFrames - first)) * 6));
     return ffmpegResult(true);
   };
 }
@@ -562,7 +569,7 @@ describe("extractHdrVideoFrames", () => {
       expectedFrameIndex: 4,
       expectedStart: -5,
       expectedSeek: "0.000000",
-      expectedFrames: "6",
+      expectedFrames: "7",
       label: "loop phase",
     },
     {
@@ -599,7 +606,7 @@ describe("extractHdrVideoFrames", () => {
                 finalFrameOnly: true,
               }
             : window,
-        runFfmpegImpl: windowWriter(calls),
+        runFfmpegImpl: windowWriter(calls, 6),
       });
       try {
         const args = calls[0] ?? [];
@@ -644,7 +651,7 @@ describe("extractHdrVideoFrames", () => {
           // A valid mux can have a short video stream and a much longer audio
           // stream/container. Scratch planning must follow video EOF.
           extractMediaMetadataImpl: async () => videoMetadata(60, 3),
-          runFfmpegImpl: windowWriter(calls),
+          runFfmpegImpl: windowWriter(calls, 6),
         });
         try {
           const args = calls[0] ?? [];
@@ -654,7 +661,7 @@ describe("extractHdrVideoFrames", () => {
           ]);
           expect(args.slice(args.indexOf("-frames:v"), args.indexOf("-frames:v") + 2)).toEqual([
             "-frames:v",
-            "6",
+            loop ? "7" : "6",
           ]);
           expect(extracted.estimatedBytes).toBe(36);
           expect(getHdrExtractionReservedBytes()).toBe(36);
@@ -781,6 +788,34 @@ describe("extractHdrVideoFrames scratch bound", () => {
         expect(second[second.indexOf("-ss") + 1]).toBe("3.000000");
         expect(second[second.indexOf("-vf") + 1]).toContain("fps=2:start_time=0.000000");
         expect(second[second.indexOf("-vf") + 1]).toContain("trim=start_frame=2");
+      } finally {
+        for (const source of extracted.sources.values()) cleanupHdrVideoFrameSource(source);
+        extracted.releaseReservation();
+      }
+    } finally {
+      rmSync(framesDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("extractHdrVideoFrames loop frame count", () => {
+  it("knows a looped source's real frame count before capture starts", async () => {
+    const framesDir = mkdtempSync(join(tmpdir(), "hf-hdr-loop-count-"));
+    const video = hdrVideo("loop", { start: 0, end: 20, mediaStart: 0, loop: true });
+    const fixture = hdrExtractionFixture([video], framesDir);
+    fixture.composition.duration = 20;
+    const realFrames = 37;
+
+    try {
+      const extracted = await extractHdrVideoFrames({
+        ...fixture,
+        windowBytes: 8 * 6,
+        extractMediaMetadataImpl: async () => videoMetadata(20),
+        runFfmpegImpl: windowWriter([], realFrames),
+      });
+      try {
+        // 40 planned frames plus one so the real end is observable; the source really has 37.
+        expect(extracted.sources.get("loop")?.frameCount).toBe(realFrames);
       } finally {
         for (const source of extracted.sources.values()) cleanupHdrVideoFrameSource(source);
         extracted.releaseReservation();
