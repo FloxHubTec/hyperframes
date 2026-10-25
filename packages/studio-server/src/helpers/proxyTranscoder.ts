@@ -150,9 +150,8 @@ export async function waitForProxy<T>(
 }
 
 /**
- * A copy is found by where its source sits (real path, mtime, size) at no cost. When that misses, the whole file
- * is hashed once and the copy is found by content, so a copied project or a re-saved file reuses it and any change
- * misses; an index file then makes the next lookup free. A params version invalidates every copy when the recipe changes.
+ * A copy is found by its source's place and time at no cost; when that misses, by the whole file's hash, once,
+ * and an index file makes the next lookup free. A params version invalidates every copy when the recipe changes.
  */
 type CanonicalProxySource = {
   projectDir: string;
