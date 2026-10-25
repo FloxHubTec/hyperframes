@@ -3200,9 +3200,15 @@ export function initSandboxRuntimeModular(): void {
       const isVisibleNow =
         visibleAt(rawNode, currentTime) &&
         clipChainVisibleAt(rawNode.parentElement, currentTime, visibleAt, rootComp);
+      // A script that hid a clip this pass showed keeps it hidden until the clip's window flips.
+      const hiddenByScript =
+        isVisibleNow &&
+        visibilityDecided.get(rawNode) === true &&
+        rawNode.style.visibility === "hidden";
       visibilityDecided.set(rawNode, isVisibleNow);
       const isRuntimeStamped = isDiscoveryStamped(rawNode);
-      if (!isRuntimeStamped) rawNode.style.visibility = isVisibleNow ? "visible" : "hidden";
+      if (!isRuntimeStamped && !hiddenByScript)
+        rawNode.style.visibility = isVisibleNow ? "visible" : "hidden";
       rawNode.toggleAttribute(CLIP_HIDDEN_ATTR, !isRuntimeStamped && !isVisibleNow);
       if (!isRuntimeStamped && !isVisibleNow && !clipsStyledVisible.has(rawNode))
         clipsNeverStyledVisible.add(rawNode);
