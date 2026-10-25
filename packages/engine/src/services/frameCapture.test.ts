@@ -262,7 +262,7 @@ describe("classifyPageError", () => {
   it("logs a scene callback error once per render, and never as a page error", async () => {
     const memo: SubTimelineWaitMemo = {};
     const sessions = [await listenedSession(memo), await listenedSession(memo)];
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
     const text = `${SCENE_CALLBACK_ERROR_PREFIX} "scene" TypeError: x`;
     for (const { pageListeners } of sessions) {
       for (let i = 0; i < 2; i++) {
