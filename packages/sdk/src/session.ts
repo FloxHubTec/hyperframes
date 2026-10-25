@@ -91,7 +91,7 @@ function escapeRegExp(s: string): string {
 }
 
 class CompositionImpl implements Composition {
-  private readonly parsed: ParsedDocument;
+  private parsed: ParsedDocument;
   private readonly persist: PersistAdapter | undefined;
   readonly preview: PreviewAdapter | undefined;
 
@@ -894,6 +894,11 @@ class CompositionImpl implements Composition {
     this.selectionHandlers = [];
     this.patchHandlers = [];
     this.errorHandlers = [];
+    // A disposed session is still referenced by stale closures; without this each
+    // one keeps its whole parsed document alive.
+    this.elementsCache = null;
+    this.rootsCache = null;
+    this.parsed = parseMutable("");
   }
 }
 
