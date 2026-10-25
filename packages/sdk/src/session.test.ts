@@ -868,6 +868,16 @@ describe("editing duplicate inline declarations", () => {
   const html =
     '<h1 data-hf-id="hf-title" style="color:red !important;color:blue;font-size:48px">Release notes</h1>';
 
+  it("retains a long important value against many later ordinary declarations", async () => {
+    const color = `red${" ".repeat(48_000)}!important`;
+    const comp = await openComposition(
+      `<h1 data-hf-id="hf-title" style="color:${color};${"color:blue;".repeat(4800)}">Release notes</h1>`,
+    );
+    comp.setStyle("hf-title", { opacity: "0.5" });
+    expect(comp.getElement("hf-title")?.inlineStyles).toEqual({ color, opacity: "0.5" });
+    comp.dispose();
+  });
+
   it("preserves priority through unrelated edits, persistence, reopen and history", async () => {
     const persist = createMemoryAdapter();
     const comp = await openComposition(html, { persist, coalesceMs: 0 });

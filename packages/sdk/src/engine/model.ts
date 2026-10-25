@@ -334,6 +334,7 @@ function trimStyleWhitespace(value: string): string {
 
 function parseStyleAttr(styleAttr: string): Record<string, string> {
   const result: Record<string, string> = {};
+  const important = new Set<string>();
   for (const decl of splitStyleAtTopLevel(styleAttr, ";")) {
     const idx = decl.indexOf(":");
     if (idx === -1) continue;
@@ -341,10 +342,10 @@ function parseStyleAttr(styleAttr: string): Record<string, string> {
     const value = trimStyleWhitespace(decl.slice(idx + 1));
     if (!rawProp) continue;
     const prop = toCamel(rawProp);
-    const previous = result[prop];
-    if (previous === undefined || !hasImportant(previous) || hasImportant(value)) {
-      result[prop] = value;
-    }
+    const isImportant = hasImportant(value);
+    if (important.has(prop) && !isImportant) continue;
+    result[prop] = value;
+    if (isImportant) important.add(prop);
   }
   return result;
 }
