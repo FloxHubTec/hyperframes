@@ -63,7 +63,7 @@ export function scalePreviewProxyBox(box: PreviewProxyBox, level: PreviewQuality
   return quantizePreviewProxyBox(box.width * level, box.height * level) ?? box;
 }
 
-/** Whether a file Chrome can play still deserves a lighter copy: a much larger source, 10-bit or deeper, or a high bitrate. */
+/** Whether a playable file still deserves a lighter copy: much larger source, 10-bit or deeper, or high bitrate. */
 export function isHeavyForPreview(facts: PreviewSourceFacts, copyBox: PreviewProxyBox): boolean {
   return (
     copyBox.width * copyBox.height <= HEAVY_PIXEL_SHARE * facts.width * facts.height ||
