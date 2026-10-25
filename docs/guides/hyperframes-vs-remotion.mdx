@@ -183,7 +183,7 @@ Then ask your agent to port the composition. It maps `useCurrentFrame` and
 `interpolate` onto timeline tweens, `Sequence` onto clips, and converts frames
 to seconds.
 
-The other 20% is the point of the skill. It refuses to translate what does not
+The harder cases are the point of the skill. It refuses to translate what does not
 fit: React state machines built on `useState` or `useEffect`, async metadata,
 third-party React UI libraries. Those get flagged instead of silently
 mistranslated. It also grades its own output — it renders both versions and
