@@ -5093,6 +5093,18 @@ export function computeDeVerifySampleFractions(k: number): number[] {
   return [...Array.from({ length: k - 1 }, (_, i) => (i + 1) / k), 0.95];
 }
 
+/** Runs timeline callbacks like the render's own seek: with them suppressed, a count-up's text stays stale in the truth. */
+export async function seekDeVerifyTruth(page: Page, t: number): Promise<void> {
+  await page.evaluate((tt: number) => {
+    const hf = (
+      window as unknown as {
+        __hf?: { seek?: (x: number, options?: { suppressEvents?: boolean }) => void };
+      }
+    ).__hf;
+    if (hf && typeof hf.seek === "function") hf.seek(tt, { suppressEvents: false });
+  }, t);
+}
+
 async function captureDeVerificationFrames(
   session: CaptureSession,
   page: Page,
@@ -5142,16 +5154,7 @@ async function captureDeVerificationFrames(
   // would share the corruption, PSNR would pass on the damaged output.
   // Seeking 0 → ascending reproduces the render's own seek order.
   const fractions = computeDeVerifySampleFractions(k);
-  const seekTo = async (t: number): Promise<void> => {
-    await page.evaluate((tt: number) => {
-      const hf = (
-        window as unknown as {
-          __hf?: { seek?: (x: number, options?: { suppressEvents?: boolean }) => void };
-        }
-      ).__hf;
-      if (hf && typeof hf.seek === "function") hf.seek(tt, { suppressEvents: true });
-    }, t);
-  };
+  const seekTo = (t: number): Promise<void> => seekDeVerifyTruth(page, t);
   await seekTo(quantizeTimeToFrame(0, fps));
   // Force one frame so lazy tween initialization paints at t=0 state.
   await pageScreenshotCapture(page, session.options);
