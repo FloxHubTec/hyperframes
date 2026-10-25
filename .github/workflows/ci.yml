@@ -642,28 +642,16 @@ jobs:
         with:
           lfs: true
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
       # HEAD is the PR merge ref; its first parent is the current base tip (see `changes`).
       - name: Find changed test files
         id: plan
-        run: node scripts/ci/flake-gate.mjs --list --base "$(git rev-parse HEAD^1)"
+        run: |
+          echo "base=$(git rev-parse HEAD^1)" >> "$GITHUB_OUTPUT"
+          node scripts/ci/flake-gate.mjs --list --base "$(git rev-parse HEAD^1)"
       - if: steps.plan.outputs.any == 'true'
-        uses: ./.github/actions/install-ffmpeg-linux
+        uses: ./.github/actions/setup-test-workspace
       - if: steps.plan.outputs.any == 'true'
-        uses: ./.github/actions/prepare-ffmpeg-bin
-      - if: steps.plan.outputs.any == 'true'
-        run: bash scripts/ci/install-workspace-dependencies.sh
-      - if: steps.plan.outputs.any == 'true'
-        run: bun run --filter '@hyperframes/{parsers,lint,studio-server}' build
-      - if: steps.plan.outputs.any == 'true'
-        run: bun run --cwd packages/core build
-      - if: steps.plan.outputs.any == 'true'
-        run: bun run --cwd packages/core build:hyperframes-runtime
-      - if: steps.plan.outputs.any == 'true'
-        run: node scripts/ci/flake-gate.mjs --base "$(git rev-parse HEAD^1)"
+        run: node scripts/ci/flake-gate.mjs --base "${{ steps.plan.outputs.base }}"
 
   test:
     name: Test

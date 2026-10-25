@@ -66,7 +66,10 @@ function main() {
   const base = process.argv[process.argv.indexOf("--base") + 1];
   const list = process.argv.includes("--list");
   const files = selectTestFiles(git("diff", "-M", "--name-status", base, "HEAD", "--", "packages"));
-  const patch = git("diff", "-M", "-U0", base, "HEAD", "--", "packages", "vitest.config.ts", "vitest.workspace.ts");
+  const patch = git(
+    "diff", "-M", "-U0", base, "HEAD", "--",
+    "packages/**/*.test.*", "packages/**/*.spec.*", "packages/**/vitest.config.*", "vitest.config.*", "vitest.workspace.*",
+  );
   if (addsRetry(patch)) {
     console.error("::error::This change adds a test retry. Retries hide flaky tests; fix the flake instead.");
     process.exit(1);
@@ -90,14 +93,15 @@ function main() {
         failed++;
         console.log(`::group::${file} run ${i}/${runs} failed\n${output}\n::endgroup::`);
       }
-      console.log(`${failed === 0 ? "ok  " : "FAIL"} ${file}: ${runs - failed}/${runs} passed`);
-      if (failed > 0) failures.push(`${file} (${failed}/${runs} failed)`);
+      const verdict = failed === 0 ? "ok" : failed === runs ? "fails in the gate" : "flaky";
+      console.log(`${verdict}: ${file}: ${runs - failed}/${runs} passed`);
+      if (failed > 0) failures.push(`${file} (${verdict}, ${failed}/${runs} failed)`);
     }
   } finally {
     for (const b of burners) b.kill();
   }
   if (failures.length > 0) {
-    console.error(`::error::Flaky or failing tests: ${failures.join(", ")}`);
+    console.error(`::error::Failing tests: ${failures.join(", ")}`);
     process.exit(1);
   }
 }
