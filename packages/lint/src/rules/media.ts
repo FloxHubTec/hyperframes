@@ -1160,7 +1160,7 @@ function findAudioGroupHoldsElementsFindings(ctx: LintContext): HyperframeLintFi
         `${elementId ? `#${elementId}` : "This audio group"} holds ${held.length} element(s), ` +
         `starting with <${held[0]!.name}${first ? `#${first}` : ""}>. Being inside it routes no audio ` +
         "through the bus (only `data-audio-group` does), and while the group has `data-hidden` they are " +
-        "silenced and left out of the render.",
+        "hidden and silenced in preview and render.",
       elementId,
       fixHint:
         "Close the group with `</hf-audio-group>` right after its opening tag (`/>` does not close a custom " +

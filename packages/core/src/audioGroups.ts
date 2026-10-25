@@ -238,7 +238,7 @@ function isGroupableMember(el: Element): boolean {
  *
  * An unknown custom element still makes a box (a flex or grid item, a line box), and a
  * mixing decision must not shift authored layout. `contents`, not `none`: what sits
- * inside one (a self-closed `<hf-audio-group />` takes in every later sibling) still renders.
+ * inside one (a self-closed `<hf-audio-group />` takes in every later sibling) still renders, unless muted.
  *
  * `!important` because an author rule can outrank a bare type selector on
  * specificity — inertness here is a contract, not a default. Emitted from the
@@ -249,6 +249,6 @@ export function ensureAudioGroupInertStyle(doc: Document): void {
   if (!doc?.head || doc.getElementById(styleId)) return;
   const style = doc.createElement("style");
   style.id = styleId;
-  style.textContent = `${HF_AUDIO_GROUP_TAG}{display:contents!important}`;
+  style.textContent = `${HF_AUDIO_GROUP_TAG}{display:contents!important}${HF_AUDIO_GROUP_TAG}[data-hidden]{display:none!important}`;
   doc.head.appendChild(style);
 }
