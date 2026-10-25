@@ -24,6 +24,7 @@ import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { alphaDecoderFor } from "@hyperframes/parsers/media-alpha";
 import { probeFirstFrameColour, probeMediaMetadata } from "./mediaMetadata.js";
 import { cleanupProxyCache } from "./proxyCache.js";
+import { acquireCopyLock } from "./proxyLock.js";
 import { PROXY_VARIANT_CONFIG, type ProxyVariant } from "./mediaCodecMap.js";
 import { mkdirWithinProject, realpath, realProjectRoot } from "./safePath.js";
 
@@ -209,9 +210,7 @@ function buildProxyCacheKey(
 ): string {
   const size = box ? `\0${formatPreviewProxyBox(box)}` : "";
   return createHash("sha256")
-    .update(
-      `${contentFingerprint(source.sourcePath)}\0${PROXY_PARAMS_VERSION}\0${variant}${size}`,
-    )
+    .update(`${contentFingerprint(source.sourcePath)}\0${PROXY_PARAMS_VERSION}\0${variant}${size}`)
     .digest("hex");
 }
 
@@ -866,6 +865,8 @@ async function transcodeToCache(
 
     const cacheDir = dirname(cachePath);
     mkdirWithinProject(projectDir, cacheDir);
+    const release = await acquireCopyLock(cachePath, job.abandoned.signal);
+    if (!release) return cachePath;
     const tempPath = join(cacheDir, `.tmp-${randomUUID()}-${basename(cachePath)}`);
     try {
       const chunkPrefix = join(
@@ -888,6 +889,7 @@ async function transcodeToCache(
       // No partial files: if anything above threw, remove whatever ffmpeg
       // may have partially written under the temp name.
       if (existsSync(tempPath)) unlinkSync(tempPath);
+      release();
     }
   } finally {
     releaseSlot();

@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { availableParallelism, tmpdir, totalmem } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { hdrToSdrToneMapFilter } from "@hyperframes/core";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1657,6 +1657,52 @@ describe("resolveProxy", () => {
     expect(calls).toHaveLength(2);
     succeed(calls[1]!);
     await expect(retry).resolves.toBeTruthy();
+  });
+
+  describe("two processes sharing one cache", () => {
+    it("lets only one make the copy, and gives both the finished file", async () => {
+      const projectDir = tmpProject();
+      const sourcePath = join(projectDir, "video.mov");
+      writeFileSync(sourcePath, "source-bytes");
+      const first = createSpawnSpy();
+      const second = createSpawnSpy();
+      const a = await loadModule(first.spawn, FFMPEG_PATH);
+      const b = await loadModule(second.spawn, FFMPEG_PATH);
+
+      const madeByA = a.resolveProxy(projectDir, sourcePath);
+      await flush(50);
+      const madeByB = b.resolveProxy(projectDir, sourcePath);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 700));
+      expect(first.calls).toHaveLength(1);
+      expect(second.calls).toHaveLength(0);
+
+      succeed(first.calls[0]!);
+      const paths = await Promise.all([madeByA, madeByB]);
+
+      expect(paths[1]).toBe(paths[0]);
+      expect(second.calls).toHaveLength(0);
+      expect(readdirSync(join(projectDir, ".transcode-cache"))).toEqual([basename(paths[0]!)]);
+    });
+
+    it("takes over from a process that died, and clears its lock when done", async () => {
+      const { spawn, calls } = createSpawnSpy();
+      const { resolveProxy, getProxyCachePath } = await loadModule(spawn, FFMPEG_PATH);
+      const projectDir = tmpProject();
+      const sourcePath = join(projectDir, "video.mov");
+      writeFileSync(sourcePath, "source-bytes");
+      const cachePath = getProxyCachePath(projectDir, sourcePath);
+      mkdirSync(dirname(cachePath), { recursive: true });
+      const lockPath = join(dirname(cachePath), `.lock-${basename(cachePath)}`);
+      writeFileSync(lockPath, "99999999");
+
+      const result = resolveProxy(projectDir, sourcePath);
+      await flush(50);
+      expect(calls).toHaveLength(1);
+      succeed(calls[0]!);
+
+      await expect(result).resolves.toBe(cachePath);
+      expect(existsSync(lockPath)).toBe(false);
+    });
   });
 
   it("throws a typed error when ffmpeg cannot be resolved, without spawning", async () => {
