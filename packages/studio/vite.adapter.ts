@@ -23,6 +23,7 @@ import {
   DEFAULT_HISTORY_ROOT,
   openProjectHistory,
   historyCache,
+  renderArtifactPaths,
 } from "@hyperframes/studio-server";
 import type { RegistryItem } from "@hyperframes/core/registry";
 import type { BundleOptions } from "@hyperframes/core/compiler";
@@ -323,10 +324,7 @@ export function createViteAdapter(
         // User-initiated cancel: not a failure. Remove any output so the
         // cancelled job doesn't resurrect in the render history.
         state.status = "cancelled";
-        for (const fp of [
-          opts.outputPath,
-          opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json"),
-        ]) {
+        for (const fp of renderArtifactPaths(opts.outputPath)) {
           try {
             if (existsSync(fp)) unlinkSync(fp);
           } catch {

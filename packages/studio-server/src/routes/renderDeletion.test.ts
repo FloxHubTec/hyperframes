@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerRenderRoutes } from "./render";
+import { registerRenderRoutes, renderArtifactPaths } from "./render";
 import type { StudioApiAdapter } from "../types";
 
 describe("DELETE /render/:jobId", () => {
@@ -157,5 +157,15 @@ describe("DELETE /render/:jobId", () => {
     expect(readFileSync(outside, "utf-8")).toBe("preserve");
     expect(readFileSync(join(rendersDir, `${jobId}.mp4`), "utf-8")).toBe("render-bytes");
     expect(existsSync(metaPath)).toBe(true);
+  });
+});
+
+describe("renderArtifactPaths", () => {
+  it("lists the output, its metadata and its provenance sidecar for cancel cleanup", () => {
+    const paths = renderArtifactPaths("/proj/renders/job.mp4");
+    expect(paths).toContain("/proj/renders/job.mp4");
+    expect(paths).toContain("/proj/renders/job.meta.json");
+    expect(paths).toContain("/proj/renders/job.mp4.hf-render.json");
+    expect(paths.every((path) => path.startsWith("/proj/renders/job."))).toBe(true);
   });
 });
