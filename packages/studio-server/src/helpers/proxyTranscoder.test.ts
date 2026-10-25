@@ -1,6 +1,7 @@
 import { execFileSync, spawn as realSpawn, spawnSync, type ChildProcess } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -1330,68 +1331,93 @@ describe("resolveProxy", () => {
     await expect(first).resolves.toBeTruthy();
   });
 
-  it("keeps the cache key when only the mtime changes, as a copied or touched file does", async () => {
-    const { getProxyCachePath } = await loadModule(() => createFakeProc(), FFMPEG_PATH);
-    const projectDir = tmpProject();
-    const sourcePath = join(projectDir, "video.mov");
-    writeFileSync(sourcePath, "source-bytes");
-    const past = new Date(Date.now() - 60_000);
-    utimesSync(sourcePath, past, past);
-    const keyBefore = getProxyCachePath(projectDir, sourcePath);
+  describe("finding the copy of a source", () => {
+    /** Makes the copy of `sourcePath` and returns the path it was made at. */
+    async function made(
+      env: Awaited<ReturnType<typeof loadModule>>,
+      calls: SpawnCall[],
+      projectDir: string,
+      sourcePath: string,
+    ): Promise<string> {
+      const before = calls.length;
+      const result = env.resolveProxy(projectDir, sourcePath);
+      await flush(80);
+      for (const call of calls.slice(before)) succeed(call);
+      return result;
+    }
 
-    const future = new Date(Date.now() + 60_000);
-    utimesSync(sourcePath, future, future);
+    it("reuses the copy of a file that was only touched or re-saved with the same bytes", async () => {
+      const { spawn, calls } = createSpawnSpy();
+      const env = await loadModule(spawn, FFMPEG_PATH);
+      const projectDir = tmpProject();
+      const sourcePath = join(projectDir, "video.mov");
+      writeFileSync(sourcePath, "source-bytes");
+      const first = await made(env, calls, projectDir, sourcePath);
 
-    expect(getProxyCachePath(projectDir, sourcePath)).toBe(keyBefore);
-  });
+      const future = new Date(Date.now() + 60_000);
+      utimesSync(sourcePath, future, future);
+      const again = await made(env, calls, projectDir, sourcePath);
 
-  it("gives a copied project, and a clip reached through a symlink, the copy the original has", async () => {
-    const { getProxyCachePath } = await loadModule(() => createFakeProc(), FFMPEG_PATH);
-    const original = tmpProject();
-    const copied = tmpProject();
-    writeFileSync(join(original, "video.mov"), "source-bytes");
-    mkdirSync(join(copied, "media"));
-    writeFileSync(join(copied, "media", "renamed.mov"), "source-bytes");
-    symlinkSync(join(original, "video.mov"), join(original, "linked.mov"));
-    const name = (path: string) => basename(path);
+      expect(again).toBe(first);
+      expect(calls).toHaveLength(1);
+      expect(env.getProxyCachePath(projectDir, sourcePath)).toBe(first);
+    });
 
-    const base = name(getProxyCachePath(original, join(original, "video.mov")));
+    it("gives a copied project the copy its original has, and a symlinked clip the same one", async () => {
+      const { spawn, calls } = createSpawnSpy();
+      const env = await loadModule(spawn, FFMPEG_PATH);
+      const original = tmpProject();
+      writeFileSync(join(original, "video.mov"), "source-bytes");
+      symlinkSync(join(original, "video.mov"), join(original, "linked.mov"));
+      const first = await made(env, calls, original, join(original, "video.mov"));
+      const copied = join(tmpProject(), "project");
+      cpSync(original, copied, { recursive: true, dereference: true });
+      for (const name of readdirSync(copied)) utimesSync(join(copied, name), new Date(), new Date(Date.now() + 5_000));
 
-    expect(name(getProxyCachePath(copied, join(copied, "media", "renamed.mov")))).toBe(base);
-    expect(name(getProxyCachePath(original, join(original, "linked.mov")))).toBe(base);
-  });
+      const viaLink = await made(env, calls, original, join(original, "linked.mov"));
+      const inCopy = await made(env, calls, copied, join(copied, "video.mov"));
 
-  it("makes a new copy for a changed file, a replaced file of the same size, and a link retargeted to other bytes", async () => {
-    const { getProxyCachePath } = await loadModule(() => createFakeProc(), FFMPEG_PATH);
-    const projectDir = tmpProject();
-    const sourcePath = join(projectDir, "video.mov");
-    const otherPath = join(projectDir, "other.mov");
-    const linkPath = join(projectDir, "linked.mov");
-    writeFileSync(sourcePath, "source-bytes");
-    writeFileSync(otherPath, "SOURCE-BYTES");
-    symlinkSync(sourcePath, linkPath);
-    const before = getProxyCachePath(projectDir, linkPath);
+      expect(viaLink).toBe(first);
+      expect(inCopy.startsWith(realpathSync(copied))).toBe(true);
+      expect(calls).toHaveLength(1);
+    });
 
-    rmSync(linkPath);
-    symlinkSync(otherPath, linkPath);
-    expect(getProxyCachePath(projectDir, linkPath)).not.toBe(before);
+    it("makes a new copy for a changed file, even one of the same size that differs in a small stretch", async () => {
+      const { spawn, calls } = createSpawnSpy();
+      const env = await loadModule(spawn, FFMPEG_PATH);
+      const projectDir = tmpProject();
+      const sourcePath = join(projectDir, "big.mov");
+      const bytes = Buffer.alloc(1024 * 1024, 1);
+      writeFileSync(sourcePath, bytes);
+      const pinned = new Date("2026-01-01T00:00:00Z");
+      utimesSync(sourcePath, pinned, pinned);
+      const first = await made(env, calls, projectDir, sourcePath);
 
-    writeFileSync(sourcePath, "other-bytes!");
-    expect(getProxyCachePath(projectDir, sourcePath)).not.toBe(before);
-  });
+      bytes[200 * 1024] = 2;
+      writeFileSync(sourcePath, bytes);
+      utimesSync(sourcePath, new Date(pinned.getTime() + 1000), new Date(pinned.getTime() + 1000));
+      const second = await made(env, calls, projectDir, sourcePath);
 
-  it("tells files apart by blocks sampled across a large file, not only its start", async () => {
-    const { getProxyCachePath } = await loadModule(() => createFakeProc(), FFMPEG_PATH);
-    const projectDir = tmpProject();
-    const sourcePath = join(projectDir, "big.mov");
-    const bytes = Buffer.alloc(1024 * 1024, 1);
-    writeFileSync(sourcePath, bytes);
-    const before = getProxyCachePath(projectDir, sourcePath);
+      expect(second).not.toBe(first);
+      expect(calls).toHaveLength(2);
+    });
 
-    bytes[bytes.length - 10] = 2;
-    writeFileSync(sourcePath, bytes);
+    it("makes a new copy when a link is retargeted to other bytes", async () => {
+      const { spawn, calls } = createSpawnSpy();
+      const env = await loadModule(spawn, FFMPEG_PATH);
+      const projectDir = tmpProject();
+      writeFileSync(join(projectDir, "a.mov"), "source-bytes");
+      writeFileSync(join(projectDir, "b.mov"), "SOURCE-BYTES");
+      symlinkSync(join(projectDir, "a.mov"), join(projectDir, "linked.mov"));
+      const first = await made(env, calls, projectDir, join(projectDir, "linked.mov"));
 
-    expect(getProxyCachePath(projectDir, sourcePath)).not.toBe(before);
+      rmSync(join(projectDir, "linked.mov"));
+      symlinkSync(join(projectDir, "b.mov"), join(projectDir, "linked.mov"));
+      const second = await made(env, calls, projectDir, join(projectDir, "linked.mov"));
+
+      expect(second).not.toBe(first);
+      expect(calls).toHaveLength(2);
+    });
   });
 
   it("produces a new cache key when size changes but mtime is pinned the same", async () => {

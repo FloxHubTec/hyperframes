@@ -1,11 +1,8 @@
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
-  closeSync,
   existsSync,
   mkdtempSync,
-  openSync,
-  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -16,7 +13,6 @@ import {
 import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
-  formatPreviewProxyBox,
   hdrToSdrToneMapFilter,
   type PreviewProxyBox,
 } from "@hyperframes/core";
@@ -24,6 +20,14 @@ import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { alphaDecoderFor } from "@hyperframes/parsers/media-alpha";
 import { probeFirstFrameColour, probeMediaMetadata } from "./mediaMetadata.js";
 import { cleanupProxyCache } from "./proxyCache.js";
+import {
+  contentCopyKey,
+  contentIndexPath,
+  fastCopyKey,
+  fastIndexPath,
+  readCopyIndex,
+  writeCopyIndex,
+} from "./proxyCacheKey.js";
 import { acquireCopyLock } from "./proxyLock.js";
 import { PROXY_VARIANT_CONFIG, type ProxyVariant } from "./mediaCodecMap.js";
 import { mkdirWithinProject, realpath, realProjectRoot } from "./safePath.js";
@@ -150,10 +154,9 @@ export async function waitForProxy<T>(
 }
 
 /**
- * A copy is keyed by what the source holds, not where it sits: its size and a hash of a few blocks of its
- * bytes. A project copied elsewhere, a clip reached through a symlink, or a touched file reuses its copy;
- * a replaced file or a retargeted link to other bytes misses. An edit that changes no sampled byte and not
- * the size is the one case this cannot see. A params version token invalidates every copy when the recipe changes.
+ * A copy is found by where its source sits (real path, mtime, size) at no cost. When that misses, the whole file
+ * is hashed once and the copy is found by content, so a copied project or a re-saved file reuses it and any change
+ * misses; an index file then makes the next lookup free. A params version invalidates every copy when the recipe changes.
  */
 type CanonicalProxySource = {
   projectDir: string;
@@ -177,54 +180,19 @@ function canonicalizeProxySource(
   return { projectDir: realProjectRoot(projectDir), sourcePath: realpath(absoluteSourcePath) };
 }
 
-const SAMPLE_BYTES = 64 * 1024;
-const SAMPLE_COUNT = 4;
-
-function sampleOffsets(size: number): number[] {
-  if (size <= SAMPLE_BYTES * SAMPLE_COUNT) return [0];
-  return Array.from({ length: SAMPLE_COUNT }, (_, index) =>
-    Math.floor(((size - SAMPLE_BYTES) * index) / (SAMPLE_COUNT - 1)),
-  );
-}
-
-function contentFingerprint(sourcePath: string): string {
-  const stat = statSync(sourcePath);
-  const hash = createHash("sha256").update(String(stat.size));
-  const fd = openSync(sourcePath, "r");
-  try {
-    const block = Buffer.alloc(Math.min(SAMPLE_BYTES, stat.size) || 1);
-    for (const offset of sampleOffsets(stat.size)) {
-      const read = readSync(fd, block, 0, block.length, offset);
-      hash.update(block.subarray(0, read));
-    }
-  } finally {
-    closeSync(fd);
-  }
-  return hash.digest("hex");
-}
-
-function buildProxyCacheKey(
-  source: CanonicalProxySource,
-  variant: ProxyVariant,
-  box: PreviewProxyBox | undefined,
-): string {
-  const size = box ? `\0${formatPreviewProxyBox(box)}` : "";
-  return createHash("sha256")
-    .update(`${contentFingerprint(source.sourcePath)}\0${PROXY_PARAMS_VERSION}\0${variant}${size}`)
-    .digest("hex");
-}
-
+/** The copy for this source: the one at its fast name, the one its fast index names, or where a new one goes. */
 function getCanonicalProxyCachePath(
   source: CanonicalProxySource,
   variant: ProxyVariant,
   box?: PreviewProxyBox,
 ): string {
-  const key = buildProxyCacheKey(source, variant, box);
-  return join(
+  const key = fastCopyKey(source.sourcePath, PROXY_PARAMS_VERSION, variant, box);
+  const made = join(
     source.projectDir,
     CACHE_DIR_NAME,
     `${key}${PROXY_VARIANT_CONFIG[variant].extension}`,
   );
+  return existsSync(made) ? made : (readCopyIndex(fastIndexPath(made)) ?? made);
 }
 
 /**
@@ -865,6 +833,15 @@ async function transcodeToCache(
 
     const cacheDir = dirname(cachePath);
     mkdirWithinProject(projectDir, cacheDir);
+    const contentIndex = contentIndexPath(
+      cacheDir,
+      await contentCopyKey(absoluteSourcePath, PROXY_PARAMS_VERSION, variant, box, job.abandoned.signal),
+    );
+    const sameContent = readCopyIndex(contentIndex);
+    if (sameContent) {
+      writeCopyIndex(fastIndexPath(cachePath), sameContent);
+      return sameContent;
+    }
     const release = await acquireCopyLock(cachePath, job.abandoned.signal);
     if (!release) return cachePath;
     const tempPath = join(cacheDir, `.tmp-${randomUUID()}-${basename(cachePath)}`);
@@ -883,6 +860,7 @@ async function transcodeToCache(
         (progress) => reportProgress(job, progress),
       );
       renameSync(tempPath, cachePath);
+      writeCopyIndex(contentIndex, cachePath);
       maintainProxyCache(cacheDir);
       return cachePath;
     } finally {
