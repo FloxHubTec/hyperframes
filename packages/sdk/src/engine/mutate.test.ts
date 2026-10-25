@@ -951,6 +951,24 @@ describe("inline style priority", () => {
     expect(getElementStyles(el)).toEqual({ color: "green ! IMPORTANT", opacity: "0.2" });
   });
 
+  it.each(["/*", "-/*"])("handles repeated comment markers after !%s", (prefix) => {
+    const parsed = parseMutable("<h1></h1>");
+    const el = parsed.document.querySelector("h1");
+    if (!el) throw new Error("missing fixture element");
+    const comments = "/**/".repeat(4096);
+    const invalid = `${prefix}${"*//*".repeat(4096)}*/#`;
+    el.setAttribute(
+      "style",
+      `--invalid: first !${invalid}; --invalid: later; --valid: first !${comments}important${comments}; --valid: later`,
+    );
+    setElementStyles(el, { opacity: "0.5" });
+    expect(getElementStyles(el)).toEqual({
+      "--invalid": "later",
+      "--valid": `first !${comments}important${comments}`,
+      opacity: "0.5",
+    });
+  });
+
   it("distinguishes custom property literals and identifier boundaries from priority", () => {
     const parsed = parseMutable("<h1></h1>");
     const el = parsed.document.querySelector("h1");

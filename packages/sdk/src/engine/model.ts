@@ -290,15 +290,34 @@ function splitStyleAtTopLevel(style: string, delimiter: ";" | "!"): string[] {
   return declarations;
 }
 
+function skipStyleTrivia(text: string, start: number): number | null {
+  let i = start;
+  while (i < text.length) {
+    if (/[ \t\r\n\f]/.test(text.charAt(i))) {
+      i++;
+      continue;
+    }
+    if (!text.startsWith("/*", i)) break;
+    const end = text.indexOf("*/", i + 2);
+    if (end === -1) return null;
+    i = end + 2;
+  }
+  return i;
+}
+
 function hasImportant(value: string): boolean {
   const parts = splitStyleAtTopLevel(value, "!");
   if (parts.length === 1) return false;
-  const suffix = parts
-    .at(-1)
-    ?.match(
-      /^(?:[ \t\r\n\f]|\/\*[\s\S]*?\*\/)*((?:\\(?:[0-9a-f]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f0-9a-f])|[-\w\u0080-\uffff])+)(?:[ \t\r\n\f]|\/\*[\s\S]*?\*\/)*$/i,
-    );
-  return suffix?.[1] !== undefined && decodeCssEscapes(suffix[1]).toLowerCase() === "important";
+  const suffix = parts.at(-1) ?? "";
+  const start = skipStyleTrivia(suffix, 0);
+  if (start === null) return false;
+  const identifier = suffix
+    .slice(start)
+    .match(
+      /^(?:\\(?:[0-9a-f]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f0-9a-f])|[-\w\u0080-\uffff])+/i,
+    )?.[0];
+  if (!identifier || decodeCssEscapes(identifier).toLowerCase() !== "important") return false;
+  return skipStyleTrivia(suffix, start + identifier.length) === suffix.length;
 }
 
 function parseStyleAttr(styleAttr: string): Record<string, string> {
