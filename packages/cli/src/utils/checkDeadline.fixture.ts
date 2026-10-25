@@ -1,5 +1,5 @@
 // fallow-ignore-file unused-file
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { testProcessIsAlive, testProcessDescendants } from "./processTestUtils.js";
 
@@ -34,6 +34,12 @@ console.log = (...args: unknown[]) => {
   }
   log(...args);
 };
+// The command may start several browsers at once; the one that runs the hanging script is the one under test.
+let scriptBrowserPid: number | undefined;
+function recordLaunch(pid: number): void {
+  appendFileSync(`${pidFile}.launched`, `${pid}\n`);
+  if (scriptBrowserPid === undefined) writeFileSync(pidFile, String(pid));
+}
 const launch = puppeteer.launch.bind(puppeteer);
 puppeteer.launch = async (options) => {
   const browser = await launch(options);
@@ -43,13 +49,15 @@ puppeteer.launch = async (options) => {
   writeFileSync(`${pidFile}.profile`, profile.slice("--user-data-dir=".length));
   const pid = browserProcess?.pid;
   if (!pid) throw new Error("Browser did not expose its process");
-  writeFileSync(pidFile, String(pid));
+  recordLaunch(pid);
   const newPage = browser.newPage.bind(browser);
   browser.newPage = async () => {
     const page = await newPage();
     page.on("console", (message) => {
       if (message.text() === "HF_TEST_SCRIPT_START") {
         writeFileSync(`${pidFile}.script`, "started");
+        scriptBrowserPid = pid;
+        writeFileSync(pidFile, String(pid));
         if (process.platform === "linux") {
           writeFileSync(
             `${pidFile}.tree`,
