@@ -19,11 +19,12 @@ export type PageMotionBlurOff = "off" | "hdr-render" | "layered-composite" | "di
 export type SubTimelineWaitOutcome = "ready" | "timeout" | "script_failure";
 
 /**
- * Shared by every capture session of one render: composition ids whose timeline
- * wait already timed out, so later sessions report the timeout without waiting again.
+ * Shared by every capture session of one render: timeline waits that already timed out
+ * (so later sessions skip the wait), and script errors the render log already shows.
  */
 export interface SubTimelineWaitMemo {
   unregisteredIds?: readonly string[];
+  loggedScriptErrors?: string[];
 }
 
 export type CaptureWarningCode =

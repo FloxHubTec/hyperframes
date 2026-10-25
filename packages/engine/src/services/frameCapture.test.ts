@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { Protocol } from "puppeteer-core";
 import { COMPOSITION_SOURCE_URL } from "@hyperframes/core";
 import type { CaptureSession } from "./frameCapture.js";
+import type { SubTimelineWaitMemo } from "../types.js";
 import {
   buildZeroDurationDiagnostic,
   pollHfReady,
@@ -164,7 +165,7 @@ describe("classifyPageError", () => {
   });
 
   // initializeSession registers its listeners before the incomplete fake session makes it throw.
-  async function listenedSession() {
+  async function listenedSession(memo: SubTimelineWaitMemo = {}) {
     const runtimeListeners = new Map<string, (event: unknown) => void>();
     const pageListeners = new Map<string, (event: unknown) => void>();
     const listen =
@@ -179,6 +180,7 @@ describe("classifyPageError", () => {
       pageErrors: [] as string[],
       warnings: [] as { code: string }[],
       browserConsoleBuffer: [],
+      subTimelineWaitMemo: memo,
     } as unknown as CaptureSession;
     await initializeSession(session).catch(() => {});
     return { session, pageListeners, runtimeListeners };
@@ -220,6 +222,27 @@ describe("classifyPageError", () => {
       "runtime-error:vfx-frame: #host: no paint arrived",
       "runtime-error:scene TypeError: x",
     ]);
+  });
+
+  it("writes a scene's error to the render log once across the render's sessions", async () => {
+    const memo: SubTimelineWaitMemo = {};
+    const sessions = [await listenedSession(memo), await listenedSession(memo)];
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const text = '[HyperFrames] composition script error: TypeError: x (in "scene" timeline)';
+    for (const { pageListeners } of sessions) {
+      for (let i = 0; i < 2; i++) {
+        pageListeners.get("console")?.({
+          type: () => "error",
+          text: () => text,
+          location: () => ({}),
+        });
+      }
+    }
+    expect(log.mock.calls.filter(([line]) => String(line).includes(text))).toHaveLength(1);
+    for (const { session } of sessions) {
+      expect(session.pageErrors).toEqual(['runtime-error:TypeError: x (in "scene" timeline)']);
+    }
+    log.mockRestore();
   });
 
   it("refuses to capture another frame once a VFX chain has failed", async () => {

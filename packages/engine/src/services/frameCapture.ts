@@ -2581,6 +2581,15 @@ function recordConsoleScriptError(session: CaptureSession, error: string | null)
   recordCaptureWarnings(session, [{ code: "vfx_failure", message, details: { sources: [error] } }]);
 }
 
+// Every worker page hits the same scene error; the render log names it once.
+function loggedEarlierInRender(session: CaptureSession, scriptError: string | null): boolean {
+  if (!scriptError) return false;
+  const logged = (session.subTimelineWaitMemo.loggedScriptErrors ??= []);
+  if (logged.includes(scriptError)) return true;
+  logged.push(scriptError);
+  return false;
+}
+
 function recordPageError(session: CaptureSession, error: string | null): void {
   if (error && !session.pageErrors.includes(error)) session.pageErrors.push(error);
 }
@@ -2650,13 +2659,16 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     const text = msg.text();
     const locationUrl = msg.location()?.url ?? "";
     const diagnostic = formatConsoleDiagnostic(type, text, locationUrl);
-    if (!diagnostic.suppressHostLog) console.log(diagnostic.text);
+    const scriptError = classifyConsoleScriptError(type, text);
+    if (!diagnostic.suppressHostLog && !loggedEarlierInRender(session, scriptError)) {
+      console.log(diagnostic.text);
+    }
     appendBrowserDiagnostic(session, diagnostic.text);
 
     // A blocked script can never register its timeline (#3352); a thrown one may still, so it only counts on timeout.
     const scriptFailure = classifyConsoleScriptFailure(type, text);
     if (scriptFailure) recordScriptLoadFailure(session, scriptFailure);
-    recordConsoleScriptError(session, classifyConsoleScriptError(type, text));
+    recordConsoleScriptError(session, scriptError);
   });
 
   page.on("pageerror", (err) => {
