@@ -89,9 +89,11 @@ import { initThreeDProjection, scanCssEffects } from "./threeDProjection.js";
 import {
   planRiskFrames,
   scanCssEffectLiveFrames,
+  riskSessionFits,
   withFramesAfterCallback,
   MAX_RISK_FRAME_FRACTION,
 } from "./riskFrames.js";
+import { getAvailableMemoryMb } from "./systemMemory.js";
 import { isPsnrFilterAvailable } from "../utils/psnrFilterAvailability.js";
 import { DEFAULT_CONFIG, applyConcreteGpuScreenshotClamp, type EngineConfig } from "../config.js";
 import type {
@@ -1183,6 +1185,17 @@ async function initDrawElementOrTransparentBackground(
             riskReasons.join("+"),
             `${riskFrames.size}/${total} frames need screenshot capture (${riskReasons.join(", ")}), ` +
               `too many to keep fast capture for the rest`,
+          );
+          return;
+        }
+        if (
+          !riskSessionFits(getAvailableMemoryMb(), session.options.width * session.options.height)
+        ) {
+          await routeWholeRender(
+            "risk_session_memory",
+            riskReasons.join("+"),
+            `${plan.size} frames need screenshot capture (${riskReasons.join(", ")}) but too little ` +
+              `memory is available for a second browser`,
           );
           return;
         }

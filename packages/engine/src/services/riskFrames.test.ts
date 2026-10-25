@@ -4,6 +4,9 @@ import {
   MAX_RISK_FRAME_FRACTION,
   RISK_RANGE_HYSTERESIS_FRAMES,
   planRiskFrames,
+  riskSessionFits,
+  RISK_SESSION_HEADROOM_BYTES,
+  RISK_SESSION_RSS_BYTES,
   withFramesAfterCallback,
   scanCssEffectLiveFrames,
 } from "./riskFrames.js";
@@ -137,5 +140,24 @@ describe("withFramesAfterCallback", () => {
 
   it("changes nothing without a callback", () => {
     expect([...withFramesAfterCallback(new Set([3]), null, 10, 30)]).toEqual([3]);
+  });
+});
+
+describe("riskSessionFits", () => {
+  const mb = (bytes: number) => Math.ceil(bytes / 1024 / 1024);
+  const HD = 1920 * 1080;
+
+  it("needs the screenshot browser plus the headroom", () => {
+    const need = mb(RISK_SESSION_RSS_BYTES + RISK_SESSION_HEADROOM_BYTES);
+    expect(riskSessionFits(need, HD)).toBe(true);
+    expect(riskSessionFits(need - 10, HD)).toBe(false);
+  });
+
+  it("asks for more at 4K, where the browser holds four times the pixels", () => {
+    const need = mb(RISK_SESSION_RSS_BYTES + RISK_SESSION_HEADROOM_BYTES);
+    expect(riskSessionFits(need, HD * 4)).toBe(false);
+    expect(
+      riskSessionFits(mb(4 * RISK_SESSION_RSS_BYTES + RISK_SESSION_HEADROOM_BYTES), HD * 4),
+    ).toBe(true);
   });
 });

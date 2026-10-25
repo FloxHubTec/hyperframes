@@ -15,6 +15,14 @@ const SCAN_CHUNK_FRAMES = 240;
  */
 export const MAX_RISK_FRAME_FRACTION = 0.6;
 
+/** Peak size of the screenshot browser on a 1080p render (479 MB measured on a 210 s fixture). */
+export const RISK_SESSION_RSS_BYTES = 500_000_000;
+
+/** Memory that must still be available once the screenshot browser is open. */
+export const RISK_SESSION_HEADROOM_BYTES = 1_500_000_000;
+
+const PIXELS_1080P = 1920 * 1080;
+
 /** Risk ranges closer than this many frames are joined, so capture never alternates modes. */
 export const RISK_RANGE_HYSTERESIS_FRAMES = 12;
 
@@ -106,4 +114,10 @@ export function withFramesAfterCallback(
   if (callbackFrom === null) return live;
   for (let f = Math.max(0, Math.floor(callbackFrom * fps) - 1); f < totalFrames; f++) live.add(f);
   return live;
+}
+
+/** Whether the screenshot browser fits: its size, scaled by output pixels, leaves the headroom. */
+export function riskSessionFits(availableMb: number, outputPixels: number): boolean {
+  const rss = RISK_SESSION_RSS_BYTES * Math.max(1, outputPixels / PIXELS_1080P);
+  return availableMb * 1024 * 1024 - rss >= RISK_SESSION_HEADROOM_BYTES;
 }
