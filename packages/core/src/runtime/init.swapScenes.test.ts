@@ -1836,6 +1836,19 @@ describe("the preview's scene window", () => {
     expect(parked()).toEqual(["s2"]);
   });
 
+  it("waits for the scene a seek lands in while its mount as a neighbour is still running", async () => {
+    bootWindowed([S0, S1, S2], trackingRoot().root);
+    await tick();
+    await seekAndSettle(5);
+    for (let i = 0; i < 5; i++) await tick();
+    expect(parked()).toEqual(["s0", "s1"]);
+    // Once s0 is in, s1 mounts as its neighbour; this seek lands in s1 meanwhile.
+    await seekAndSettle(0.5);
+    window.__player?.seek(2.5);
+    await window.__hfWaitForSeekCompletion?.();
+    expect(sceneHost("s1").textContent).toBe("one");
+  });
+
   it("keeps drawing the scene it showed while the scene a seek lands in mounts", async () => {
     bootWindowed([S0, S1, S2], trackingRoot().root);
     await tick();

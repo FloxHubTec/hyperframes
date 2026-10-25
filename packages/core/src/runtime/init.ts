@@ -4439,7 +4439,10 @@ export function initSandboxRuntimeModular(): void {
     const landed = windowScenes.find(
       ({ name, start, end }) => start <= time && time <= end && parked(name),
     );
-    if (windowWork) return landed !== undefined;
+    if (windowWork) {
+      if (landed) registerSeekCompletion(windowWork.then(() => windowWork));
+      return landed !== undefined;
+    }
     const near = scenesWanted(windowScenes, time, clock.isPlaying());
     for (const name of heldScenes) near.add(name);
     const key = [...near].join("\n");
