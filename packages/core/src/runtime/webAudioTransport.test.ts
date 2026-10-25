@@ -1597,6 +1597,8 @@ describe("WebAudioTransport", () => {
       }) as unknown as HTMLMediaElement;
     const failedSrcs = (t: WebAudioTransport) =>
       (t as unknown as { _failedSrcs: Set<string> })._failedSrcs;
+    // Keys are resolved against the document, so one asset has one key however it is written.
+    const key = (src: string) => new URL(src, document.baseURI).href;
 
     it("does NOT blacklist a transient fetch failure — a later play retries and succeeds", async () => {
       const transport = transportWithDecode(async () => ({}) as AudioBuffer);
@@ -1608,7 +1610,7 @@ describe("WebAudioTransport", () => {
 
       const first = await transport.decodeAudioElement(el("tts.wav"));
       expect(first).toBeNull();
-      expect(failedSrcs(transport).has("tts.wav")).toBe(false); // not permanently silenced
+      expect(failedSrcs(transport).has(key("tts.wav"))).toBe(false); // not permanently silenced
 
       const second = await transport.decodeAudioElement(el("tts.wav"));
       expect(second).not.toBeNull(); // self-heals once the asset is available
@@ -1627,7 +1629,7 @@ describe("WebAudioTransport", () => {
 
       const first = await transport.decodeAudioElement(el("corrupt.wav"));
       expect(first).toBeNull();
-      expect(failedSrcs(transport).has("corrupt.wav")).toBe(true); // bad data is permanent
+      expect(failedSrcs(transport).has(key("corrupt.wav"))).toBe(true); // bad data is permanent
 
       const second = await transport.decodeAudioElement(el("corrupt.wav"));
       expect(second).toBeNull();

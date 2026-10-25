@@ -19,6 +19,7 @@ import { clampAudioGain } from "../audioGain.js";
 import { getDebugSurface } from "./globals.js";
 import { readElementPlaybackRate } from "./media.js";
 import { classifyWebAudioMediaRoute, reportWebAudioMediaRoute } from "./webAudioRoute.js";
+import { assetUrl } from "./assetUrl.js";
 
 const MASTER_FX_ATTRS: FxAttributes = { automation: null };
 
@@ -149,13 +150,7 @@ function isBufferSource(
 // between resources reports no `currentSrc`, and the attribute behind it is usually relative.
 const decodeKey = (el: HTMLMediaElement): string | null => {
   const src = el.currentSrc || el.getAttribute("src");
-  if (!src) return null;
-  const base = el.ownerDocument?.baseURI;
-  try {
-    return base ? new URL(src, base).href : src;
-  } catch {
-    return src;
-  }
+  return src ? assetUrl(src) : null;
 };
 
 // A pause to scrub or a reschedule mid-play keeps the output awake; a real idle lets it sleep.
