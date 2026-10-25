@@ -485,8 +485,11 @@ async function encodeInChunks(
 ): Promise<void> {
   const extension = extname(tempPath);
   const pieces = ranges.map((_, index) => `${chunkPrefix}${index}${extension}`);
-  const kept = ranges.filter((_, index) => existsSync(pieces[index]!));
-  if (kept.length) onDone(kept.reduce((sum, range) => sum + range.lengthSeconds, 0));
+  let doneSeconds = 0;
+  for (const [index, range] of ranges.entries()) {
+    if (existsSync(pieces[index]!)) doneSeconds += range.lengthSeconds;
+  }
+  if (doneSeconds) onDone(doneSeconds);
   for (const [index, range] of ranges.entries()) {
     const piece = pieces[index]!;
     if (existsSync(piece)) continue;
@@ -494,12 +497,8 @@ async function encodeInChunks(
     try {
       await encode(pieceTemp, range);
       renameSync(pieceTemp, piece);
-      onDone(
-        ranges.reduce(
-          (sum, other, at) => (existsSync(pieces[at]!) ? sum + other.lengthSeconds : sum),
-          0,
-        ),
-      );
+      doneSeconds += range.lengthSeconds;
+      onDone(doneSeconds);
     } finally {
       if (existsSync(pieceTemp)) unlinkSync(pieceTemp);
     }
@@ -728,7 +727,7 @@ function spawnFfmpeg(
       } else if (stalled) {
         reject(
           new ProxyTranscodeError(
-            `ffmpeg made no progress for ${Math.round(stallMs / 1000)}s and was ended; a long source keeps its finished pieces and the next attempt continues from them`,
+            `ffmpeg made no progress for ${Math.round(stallMs / 1000)}s and was ended; finished pieces are kept for the next attempt`,
             null,
             stderrTail,
           ),
@@ -889,7 +888,7 @@ export async function resolveProxy(
 export async function resolveProxies(
   projectDir: string,
   sources: ReadonlyArray<{ sourcePath: string; variant: ProxyVariant; box?: PreviewProxyBox }>,
-  onSettled: () => void = () => {},
+  onSettled: (index: number) => void = () => {},
   onProgress: (index: number, progress: ProxyProgress) => void = () => {},
   signal?: AbortSignal,
 ): Promise<PromiseSettledResult<string>[]> {
@@ -915,7 +914,7 @@ export async function resolveProxies(
         (value) => ({ status: "fulfilled", value }),
         (reason: unknown) => ({ status: "rejected", reason }),
       );
-      onSettled();
+      onSettled(index);
     }
   };
   const workers = Math.min(MAX_CONCURRENT_TRANSCODES, sources.length);

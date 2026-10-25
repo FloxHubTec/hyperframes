@@ -148,7 +148,11 @@ function elapsedText(ms: number): string {
 function startCopyHeartbeat(
   sources: ReadonlyArray<{ file: string }>,
   cached: readonly boolean[],
-): { progress: (index: number, progress: ProxyProgress) => void; stop: () => void } {
+): {
+  progress: (index: number, progress: ProxyProgress) => void;
+  settled: (index: number) => void;
+  stop: () => void;
+} {
   const startedAt = Date.now();
   const latest = new Map<number, ProxyProgress>();
   const timer = setInterval(() => {
@@ -165,6 +169,7 @@ function startCopyHeartbeat(
   timer.unref();
   return {
     progress: (index, progress) => void latest.set(index, progress),
+    settled: (index) => void latest.delete(index),
     stop: () => clearInterval(timer),
   };
 }
@@ -229,8 +234,9 @@ export async function preResolveHostileMediaProxies(
   const results = await resolveProxies(
     projectDir,
     sources,
-    () => {
+    (index) => {
       settled += 1;
+      heartbeat.settled(index);
       if (toMake > 0) console.error(`[hyperframes] browser-playable copies: ${settled}/${total}`);
     },
     heartbeat.progress,

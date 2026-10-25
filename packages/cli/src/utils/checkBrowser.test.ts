@@ -119,7 +119,7 @@ vi.mock("@hyperframes/studio-server/proxy-transcoder", () => ({
       variant: string;
       box?: { width: number; height: number };
     }>,
-    onSettled: () => void = () => {},
+    onSettled: (index: number) => void = () => {},
     onProgress: (
       index: number,
       progress: { doneSeconds: number; totalSeconds?: number },
@@ -129,11 +129,11 @@ vi.mock("@hyperframes/studio-server/proxy-transcoder", () => ({
     mocks.proxySignal = signal;
     mocks.proxyProgress.feed?.(onProgress);
     return Promise.allSettled(
-      sources.map(({ sourcePath, variant, box }) =>
+      sources.map(({ sourcePath, variant, box }, index) =>
         (box
           ? mocks.resolveProxy(projectDir, sourcePath, variant, box)
           : mocks.resolveProxy(projectDir, sourcePath, variant)
-        ).finally(onSettled),
+        ).finally(() => onSettled(index)),
       ),
     );
   },
@@ -1355,6 +1355,44 @@ describe("preResolveHostileMediaProxies", () => {
       expect(errorSpy.mock.calls.map(([line]) => line)).toContain(
         "[hyperframes] browser-playable copy of clip.mov: 25% (10s so far)",
       );
+    } finally {
+      mocks.proxyProgress.feed = undefined;
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops reporting a copy once it is done, so a finished one is not read as stuck", async () => {
+    vi.useFakeTimers();
+    try {
+      const projectDir = mkProjectDir();
+      const hostile = {
+        codecName: "hevc",
+        browserHostile: true,
+        representativeMime: null,
+        hasAlpha: false,
+      };
+      mocks.scanProjectMediaCodecMap.mockResolvedValue({ "/a.mov": hostile, "/b.mov": hostile });
+      let finishB: (() => void) | undefined;
+      mocks.resolveProxy.mockImplementation((_dir, sourcePath) =>
+        sourcePath.endsWith("a.mov")
+          ? Promise.resolve("/cache/a.mp4")
+          : new Promise<string>((done) => (finishB = () => done("/cache/b.mp4"))),
+      );
+      mocks.proxyProgress.feed = (report) => {
+        report(0, { doneSeconds: 118, totalSeconds: 120 });
+        report(1, { doneSeconds: 30, totalSeconds: 120 });
+      };
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      const pending = preResolveHostileMediaProxies(projectDir, "<html></html>");
+      await vi.advanceTimersByTimeAsync(10_000);
+      mocks.proxyProgress.feed = undefined;
+      finishB?.();
+      await pending;
+
+      const lines = errorSpy.mock.calls.map(([line]) => String(line));
+      expect(lines).toContain("[hyperframes] browser-playable copy of b.mov: 25% (10s so far)");
+      expect(lines.some((line) => line.includes("copy of a.mov"))).toBe(false);
     } finally {
       mocks.proxyProgress.feed = undefined;
       vi.useRealTimers();
