@@ -25,6 +25,15 @@ import {
 import type { ProjectDir } from "./project.js";
 
 const mocks = vi.hoisted(() => ({
+  stopListeners: new Set<() => void>(),
+  proxyProgress: {
+    feed: undefined as
+      | undefined
+      | ((
+          report: (index: number, progress: { doneSeconds: number; totalSeconds?: number }) => void,
+        ) => void),
+  },
+  proxySignal: undefined as AbortSignal | undefined,
   bundleWithLocalizedFonts: vi.fn(async () => "<html></html>"),
   serverClose: vi.fn(async () => undefined),
   resolveProxy:
@@ -56,6 +65,13 @@ const mocks = vi.hoisted(() => ({
   >(async () => ({})),
 }));
 
+vi.mock("../browser/launch.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../browser/launch.js")>()),
+  onStopSignal: (listener: () => void) => {
+    mocks.stopListeners.add(listener);
+    return () => mocks.stopListeners.delete(listener);
+  },
+}));
 vi.mock("./bundleWithLocalizedFonts.js", () => ({
   // Keep browser-check unit tests focused on the page driver and audit pipeline.
   // The real helper cold-loads the producer/font graph, which is covered by its
@@ -104,15 +120,23 @@ vi.mock("@hyperframes/studio-server/proxy-transcoder", () => ({
       box?: { width: number; height: number };
     }>,
     onSettled: () => void = () => {},
-  ) =>
-    Promise.allSettled(
+    onProgress: (
+      index: number,
+      progress: { doneSeconds: number; totalSeconds?: number },
+    ) => void = () => {},
+    signal?: AbortSignal,
+  ) => {
+    mocks.proxySignal = signal;
+    mocks.proxyProgress.feed?.(onProgress);
+    return Promise.allSettled(
       sources.map(({ sourcePath, variant, box }) =>
         (box
           ? mocks.resolveProxy(projectDir, sourcePath, variant, box)
           : mocks.resolveProxy(projectDir, sourcePath, variant)
         ).finally(onSettled),
       ),
-    ),
+    );
+  },
 }));
 
 const PROJECT: ProjectDir = {
@@ -1301,6 +1325,67 @@ describe("preResolveHostileMediaProxies", () => {
     expect(infoSpy).not.toHaveBeenCalled();
     expect(logSpy).not.toHaveBeenCalled();
     expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("says how far a copy has got every few seconds, so a slow copy reads as slow", async () => {
+    vi.useFakeTimers();
+    try {
+      const projectDir = mkProjectDir();
+      mocks.scanProjectMediaCodecMap.mockResolvedValue({
+        "/clip.mov": {
+          codecName: "hevc",
+          browserHostile: true,
+          representativeMime: null,
+          hasAlpha: false,
+        },
+      });
+      let finish: (() => void) | undefined;
+      mocks.resolveProxy.mockImplementation(
+        () => new Promise<string>((done) => (finish = () => done("/cache/clip.mp4"))),
+      );
+      mocks.proxyProgress.feed = (report) => report(0, { doneSeconds: 30, totalSeconds: 120 });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      const pending = preResolveHostileMediaProxies(projectDir, "<html></html>");
+      await vi.advanceTimersByTimeAsync(10_000);
+      mocks.proxyProgress.feed = undefined;
+      finish?.();
+      await pending;
+
+      expect(errorSpy.mock.calls.map(([line]) => line)).toContain(
+        "[hyperframes] browser-playable copy of clip.mov: 25% (10s so far)",
+      );
+    } finally {
+      mocks.proxyProgress.feed = undefined;
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends the copies it is making when it is stopped by a signal", async () => {
+    const projectDir = mkProjectDir();
+    mocks.scanProjectMediaCodecMap.mockResolvedValue({
+      "/clip.mov": {
+        codecName: "hevc",
+        browserHostile: true,
+        representativeMime: null,
+        hasAlpha: false,
+      },
+    });
+    let finish: (() => void) | undefined;
+    mocks.resolveProxy.mockImplementation(
+      () => new Promise<string>((done) => (finish = () => done("/cache/clip.mp4"))),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const pending = preResolveHostileMediaProxies(projectDir, "<html></html>");
+    await vi.waitFor(() => expect(mocks.proxySignal).toBeDefined());
+    expect(mocks.proxySignal!.aborted).toBe(false);
+    for (const listener of mocks.stopListeners) listener();
+
+    expect(mocks.proxySignal!.aborted).toBe(true);
+    finish?.();
+    await pending;
+    expect(mocks.stopListeners.size).toBe(0);
   });
 
   it("says it is making copies, and counts them, only when some are not made yet", async () => {

@@ -15,6 +15,7 @@ function known(value: string | undefined): string | undefined {
 export function hdrToSdrToneMapFilter(
   probed: ToneMapSourceColour,
   firstFrame: ToneMapSourceColour,
+  size?: { width: string; height: string },
 ): string {
   const fill = (key: keyof ToneMapSourceColour, fallback?: string) =>
     known(firstFrame[key]) ? undefined : (known(probed[key]) ?? fallback);
@@ -24,7 +25,9 @@ export function hdrToSdrToneMapFilter(
     ["color_trc", fill("colorTransfer")],
   ].filter(([, value]) => value);
   const setTags = tags.length ? `setparams=${tags.map((tag) => tag.join("=")).join(":")},` : "";
-  return `${setTags}zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv`;
+  // A size resizes in the first zscale, before the float tone map, so the map runs on the smaller frame.
+  const resize = size ? `w=${size.width}:h=${size.height}:` : "";
+  return `${setTags}zscale=${resize}t=linear:npl=100,tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv`;
 }
 
 /** ffmpeg args printing the first shown frame's tags; ffprobe's packet-bounded reads miss edit-list pre-roll. */
