@@ -490,9 +490,13 @@ Source: `packages/lint/src/rules/gsap.ts`.
 
 ### `svg_round_cap_hidden_dash`
 
-**Warning.** A path with a round or square `stroke-linecap` is hidden by `stroke-dasharray` and `stroke-dashoffset` set so the next dash starts exactly at the path end (for example `pathLength="100"`, dasharray `100`, dashoffset `100`). Chrome's rounding leaves a sliver there on some curves, and the cap paints it as a dot in the render, the snapshot and the browser.
+**Warning.** A round or square capped path is hidden with dasharray = gap = `pathLength` and dashoffset = dash.
 
-**Fix:** Make the gap longer than the path (`stroke-dasharray="100 120"`, `stroke-dashoffset="110"`), or keep the element `visibility: hidden` until its draw tween starts.
+Chrome can leave a zero-length sliver at the path end there, and the cap paints it as a dot on some curves.
+
+**Fix:** Make the gap longer than the path (`stroke-dasharray="100 120"`, `stroke-dashoffset="110"`).
+
+Or keep the element `visibility: hidden` until its draw tween starts.
 
 ### `svg_measure_before_path_d`
 
