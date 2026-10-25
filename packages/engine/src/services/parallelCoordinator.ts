@@ -1121,10 +1121,12 @@ export async function executeParallelCapture(
     captureOptions.deVerifySamples,
     tasks.length,
   );
-  const workerCaptureOptions: CaptureOptions =
-    deVerifySamples === captureOptions.deVerifySamples
-      ? captureOptions
-      : { ...captureOptions, deVerifySamples };
+  // Workers have no screenshot session to hand risk frames to.
+  const workerCaptureOptions: CaptureOptions = {
+    ...captureOptions,
+    deVerifySamples,
+    deFrameFallback: false,
+  };
   const peerController = new AbortController();
   const workerSignal = signal
     ? AbortSignal.any([signal, peerController.signal])

@@ -43,11 +43,6 @@ describe("planRiskFrames", () => {
   });
 });
 
-interface Seek {
-  t: number;
-  suppressEvents?: boolean;
-}
-
 const GLOBALS = ["document", "window", "getComputedStyle"] as const;
 const saved = new Map<string, unknown>();
 
@@ -60,25 +55,30 @@ afterEach(() => {
   saved.clear();
 });
 
-/** A page whose one effect element shows from `showFrom` to `showTo` seconds. */
-function makePage(showFrom: number, showTo: number, seeks: Seek[]): Page {
+type Style = { visibility: string; display: string; opacity: string };
+const SHOWN: Style = { visibility: "visible", display: "block", opacity: "1" };
+
+/** A page whose one effect element is styled by `styleOf(seconds)`, with optional children. */
+function makePage(styleOf: (t: number) => Style, children: Array<(t: number) => Style> = []): Page {
   let now = 0;
-  const parent = { parentElement: null };
-  const el = { parentElement: parent };
+  const kids = children.map(() => ({ parentElement: null as unknown }));
+  const el = {
+    parentElement: { parentElement: null },
+    querySelectorAll: () => kids,
+  };
+  kids.forEach((k) => (k.parentElement = el));
   const win = {
     __hfCssFxTargets: [el],
     __hf: {
-      seek: (t: number, options?: { suppressEvents?: boolean }) => {
+      seek: (t: number) => {
         now = t;
-        seeks.push({ t, suppressEvents: options?.suppressEvents });
       },
     },
   };
   const computed = (n: unknown) => {
-    const shown = now >= showFrom && now < showTo;
-    return n === el
-      ? { visibility: shown ? "visible" : "hidden", display: "block", opacity: "1" }
-      : { visibility: "visible", display: "block", opacity: "1" };
+    if (n === el) return styleOf(now);
+    const i = kids.indexOf(n as (typeof kids)[number]);
+    return i >= 0 ? (children[i] as (t: number) => Style)(now) : SHOWN;
   };
   return {
     evaluate: async (fn: (...a: unknown[]) => unknown, ...args: unknown[]) => {
@@ -92,19 +92,38 @@ function makePage(showFrom: number, showTo: number, seeks: Seek[]): Page {
   } as unknown as Page;
 }
 
+const between = (from: number, to: number) => (t: number) =>
+  t >= from && t < to ? SHOWN : { ...SHOWN, visibility: "hidden" };
+const frames = (live: Set<number> | null) => [...(live ?? [])].sort((a, b) => a - b);
+const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
+
 describe("scanCssEffectLiveFrames", () => {
-  it("returns the frames where an effect element shows and rewinds to frame 0", async () => {
-    const seeks: Seek[] = [];
-    const live = await scanCssEffectLiveFrames(makePage(2, 4, seeks), 10, 100, 100);
-    expect([...(live ?? [])].sort((a, b) => a - b)).toEqual(
-      Array.from({ length: 20 }, (_, i) => 20 + i),
+  it("returns the frames where the effect element shows", async () => {
+    const live = await scanCssEffectLiveFrames(makePage(between(2, 4)), 10, 100, 100);
+    expect(frames(live)).toEqual(range(20, 20));
+  });
+
+  it("does not count a fully transparent element", async () => {
+    const live = await scanCssEffectLiveFrames(
+      makePage((t) => ({ ...SHOWN, opacity: t < 3 ? "0" : "1" })),
+      10,
+      50,
+      50,
     );
-    expect(seeks.slice(0, 3).map((s) => s.t)).toEqual([0, 0.1, 0.2]);
-    expect(seeks[seeks.length - 1]).toEqual({ t: 0, suppressEvents: true });
-    expect(seeks.every((s) => s.suppressEvents)).toBe(true);
+    expect(frames(live)).toEqual(range(30, 20));
+  });
+
+  it("counts a hidden element while a descendant sets visibility: visible", async () => {
+    const live = await scanCssEffectLiveFrames(
+      makePage(between(0, 0), [between(1, 2)]),
+      10,
+      50,
+      50,
+    );
+    expect(frames(live)).toEqual(range(10, 10));
   });
 
   it("gives up once more frames qualify than the cap", async () => {
-    expect(await scanCssEffectLiveFrames(makePage(0, 100, []), 10, 100, 10)).toBeNull();
+    expect(await scanCssEffectLiveFrames(makePage(between(0, 100)), 10, 100, 10)).toBeNull();
   });
 });

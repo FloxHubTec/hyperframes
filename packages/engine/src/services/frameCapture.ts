@@ -1096,7 +1096,10 @@ async function initDrawElementOrTransparentBackground(
       // HF_FAST_CAPTURE_CSSFX=true bypasses for R&D.
       // Frames this render captures by screenshot instead (see CaptureSession.deRiskFrames);
       // only a session whose caller can hand them over (worker-encode pipeline) may keep drawElement.
-      const perFrame = drawElementWorkerEncodeEligible(session, transparent) && !forceDE;
+      const perFrame =
+        session.options.deFrameFallback === true &&
+        drawElementWorkerEncodeEligible(session, transparent) &&
+        !forceDE;
       const riskFrames = new Set<number>();
       const riskReasons: string[] = [];
       let cssFrames = 0;
@@ -1109,24 +1112,15 @@ async function initDrawElementOrTransparentBackground(
         await routeToFallback();
       };
       if (!forceDE && process.env.HF_FAST_CAPTURE_CSSFX !== "true") {
-        const scan = await scanCssEffects(page, perFrame);
-        const cssFx = scan.reason;
+        const cssFx = (await scanCssEffects(page, false)).reason;
         if (cssFx) {
           // Full specific effect from `scanCssEffects` (e.g. "filter:blur",
           // "mix-blend-mode", "webgl-context") — `deGateReason` keeps its
           // low-cardinality prefix, `deFallbackTrigger` the full value.
           const gateReason = `css_effect:${(cssFx.split(":")[0] ?? "").replace(/[^a-z-]/gi, "")}`;
           const gateMessage = `${cssFx} detected (drawElementImage cannot reproduce it; see fast-capture-limitations.md)`;
-          cssFrames = perFrame && scan.bounded ? await renderFrameCount(session, page) : 0;
-          const live =
-            cssFrames > 0
-              ? await scanCssEffectLiveFrames(
-                  page,
-                  fpsToNumber(session.options.fps),
-                  cssFrames,
-                  cssFrames * MAX_RISK_FRAME_FRACTION,
-                )
-              : null;
+          cssFrames = perFrame ? await renderFrameCount(session, page) : 0;
+          const live = cssFrames > 0 ? await cssEffectRiskFrames(session, cssFrames) : null;
           if (!live) {
             await routeWholeRender(gateReason, cssFx, gateMessage);
             return;
@@ -1249,6 +1243,47 @@ function drawElementWorkerEncodeEligible(session: CaptureSession, transparent: b
     !transparent &&
     session.beginFrameTimeTicks === 0
   );
+}
+
+/**
+ * The frames a CSS effect shows on, or null when it cannot be bounded. Scans in a throwaway
+ * session: the scan seeks the timeline end to end, which this page's render must not inherit.
+ */
+async function cssEffectRiskFrames(
+  session: CaptureSession,
+  totalFrames: number,
+): Promise<Set<number> | null> {
+  let scratch: CaptureSession | null = null;
+  try {
+    scratch = await createCaptureSession(
+      session.serverUrl,
+      session.outputDir,
+      { ...session.options, onMemorySample: undefined },
+      null,
+      {
+        ...session.config,
+        useDrawElement: false,
+        staticFrameDedup: false,
+        enableBrowserPool: false,
+      },
+    );
+    await initializeSession(scratch);
+    const scan = await scanCssEffects(scratch.page, true);
+    if (!scan.reason || !scan.bounded) return null;
+    return await scanCssEffectLiveFrames(
+      scratch.page,
+      fpsToNumber(session.options.fps),
+      totalFrames,
+      totalFrames * MAX_RISK_FRAME_FRACTION,
+    );
+  } catch (error) {
+    console.log(
+      `[engine] fast capture: effect scan failed (${error instanceof Error ? error.message : String(error)})`,
+    );
+    return null;
+  } finally {
+    if (scratch) await closeCaptureSession(scratch).catch(() => {});
+  }
 }
 
 /** Frames the render will capture, from the producer's duration when it set one. */

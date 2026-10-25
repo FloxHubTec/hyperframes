@@ -240,6 +240,8 @@ export interface CaptureOptions {
    * Clamped to 0..8 like the env knob; HF_DE_VERIFY, when set, still wins.
    */
   deVerifySamples?: number;
+  /** The caller captures frames in `session.deRiskFrames` with a screenshot session. */
+  deFrameFallback?: boolean;
 }
 
 export interface CaptureVideoMetadataHint {

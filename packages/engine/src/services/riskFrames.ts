@@ -20,7 +20,8 @@ export const RISK_RANGE_HYSTERESIS_FRAMES = 12;
 
 /**
  * Frames where an element recorded by `scanCssEffects` shows, seeking forward from frame 0 as a
- * render does, then rewinding. Null once more than `maxFrames` frames qualify.
+ * render does. Seeks leave the page changed, so run it on a page no render will use. Null once
+ * more than `maxFrames` frames qualify.
  */
 export async function scanCssEffectLiveFrames(
   page: Page,
@@ -36,23 +37,28 @@ export async function scanCssEffectLiveFrames(
     }
     const hits = await page.evaluate(async (ts: number[]): Promise<number[]> => {
       type HfWindow = Window & {
-        __hf?: { seek?: (t: number, options?: { suppressEvents?: boolean }) => void };
+        __hf?: { seek?: (t: number) => void };
         __hfWaitForSeekCompletion?: () => Promise<void>;
         __hfCssFxTargets?: Element[];
       };
       const w = window as HfWindow;
       const targets = w.__hfCssFxTargets ?? [];
+      // A hidden element still shows a descendant that sets `visibility: visible` itself.
+      const paints = (el: Element): boolean =>
+        getComputedStyle(el).visibility !== "hidden" ||
+        Array.from(el.querySelectorAll("*")).some(
+          (d) => getComputedStyle(d).visibility === "visible",
+        );
       const shows = (el: Element): boolean => {
-        if (getComputedStyle(el).visibility === "hidden") return false;
         for (let n: Element | null = el; n; n = n.parentElement) {
           const cs = getComputedStyle(n);
           if (cs.display === "none" || Number(cs.opacity) === 0) return false;
         }
-        return true;
+        return paints(el);
       };
       const out: number[] = [];
       for (let i = 0; i < ts.length; i++) {
-        w.__hf?.seek?.(ts[i] as number, { suppressEvents: true });
+        w.__hf?.seek?.(ts[i] as number);
         await w.__hfWaitForSeekCompletion?.();
         if (targets.some(shows)) out.push(i);
       }
@@ -61,17 +67,6 @@ export async function scanCssEffectLiveFrames(
     for (const i of hits) live.add(from + i);
     if (live.size > maxFrames) break;
   }
-  await page.evaluate(
-    (t0: number) => {
-      const hf = (
-        window as unknown as {
-          __hf?: { seek?: (t: number, options?: { suppressEvents?: boolean }) => void };
-        }
-      ).__hf;
-      hf?.seek?.(t0, { suppressEvents: true });
-    },
-    quantizeTimeToFrame(0, fps),
-  );
   return live.size > maxFrames ? null : live;
 }
 

@@ -469,6 +469,8 @@ function createDrainFrameGuard(args: {
 /** Frames drawElement cannot reproduce, and how to capture one by screenshot. */
 interface RiskFrameCapture {
   frames: ReadonlySet<number>;
+  /** Opens the screenshot session; kept out of the stall budget, a browser launch is slow. */
+  open: () => Promise<void>;
   capture: (frameIndex: number, time: number) => Promise<Buffer>;
 }
 
@@ -494,13 +496,16 @@ async function runWorkerEncodePipelineLoop(
   // a screenshot-session frame is that ground truth already.
   const guardFrame = (item: Pending, buf: Buffer): Promise<Buffer> =>
     item.trusted ? Promise.resolve(buf) : guard(session, item.idx, buf);
-  const captureRisk = (idx: number): Promise<Buffer> =>
-    raceAgainstStall(
+  const captureRisk = async (idx: number): Promise<Buffer> => {
+    await risk!.open();
+    lastProgressAt = Date.now();
+    return raceAgainstStall(
       risk!.capture(idx, frameTime(idx)),
       stallTimeoutMs - (Date.now() - lastProgressAt),
       { session, frameIndex: idx, totalFrames, stallTimeoutMs },
       abortSignal,
     );
+  };
 
   const stallTimeoutMs = resolveCaptureStallTimeoutMs();
   let lastProgressAt = Date.now();
@@ -1020,10 +1025,11 @@ export async function runCaptureStreamingStage(
                   frames: riskFrames,
                   // Opened on the first risk frame, in a browser of its own: pages sharing a
                   // browser share a compositor, which starves the drawElement page's paint events.
-                  capture: async (frameIndex, time) => {
+                  open: async () => {
                     riskSession ??= await openRiskSession();
-                    return (await captureFrameToBuffer(riskSession, frameIndex, time)).buffer;
                   },
+                  capture: async (frameIndex, time) =>
+                    (await captureFrameToBuffer(riskSession!, frameIndex, time)).buffer,
                 }
               : undefined,
           );
