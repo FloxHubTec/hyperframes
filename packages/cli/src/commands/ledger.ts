@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
-import type { AssetLedger } from "@hyperframes/core/asset-ledger";
+import type { AssetLedger } from "../utils/assetLedger.js";
 import { setCommandExitCode } from "../utils/commandResult.js";
 import { c } from "../ui/colors.js";
 import { resolveProject } from "../utils/project.js";
@@ -88,7 +88,7 @@ export default defineCommand({
     const strictOffline = Boolean(args["strict-offline"]);
     try {
       const project = resolveProject(args.dir, { requireIndex: false });
-      const { buildProjectAssetLedger } = await import("@hyperframes/core/asset-ledger");
+      const { buildProjectAssetLedger } = await import("../utils/assetLedger.js");
       const ledger = buildProjectAssetLedger(project.dir);
       const strictViolation = strictOffline && ledger.counts.remote > 0;
 

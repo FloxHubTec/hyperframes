@@ -28,6 +28,7 @@ npm install -g hyperframes
 | Find problems            | [`lint`](#lint), [`check`](#check), [`snapshot`](#snapshot), [`keyframes`](#keyframes), [`compare`](#compare-and-grade-compare), [`grade-compare`](#compare-and-grade-compare)                                                   |
 | Edit from the terminal   | [`timeline`](#timeline), [`history`](#history)                                                                                                                                                                                   |
 | Make a file              | [`render`](#render), [`benchmark`](#benchmark)                                                                                                                                                                                   |
+| Render offline           | [`ledger`](#ledger-and-vendor), [`vendor`](#ledger-and-vendor)                                                                                                                                                                   |
 | Render somewhere else    | [`cloud`](#hyperframes-cloud), [`lambda`](#hyperframes-lambda), [`cloudrun`](#hyperframes-cloudrun)                                                                                                                              |
 | Fix your setup           | [`doctor`](#doctor), [`browser`](#browser), [`upgrade`](#upgrade), [`docs`](#docs), [`info`](#info-and-compositions), [`compositions`](#info-and-compositions), [`clean`](#clean)                                                                   |
 | Connect other tools      | [`auth`](#hyperframes-auth), [`skills`](#skills), [`usage`](#usage), [`figma`](#figma-and-events), [`events`](#figma-and-events), [`telemetry`](#telemetry), [`feedback`](#feedback)                                                                            |
@@ -1657,6 +1658,25 @@ npx hyperframes benchmark [dir]
 It runs several configurations — varying fps, quality, and worker count — and
 compares time and file size. `--runs` sets runs per configuration (1–20,
 default 3); `--json` prints the results as JSON.
+
+### `ledger` and `vendor`
+
+Make a render independent of the network.
+
+```bash
+npx hyperframes ledger                    # list every declared asset: remote, local, data, missing
+npx hyperframes ledger --strict-offline   # exit 1 if any remote reference remains
+npx hyperframes vendor                    # download remote assets, rewrite references
+npx hyperframes vendor --dry-run          # list what would be downloaded
+npx hyperframes vendor --strict-offline   # exit 1 unless the project ends up fully offline
+```
+
+`ledger` reads the project's HTML and CSS without a browser or network. `vendor`
+downloads remote scripts, stylesheets, fonts and media into `assets/vendor/`
+(`--out` changes it), rewrites the references, and records each file's URL and
+sha256 in `vendor-manifest.json`. Stylesheets and scripts that load their own
+relative files, and remote iframes, stay remote and are reported.
+[Ledger & vendor](/reference/cli-ledger) has every flag and the JSON output.
 
 ## Keep the environment healthy
 

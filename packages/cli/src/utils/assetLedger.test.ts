@@ -9,7 +9,7 @@ import {
   collectProjectHtmlFiles,
   extractAssetRefs,
   extractFileAssetRefs,
-} from "./ledger";
+} from "./assetLedger";
 
 // A representative composition: one CDN script (jsDelivr), local media, a
 // data URI, a missing reference, and CSS-declared assets.

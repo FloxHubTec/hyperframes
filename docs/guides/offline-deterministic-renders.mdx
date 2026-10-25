@@ -84,10 +84,13 @@ The `<script>` tag now reads
 - **Remote iframes.** A live embedded page can never be deterministic.
   `vendor` leaves iframes alone and `--strict-offline` keeps failing until you
   replace the embed with captured media (`hyperframes capture`).
-- **Stylesheets that load their own files.** A remote stylesheet containing
-  `url(…)` or `@import` (Google Fonts, Font Awesome, KaTeX) is left remote and
+- **Stylesheets that load relative files.** A remote stylesheet with a
+  relative `url(…)` or `@import` (Font Awesome, KaTeX) is left remote and
   reported, because its relative URLs would break once vendored. Self-host
   those fonts and files with `@font-face` instead.
+- **ES modules that import other files.** A remote script with `import`
+  statements (`three.module.js`, jsDelivr `+esm` bundles) is left remote and
+  reported for the same reason. Use the library's single-file build.
 - **Runtime-constructed URLs.** The ledger reads declared markup, not script
   behavior. `hyperframes check` (headless Chrome) remains the runtime gate.
 

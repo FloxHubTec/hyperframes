@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { extractFileAssetRefs } from "@hyperframes/core/asset-ledger";
+import { extractFileAssetRefs } from "../utils/assetLedger.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { consumeCommandResult } from "../utils/commandResult.js";
 import {
@@ -27,6 +27,8 @@ vi.mock("../capture/publicNetwork.js", async (importOriginal) => ({
 import vendorCommand, {
   resolveVendorTarget,
   rewriteFileReferences,
+  scriptLoadsDependencies,
+  stylesheetLoadsDependencies,
   toFetchableUrl,
   vendorFileName,
 } from "./vendor.js";
@@ -129,6 +131,35 @@ describe("rewriteFileReferences", () => {
       "https://x.com/bg.png": "assets/vendor/bg.png",
     });
     expect(text).toBe(`.a { background: url("../assets/vendor/bg.png"); }`);
+  });
+});
+
+describe("stylesheetLoadsDependencies", () => {
+  it("flags relative url(), @import and escaped identifiers", () => {
+    expect(stylesheetLoadsDependencies("@font-face{src:url(../webfonts/fa.woff2)}")).toBe(true);
+    expect(stylesheetLoadsDependencies('@import "theme.css";')).toBe(true);
+    expect(stylesheetLoadsDependencies(".a{background:u\\72l(x.png)}")).toBe(true);
+  });
+
+  it("allows data: URLs, absolute URLs and escapes inside strings", () => {
+    const css = `.a{background:url("data:image/svg+xml,%3csvg%3e%3c/svg%3e")}.b::before{content:"\\2014 \\00A0"}@import url("https://x.com/b.css");`;
+    expect(stylesheetLoadsDependencies(css)).toBe(false);
+  });
+});
+
+describe("scriptLoadsDependencies", () => {
+  it("flags static, re-exported and dynamic imports and import.meta", () => {
+    expect(scriptLoadsDependencies('import{REVISION as e}from"./three.core.js";')).toBe(true);
+    expect(scriptLoadsDependencies('export*from"/npm/d3-array@3.2.4/+esm";')).toBe(true);
+    expect(scriptLoadsDependencies('const m = await import("./chunk.js");')).toBe(true);
+    expect(scriptLoadsDependencies('new URL("./w.wasm", import.meta.url)')).toBe(true);
+  });
+
+  it("allows classic scripts and self-contained modules", () => {
+    expect(scriptLoadsDependencies('!function(t){t.gsap={import:1,a:x.import("y")}}(this)')).toBe(
+      false,
+    );
+    expect(scriptLoadsDependencies("export const a = 1; export default a;")).toBe(false);
   });
 });
 
@@ -294,6 +325,45 @@ describe("vendor command", () => {
     expect(readFileSync(join(dir, "styles", "theme.css"), "utf-8")).toMatch(
       /url\("\.\.\/assets\/vendor\/inter-[0-9a-f]{10}\.woff2"\)/,
     );
+  });
+
+  it("keeps an ES module script remote when it imports other files", async () => {
+    const moduleUrl = "https://cdn.example.com/three/build/three.module.js";
+    writeFileSync(join(dir, "index.html"), `<script type="module" src="${moduleUrl}"></script>`);
+    publicRequest.mockImplementation(async () =>
+      fetchResponse('import{REVISION as e}from"./three.core.js";export{e};', "text/javascript"),
+    );
+
+    await run({ dir, out: "assets/vendor", json: true, "strict-offline": true });
+    expect(consumeCommandResult().exitCode).toBe(1);
+    const output = lastJsonOutput();
+    expect(output.failed).toEqual([{ url: moduleUrl, error: expect.stringMatching(/imports/) }]);
+    expect(output.remainingRemoteUrls).toEqual([moduleUrl]);
+    expect(readFileSync(join(dir, "index.html"), "utf-8")).toContain(moduleUrl);
+  });
+
+  it("vendors a stylesheet with data: URLs; a second run vendors its absolute url()", async () => {
+    const cssUrl = "https://cdn.example.com/bootstrap.min.css";
+    const bgUrl = "https://cdn.example.com/bg.png";
+    writeFileSync(join(dir, "index.html"), `<link rel="stylesheet" href="${cssUrl}">`);
+    publicRequest.mockImplementation(async () =>
+      fetchResponse(
+        `.a{background:url("data:image/svg+xml,%3csvg%3e%3c/svg%3e")}.b{background:url(${bgUrl})}`,
+        "text/css",
+      ),
+    );
+
+    await run({ dir, out: "assets/vendor", json: true, "strict-offline": true });
+    expect(consumeCommandResult().exitCode).toBe(1);
+    const output = lastJsonOutput();
+    expect(output.failed).toEqual([]);
+    expect(output.remainingRemoteUrls).toEqual([bgUrl]);
+    expect(readFileSync(join(dir, "index.html"), "utf-8")).not.toContain(cssUrl);
+
+    publicRequest.mockImplementation(async () => fetchResponse("png", "image/png"));
+    await run({ dir, out: "assets/vendor", json: true, "strict-offline": true });
+    expect(consumeCommandResult().exitCode).toBe(0);
+    expect(lastJsonOutput().remainingRemoteUrls).toEqual([]);
   });
 
   it("--strict-offline exits 1 when a non-vendorable remote (iframe) remains", async () => {

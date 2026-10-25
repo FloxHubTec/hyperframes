@@ -5,7 +5,7 @@ import { defineCommand } from "citty";
 import { safeFetch } from "../capture/assetDownloader.js";
 import { readBoundedResponse } from "../capture/readBoundedResponse.js";
 import type { Example } from "./_examples.js";
-import type { LedgerAssetKind } from "@hyperframes/core/asset-ledger";
+import type { LedgerAssetKind } from "../utils/assetLedger.js";
 import { setCommandExitCode } from "../utils/commandResult.js";
 import { c } from "../ui/colors.js";
 import { resolveProject } from "../utils/project.js";
@@ -181,9 +181,39 @@ export function rewriteFileReferences(
   return { text: out + text.slice(cursor), rewritten };
 }
 
-/** A stylesheet that loads anything itself would break once moved under the vendor directory. */
-function stylesheetLoadsDependencies(body: Buffer): boolean {
-  return /url\s*\(|@import|\\/i.test(body.toString("utf-8"));
+const CSS_URL_RE = /url\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/gi;
+const CSS_IMPORT_RE = /@import\s+(?:"([^"]*)"|'([^']*)')/gi;
+const CSS_STRING_RE = /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g;
+
+/** Data URLs stay inline and absolute URLs are still reported by the ledger, which reads local CSS. */
+function cssUrlSurvivesMove(url: string): boolean {
+  return /^data:/i.test(url) || toFetchableUrl(url) !== null;
+}
+
+/** A stylesheet that loads relative files would break once moved under the vendor directory. */
+export function stylesheetLoadsDependencies(css: string): boolean {
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const re of [CSS_URL_RE, CSS_IMPORT_RE]) {
+    for (const match of text.matchAll(re)) {
+      if (!cssUrlSurvivesMove((match[1] ?? match[2] ?? match[3] ?? "").trim())) return true;
+    }
+  }
+  const outsideUrls = text.replace(CSS_URL_RE, "").replace(CSS_IMPORT_RE, "");
+  if (/url\s*\(|@import\s*[^\s;]|image-set\s*\(/i.test(outsideUrls)) return true;
+  return outsideUrls.replace(CSS_STRING_RE, "").includes("\\");
+}
+
+const STATIC_IMPORT_RE = /(?:^|[;\s{}()])import\s*(?:[\w$*{},\s]+?from\s*)?["'`]/;
+const EXPORT_FROM_RE = /(?:^|[;\s{}()])export\s*(?:\*|\{[^}]*\})\s*(?:as\s+[\w$]+\s*)?from\s*["'`]/;
+const DYNAMIC_IMPORT_RE = /(?<![.\w$])import\s*(?:\(|\.meta\b)/;
+
+/**
+ * A script that imports other modules (or resolves files from `import.meta`)
+ * would break once moved, or keep fetching remotely where the ledger can't
+ * see it, since the ledger does not read JavaScript.
+ */
+export function scriptLoadsDependencies(js: string): boolean {
+  return STATIC_IMPORT_RE.test(js) || EXPORT_FROM_RE.test(js) || DYNAMIC_IMPORT_RE.test(js);
 }
 
 function isVendoredEntry(value: unknown): value is VendoredEntry {
@@ -262,7 +292,7 @@ export default defineCommand({
     try {
       const project = resolveProject(args.dir, { requireIndex: false });
       const { buildProjectAssetLedger, extractFileAssetRefs } =
-        await import("@hyperframes/core/asset-ledger");
+        await import("../utils/assetLedger.js");
       const ledger = buildProjectAssetLedger(project.dir);
 
       const outRel = String(args.out ?? "assets/vendor").replace(/\\/g, "/");
@@ -304,12 +334,23 @@ export default defineCommand({
       for (const [declaredUrl, fetchUrl] of candidates) {
         try {
           const { body, contentType } = await downloadAsset(fetchUrl, timeoutMs, maxBytes);
-          const stylesheet =
-            contentType?.toLowerCase().includes("text/css") ||
-            ledger.assets.some((a) => a.url === declaredUrl && a.kind === "stylesheet");
-          if (stylesheet && stylesheetLoadsDependencies(body)) {
+          const declaredAs = (kind: LedgerAssetKind) =>
+            ledger.assets.some((a) => a.url === declaredUrl && a.kind === kind);
+          const type = contentType?.toLowerCase() ?? "";
+          if (
+            (type.includes("text/css") || declaredAs("stylesheet")) &&
+            stylesheetLoadsDependencies(body.toString("utf-8"))
+          ) {
             throw new Error(
-              "stylesheet loads url(), @import or escaped dependencies that would break once vendored; keeping the remote reference",
+              "stylesheet loads relative url(), @import or escaped dependencies that would break once vendored; keeping the remote reference",
+            );
+          }
+          if (
+            (type.includes("javascript") || declaredAs("script")) &&
+            scriptLoadsDependencies(body.toString("utf-8"))
+          ) {
+            throw new Error(
+              "script imports other modules that would break or stay remote once vendored; keeping the remote reference",
             );
           }
           const fileName = vendorFileName(fetchUrl, contentType);

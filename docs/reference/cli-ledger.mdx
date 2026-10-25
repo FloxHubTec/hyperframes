@@ -112,12 +112,22 @@ Remote **iframes** are never vendored: a live page cannot be made
 deterministic by downloading it. They stay remote and still fail
 `--strict-offline`, which is the point — replace them with captured media.
 
-A remote stylesheet that loads anything itself (`url(…)`, `@import`, or CSS
-escapes) is not vendored: moved under `assets/vendor/`, its relative URLs
-would point at files that do not exist. It is reported as a failed download
-and stays remote, so `--strict-offline` keeps failing. Google Fonts and icon
-font stylesheets fall in this group; self-host their files with
-`@font-face` (see [media guide](/guides/media)) instead.
+A remote stylesheet that loads relative files (a relative `url(…)` or
+`@import`, `image-set()`, or CSS escapes outside strings) is not vendored:
+moved under `assets/vendor/`, its relative URLs would point at files that do
+not exist. It is reported as a failed download and stays remote, so
+`--strict-offline` keeps failing. Icon font stylesheets such as Font Awesome
+and KaTeX fall in this group; self-host their files with `@font-face` (see
+[media guide](/guides/media)) instead. `data:` URLs are fine, and absolute
+URLs are too: the ledger reads the vendored stylesheet, so they show up as
+remote references and a second `vendor` run downloads them.
+
+A remote script that imports other modules (a static `import` or
+`export … from`, a dynamic `import()`, or `import.meta`) is not vendored
+either, for the same reason: `three.module.js` imports `./three.core.js`, and
+jsDelivr `+esm` bundles import root-relative paths. The ledger does not read
+JavaScript, so these are kept remote and reported. Classic scripts and
+self-contained modules vendor normally.
 
 ### Exit codes
 

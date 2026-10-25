@@ -1,6 +1,4 @@
-// Scans HTML and CSS text only, so it runs without a browser or network. URLs built at runtime and
-// assets nested inside remote stylesheets are out of scope. Node-only: import it via
-// `@hyperframes/core/asset-ledger` so the main entry stays browser-safe.
+// Scans HTML and CSS text only, so it runs without a browser or network.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
@@ -62,12 +60,7 @@ export interface LedgerFileInput {
 }
 
 export interface BuildLedgerOptions {
-  /**
-   * Resolve a local URL candidate to a project-root-relative path, or null
-   * when the file does not exist. `fromFile` is the referencing HTML file
-   * (root-relative). When omitted, every local candidate reports `missing` —
-   * fine for pure-string unit tests, wrong for real projects.
-   */
+  /** Resolves a local URL to a root-relative path, or null; without it every local URL is `missing`. */
   resolveLocalAsset?: (fromFile: string, url: string) => string | null;
 }
 
@@ -541,7 +534,7 @@ export function collectProjectHtmlFiles(projectDir: string): string[] {
  * bare root-relative URLs from the project root (both via the shared
  * candidate logic in `@hyperframes/parsers/asset-resolution`).
  */
-export function resolveDeclaredLocalAsset(
+function resolveDeclaredLocalAsset(
   projectDir: string,
   fromFile: string,
   url: string,
