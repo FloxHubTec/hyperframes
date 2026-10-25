@@ -1,5 +1,4 @@
 import { resolveFrameFormat } from "@hyperframes/engine";
-import { isUniformFrameCost } from "../render/captureCost.js";
 import type { ChunkSliceJson } from "../render/stages/freezePlan.js";
 import type { PlanVideosJson } from "./shared.js";
 
@@ -7,6 +6,17 @@ import type { PlanVideosJson } from "./shared.js";
 const PAGE_BASE_WEIGHT = 0.7;
 /** png frames cost ~1.5x jpg per megapixel. */
 const PNG_WEIGHT_FACTOR = 1.5;
+
+/** Costs whose max/min stay within 5% count as uniform. */
+function isUniformFrameCost(weights: Float64Array): boolean {
+  let lightest = Infinity;
+  let heaviest = 0;
+  for (const weight of weights) {
+    lightest = Math.min(lightest, weight);
+    heaviest = Math.max(heaviest, weight);
+  }
+  return heaviest <= lightest * 1.05;
+}
 
 /** Estimated capture cost of every frame: page base plus each active video's pixels. */
 export function planFrameWeights(input: {

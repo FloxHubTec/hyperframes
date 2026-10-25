@@ -1553,20 +1553,6 @@ describe("selectCaptureCalibrationFrames", () => {
     expect(selectCaptureCalibrationFrames(180)).toEqual([0, 45, 90, 135, 179]);
     expect(selectCaptureCalibrationFrames(3)).toEqual([0, 1, 2]);
   });
-
-  it("keeps the quartile frames when the per-frame cost is uniform", () => {
-    expect(selectCaptureCalibrationFrames(180, new Float64Array(180).fill(0.7))).toEqual([
-      0, 45, 90, 135, 179,
-    ]);
-  });
-
-  it("samples by cost interval so a heavy window is always measured", () => {
-    const weights = new Float64Array(1500).fill(1);
-    weights.fill(4, 1000, 1083);
-    const quartiles = selectCaptureCalibrationFrames(1500);
-    expect(quartiles.some((frame) => frame >= 1000 && frame < 1083)).toBe(false);
-    expect(selectCaptureCalibrationFrames(1500, weights)).toEqual([218, 655, 1000, 1023, 1281]);
-  });
 });
 
 describe("capture calibration safeguards", () => {

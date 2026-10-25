@@ -1601,7 +1601,6 @@ export async function buildLocalExecutionPlan(
           html: compiled.html,
           planVideos: planVideosJson,
           totalFrames,
-          frameWeights,
           fps: config.fps,
           width,
           height,
