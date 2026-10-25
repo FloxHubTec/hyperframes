@@ -3122,8 +3122,8 @@ export function initSandboxRuntimeModular(): void {
         if (nodeAffectsAudio(rawNode)) hiddenAudioDirty = true;
       }
 
-      // A static element reached only for its data-hidden has no clip window to decide.
-      if (!rawNode.hasAttribute("data-start")) continue;
+      const hasClipWindow = rawNode.hasAttribute("data-start");
+      if (!hasClipWindow) continue;
 
       if (unchanged?.(rawNode)) continue;
 
