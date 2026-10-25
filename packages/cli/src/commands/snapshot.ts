@@ -1,6 +1,13 @@
+import {
+  DEFAULT_CONFIG,
+  buildZeroDurationDiagnostic,
+  evaluateHfDiagnostic,
+} from "@hyperframes/engine";
+import type { Page } from "puppeteer-core";
 import { reportArtifacts } from "../utils/toolContext.js";
 import { withProjectLock } from "../utils/projectLock.js";
 import {
+  parseSnapshotAt,
   parseSnapshotRange,
   sampleSnapshotRange,
   resolveSnapshotCompositionRange,
@@ -112,6 +119,15 @@ function orbitStageSource(): string {
  * clip (corrupt media, stalled network mount, codec edge case) cannot wedge
  * `hyperframes snapshot` indefinitely. */
 const FFMPEG_EXTRACT_TIMEOUT_MS = 30_000;
+const FALLBACK_SEEK_LEAD_SECONDS = 5;
+const RENDER_READY_TIMEOUT_MS = DEFAULT_CONFIG.playerReadyTimeout;
+
+export async function renderNotReadyError(page: Page, timeoutMs: number): Promise<Error> {
+  const diagnostic = await evaluateHfDiagnostic(page).then(buildZeroDurationDiagnostic, () => "");
+  return new Error(
+    `The composition was not render-ready after ${timeoutMs}ms, so no frame was saved (raise --timeout if it loads slowly).\n${diagnostic}`,
+  );
+}
 /** Each 4K decode is already multi-threaded, so a few at once fill the cores without exhausting memory. */
 const VIDEO_FRAME_EXTRACT_CONCURRENCY = 4;
 
@@ -119,6 +135,9 @@ const VIDEO_FRAME_EXTRACT_CONCURRENCY = 4;
 export function formatSnapshotTimestamp(time: number): string {
   return `${Number(time.toFixed(3))}s`;
 }
+
+export const SNAPSHOT_IMAGE_NAME =
+  /^(?:(?:frame-\d+-|ref-(?:\d+-)?)?at-[\d.]+s\.png|pair-(?:\d+-)?at-[\d.]+s\.jpg|(?:beat-\d+|seam-\d+-\d+)-at-[\d.]+s\.png|(?:contact-sheet|review-beats|review-phone)(?:-\d+)?\.jpg|review-seam-\d+\.jpg)$/;
 
 /** --keep names a still by its millisecond label, so two distinct times may not share one. */
 function assertDistinctKeepNames(times: number[]): void {
@@ -241,7 +260,7 @@ export function containingSourceFrameIndex(timestamps: readonly number[], time: 
 }
 
 /** Keyframe seek plus the decoded-time threshold that selects the frame containing `time`, or null. */
-async function probeContainingSourceFrameSeek(
+export async function probeContainingSourceFrameSeek(
   videoPath: string,
   time: number,
   holdLastFrame: boolean,
@@ -335,12 +354,19 @@ async function probeContainingSourceFrameSeek(
     const landed = await landing(candidate.pts);
     if (landed === null) break;
     if (landed <= 0 || landed > frame) continue;
+    // An index that places this keyframe after its own time lands on the one before; an accurate seek
+    // to the keyframe's time decodes from there and drops everything before it.
+    if (landed < candidate.pts - 1e-6) return { seek: candidate.pts, select: mid - candidate.pts };
     const again = Math.abs(landed - candidate.pts) < 1e-6 ? landed : await landing(landed);
     if (again !== null && Math.abs(again - landed) < 1e-6)
       return { seek: landed, select: mid - landed };
   }
-  // No seek: the first frame FFmpeg emits is the first one at or after the file start.
-  return { select: mid - (timestamps.find((t) => t >= 0) ?? frame) };
+  // No usable keyframe landing: an accurate seek to the gap before the frame decodes up to it and drops the rest.
+  // An exact frame time keeps start_t at 0; a time between frames would shift the select by the gap to the next frame.
+  const from = timestamps.filter((t) => t > 0 && t <= mid - FALLBACK_SEEK_LEAD_SECONDS).at(-1) ?? 0;
+  return from > 0
+    ? { seek: from, select: mid - from }
+    : { select: mid - (timestamps.find((t) => t >= 0) ?? frame) };
 }
 
 /** Raw stream time of the packet an input seek to `seek` lands on, read without decoding. */
@@ -366,6 +392,8 @@ async function probeSeekLanding(
     return null;
   }
 }
+
+class FrameExtractTimeoutError extends Error {}
 
 export async function extractVideoFrameToBuffer(
   videoPath: string,
@@ -399,7 +427,12 @@ export async function extractVideoFrameToBuffer(
     if (filters.length > 0) args.push("-vf", filters.join(","));
     args.push("-frames:v", "1", "-q:v", "2", "-y", outPath);
     const result = await runFfmpegOnce(ffmpegPath, args, FFMPEG_EXTRACT_TIMEOUT_MS);
-    if (result.code !== 0 || result.timedOut || !existsSync(outPath)) return null;
+    if (result.timedOut) {
+      throw new FrameExtractTimeoutError(
+        `FFmpeg timed out after ${FFMPEG_EXTRACT_TIMEOUT_MS / 1000}s extracting the frame of ${videoPath} at ${timeSeconds.toFixed(2)}s`,
+      );
+    }
+    if (result.code !== 0 || !existsSync(outPath)) return null;
     return readFileSync(outPath);
   } finally {
     try {
@@ -407,6 +440,21 @@ export async function extractVideoFrameToBuffer(
     } catch {
       /* best-effort */
     }
+  }
+}
+
+/** A timed-out clip becomes a finding naming it, so the other frames of the snapshot still land. */
+export async function extractVideoFrameOrWarn(
+  warnings: string[],
+  ...args: Parameters<typeof extractVideoFrameToBuffer>
+): Promise<Buffer | null> {
+  try {
+    return await extractVideoFrameToBuffer(...args);
+  } catch (error) {
+    if (!(error instanceof FrameExtractTimeoutError)) throw error;
+    warnings.push(error.message);
+    console.warn(`   ${c.warn("⚠")} ${error.message}`);
+    return null;
   }
 }
 
@@ -554,13 +602,14 @@ async function captureSnapshots(
       page,
       renderReadyTimedOut,
     } = await openSettledCompositionPage(html, server.url, {
-      renderReadyTimeoutMs: opts.timeout ?? 5000,
+      renderReadyTimeoutMs: opts.timeout ?? RENDER_READY_TIMEOUT_MS,
       renderReadyWarningSuffix: "snapshots may be inaccurate",
       browserGpuMode: opts.browserGpuMode,
     });
 
     try {
-      if (renderReadyTimedOut) warnings.push("Render readiness timed out");
+      if (renderReadyTimedOut)
+        throw await renderNotReadyError(page, opts.timeout ?? RENDER_READY_TIMEOUT_MS);
       // Font verification — split into loaded / errored / unused. Only status
       // "error" is a real failure; a face still "unloaded"/"loading" after
       // document.fonts.ready + the settle wait was simply never requested by any
@@ -683,7 +732,7 @@ async function captureSnapshots(
       try {
         const { readdirSync } = await import("node:fs");
         for (const file of opts.keep ? [] : readdirSync(snapshotDir)) {
-          if (/\.(png|jpg|jpeg)$/i.test(file)) {
+          if (SNAPSHOT_IMAGE_NAME.test(file)) {
             const path = resolve(snapshotDir, file);
             replaced.push(path);
             rmSync(path, { force: true });
@@ -855,7 +904,8 @@ async function captureSnapshots(
               const useVp9AlphaDecoder = inputIsLocal
                 ? await shouldUseVp9AlphaDecoder(ffmpegInput)
                 : false;
-              const png = await extractVideoFrameToBuffer(
+              const png = await extractVideoFrameOrWarn(
+                warnings,
                 ffmpegInput,
                 Math.max(0, v.relTime),
                 useVp9AlphaDecoder,
@@ -1191,8 +1241,8 @@ export default defineCommand({
     },
     timeout: {
       type: "string",
-      description: "Ms to wait for runtime to initialize (default: 5000)",
-      default: "5000",
+      description: `Ms to wait for the composition to become render-ready (default: ${RENDER_READY_TIMEOUT_MS})`,
+      default: String(RENDER_READY_TIMEOUT_MS),
     },
     angle: {
       type: "string",
@@ -1274,6 +1324,8 @@ export default defineCommand({
     }
     const frames = parseInt(args.frames as string, 10) || 5;
     const range = args.range === undefined ? undefined : parseSnapshotRange(String(args.range));
+    const atTimestamps = args.at === undefined ? undefined : parseSnapshotAt(String(args.at));
+    if (args.keep === true && atTimestamps) assertDistinctKeepNames(atTimestamps);
     const composition =
       args.composition === undefined ? undefined : String(args.composition).trim();
     if (composition === "") throw new Error("--composition requires a composition ID");
@@ -1309,14 +1361,7 @@ export default defineCommand({
       }
       failCommand();
     }
-    const timeout = parseInt(args.timeout as string, 10) || 5000;
-    const atTimestamps = args.at
-      ? String(args.at)
-          .split(",")
-          .map((s) => parseFloat(s.trim()))
-          .filter((n) => !isNaN(n))
-      : undefined;
-    if (args.keep === true && atTimestamps) assertDistinctKeepNames(atTimestamps);
+    const timeout = parseInt(args.timeout as string, 10) || RENDER_READY_TIMEOUT_MS;
     // Gemini frame analysis runs by default (silently skipped if
     // GEMINI_API_KEY is not set). `--describe "custom question"` overrides
     // the default prompt with a targeted question. `--describe false` opts
@@ -1373,11 +1418,8 @@ export default defineCommand({
           log,
         });
         const paths = captured.paths;
-        reportArtifacts(
-          "snapshot",
-          "frame",
-          paths.map((path) => resolve(project.dir, path)),
-        );
+        const framePaths = paths.map((path) => resolve(project.dir, path));
+        reportArtifacts("snapshot", "frame", framePaths);
 
         if (paths.length === 0) {
           fail(`\n${c.error("✗")} Could not determine composition duration — no frames captured`);
@@ -1411,7 +1453,7 @@ export default defineCommand({
             printReview(captured.review, reviewSheets, log);
           } else if (args.keep !== true) {
             contactSheets = await createSnapshotContactSheet(
-              snapshotDir,
+              framePaths,
               join(snapshotDir, "contact-sheet.jpg"),
             );
           }

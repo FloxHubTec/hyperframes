@@ -1,7 +1,7 @@
 // fallow-ignore-file code-duplication
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -229,6 +229,36 @@ describe("buildChromeArgs browser GPU mode", () => {
     expect(args).not.toContain("--use-angle=swiftshader");
   });
 
+  it("disables DXC for hardware WebGPU on Windows", () => {
+    const args = buildChromeArgs({ ...base, platform: "win32" }, { browserGpuMode: "hardware" });
+    expect(args).toContain("--enable-unsafe-webgpu");
+    expect(args).toContain("--disable-dawn-features=use_dxc");
+  });
+
+  it("disables DXC for a WebGPU composition in software mode on Windows", () => {
+    const args = buildChromeArgs(
+      { ...base, platform: "win32", requiresWebGpu: true },
+      { browserGpuMode: "software" },
+    );
+    expect(args).toContain("--enable-unsafe-webgpu");
+    expect(args).toContain("--disable-dawn-features=use_dxc");
+  });
+
+  it("leaves DXC unchanged without WebGPU in software mode on Windows", () => {
+    const args = buildChromeArgs({ ...base, platform: "win32" }, { browserGpuMode: "software" });
+    expect(args).not.toContain("--enable-unsafe-webgpu");
+    expect(args).not.toContain("--disable-dawn-features=use_dxc");
+  });
+
+  it("leaves DXC unchanged for hardware WebGPU on macOS and Linux", () => {
+    const platforms: NodeJS.Platform[] = ["darwin", "linux"];
+    for (const platform of platforms) {
+      const args = buildChromeArgs({ ...base, platform }, { browserGpuMode: "hardware" });
+      expect(args).toContain("--enable-unsafe-webgpu");
+      expect(args).not.toContain("--disable-dawn-features=use_dxc");
+    }
+  });
+
   it("uses ANGLE-EGL for hardware browser GPU mode on Linux", () => {
     const args = buildChromeArgs({ ...base, platform: "linux" }, { browserGpuMode: "hardware" });
     expect(args).toContain("--use-gl=angle");
@@ -448,13 +478,42 @@ describe("resolveBrowserGpuMode", () => {
 
   beforeEach(() => {
     _resetAutoBrowserGpuModeCacheForTests();
+    // A named shell skips discovery, which starts any older Chrome in the user's cache to test it.
+    vi.stubEnv("PRODUCER_HEADLESS_SHELL_PATH", process.execPath);
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     _setPuppeteerForTests(undefined);
     _resetAutoBrowserGpuModeCacheForTests();
   });
+
+  it.runIf(process.platform === "linux" && process.arch === "x64")(
+    "does not launch a Chrome found in the user's cache while probing",
+    async () => {
+      const home = mkdtempSync(join(tmpdir(), "hf-gpu-probe-home-"));
+      const marker = join(home, "launched");
+      const shellDir = join(
+        home,
+        ".cache/puppeteer/chrome-headless-shell",
+        "linux-100.0.0.0",
+        "chrome-headless-shell-linux64",
+      );
+      mkdirSync(shellDir, { recursive: true });
+      writeFileSync(join(shellDir, "chrome-headless-shell"), `#!/bin/sh\ntouch "${marker}"\n`);
+      chmodSync(join(shellDir, "chrome-headless-shell"), 0o755);
+      vi.stubEnv("HOME", home);
+      vi.stubEnv("HYPERFRAMES_BROWSER_PATH", "");
+      setMockWebGlProbe({ hasWebGL: true, vendor: "NVIDIA", renderer: "NVIDIA" });
+      try {
+        await resolveBrowserGpuMode("auto");
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("lets a host own GPU probe launch and cleanup", async () => {
     const { launch } = setMockWebGlProbe({ hasWebGL: true, vendor: "NVIDIA", renderer: "NVIDIA" });

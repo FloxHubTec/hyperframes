@@ -198,6 +198,14 @@ Source: `packages/lint/src/rules/composition.ts`.
 
 **Fix:** Give the root `id="root"` and style it with `#root` plus plain descendant selectors.
 
+### `subcomposition_style_outside_template`
+
+**Warning.** A sub-composition file with a `<template>` has a `<style>`, or a `<link rel="stylesheet">`
+outside `<head>`, that sits outside the template. Mounting keeps only the template's content and the
+stylesheet links in `<head>`, so those styles never apply in preview, snapshot or render.
+
+**Fix:** Move it inside `<template>`, next to the composition root.
+
 ### `template_literal_selector`
 
 **Error.** `querySelector` is called with a template-literal variable, which the bundler's CSS parser crashes on.
@@ -488,6 +496,16 @@ Source: `packages/lint/src/rules/gsap.ts`.
 
 **Fix:** Remove the CSS `stroke-dasharray` (decorative dashes belong on a separate element), or set the full two-component value in GSAP.
 
+### `svg_round_cap_hidden_dash`
+
+**Warning.** A round or square capped path is hidden with dasharray = gap = `pathLength` and dashoffset = dash.
+
+Chrome can leave a zero-length sliver at the path end there, and the cap paints it as a dot on some curves.
+
+**Fix:** Make the gap longer than the path (`stroke-dasharray="100 120"`, `stroke-dashoffset="110"`).
+
+Or keep the element `visibility: hidden` until its draw tween starts.
+
 ### `svg_measure_before_path_d`
 
 **Error / warning.** `getTotalLength()` is called on a path with no static `d` attribute, so it returns 0 and the dash animation dies. Error when no `d` assignment exists anywhere, warning when `d` is only assigned inside a function body.
@@ -730,6 +748,8 @@ Source: `packages/lint/src/rules/fonts.ts`.
 
 **Fix:** Declare each family with `@font-face` pointing at the captured `.woff2` files, or bundle the font under `capture/assets/fonts/`.
 
+The declaration may use a quoted or unquoted family name. If `font-family` is the last descriptor in the block, its final semicolon is optional.
+
 ### `system_font_will_alias`
 
 **Warning.** A system font family is used without a matching `@font-face`; in distributed rendering system-font capture is disabled, so the font is substituted at render time and text can reflow. Only reported when the linter runs with the `distributed: true` option (linting for distributed or Lambda renders); a local render captures the system font as designed, so it is not flagged there.
@@ -860,7 +880,7 @@ Source: the project lint pass in `packages/lint/src/project.ts`, `packages/lint/
 
 ### `texture_mask_asset_not_found`
 
-**Error.** A CSS `mask-image` references files that are not in the project, so the texture mask fails to load.
+**Error.** A CSS `mask-image` or `-webkit-mask-image` declaration references files that are not in the project, so the texture mask fails to load. In valid CSS, comments and text inside other declarations, such as `content` strings, are ignored.
 
 **Fix:** Add the missing mask file(s) to the project, or update the `mask-image` URL.
 

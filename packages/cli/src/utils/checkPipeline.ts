@@ -1,4 +1,4 @@
-import { BrowserCleanupError } from "../browser/launch.js";
+import { BrowserCleanupError, onStopSignal } from "../browser/launch.js";
 import type { CheckProgress } from "./checkProgress.js";
 import { CheckDeadline, CheckDeadlineError, type CheckPhase } from "./checkDeadline.js";
 import {
@@ -517,6 +517,7 @@ async function collectGridSamples(
   helpers: Promise<CheckAuditDriver[]>,
   enter: (phase: CheckPhase) => void,
   report: CheckProgress,
+  keep: (read: () => Partial<CheckBrowserResult>) => void,
 ): Promise<GridSamples> {
   const geometryEnabled = grid.captionSamples.length > 0 || grid.frameSamples.length > 0;
   const sets: SampleSets = {
@@ -528,6 +529,17 @@ async function collectGridSamples(
   const times = mergeSampleTimes(grid.layoutSamples, motion.times);
   const pending = times.map((_, index) => index);
   const perTime: GridSamples[] = [];
+  keep(() => {
+    const so = emptyGridSamples();
+    for (const samples of perTime) if (samples) appendGridSamples(so, samples);
+    const contrast = buildContrastResults(so.contrastEntries);
+    return {
+      layoutIssues: so.layoutIssues,
+      contrastFindings: contrast.findings,
+      contrastChecked: so.contrastEntries.length,
+      contrastPassed: contrast.passed,
+    };
+  });
   let finished = 0;
   const work = async (worker: CheckAuditDriver, taken: number[] = []) => {
     for (let index = pending.shift(); index !== undefined; index = pending.shift()) {
@@ -1466,6 +1478,7 @@ export async function runAuditGrid(
   helpers: Promise<CheckAuditDriver[]> = Promise.resolve([]),
   enter: (phase: CheckPhase) => void = () => {},
   report: CheckProgress = () => {},
+  keep: (read: () => Partial<CheckBrowserResult>) => void = () => {},
 ): Promise<CheckBrowserResult> {
   enter("samples");
   await driver.initialize(options.contrast);
@@ -1476,7 +1489,16 @@ export async function runAuditGrid(
     grid.duration,
   );
   const seekLoopStart = Date.now();
-  const collected = await collectGridSamples(driver, options, grid, plan, helpers, enter, report);
+  const collected = await collectGridSamples(
+    driver,
+    options,
+    grid,
+    plan,
+    helpers,
+    enter,
+    report,
+    keep,
+  );
   const seekLoopMs = Date.now() - seekLoopStart;
 
   let motionIssues = plan.preflightIssues;
@@ -1633,6 +1655,7 @@ export async function runCheckPipeline(
         : [];
 
     const deadline = new CheckDeadline();
+    const forgetStop = onStopSignal(deadline.stop);
     let outcome: { kind: "report"; report: CheckReport } | { kind: "failed"; error: unknown };
     try {
       let browser: CheckBrowserResult;
@@ -1642,8 +1665,9 @@ export async function runCheckPipeline(
           dependencies.runBrowserCheck(project, options, motion, deadline, browserAhead),
         );
       } catch (error) {
-        browser = emptyBrowserResult();
-        browser.runtimeFindings.push(runtimeFailure(error));
+        const found = deadline.partialResult();
+        browser = { ...emptyBrowserResult(), ...found, skipped: Object.keys(found).length === 0 };
+        browser.runtimeFindings = [...browser.runtimeFindings, runtimeFailure(error)];
       }
 
       const snapshotFiles = options.snapshots
@@ -1668,6 +1692,7 @@ export async function runCheckPipeline(
     } catch (error) {
       outcome = { kind: "failed", error };
     }
+    forgetStop();
     try {
       await deadline.close();
     } catch (error) {

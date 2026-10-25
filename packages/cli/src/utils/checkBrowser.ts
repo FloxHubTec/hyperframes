@@ -1,6 +1,6 @@
 import type { CheckDeadline } from "./checkDeadline.js";
 import { logCheckProgress } from "./checkProgress.js";
-import { BrowserCleanupError, closeManagedBrowser } from "../browser/launch.js";
+import { BrowserCleanupError, closeManagedBrowser, onStopSignal } from "../browser/launch.js";
 import { collectMotionBlurDrafts, dropMotionBlurConsoleEcho } from "./checkMotionBlur.js";
 import { checkSnapshotDirectory } from "./checkSnapshotDirectory.js";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -36,6 +36,11 @@ import { collectTweenRecords, findTweenTails, tweenTailMessage } from "./gsapTwe
 import { resolveAutoProxy } from "./projectConfig.js";
 import { findStageProxyBox } from "./compositionViewport.js";
 import type { PreviewProxyBox } from "@hyperframes/core";
+import { injectTagsAtHeadStart } from "@hyperframes/core/compiler/html-document";
+import {
+  STUDIO_PREVIEW_CAPTURE_MODE,
+  STUDIO_PREVIEW_MARK_META,
+} from "@hyperframes/core/studio-preview-mark";
 import {
   decideMediaProxyEligibility,
   proxyVariantFor,
@@ -45,6 +50,7 @@ import {
   FfmpegUnavailableError,
   getProxyCachePath,
   resolveProxies,
+  type ProxyProgress,
 } from "@hyperframes/studio-server/proxy-transcoder";
 import { rectToBbox } from "./checkTypes.js";
 import type {
@@ -131,6 +137,43 @@ interface FinishedContrast {
   bg: string;
 }
 
+const COPY_HEARTBEAT_MS = 10_000;
+
+function elapsedText(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+/** Says on stderr how far each copy is, so a slow copy reads as slow and a stuck one as stuck. */
+function startCopyHeartbeat(
+  sources: ReadonlyArray<{ file: string }>,
+  cached: readonly boolean[],
+): {
+  progress: (index: number, progress: ProxyProgress) => void;
+  settled: (index: number) => void;
+  stop: () => void;
+} {
+  const startedAt = Date.now();
+  const latest = new Map<number, ProxyProgress>();
+  const timer = setInterval(() => {
+    for (const [index, { doneSeconds, totalSeconds }] of latest) {
+      if (cached[index]) continue;
+      const done = totalSeconds
+        ? `${Math.min(100, Math.floor((doneSeconds / totalSeconds) * 100))}%`
+        : "";
+      console.error(
+        `[hyperframes] browser-playable copy of ${sources[index]!.file}: ${done || `${Math.floor(doneSeconds)}s done`} (${elapsedText(Date.now() - startedAt)} so far)`,
+      );
+    }
+  }, COPY_HEARTBEAT_MS);
+  timer.unref();
+  return {
+    progress: (index, progress) => void latest.set(index, progress),
+    settled: (index) => void latest.delete(index),
+    stop: () => clearInterval(timer),
+  };
+}
+
 /**
  * Awaits the H.264 authoring proxy for every browser-hostile local video
  * asset in `html` BEFORE the timed render-ready wait starts. `check`'s
@@ -185,9 +228,22 @@ export async function preResolveHostileMediaProxies(
     );
   }
   let settled = 0;
-  const results = await resolveProxies(projectDir, sources, () => {
-    settled += 1;
-    if (toMake > 0) console.error(`[hyperframes] browser-playable copies: ${settled}/${total}`);
+  const heartbeat = startCopyHeartbeat(sources, cached);
+  const stopped = new AbortController();
+  const forgetStop = onStopSignal(() => stopped.abort());
+  const results = await resolveProxies(
+    projectDir,
+    sources,
+    (index) => {
+      settled += 1;
+      heartbeat.settled(index);
+      if (toMake > 0) console.error(`[hyperframes] browser-playable copies: ${settled}/${total}`);
+    },
+    heartbeat.progress,
+    stopped.signal,
+  ).finally(() => {
+    heartbeat.stop();
+    forgetStop();
   });
   const failures = sources.flatMap((source, index) => {
     const result = results[index]!;
@@ -254,6 +310,14 @@ function proxyFailedDraft(message: string): RuntimeDraft {
   return { code: "media_proxy_failed", severity: "warning", message, time: 0 };
 }
 
+async function loadCheckHtmlWithDeferredMedia(dir: string): Promise<string> {
+  const { bundleWithLocalizedFonts } = await import("./bundleWithLocalizedFonts.js");
+  return injectTagsAtHeadStart(
+    await bundleWithLocalizedFonts(dir),
+    `<meta name="${STUDIO_PREVIEW_MARK_META}" content="${STUDIO_PREVIEW_CAPTURE_MODE}">`,
+  );
+}
+
 export async function runBrowserCheck(
   project: ProjectDir,
   options: CheckOptions,
@@ -262,8 +326,7 @@ export async function runBrowserCheck(
   deadline?: CheckDeadline,
   prelaunched?: PrelaunchedBrowser,
 ): Promise<CheckBrowserResult> {
-  const { bundleWithLocalizedFonts } = await import("./bundleWithLocalizedFonts.js");
-  const html = await bundleWithLocalizedFonts(project.dir);
+  const html = await loadCheckHtmlWithDeferredMedia(project.dir);
   deadline?.enter("copies");
   const { findings: drafts, failedPaths } = await preResolveHostileMediaProxies(
     project.dir,
@@ -313,6 +376,12 @@ export async function runBrowserCheck(
     await waitForPreferredSeekTarget(page);
 
     const rootAnchor = await resolveRootAnchor(page);
+    deadline?.keepPartial(() => ({
+      runtimeFindings: dropFailedProxyEchoes(
+        keepBrokenImageAborts(drafts, new Set()),
+        failedPaths,
+      ).map((draft) => runtimeFinding(draft, rootAnchor)),
+    }));
     const launchSettleMs = Date.now() - launchSettleStart;
     // validate's per-media-element audit, kept in the consolidation: a clip
     // whose intrinsic duration is meaningfully shorter than its data-duration
@@ -338,6 +407,7 @@ export async function runBrowserCheck(
       helpers,
       deadline?.enter,
       logCheckProgress,
+      deadline?.keepPartial,
     );
     helperSession?.stop();
     const helper = await helperOpen?.catch(() => undefined);
@@ -489,8 +559,7 @@ export async function captureFindingCrops(
   deadline?: CheckDeadline,
 ): Promise<string[]> {
   if (requests.length === 0) return [];
-  const { bundleWithLocalizedFonts } = await import("./bundleWithLocalizedFonts.js");
-  const html = await bundleWithLocalizedFonts(project.dir);
+  const html = await loadCheckHtmlWithDeferredMedia(project.dir);
   const server = await serveStaticProjectHtml(
     project.dir,
     html,
@@ -771,12 +840,33 @@ function wireNetworkListeners(page: Page, drafts: RuntimeDraft[], clock: Runtime
   });
 }
 
+function failWhenPageDies(page: Page, driver: CheckAuditDriver): CheckAuditDriver {
+  const dead = new Promise<never>((_, reject) => {
+    page.on("error", (error) =>
+      reject(new Error(`The page crashed: ${normalizeErrorMessage(error)}`)),
+    );
+    page.on("close", () => reject(new Error("The page closed before the check finished")));
+  });
+  dead.catch(() => undefined);
+  return Object.fromEntries(
+    Object.entries(driver).map(([name, member]) => [
+      name,
+      typeof member === "function"
+        ? (...args: unknown[]) => {
+            const result: unknown = Reflect.apply(member, driver, args);
+            return result instanceof Promise ? Promise.race([result, dead]) : result;
+          }
+        : member,
+    ]),
+  ) as unknown as CheckAuditDriver;
+}
+
 export function createPageDriver(
   page: Page,
   clock: RuntimeClock = createRuntimeClock(),
   sampleLog?: SampleWindow,
 ): CheckAuditDriver {
-  return {
+  return failWhenPageDies(page, {
     initialize: (contrast) => injectAuditScripts(page, contrast),
     markSamples: (phase) => {
       if (!sampleLog) return;
@@ -832,7 +922,7 @@ export function createPageDriver(
     collectContrast: (time, annotations) => collectContrast(page, time, annotations),
     collectCraftFrame: (time) => collectCraftFrame(page, time),
     collectCraftFilm: () => collectCraftFilm(page),
-  };
+  });
 }
 
 async function collectCraftFrame(page: Page, time: number): Promise<CraftFrame> {
