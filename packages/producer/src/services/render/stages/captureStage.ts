@@ -117,6 +117,8 @@ export interface CaptureStageInput {
    */
   frameRange?: { startFrame: number; endFrame: number };
   onFrameLanded?: (frame: LandedFrame) => void;
+  /** Set when `onFrameLanded` feeds an in-order encoder: workers then capture round-robin, not contiguous ranges. */
+  interleaveFrames?: boolean;
 }
 
 export interface CaptureStageResult {
@@ -377,6 +379,7 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
       createBeforeCaptureHook: createRenderVideoFrameInjector,
       abortSignal,
       frameRangeStart: frameRange?.startFrame,
+      interleaveFrames: input.interleaveFrames,
       dedupPerfs,
       pageErrorLines: workerPageErrors,
       onProgress: (progress) => {

@@ -78,6 +78,7 @@ import {
   createVideoFrameInjector,
   getEncoderPreset,
   distributeFrames,
+  distributeFramesInterleaved,
   executeParallelCapture,
   mergeWorkerFrames,
   type ParallelProgress,
@@ -1200,6 +1201,8 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
   createBeforeCaptureHook: () => BeforeCaptureHook | null;
   abortSignal?: AbortSignal;
   onProgress?: (progress: ParallelProgress) => void;
+  /** Workers take frames round-robin so an in-order consumer (the overlapped encoder) is never starved. */
+  interleaveFrames?: boolean;
   cfg: EngineConfig;
   log: ProducerLogger;
   /**
@@ -1244,7 +1247,14 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
           attempt,
           rangeStart,
         )
-      : [distributeFrames(options.totalFrames, currentWorkers, attemptWorkDir, rangeStart)];
+      : [
+          (options.interleaveFrames ? distributeFramesInterleaved : distributeFrames)(
+            options.totalFrames,
+            currentWorkers,
+            attemptWorkDir,
+            rangeStart,
+          ),
+        ];
 
     // Reset before each attempt so a retry REPLACES (not accumulates) worker perf —
     // otherwise a frame captured in attempt 0 AND re-captured on retry would be counted
@@ -5032,6 +5042,7 @@ async function executeRenderPipeline(input: {
                 assertNotAborted,
                 onProgress,
                 onFrameLanded: (frame) => overlap?.onFrameLanded(frame),
+                interleaveFrames: overlap !== null,
               }),
           );
         let captureRes;

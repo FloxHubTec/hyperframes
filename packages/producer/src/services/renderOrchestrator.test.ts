@@ -180,6 +180,47 @@ describe("executeDiskCaptureWithAdaptiveRetry — zero-progress bail (integratio
     }
   });
 
+  it.each([
+    { interleaveFrames: true, strides: [3, 3, 3], starts: [10, 11, 12] },
+    {
+      interleaveFrames: undefined,
+      strides: [undefined, undefined, undefined],
+      starts: [10, 14, 18],
+    },
+  ])(
+    "hands workers $starts as start frames when interleaveFrames=$interleaveFrames",
+    async ({ interleaveFrames, strides, starts }) => {
+      vi.mocked(executeParallelCapture).mockResolvedValue([]);
+      vi.mocked(mergeWorkerFrames).mockResolvedValue(undefined);
+      const workDir = mkdtempSync(join(tmpdir(), "hf-dist-work-"));
+      const framesDir = mkdtempSync(join(tmpdir(), "hf-dist-frames-"));
+      try {
+        await executeDiskCaptureWithAdaptiveRetry({
+          serverUrl: "http://localhost:0",
+          workDir,
+          framesDir,
+          totalFrames: 12,
+          initialWorkerCount: 3,
+          allowRetry: false,
+          frameExt: "jpg",
+          captureOptions: {} as CaptureOptions,
+          createBeforeCaptureHook: () => null,
+          cfg: {} as EngineConfig,
+          log: makeLog(),
+          dedupPerfs: [],
+          frameRangeStart: 10,
+          interleaveFrames,
+        }).catch(() => {});
+        const tasks = vi.mocked(executeParallelCapture).mock.calls[0]?.[2] ?? [];
+        expect(tasks.map((t) => t.startFrame)).toEqual(starts);
+        expect(tasks.map((t) => t.frameStride)).toEqual(strides);
+      } finally {
+        rmSync(workDir, { recursive: true, force: true });
+        rmSync(framesDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("runs exactly one attempt (no worker-halving retries) when an attempt captures zero frames", async () => {
     // Capture writes nothing -> framesDir stays empty -> every frame still missing.
     vi.mocked(executeParallelCapture).mockResolvedValue([]);
