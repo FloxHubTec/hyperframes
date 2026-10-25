@@ -113,6 +113,7 @@ function orbitStageSource(): string {
  * clip (corrupt media, stalled network mount, codec edge case) cannot wedge
  * `hyperframes snapshot` indefinitely. */
 const FFMPEG_EXTRACT_TIMEOUT_MS = 30_000;
+const FALLBACK_SEEK_LEAD_SECONDS = 5;
 /** Each 4K decode is already multi-threaded, so a few at once fill the cores without exhausting memory. */
 const VIDEO_FRAME_EXTRACT_CONCURRENCY = 4;
 
@@ -346,8 +347,11 @@ export async function probeContainingSourceFrameSeek(
     if (again !== null && Math.abs(again - landed) < 1e-6)
       return { seek: landed, select: mid - landed };
   }
-  // No seek: the first frame FFmpeg emits is the first one at or after the file start.
-  return { select: mid - (timestamps.find((t) => t >= 0) ?? frame) };
+  // No usable keyframe landing: an accurate seek to the gap before the frame decodes up to it and drops the rest.
+  const from = Math.max(0, mid - FALLBACK_SEEK_LEAD_SECONDS);
+  return from > 0
+    ? { seek: from, select: mid - from }
+    : { select: mid - (timestamps.find((t) => t >= 0) ?? frame) };
 }
 
 /** Raw stream time of the packet an input seek to `seek` lands on, read without decoding. */
@@ -406,7 +410,12 @@ export async function extractVideoFrameToBuffer(
     if (filters.length > 0) args.push("-vf", filters.join(","));
     args.push("-frames:v", "1", "-q:v", "2", "-y", outPath);
     const result = await runFfmpegOnce(ffmpegPath, args, FFMPEG_EXTRACT_TIMEOUT_MS);
-    if (result.code !== 0 || result.timedOut || !existsSync(outPath)) return null;
+    if (result.timedOut) {
+      throw new Error(
+        `FFmpeg timed out after ${FFMPEG_EXTRACT_TIMEOUT_MS / 1000}s extracting the frame of ${videoPath} at ${timeSeconds.toFixed(2)}s`,
+      );
+    }
+    if (result.code !== 0 || !existsSync(outPath)) return null;
     return readFileSync(outPath);
   } finally {
     try {
