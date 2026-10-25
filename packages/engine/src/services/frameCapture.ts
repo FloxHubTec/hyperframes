@@ -86,7 +86,12 @@ import {
   DE_CANVAS_NOT_INITIALIZED_CODE,
 } from "./drawElementService.js";
 import { initThreeDProjection, scanCssEffects } from "./threeDProjection.js";
-import { planRiskFrames, scanCssEffectLiveFrames, MAX_RISK_FRAME_FRACTION } from "./riskFrames.js";
+import {
+  planRiskFrames,
+  scanCssEffectLiveFrames,
+  withFramesAfterCallback,
+  MAX_RISK_FRAME_FRACTION,
+} from "./riskFrames.js";
 import { isPsnrFilterAvailable } from "../utils/psnrFilterAvailability.js";
 import { DEFAULT_CONFIG, applyConcreteGpuScreenshotClamp, type EngineConfig } from "../config.js";
 import type {
@@ -1270,12 +1275,14 @@ async function cssEffectRiskFrames(
     await initializeSession(scratch);
     const scan = await scanCssEffects(scratch.page, true);
     if (!scan.reason || !scan.bounded) return null;
-    return await scanCssEffectLiveFrames(
+    const fps = fpsToNumber(session.options.fps);
+    const live = await scanCssEffectLiveFrames(
       scratch.page,
-      fpsToNumber(session.options.fps),
+      fps,
       totalFrames,
       totalFrames * MAX_RISK_FRAME_FRACTION,
     );
+    return live && withFramesAfterCallback(live, scan.callbackFrom, fps, totalFrames);
   } catch (error) {
     console.log(
       `[engine] fast capture: effect scan failed (${error instanceof Error ? error.message : String(error)})`,

@@ -95,3 +95,15 @@ export function planRiskFrames(frames: Iterable<number>, totalFrames: number): S
   if (rangeStart >= 0) flush();
   return plan.size > totalFrames * MAX_RISK_FRAME_FRACTION ? null : plan;
 }
+
+/** `live` plus every frame from just before the first callback to the end of the render. */
+export function withFramesAfterCallback(
+  live: Set<number>,
+  callbackFrom: number | null,
+  fps: number,
+  totalFrames: number,
+): Set<number> {
+  if (callbackFrom === null) return live;
+  for (let f = Math.max(0, Math.floor(callbackFrom * fps) - 1); f < totalFrames; f++) live.add(f);
+  return live;
+}

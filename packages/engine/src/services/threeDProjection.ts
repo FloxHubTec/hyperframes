@@ -930,6 +930,8 @@ export interface CssEffectScan {
   reason: string | null;
   /** False when a match is not tied to an element (unmatched rule, CSS animation, WebGL). */
   bounded: boolean;
+  /** Seconds at which the first timeline callback can fire; the effect can show anywhere after. */
+  callbackFrom: number | null;
 }
 
 /**
@@ -949,7 +951,7 @@ export async function scanCssEffects(page: Page, collect: boolean): Promise<CssE
     // detect the same effects seek-free, four ways:
     return await page.evaluate((collectAll: boolean): CssEffectScan => {
       const root = document.querySelector("[data-composition-id]");
-      if (!root) return { reason: null, bounded: true };
+      if (!root) return { reason: null, bounded: true, callbackFrom: null };
 
       let reason: string | null = null;
       let bounded = true;
@@ -1098,26 +1100,37 @@ export async function scanCssEffects(page: Page, collect: boolean): Promise<CssE
         if (scan()) break;
       }
 
-      // A timeline callback can add the effect's class to any element mid-render, so the
-      // elements found now are not the only ones it can reach.
-      const hasCallback = (tl: unknown): boolean => {
-        const node = tl as {
-          vars?: Record<string, unknown>;
-          getChildren?: (n: boolean, t: boolean, l: boolean) => unknown[];
-        };
-        const calls = ["onStart", "onUpdate", "onComplete", "onRepeat", "onReverseComplete"];
-        if (calls.some((k) => typeof node.vars?.[k] === "function")) return true;
-        return typeof node.getChildren === "function"
-          ? node.getChildren(false, true, true).some(hasCallback)
-          : false;
+      // A timeline callback can add an effect's class to any element, so from the first callback
+      // on, the elements found now are not the only ones the effect can reach.
+      type CallbackNode = {
+        vars?: Record<string, unknown>;
+        startTime?: () => number;
+        getChildren?: (n: boolean, t: boolean, l: boolean) => CallbackNode[];
       };
-      const timelines = (window as unknown as { __timelines?: Record<string, unknown> })
+      const calls = ["onStart", "onUpdate", "onComplete", "onRepeat", "onReverseComplete"];
+      const firstCallback = (node: CallbackNode, offset: number): number => {
+        const start = offset + (typeof node.startTime === "function" ? node.startTime() : 0);
+        let first = calls.some((k) => typeof node.vars?.[k] === "function") ? start : Infinity;
+        if (typeof node.getChildren === "function") {
+          for (const child of node.getChildren(false, true, true)) {
+            first = Math.min(first, firstCallback(child, start));
+          }
+        }
+        return first;
+      };
+      const timelines = (window as unknown as { __timelines?: Record<string, CallbackNode> })
         .__timelines;
-      if (reason && Object.values(timelines ?? {}).some(hasCallback)) bounded = false;
+      const callbackStart = reason
+        ? Math.min(Infinity, ...Object.values(timelines ?? {}).map((tl) => firstCallback(tl, 0)))
+        : Infinity;
       (window as unknown as { __hfCssFxTargets?: Element[] }).__hfCssFxTargets = [...targets];
-      return { reason, bounded };
+      return {
+        reason,
+        bounded,
+        callbackFrom: Number.isFinite(callbackStart) ? callbackStart : null,
+      };
     }, collect);
   } catch {
-    return { reason: null, bounded: true };
+    return { reason: null, bounded: true, callbackFrom: null };
   }
 }

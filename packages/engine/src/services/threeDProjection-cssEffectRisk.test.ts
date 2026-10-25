@@ -129,7 +129,7 @@ describe("detectCssEffectRisk drop-shadow gating", () => {
 describe("scanCssEffects", () => {
   it("ties a computed effect to its element", async () => {
     const scan = await scanCssEffects(makeMockPage({ computed: { filter: "blur(4px)" } }), true);
-    expect(scan).toEqual({ reason: "filter:blur", bounded: true });
+    expect(scan).toEqual({ reason: "filter:blur", bounded: true, callbackFrom: null });
     expect(
       (globalThis as { window?: { __hfCssFxTargets?: unknown[] } }).window?.__hfCssFxTargets,
     ).toHaveLength(1);
@@ -146,7 +146,7 @@ describe("scanCssEffects", () => {
       }),
       true,
     );
-    expect(scan).toEqual({ reason: "filter:drop-shadow", bounded: true });
+    expect(scan).toEqual({ reason: "filter:drop-shadow", bounded: true, callbackFrom: null });
     expect(
       (globalThis as { window?: { __hfCssFxTargets?: unknown[] } }).window?.__hfCssFxTargets,
     ).toEqual([target]);
@@ -159,7 +159,7 @@ describe("scanCssEffects", () => {
       }),
       true,
     );
-    expect(scan).toEqual({ reason: "filter:blur", bounded: false });
+    expect(scan).toEqual({ reason: "filter:blur", bounded: false, callbackFrom: null });
   });
 
   it("is unbounded for a CSS animation", async () => {
@@ -181,10 +181,14 @@ describe("scanCssEffects", () => {
     expect(scan.reason).toBe("filter:blur");
   });
 
-  it("is unbounded when a timeline callback can change the DOM mid-render", async () => {
+  it("reports when the first timeline callback can fire, after which the effect can reach any element", async () => {
     const timeline = {
       vars: {},
-      getChildren: () => [{ vars: { onComplete: () => {} }, getChildren: undefined }],
+      startTime: () => 0,
+      getChildren: () => [
+        { vars: { onComplete: () => {} }, startTime: () => 12 },
+        { vars: { onUpdate: () => {} }, startTime: () => 30 },
+      ],
     };
     const scan = await scanCssEffects(
       makeMockPage({
@@ -193,7 +197,7 @@ describe("scanCssEffects", () => {
       }),
       true,
     );
-    expect(scan).toEqual({ reason: "filter:drop-shadow", bounded: false });
+    expect(scan).toEqual({ reason: "filter:drop-shadow", bounded: true, callbackFrom: 12 });
   });
 
   it("stays bounded for a timeline of plain tweens", async () => {
@@ -208,6 +212,6 @@ describe("scanCssEffects", () => {
       }),
       true,
     );
-    expect(scan.bounded).toBe(true);
+    expect(scan).toMatchObject({ bounded: true, callbackFrom: null });
   });
 });

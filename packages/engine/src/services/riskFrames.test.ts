@@ -4,6 +4,7 @@ import {
   MAX_RISK_FRAME_FRACTION,
   RISK_RANGE_HYSTERESIS_FRAMES,
   planRiskFrames,
+  withFramesAfterCallback,
   scanCssEffectLiveFrames,
 } from "./riskFrames.js";
 
@@ -125,5 +126,16 @@ describe("scanCssEffectLiveFrames", () => {
 
   it("gives up once more frames qualify than the cap", async () => {
     expect(await scanCssEffectLiveFrames(makePage(between(0, 100)), 10, 100, 10)).toBeNull();
+  });
+});
+
+describe("withFramesAfterCallback", () => {
+  it("adds every frame from just before the first callback to the end", () => {
+    const live = withFramesAfterCallback(new Set([3]), 2, 10, 30);
+    expect([...live].sort((a, b) => a - b)).toEqual([3, ...range(19, 11)]);
+  });
+
+  it("changes nothing without a callback", () => {
+    expect([...withFramesAfterCallback(new Set([3]), null, 10, 30)]).toEqual([3]);
   });
 });
