@@ -3083,10 +3083,17 @@ export function initSandboxRuntimeModular(): void {
   // plain inline hidden on a clip in its window is the script's, except on a clip authored that way.
   const clipsSeen = new WeakSet<Element>();
   const authoredInlineHidden = new WeakSet<Element>();
-  const hiddenByScript = (el: HTMLElement): boolean =>
+  const hiddenByScript = (el: StylableElement): boolean =>
     el.style.visibility === "hidden" &&
     el.style.getPropertyPriority("visibility") !== "important" &&
     !authoredInlineHidden.has(el);
+  const hiddenUnderScript = new WeakMap<Element, boolean>();
+  const underScriptHiddenClip = (el: Element, rootComp: Element | null): boolean => {
+    for (let up = el.parentElement; up && up !== rootComp; up = up.parentElement) {
+      if (up.hasAttribute("data-start") && isStylableElement(up) && hiddenByScript(up)) return true;
+    }
+    return false;
+  };
   // Every time at which an element's visibility, upcoming or preload decision can flip: its own window
   // edges, the look-ahead and release edges around them, and the window edges of each timed ancestor.
   const decisionEdges = new Map<Element, number[] | null>();
@@ -3142,6 +3149,8 @@ export function initSandboxRuntimeModular(): void {
         !node.hasAttribute(RUNTIME_STAMPED_ATTR) &&
         (node as HTMLElement).style.visibility !== (decided ? "visible" : "hidden")
       )
+        return false;
+      if (underScriptHiddenClip(node, rootComp) !== (hiddenUnderScript.get(node) ?? false))
         return false;
       let edges = decisionEdges.get(node);
       if (edges === undefined) {
@@ -3205,9 +3214,12 @@ export function initSandboxRuntimeModular(): void {
       // Descendants must not override a hidden ancestor clip. CSS visibility can
       // otherwise leak child pixels through inactive scenes because a descendant
       // with visibility:visible escapes an ancestor's visibility:hidden.
+      const underScript = underScriptHiddenClip(rawNode, rootComp);
+      hiddenUnderScript.set(rawNode, underScript);
       const isVisibleNow =
         visibleAt(rawNode, currentTime) &&
-        clipChainVisibleAt(rawNode.parentElement, currentTime, visibleAt, rootComp);
+        clipChainVisibleAt(rawNode.parentElement, currentTime, visibleAt, rootComp) &&
+        !underScript;
       visibilityDecided.set(rawNode, isVisibleNow);
       const isRuntimeStamped = isDiscoveryStamped(rawNode);
       if (!clipsSeen.has(rawNode)) {
@@ -3263,6 +3275,18 @@ export function initSandboxRuntimeModular(): void {
       scheduleWebAudioForActiveClips();
     }
     hiddenAudioDirty = false;
+  };
+
+  // The timeline writes after the pass on a preview seek, so clips under a clip it just hid or showed
+  // are decided again.
+  const decideClipsUnderScriptHidden = (currentTime: number) => {
+    const rootComp = resolveRootCompositionElement();
+    const stale = queryForTransport("[data-start]").filter(
+      (el) =>
+        visibilityDecided.has(el) &&
+        underScriptHiddenClip(el, rootComp) !== (hiddenUnderScript.get(el) ?? false),
+    );
+    if (stale.length > 0) syncTimedElementVisibility(currentTime, stale);
   };
 
   // Scope 2 of 3 (see `withTimingResolver`). One resolver for the whole
@@ -4588,6 +4612,7 @@ export function initSandboxRuntimeModular(): void {
     const tl = state.capturedTimeline;
     pauseTimelineIfPossible(tl);
     const pageAnimations = seekTimelineAndAdapters(state.currentTime);
+    if (!keepPlaying) decideClipsUnderScriptHidden(state.currentTime);
     runAdapters("pause", 0, pageAnimations);
     if (keepPlaying) {
       transport.play();

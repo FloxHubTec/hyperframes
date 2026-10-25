@@ -61,4 +61,33 @@ describe("a timeline set that hides a timed clip", () => {
       expect(visibilityAt([3]).map((seen) => seen.split("/")[0])).toEqual(["hidden"]);
     });
   }
+
+  for (const [name, seek] of Object.entries(paths)) {
+    it(`hides the timed children of a scene a script hides on the ${name} path`, () => {
+      document.body.innerHTML =
+        `<div data-composition-id="main" data-root="true" data-start="0" data-duration="5" data-width="640" data-height="360">` +
+        `<div id="scene" class="clip" data-start="0" data-duration="5">` +
+        `<div id="kid" class="clip" data-start="0" data-duration="5"></div><div id="plain"></div></div></div>`;
+      const tl = gsap.timeline({ paused: true });
+      tl.set("#scene", { visibility: "hidden" }, 2.67);
+      window.__timelines = { main: tl as unknown as RuntimeTimelineLike };
+      const parent = window.parent;
+      Object.defineProperty(window, "parent", { configurable: true, value: {} });
+      try {
+        initSandboxRuntimeModular();
+      } finally {
+        Object.defineProperty(window, "parent", { configurable: true, value: parent });
+      }
+      const computed = () =>
+        ["scene", "kid", "plain"].map(
+          (id) => getComputedStyle(document.getElementById(id)!).visibility[0],
+        );
+      const seen: string[] = [];
+      for (const t of [1, 3, 3.5, 1]) {
+        seek(t);
+        seen.push(computed().join(""));
+      }
+      expect(seen).toEqual(["vvv", "hhh", "hhh", "vvv"]);
+    });
+  }
 });
