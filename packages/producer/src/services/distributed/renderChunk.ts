@@ -1099,7 +1099,7 @@ export async function renderChunk(
       sessionBootMs,
       captureStageMs,
       encodeStageMs,
-      // Wall time of the chunk's own video frame extraction, which runs beside the session boot.
+      // Wall time of the chunk's own video frame extraction; it overlaps captureStageMs, so do not add them.
       videoExtractMs,
       workers: chunkWorkerCount,
       captureMode,
