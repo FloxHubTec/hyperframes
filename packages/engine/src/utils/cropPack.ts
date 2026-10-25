@@ -53,8 +53,12 @@ export function planCropPackMembers(
   masterPath: string,
 ): CropPackMemberPlan[] {
   return frames.map((frame) => {
-    const crop = pixelRect(frame, compositionWidth, compositionHeight);
-    const output = outputSizeForCrop(crop, frame.ratio);
+    const pixel = pixelRect(frame, compositionWidth, compositionHeight);
+    const output = outputSizeForCrop(pixel, frame.ratio);
+    // When even-rounding only trimmed a pixel, crop to the output size so the
+    // sibling keeps the master's pixels 1:1 instead of being resampled.
+    const nearlyEqual = pixel.width - output.width < 2 && pixel.height - output.height < 2;
+    const crop = nearlyEqual ? { ...pixel, width: output.width, height: output.height } : pixel;
     return {
       id: frame.id,
       crop,
@@ -76,8 +80,8 @@ export async function planCropPackMembersForMaster(
   compositionHeight: number,
   masterPath: string,
 ): Promise<CropPackMemberPlan[]> {
-  const metadata = await extractVideoMetadata(masterPath);
-  const sized = metadata.width > 0 && metadata.height > 0;
+  const metadata = await extractVideoMetadata(masterPath).catch(() => undefined);
+  const sized = metadata !== undefined && metadata.width > 0 && metadata.height > 0;
   return planCropPackMembers(
     frames,
     sized ? metadata.width : compositionWidth,
@@ -103,7 +107,12 @@ function alphaDecoderArgs(encode: CropPackEncodeSettings): string[] {
  * Audio is copied when requested; chapter metadata via `-map_metadata 0`.
  */
 export function buildCropPackArgs(input: BuildCropPackArgsInput): string[] {
-  const filter = `crop=${input.crop.width}:${input.crop.height}:${input.crop.x}:${input.crop.y},scale=${input.outputWidth}:${input.outputHeight}`;
+  const cropFilter = `crop=${input.crop.width}:${input.crop.height}:${input.crop.x}:${input.crop.y}`;
+  const unscaled =
+    input.crop.width === input.outputWidth && input.crop.height === input.outputHeight;
+  const filter = unscaled
+    ? cropFilter
+    : `${cropFilter},scale=${input.outputWidth}:${input.outputHeight}`;
   let args = buildEncoderArgs(
     { ...input.encode, width: input.outputWidth, height: input.outputHeight, useGpu: false },
     [...alphaDecoderArgs(input.encode), "-i", input.masterPath, "-filter:v", filter],

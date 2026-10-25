@@ -53,7 +53,7 @@ describe("buildCropPackArgs", () => {
 
   it("crops in -filter:v without the master's range conversion", () => {
     const args = buildCropPackArgs({ ...base, encode: mp4Encode });
-    expect(valueOf(args, "-filter:v")).toBe("crop=608:1080:656:0,scale=608:1080");
+    expect(valueOf(args, "-filter:v")).toBe("crop=608:1080:656:0");
     expect(args).not.toContain("-vf");
     expect(valueOf(args, "-c:a")).toBe("copy");
     expect(args).toContain("-map_metadata");
@@ -174,14 +174,14 @@ describe("planCropPackMembersForMaster", () => {
     expect(members[0]?.outputHeight).toBe(2160);
   });
 
-  it("scales an odd crop to an even output size for 4:2:0 encoders", () => {
+  it("crops an odd rect straight to the even output size, without a resample", () => {
     const [member] = planCropPackMembers(
       [{ id: "square", ratio: "1:1", x: 0, y: 0, width: (0.123 * 1080) / 1920, height: 0.123 }],
       1920,
       1080,
       "renders/launch.mp4",
     );
-    expect(member?.crop).toEqual({ x: 0, y: 0, width: 133, height: 133 });
+    expect(member?.crop).toEqual({ x: 0, y: 0, width: 132, height: 132 });
     expect(member?.outputWidth).toBe(132);
     expect(member?.outputHeight).toBe(132);
     const args = buildCropPackArgs({
@@ -193,7 +193,31 @@ describe("planCropPackMembersForMaster", () => {
       copyAudio: true,
       encode: mp4Encode,
     });
-    expect(args[args.indexOf("-filter:v") + 1]).toBe("crop=133:133:0:0,scale=132:132");
+    expect(args[args.indexOf("-filter:v") + 1]).toBe("crop=132:132:0:0");
+  });
+
+  it("still scales when the output is smaller than the crop by 2px or more", () => {
+    const args = buildCropPackArgs({
+      masterPath: "renders/launch.mp4",
+      outputPath: "renders/launch.vertical.mp4",
+      crop: { x: 656, y: 0, width: 608, height: 1080 },
+      outputWidth: 304,
+      outputHeight: 540,
+      copyAudio: true,
+      encode: mp4Encode,
+    });
+    expect(args[args.indexOf("-filter:v") + 1]).toBe("crop=608:1080:656:0,scale=304:540");
+  });
+
+  it("falls back to the composition size when the probe fails", async () => {
+    extractVideoMetadataMock.mockRejectedValue(new Error("ffprobe failed"));
+    const members = await planCropPackMembersForMaster(
+      [vertical],
+      1920,
+      1080,
+      "renders/launch.mp4",
+    );
+    expect(members[0]?.crop).toEqual({ x: 656, y: 0, width: 608, height: 1080 });
   });
 
   it("falls back to the composition size when the probe has no dimensions", async () => {

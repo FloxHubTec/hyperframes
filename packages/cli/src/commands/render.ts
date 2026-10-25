@@ -97,7 +97,11 @@ import {
   runPostRenderStepAsync,
 } from "../utils/render-success-state.js";
 import type { ProducerLogger, RenderJob } from "@hyperframes/producer";
-import { EXTRACT_CACHE_DIR_DISABLED_ALIASES, type VideoFrameFormat } from "@hyperframes/engine";
+import {
+  EXTRACT_CACHE_DIR_DISABLED_ALIASES,
+  planCropPackMembersForMaster,
+  type VideoFrameFormat,
+} from "@hyperframes/engine";
 import {
   checkOutputResolutionCompatibility,
   suggestMatchingPreset,
@@ -106,7 +110,6 @@ import {
   type OutputResolutionIssueKind,
   type Fps,
 } from "@hyperframes/core";
-import { cropPackOutputPath, outputSizeForCrop, pixelRect } from "@hyperframes/parsers/safe-frames";
 
 export default defineCommand({
   meta: {
@@ -781,6 +784,10 @@ async function renderDocker(
   // the exit code.
   markRenderSucceeded();
 
+  // Sized from the master's probed dimensions, as the producer plans them, so
+  // `--resolution` renders report the siblings' real size.
+  const cropPack = await cropPackListing(outputPath, options.cropPack);
+
   // Track metrics (no job object available from Docker — use a minimal stub)
   runPostRenderStep("trackRenderComplete", () =>
     trackRenderComplete({
@@ -792,7 +799,7 @@ async function renderDocker(
       gpu: options.gpu,
       authoringSkill: options.authoringSkill,
       catalogUsage: options.catalogUsage,
-      cropPack: cropPackListing(outputPath, options.cropPack),
+      cropPack,
       ...getMemorySnapshot(),
     }),
   );
@@ -801,14 +808,7 @@ async function renderDocker(
   // threaded back here; the summary shows render time only (never a wrong video
   // length). Probe the output with ffprobe if a duration figure is wanted here.
   runPostRenderStep("printRenderComplete", () =>
-    printRenderComplete(
-      outputPath,
-      elapsed,
-      options.quiet,
-      undefined,
-      undefined,
-      cropPackListing(outputPath, options.cropPack),
-    ),
+    printRenderComplete(outputPath, elapsed, options.quiet, undefined, undefined, cropPack),
   );
   runPostRenderStep("warnIfWebmAlphaDropped", () =>
     warnIfWebmAlphaDropped(outputPath, options.format, options.quiet),
@@ -816,7 +816,7 @@ async function renderDocker(
   if (options.exitAfterComplete) scheduleRenderProcessExit();
   return {
     renderTimeMs: elapsed,
-    cropPack: cropPackListing(outputPath, options.cropPack),
+    cropPack,
   };
 }
 
@@ -1620,21 +1620,23 @@ function trackRenderMetrics(
   });
 }
 
-function cropPackListing(
+async function cropPackListing(
   masterPath: string,
   spec: RenderOptions["cropPack"] | undefined,
-): SingleRenderResult["cropPack"] {
+): Promise<SingleRenderResult["cropPack"]> {
   if (!spec || spec.members.length === 0) return undefined;
-  return spec.members.map((frame) => {
-    const crop = pixelRect(frame, spec.compositionWidth, spec.compositionHeight);
-    const size = outputSizeForCrop(crop, frame.ratio);
-    return {
-      id: frame.id,
-      outputPath: cropPackOutputPath(masterPath, frame.id),
-      width: size.width,
-      height: size.height,
-    };
-  });
+  const plans = await planCropPackMembersForMaster(
+    spec.members,
+    spec.compositionWidth,
+    spec.compositionHeight,
+    masterPath,
+  );
+  return plans.map((plan) => ({
+    id: plan.id,
+    outputPath: plan.outputPath,
+    width: plan.outputWidth,
+    height: plan.outputHeight,
+  }));
 }
 
 function printRenderComplete(
