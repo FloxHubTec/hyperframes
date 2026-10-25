@@ -102,6 +102,26 @@ describe("a timeline set that hides a timed clip", () => {
   }
 
   for (const [name, seek] of Object.entries(paths)) {
+    it(`hides a clip a tween left at inherit once its window has ended on the ${name} path`, () => {
+      document.body.innerHTML =
+        `<div data-composition-id="main" data-root="true" data-start="0" data-duration="5" data-width="640" data-height="360">` +
+        `<div id="c" class="clip" data-start="0" data-duration="2"></div></div>`;
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#c", { autoAlpha: 0.5, duration: 0.5 }, 1);
+      window.__timelines = { main: tl as unknown as RuntimeTimelineLike };
+      const parent = window.parent;
+      Object.defineProperty(window, "parent", { configurable: true, value: {} });
+      try {
+        initSandboxRuntimeModular();
+      } finally {
+        Object.defineProperty(window, "parent", { configurable: true, value: parent });
+      }
+      seek(3);
+      expect(document.getElementById("c")!.style.visibility).toBe("hidden");
+    });
+  }
+
+  for (const [name, seek] of Object.entries(paths)) {
     it(`hides the timed children of a scene a script hides on the ${name} path`, () => {
       document.body.innerHTML =
         `<div data-composition-id="main" data-root="true" data-start="0" data-duration="5" data-width="640" data-height="360">` +

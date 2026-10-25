@@ -40,7 +40,7 @@ export function showClips(hidden: Array<Element & ElementCSSInlineStyle>): () =>
   const putMarksBack = hidden.map((el) => revealClip(el));
   return () => {
     for (const el of hidden) {
-      if (el.style.getPropertyValue("visibility") === "visible")
+      if (el.style.getPropertyValue("visibility") !== "hidden")
         el.style.setProperty("visibility", "hidden", "important");
     }
     for (const putMarkBack of putMarksBack) putMarkBack();
