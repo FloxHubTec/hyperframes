@@ -1,5 +1,16 @@
 name: Set up the test workspace
 description: Bun, Node, FFmpeg, Chrome, dependencies and the package builds the Linux test jobs need.
+inputs:
+  chrome:
+    description: Install Chrome (path in the chrome-path output).
+    default: "false"
+  engine:
+    description: Build @hyperframes/engine.
+    default: "false"
+outputs:
+  chrome-path:
+    description: Path of the installed Chrome, when `chrome` is true.
+    value: ${{ steps.chrome.outputs.chrome-path }}
 runs:
   using: composite
   steps:
@@ -10,11 +21,10 @@ runs:
     - uses: ./.github/actions/install-ffmpeg-linux
     - uses: ./.github/actions/prepare-ffmpeg-bin
     - id: chrome
+      if: inputs.chrome == 'true'
       uses: browser-actions/setup-chrome@c785b87e244131f27c9f19c1a33e2ead956ab7ce # v1
       with:
         chrome-version: stable
-    - shell: bash
-      run: echo "HYPERFRAMES_BROWSER_PATH=${{ steps.chrome.outputs.chrome-path }}" >> "$GITHUB_ENV"
     - shell: bash
       run: bash scripts/ci/install-workspace-dependencies.sh
     - shell: bash
@@ -23,5 +33,6 @@ runs:
       run: bun run --cwd packages/core build
     - shell: bash
       run: bun run --cwd packages/core build:hyperframes-runtime
-    - shell: bash
+    - if: inputs.engine == 'true'
+      shell: bash
       run: bun run --filter @hyperframes/engine build
