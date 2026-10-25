@@ -303,7 +303,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
 
   ...createAutomationSelectionSlice(set),
   ...createEditingModeSlice(set),
-  ...createPreviewQualitySlice(set),
+  ...createPreviewQualitySlice(set, get),
   ...createRangeSelectionSlice(),
   ...createPlaybackReadinessSlice(set),
 

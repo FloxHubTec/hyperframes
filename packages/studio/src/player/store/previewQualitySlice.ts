@@ -11,9 +11,14 @@ export interface PreviewCopies {
   error: string | null;
 }
 
+export type PreviewQualityChosenBy = "person" | "app";
+
 export interface PreviewQualitySlice {
   previewQuality: PreviewQuality;
-  setPreviewQuality: (level: PreviewQuality) => void;
+  /** Who set the level: a person (saved level, or a pick) or the app (never saved); null while nothing has. */
+  previewQualityChosenBy: PreviewQualityChosenBy | null;
+  /** A person's pick is saved; `by: "app"` sets the level without saving it and never overrides a saved pick. */
+  setPreviewQuality: (level: PreviewQuality, options?: { by?: PreviewQualityChosenBy }) => void;
   /** Null when no copies are wanted: full quality, or nothing heavy. */
   previewCopies: PreviewCopies | null;
   setPreviewCopies: (copies: PreviewCopies | null) => void;
@@ -24,12 +29,21 @@ export interface PreviewQualitySlice {
 
 export function createPreviewQualitySlice(
   set: StoreApi<PreviewQualitySlice>["setState"],
+  get: StoreApi<PreviewQualitySlice>["getState"],
 ): PreviewQualitySlice {
+  const saved = readStudioUiPreferences().previewQuality;
   return {
-    previewQuality: readStudioUiPreferences().previewQuality ?? 1,
-    setPreviewQuality: (previewQuality) => {
+    previewQuality: saved ?? 1,
+    previewQualityChosenBy: saved === undefined ? null : "person",
+    setPreviewQuality: (previewQuality, options) => {
+      if (options?.by === "app") {
+        if (get().previewQualityChosenBy !== "person") {
+          set({ previewQuality, previewQualityChosenBy: "app" });
+        }
+        return;
+      }
       writeStudioUiPreferences({ previewQuality });
-      set({ previewQuality });
+      set({ previewQuality, previewQualityChosenBy: "person" });
     },
     previewCopies: null,
     setPreviewCopies: (previewCopies) => set({ previewCopies }),

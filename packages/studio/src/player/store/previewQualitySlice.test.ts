@@ -1,5 +1,9 @@
+// @vitest-environment happy-dom
+
+
 import { describe, expect, it } from "vitest";
 import { usePlayerStore } from "./playerStore";
+import { readStudioUiPreferences } from "../../utils/studioUiPreferences";
 import { parsePreviewCopies } from "./previewQualitySlice";
 
 describe("preview quality in the player store", () => {
@@ -11,6 +15,27 @@ describe("preview quality in the player store", () => {
     const before = state.previewCopiesRetry;
     state.retryPreviewCopies();
     expect(usePlayerStore.getState().previewCopiesRetry).toBe(before + 1);
+  });
+
+  it("keeps a person's pick over the app's, and does not save the app's", () => {
+    usePlayerStore.setState({ previewQuality: 1, previewQualityChosenBy: null });
+    usePlayerStore.getState().setPreviewQuality(0.25, { by: "app" });
+    expect(usePlayerStore.getState()).toMatchObject({
+      previewQuality: 0.25,
+      previewQualityChosenBy: "app",
+    });
+    expect(readStudioUiPreferences().previewQuality).toBeUndefined();
+
+    usePlayerStore.getState().setPreviewQuality(0.5);
+    expect(usePlayerStore.getState()).toMatchObject({
+      previewQuality: 0.5,
+      previewQualityChosenBy: "person",
+    });
+    expect(readStudioUiPreferences().previewQuality).toBe(0.5);
+
+    usePlayerStore.getState().setPreviewQuality(0.125, { by: "app" });
+    expect(usePlayerStore.getState().previewQuality).toBe(0.5);
+    usePlayerStore.getState().setPreviewQuality(1);
   });
 
   it("reads a report of the copies only when it has the shape of one", () => {
