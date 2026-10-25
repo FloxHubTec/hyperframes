@@ -426,6 +426,21 @@ export async function extractVideoFrameToBuffer(
   }
 }
 
+/** A timed-out clip becomes a finding naming it, so the other frames of the snapshot still land. */
+export async function extractVideoFrameOrWarn(
+  warnings: string[],
+  ...args: Parameters<typeof extractVideoFrameToBuffer>
+): Promise<Buffer | null> {
+  try {
+    return await extractVideoFrameToBuffer(...args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    warnings.push(message);
+    console.warn(`   ${c.warn("⚠")} ${message}`);
+    return null;
+  }
+}
+
 export const examples: Example[] = [
   ["Capture 5 key frames from a composition", "snapshot capture"],
   ["Capture 10 evenly-spaced frames", "snapshot capture --frames 10"],
@@ -871,7 +886,8 @@ async function captureSnapshots(
               const useVp9AlphaDecoder = inputIsLocal
                 ? await shouldUseVp9AlphaDecoder(ffmpegInput)
                 : false;
-              const png = await extractVideoFrameToBuffer(
+              const png = await extractVideoFrameOrWarn(
+                warnings,
                 ffmpegInput,
                 Math.max(0, v.relTime),
                 useVp9AlphaDecoder,
