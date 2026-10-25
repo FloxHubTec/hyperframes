@@ -58,7 +58,7 @@ export type PreviewSourceFacts = {
 export const HEAVY_PIXEL_SHARE = 0.5;
 export const HEAVY_BITRATE = 40_000_000;
 
-/** The box a lighter copy is made at: the shown box times the level, on the size ladder. */
+/** The box a lighter copy is made at: the shown box times the level. */
 export function scalePreviewProxyBox(box: PreviewProxyBox, level: PreviewQuality): PreviewProxyBox {
   return quantizePreviewProxyBox(box.width * level, box.height * level) ?? box;
 }
