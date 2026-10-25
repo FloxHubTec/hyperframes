@@ -13,6 +13,14 @@ vi.mock("@hyperframes/engine", () => ({
 import { runCropPackStage } from "./cropPackStage.js";
 import type { RenderJob } from "../../renderOrchestrator.js";
 
+const encode = {
+  fps: { num: 30, den: 1 },
+  codec: "h264" as const,
+  preset: "slow",
+  quality: 18,
+  pixelFormat: "yuv420p",
+};
+
 function makeJob(overrides: Partial<RenderJob["config"]> = {}): RenderJob {
   return {
     id: "crop-pack",
@@ -65,7 +73,7 @@ describe("runCropPackStage", () => {
   it("leaves the master path unchanged and writes sibling names", async () => {
     const job = makeJob();
     const masterPath = "/tmp/launch.mp4";
-    const result = await runCropPackStage({ job, masterPath, format: "mp4" });
+    const result = await runCropPackStage({ job, masterPath, format: "mp4", encode });
     expect(masterPath).toBe("/tmp/launch.mp4");
     expect(result.members[0]?.outputPath).toBe("/tmp/launch.vertical.mp4");
     expect(job.cropPack?.[0]?.outputPath).toBe("/tmp/launch.vertical.mp4");
@@ -79,7 +87,6 @@ describe("runCropPackStage", () => {
 
   it("passes the master's encoder settings to every member", async () => {
     const job = makeJob();
-    const encode = { preset: "slow", quality: 18 };
     await runCropPackStage({ job, masterPath: "/tmp/launch.mp4", format: "mp4", encode });
     expect(encodeCropPackMemberMock).toHaveBeenCalledWith(
       expect.objectContaining({ id: "vertical" }),
@@ -94,6 +101,7 @@ describe("runCropPackStage", () => {
       job,
       masterPath: "/tmp/launch.mp4",
       format: "mp4",
+      encode,
     });
     expect(result.members).toEqual([]);
     expect(encodeCropPackMemberMock).not.toHaveBeenCalled();
@@ -101,8 +109,8 @@ describe("runCropPackStage", () => {
 
   it("skips gif and png-sequence", async () => {
     const job = makeJob();
-    await runCropPackStage({ job, masterPath: "/tmp/launch.gif", format: "gif" });
-    await runCropPackStage({ job, masterPath: "/tmp/frames", format: "png-sequence" });
+    await runCropPackStage({ job, masterPath: "/tmp/launch.gif", format: "gif", encode });
+    await runCropPackStage({ job, masterPath: "/tmp/frames", format: "png-sequence", encode });
     expect(encodeCropPackMemberMock).not.toHaveBeenCalled();
   });
 });

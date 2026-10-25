@@ -3971,7 +3971,16 @@ async function executeRenderPipeline(input: {
       job,
       masterPath: stagedOutputPath,
       format: outputFormat,
-      encode: { preset: preset.preset, quality: effectiveQuality, bitrate: effectiveBitrate },
+      encode: {
+        fps: job.config.fps,
+        codec: preset.codec,
+        preset: preset.preset,
+        quality: effectiveQuality,
+        bitrate: effectiveBitrate,
+        pixelFormat: preset.pixelFormat,
+        vp9CpuUsed: cfg.vp9CpuUsed,
+        hdr: preset.hdr,
+      },
       abortSignal: executionSignal,
     });
     if (cropPackRes.members.length > 0) {

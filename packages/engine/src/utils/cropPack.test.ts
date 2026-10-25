@@ -17,7 +17,8 @@ vi.mock("./ffprobe.js", () => ({
   extractVideoMetadata: extractVideoMetadataMock,
 }));
 
-vi.mock("./hdr.js", () => ({
+vi.mock("./hdr.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./hdr.js")>()),
   isHdrColorSpace: (cs: { colorTransfer?: string } | null) =>
     cs?.colorTransfer === "smpte2084" || cs?.colorTransfer === "arib-std-b67",
 }));
@@ -29,83 +30,91 @@ import {
   planCropPackMembersForMaster,
 } from "./cropPack.js";
 
+const fps = { num: 30, den: 1 };
+const mp4Encode = {
+  fps,
+  codec: "h264" as const,
+  preset: "medium",
+  quality: 23,
+  pixelFormat: "yuv420p",
+};
+
 describe("buildCropPackArgs", () => {
   const crop = { x: 656, y: 0, width: 608, height: 1080 };
+  const base = {
+    masterPath: "renders/launch.mp4",
+    outputPath: "renders/launch.vertical.mp4",
+    crop,
+    outputWidth: 608,
+    outputHeight: 1080,
+    copyAudio: true,
+  };
+  const valueOf = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
 
-  it("puts crop and scale numbers in -filter:v", () => {
-    const args = buildCropPackArgs({
-      masterPath: "renders/launch.mp4",
-      outputPath: "renders/launch.vertical.mp4",
-      crop,
-      outputWidth: 608,
-      outputHeight: 1080,
-      copyAudio: true,
-    });
-    const vf = args[args.indexOf("-filter:v") + 1];
-    expect(vf).toBe("crop=608:1080:656:0,scale=608:1080");
-    expect(args).toContain("-c:a");
-    expect(args[args.indexOf("-c:a") + 1]).toBe("copy");
+  it("crops in -filter:v without the master's range conversion", () => {
+    const args = buildCropPackArgs({ ...base, encode: mp4Encode });
+    expect(valueOf(args, "-filter:v")).toBe("crop=608:1080:656:0,scale=608:1080");
+    expect(args).not.toContain("-vf");
+    expect(valueOf(args, "-c:a")).toBe("copy");
     expect(args).toContain("-map_metadata");
-    expect(args).not.toContain("make_zero");
     expect(args).not.toContain("-avoid_negative_ts");
+    expect(args.slice(-2)).toEqual(["-y", "renders/launch.vertical.mp4"]);
   });
 
   it("omits audio copy when requested", () => {
-    const args = buildCropPackArgs({
-      masterPath: "renders/launch.mp4",
-      outputPath: "renders/launch.vertical.mp4",
-      crop,
-      outputWidth: 608,
-      outputHeight: 1080,
-      copyAudio: false,
-    });
+    const args = buildCropPackArgs({ ...base, copyAudio: false, encode: mp4Encode });
     expect(args).toContain("-an");
     expect(args).not.toContain("-c:a");
   });
 
-  it("encodes an mp4 sibling with the master's preset and CRF", () => {
+  it("encodes an mp4 sibling like the master: preset, CRF, no B-frames, BT.709 tags", () => {
     const args = buildCropPackArgs({
-      masterPath: "renders/launch.mp4",
-      outputPath: "renders/launch.vertical.mp4",
-      crop,
-      outputWidth: 608,
-      outputHeight: 1080,
-      copyAudio: true,
-      encode: { preset: "slow", quality: 18 },
+      ...base,
+      encode: { ...mp4Encode, preset: "slow", quality: 18 },
     });
-    expect(args[args.indexOf("-preset") + 1]).toBe("slow");
-    expect(args[args.indexOf("-crf") + 1]).toBe("18");
-    expect(args).not.toContain("-b:v");
+    expect(valueOf(args, "-c:v")).toBe("libx264");
+    expect(valueOf(args, "-preset")).toBe("slow");
+    expect(valueOf(args, "-crf")).toBe("18");
+    expect(valueOf(args, "-bf")).toBe("0");
+    expect(valueOf(args, "-color_primaries:v")).toBe("bt709");
+    expect(valueOf(args, "-pix_fmt")).toBe("yuv420p");
   });
 
   it("uses the master's bitrate instead of CRF when one is set", () => {
-    const args = buildCropPackArgs({
-      masterPath: "renders/launch.mp4",
-      outputPath: "renders/launch.vertical.mp4",
-      crop,
-      outputWidth: 608,
-      outputHeight: 1080,
-      copyAudio: true,
-      encode: { preset: "medium", quality: 23, bitrate: "10M" },
-    });
-    expect(args[args.indexOf("-b:v") + 1]).toBe("10M");
+    const args = buildCropPackArgs({ ...base, encode: { ...mp4Encode, bitrate: "10M" } });
+    expect(valueOf(args, "-b:v")).toBe("10M");
     expect(args).not.toContain("-crf");
   });
 
-  it("encodes a webm sibling in VP9 constant-quality mode", () => {
+  it("keeps alpha on a transparent webm sibling", () => {
     const args = buildCropPackArgs({
+      ...base,
       masterPath: "renders/launch.webm",
       outputPath: "renders/launch.vertical.webm",
-      crop,
-      outputWidth: 608,
-      outputHeight: 1080,
-      copyAudio: true,
-      encode: { preset: "good", quality: 18 },
+      encode: { fps, codec: "vp9", preset: "good", quality: 18, pixelFormat: "yuva420p" },
     });
-    expect(args[args.indexOf("-c:v") + 1]).toBe("libvpx-vp9");
-    expect(args[args.indexOf("-b:v") + 1]).toBe("0");
-    expect(args[args.indexOf("-crf") + 1]).toBe("18");
-    expect(args[args.indexOf("-deadline") + 1]).toBe("good");
+    expect(args.slice(0, 3)).toEqual(["-c:v", "libvpx-vp9", "-i"]);
+    expect(args[args.lastIndexOf("-c:v") + 1]).toBe("libvpx-vp9");
+    expect(valueOf(args, "-pix_fmt")).toBe("yuva420p");
+    expect(valueOf(args, "-metadata:s:v:0")).toBe("alpha_mode=1");
+  });
+
+  it("encodes an HDR sibling as 10-bit HEVC with the master's HDR tags", () => {
+    const args = buildCropPackArgs({
+      ...base,
+      encode: {
+        fps,
+        codec: "h265",
+        preset: "medium",
+        quality: 23,
+        pixelFormat: "yuv420p10le",
+        hdr: { transfer: "pq" },
+      },
+    });
+    expect(valueOf(args, "-c:v")).toBe("libx265");
+    expect(valueOf(args, "-pix_fmt")).toBe("yuv420p10le");
+    expect(valueOf(args, "-color_trc:v")).toBe("smpte2084");
+    expect(valueOf(args, "-color_primaries:v")).toBe("bt2020");
   });
 });
 
@@ -196,6 +205,7 @@ describe("encodeCropPackMember", () => {
           outputPath: "renders/launch.vertical.mp4",
         },
         "/no/such/master.mp4",
+        { encode: mp4Encode },
       ),
     ).rejects.toThrow(/does not exist/);
     expect(runFfmpegMock).not.toHaveBeenCalled();
@@ -221,13 +231,14 @@ describe("encodeCropPackMember", () => {
         outputPath: join(dir, "launch.vertical.mp4"),
       },
       masterPath,
+      { encode: mp4Encode },
     );
     expect(result.id).toBe("vertical");
     const args = runFfmpegMock.mock.calls[0]?.[0] as string[];
     expect(args[args.indexOf("-c:a") + 1]).toBe("copy");
   });
 
-  it("hard-errors an HDR master instead of writing SDR", async () => {
+  it("hard-errors an HDR master without HDR encoder settings", async () => {
     dir = mkdtempSync(join(tmpdir(), "hf-crop-hdr-"));
     const masterPath = join(dir, "launch.mp4");
     writeFileSync(masterPath, "fake");
@@ -246,8 +257,43 @@ describe("encodeCropPackMember", () => {
           outputPath: join(dir, "launch.vertical.mp4"),
         },
         masterPath,
+        { encode: mp4Encode },
       ),
     ).rejects.toThrow(/vertical[\s\S]*HDR/);
     expect(runFfmpegMock).not.toHaveBeenCalled();
+  });
+
+  it("encodes an HDR master when the master's HDR settings are passed", async () => {
+    dir = mkdtempSync(join(tmpdir(), "hf-crop-hdr-"));
+    const masterPath = join(dir, "launch.mp4");
+    writeFileSync(masterPath, "fake");
+    extractVideoMetadataMock.mockResolvedValue({
+      hasAudio: false,
+      colorSpace: { colorTransfer: "smpte2084", colorPrimaries: "bt2020", colorSpace: "bt2020nc" },
+    });
+    runFfmpegMock.mockResolvedValue({ success: true, exitCode: 0, stderr: "" });
+
+    await encodeCropPackMember(
+      {
+        id: "vertical",
+        crop: { x: 656, y: 0, width: 608, height: 1080 },
+        outputWidth: 608,
+        outputHeight: 1080,
+        outputPath: join(dir, "launch.vertical.mp4"),
+      },
+      masterPath,
+      {
+        encode: {
+          fps,
+          codec: "h265",
+          preset: "medium",
+          quality: 23,
+          pixelFormat: "yuv420p10le",
+          hdr: { transfer: "pq" },
+        },
+      },
+    );
+    const args = runFfmpegMock.mock.calls[0]?.[0] as string[];
+    expect(args[args.indexOf("-c:v") + 1]).toBe("libx265");
   });
 });

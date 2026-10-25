@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { extname } from "node:path";
 import {
   cropPackOutputPath,
   outputSizeForCrop,
@@ -7,10 +6,11 @@ import {
   type PixelRect,
   type SafeFrame,
 } from "@hyperframes/parsers/safe-frames";
+import { buildEncoderArgs } from "../services/chunkEncoder.js";
+import type { EncoderOptions } from "../services/chunkEncoder.types.js";
 import { extractVideoMetadata } from "./ffprobe.js";
 import { isHdrColorSpace } from "./hdr.js";
 import { formatFfmpegError, runFfmpeg } from "./runFfmpeg.js";
-import { appendRenderProvenanceArgs } from "./renderProvenance.js";
 
 export interface CropPackMemberPlan {
   id: string;
@@ -27,15 +27,14 @@ export interface CropPackMemberResult {
   height: number;
 }
 
-/** The master's encoder settings, so siblings match its quality. */
-export interface CropPackEncodeSettings {
-  /** x264 preset for mp4, VP9 deadline for webm, ProRes profile for mov. */
-  preset: string;
-  /** CRF for mp4 and webm. */
-  quality: number;
-  /** Target bitrate; replaces CRF for mp4 and caps VP9 when set. */
-  bitrate?: string;
-}
+/**
+ * The master's encoder options. Siblings are encoded with `buildEncoderArgs`
+ * so they keep the master's codec, pixel format, B-frame and color settings.
+ */
+export type CropPackEncodeSettings = Omit<
+  EncoderOptions,
+  "width" | "height" | "useGpu" | "lockGopForChunkConcat" | "gopSize"
+>;
 
 export interface BuildCropPackArgsInput {
   masterPath: string;
@@ -44,7 +43,7 @@ export interface BuildCropPackArgsInput {
   outputWidth: number;
   outputHeight: number;
   copyAudio: boolean;
-  encode?: CropPackEncodeSettings;
+  encode: CropPackEncodeSettings;
 }
 
 export function planCropPackMembers(
@@ -87,67 +86,53 @@ export async function planCropPackMembersForMaster(
   );
 }
 
-function videoEncodeArgs(outputPath: string, encode?: CropPackEncodeSettings): string[] {
-  const ext = extname(outputPath).toLowerCase();
-  if (ext === ".webm") {
-    const rate = encode
-      ? ["-b:v", encode.bitrate || "0", "-crf", String(encode.quality), "-deadline", encode.preset]
-      : [];
-    return ["-c:v", "libvpx-vp9", ...rate, "-pix_fmt", "yuv420p"];
-  }
-  if (ext === ".mov") {
-    const profile = encode ? ["-profile:v", encode.preset] : [];
-    return ["-c:v", "prores_ks", ...profile, "-pix_fmt", "yuva444p10le"];
-  }
-  const rate = encode
-    ? [
-        "-preset",
-        encode.preset,
-        ...(encode.bitrate ? ["-b:v", encode.bitrate] : ["-crf", String(encode.quality)]),
-      ]
-    : [];
-  return ["-c:v", "libx264", ...rate, "-pix_fmt", "yuv420p"];
+function withoutOption(args: string[], flag: string): string[] {
+  const i = args.indexOf(flag);
+  return i === -1 ? args : [...args.slice(0, i), ...args.slice(i + 2)];
+}
+
+/** ffmpeg's native VP9 decoder drops the alpha plane; libvpx keeps it. */
+function alphaDecoderArgs(encode: CropPackEncodeSettings): string[] {
+  return encode.codec === "vp9" && encode.pixelFormat === "yuva420p" ? ["-c:v", "libvpx-vp9"] : [];
 }
 
 /**
- * ffmpeg argv for one crop-pack member. Video is crop+scale (re-encode);
- * audio is copied when requested. Provenance is re-applied; chapter
- * metadata is copied with `-map_metadata 0`. Never passes
- * `-avoid_negative_ts make_zero`.
+ * ffmpeg argv for one crop-pack member: crop+scale re-encoded with the
+ * master's encoder args. The master's `-vf` range conversion is dropped since
+ * the master is already TV range, and so is `-avoid_negative_ts make_zero`.
+ * Audio is copied when requested; chapter metadata via `-map_metadata 0`.
  */
 export function buildCropPackArgs(input: BuildCropPackArgsInput): string[] {
   const filter = `crop=${input.crop.width}:${input.crop.height}:${input.crop.x}:${input.crop.y},scale=${input.outputWidth}:${input.outputHeight}`;
-  const args = [
-    "-i",
-    input.masterPath,
-    "-filter:v",
-    filter,
-    ...videoEncodeArgs(input.outputPath, input.encode),
-  ];
+  let args = buildEncoderArgs(
+    { ...input.encode, width: input.outputWidth, height: input.outputHeight, useGpu: false },
+    [...alphaDecoderArgs(input.encode), "-i", input.masterPath, "-filter:v", filter],
+    input.outputPath,
+  );
+  args = withoutOption(withoutOption(args, "-vf"), "-avoid_negative_ts");
+  const tail = args.splice(args.length - 2, 2);
   args.push("-map", "0:v:0");
   if (input.copyAudio) {
     args.push("-map", "0:a?", "-c:a", "copy");
   } else {
     args.push("-an");
   }
-  args.push("-map_metadata", "0");
-  appendRenderProvenanceArgs(args, input.outputPath);
-  args.push("-y", input.outputPath);
+  args.push("-map_metadata", "0", ...tail);
   return args;
 }
 
 export async function encodeCropPackMember(
   member: CropPackMemberPlan,
   masterPath: string,
-  options: { copyAudio?: boolean; signal?: AbortSignal; encode?: CropPackEncodeSettings } = {},
+  options: { copyAudio?: boolean; signal?: AbortSignal; encode: CropPackEncodeSettings },
 ): Promise<CropPackMemberResult> {
   if (!existsSync(masterPath)) {
     throw new Error(`Crop pack master "${masterPath}" does not exist.`);
   }
   const metadata = await extractVideoMetadata(masterPath);
-  if (isHdrColorSpace(metadata.colorSpace)) {
+  if (isHdrColorSpace(metadata.colorSpace) && !options.encode.hdr) {
     throw new Error(
-      `Crop pack member "${member.id}" cannot be written: crop+scale would break HDR.`,
+      `Crop pack member "${member.id}" cannot be written: HDR master without HDR encoder settings.`,
     );
   }
   const copyAudio = (options.copyAudio ?? true) && metadata.hasAudio;

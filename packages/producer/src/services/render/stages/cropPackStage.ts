@@ -18,8 +18,8 @@ export interface CropPackStageInput {
   job: RenderJob;
   masterPath: string;
   format: string;
-  /** The master's encoder settings, so siblings match its quality. */
-  encode?: CropPackEncodeSettings;
+  /** The master's encoder options, so siblings match its encode. */
+  encode: CropPackEncodeSettings;
   abortSignal?: AbortSignal;
 }
 
