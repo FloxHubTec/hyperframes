@@ -24,6 +24,7 @@ import {
   quantizeTimeToFrame,
   fpsToNumber,
   resolveAuthoredTimingWindow,
+  SCENE_CALLBACK_ERROR_PREFIX,
   type RawAuthoredTiming,
 } from "@hyperframes/core";
 
@@ -122,7 +123,14 @@ export type { CaptureOptions, CaptureResult, CaptureBufferResult, CapturePerfSum
 /** Called after seeking, before screenshot. Use for video frame injection or other pre-capture work.
  * `heldVideoTime` (motion-blur samples only) is the output frame's time: a video on screen at
  * both times shows its frame for `heldVideoTime`, so footage does not smear. */
-export type BeforeCaptureHook = (page: Page, time: number, heldVideoTime?: number) => Promise<void>;
+export type BeforeCaptureHook = ((
+  page: Page,
+  time: number,
+  heldVideoTime?: number,
+) => Promise<void>) & {
+  /** A hook with state of its own, for a second page; absent when the hook cannot be copied. */
+  fresh?: () => BeforeCaptureHook | null;
+};
 
 /** The per-frame wait a capture is in, worded for the stall error a user reads. */
 type CaptureStep =
@@ -977,7 +985,7 @@ async function initDrawElementOrTransparentBackground(
   if ((session.config?.useDrawElement ?? false) && supersampling) {
     session.deGateReason = "supersampling";
     session.deFallbackTrigger = "supersampling";
-    console.error(
+    console.log(
       "[engine] --experimental-fast-capture disabled for this render: drawElementImage " +
         "ignores deviceScaleFactor, so scaled (DPR other than 1) output uses screenshot capture.",
     );
@@ -985,7 +993,7 @@ async function initDrawElementOrTransparentBackground(
   if ((session.config?.useDrawElement ?? false) && !supersampling && forceScreenshot) {
     session.deGateReason = "render_mode_hint";
     session.deFallbackTrigger = "render_mode_hint";
-    console.error(
+    console.log(
       "[engine] fast capture falls back to screenshot: render-mode compatibility " +
         "hint forced screenshot capture (e.g. raw requestAnimationFrame composition).",
     );
@@ -1037,7 +1045,7 @@ async function initDrawElementOrTransparentBackground(
     if (!supportsDrawElement) {
       session.deGateReason = "unsupported_chrome";
       session.deFallbackTrigger = "unsupported_chrome";
-      console.error(
+      console.log(
         `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ` +
           "this Chrome build does not implement canvas.drawElementImage (Dev/Canary-only " +
           "feature); run `hyperframes browser ensure --force` to fetch a supported " +
@@ -1089,7 +1097,7 @@ async function initDrawElementOrTransparentBackground(
       // "screenshot": on a BeginFrame-launched browser (Linux fast capture)
       // Page.captureScreenshot hangs for the full protocol timeout, while
       // beginFrameCapture is the platform's normal baseline path.
-      console.error(
+      console.log(
         `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ` +
           "SwiftShader (software rasterizer, no GPU egress to skip, drawElement is " +
           "parity-or-slower; see fast-capture-limitations.md)",
@@ -1113,7 +1121,7 @@ async function initDrawElementOrTransparentBackground(
       const routeWholeRender = async (reason: string, trigger: string, message: string) => {
         session.deGateReason = reason;
         session.deFallbackTrigger = trigger;
-        console.error(
+        console.log(
           `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ${message}`,
         );
         await routeToFallback();
@@ -1214,7 +1222,7 @@ async function initDrawElementOrTransparentBackground(
       if (!forceDE && !threeD.ok) {
         session.deGateReason = "3d_init_failed";
         session.deFallbackTrigger = "3d_init_failed";
-        console.error(
+        console.log(
           `[engine] fast capture falls back to ${session.launchCaptureMode} capture: ` +
             `3D projection init failed (${threeD.reason ?? "unknown"})`,
         );
@@ -1297,7 +1305,7 @@ async function cssEffectRiskFrames(
     );
     return live && withFramesAfterCallback(live, scan.callbackFrom, fps, totalFrames);
   } catch (error) {
-    console.error(
+    console.log(
       `[engine] fast capture: effect scan failed (${error instanceof Error ? error.message : String(error)})`,
     );
     return null;
@@ -1378,12 +1386,27 @@ export async function completeDeferredDrawElementInit(session: CaptureSession): 
   if (!session.deInitDeferred || !session.onBeforeCapture) return;
   const page = session.page;
   const logInitPhase = (phase: string) =>
-    console.error(`[initSession:${session.captureMode}] ${phase} (deferred drawElement init)`);
+    console.log(`[initSession:${session.captureMode}] ${phase} (deferred drawElement init)`);
   await finalizeDrawElementInit(session, page, logInitPhase, {
     transparent: session.options.format === "png",
     forceDE: process.env.HF_FORCE_DRAWELEMENT === "1",
   });
   session.deInitDeferred = false;
+}
+
+/**
+ * Media elements are addressed by a document-unique render id, not by the per-file element id.
+ * Installed before any page script runs, on the render page and the self-check's truth page alike.
+ */
+async function installMediaPageHooks(page: Page, options: CaptureOptions): Promise<void> {
+  await installMediaRenderIdBridge(page);
+  if (options.skipReadinessVideoIds?.length) {
+    await page.evaluateOnNewDocument(
+      holdRenderFrameVideos,
+      options.skipReadinessVideoIds,
+      MEDIA_RENDER_ID_ATTR,
+    );
+  }
 }
 
 // fallow-ignore-next-line unit-size
@@ -1605,16 +1628,7 @@ async function constructCaptureSession(
       w.__name = <T>(fn: T, _name: string): T => fn;
     }
   });
-  // Media elements are addressed by a document-unique render id, not by the
-  // per-file element id. Install the resolvers before any page script runs.
-  await installMediaRenderIdBridge(page);
-  if (options.skipReadinessVideoIds?.length) {
-    await page.evaluateOnNewDocument(
-      holdRenderFrameVideos,
-      options.skipReadinessVideoIds,
-      MEDIA_RENDER_ID_ATTR,
-    );
-  }
+  await installMediaPageHooks(page, options);
   // Fast capture: record accelerated canvases (webgl/webgl2/webgpu) and force
   // preserveDrawingBuffer before any page script can create a context — their
   // paint records freeze at the first frame, so captureDrawElementFrame
@@ -2568,6 +2582,15 @@ function recordConsoleScriptError(session: CaptureSession, error: string | null)
   recordCaptureWarnings(session, [{ code: "vfx_failure", message, details: { sources: [error] } }]);
 }
 
+// Every worker page hits the same scene callback error; the render log names it once.
+function loggedEarlierInRender(session: CaptureSession, text: string): boolean {
+  if (!text.startsWith(SCENE_CALLBACK_ERROR_PREFIX)) return false;
+  const logged = (session.subTimelineWaitMemo.loggedSceneCallbackErrors ??= []);
+  if (logged.includes(text)) return true;
+  logged.push(text);
+  return false;
+}
+
 function recordPageError(session: CaptureSession, error: string | null): void {
   if (error && !session.pageErrors.includes(error)) session.pageErrors.push(error);
 }
@@ -2631,13 +2654,15 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
   const { page, serverUrl } = session;
 
   // Forward browser console to host. HyperFrames runtime logs get a dedicated
-  // prefix so page-context observability is visible in producer stderr.
+  // prefix so page-context observability is visible in producer stdout.
   page.on("console", (msg: ConsoleMessage) => {
     const type = msg.type();
     const text = msg.text();
     const locationUrl = msg.location()?.url ?? "";
     const diagnostic = formatConsoleDiagnostic(type, text, locationUrl);
-    if (!diagnostic.suppressHostLog) console.error(diagnostic.text);
+    if (!diagnostic.suppressHostLog && !loggedEarlierInRender(session, text)) {
+      console.log(diagnostic.text);
+    }
     appendBrowserDiagnostic(session, diagnostic.text);
 
     // A blocked script can never register its timeline (#3352); a thrown one may still, so it only counts on timeout.
@@ -2713,7 +2738,7 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
     session.config?.pageNavigationTimeout ?? DEFAULT_CONFIG.pageNavigationTimeout;
   const initStart = Date.now();
   const logInitPhase = (phase: string) => {
-    console.error(`[initSession:${session.captureMode}] ${phase} (${Date.now() - initStart}ms)`);
+    console.log(`[initSession:${session.captureMode}] ${phase} (${Date.now() - initStart}ms)`);
   };
   const gotoEntryPage = async (): Promise<void> => {
     appendBrowserDiagnostic(
@@ -3669,6 +3694,7 @@ export async function createStaticVerificationPage(session: CaptureSession): Pro
         w.__name = <T>(fn: T, _name: string): T => fn;
       }
     });
+    await installMediaPageHooks(page, session.options);
     if (session.options.variables && Object.keys(session.options.variables).length > 0) {
       const variablesJson = JSON.stringify(session.options.variables);
       await page.evaluateOnNewDocument((json: string) => {
@@ -4658,7 +4684,7 @@ async function captureFrameCore(
     session.capturePerf.frameMs.push(captureTimeMs);
     if (session.capturePerf.frames === 1) {
       const blur = await describePageMotionBlur(session.page).catch(() => null);
-      if (blur) console.error(blur);
+      if (blur) console.log(blur);
     }
 
     // Retain this freshly-captured buffer so the following static frames can reuse it.
@@ -4748,7 +4774,7 @@ export async function captureFrameToBuffer(
             // works. Counted here rather than in captureFrameCore's catch: the
             // deadline rejects from outside it, so that catch never runs.
             session.deFrameTimeouts = (session.deFrameTimeouts ?? 0) + 1;
-            console.error(
+            console.log(
               `[engine] fast capture frame ${frameIndex}: capture exceeded ` +
                 `${DE_FRAME_TIMEOUT_MS}ms; renderer stalled after drawElementImage ` +
                 `(PRINFRA-488). Failing the drawElement attempt so the whole render ` +
@@ -5011,7 +5037,7 @@ export async function captureFramesBatchPipelined(
       session.deNcprFallbacks = (session.deNcprFallbacks ?? 0) + 1;
       throw new DrawElementCaptureError(frameIndices[failedAt] ?? failedAt, reason, error);
     } else {
-      console.error(
+      console.log(
         `[engine] fast capture: batch produce failed at frame ` +
           `${frameIndices[failedAt] ?? "?"} (${error ?? "?"}); ` +
           `re-capturing ${frameIndices.length - failedAt} frame(s) per-frame`,
@@ -5110,7 +5136,7 @@ export async function closeCaptureSession(session: CaptureSession): Promise<void
   }
   if (session.page && !session.pageReleased) {
     const blur = await describePageMotionBlurAtEnd(session.page);
-    if (blur) console.error(blur);
+    if (blur) console.log(blur);
   }
   // Realized static-dedup telemetry: how much the cache actually helped this
   // render (vs the prediction logged at arm time). Both capture paths
@@ -5123,7 +5149,7 @@ export async function closeCaptureSession(session: CaptureSession): Promise<void
     const total = captured + reused;
     const pct = total > 0 ? Math.round((reused / total) * 100) : 0;
     const avgTotalMs = captured > 0 ? Math.round(session.capturePerf.totalMs / captured) : 0;
-    console.error(
+    console.log(
       `[static-dedup] reused ${reused}/${total} frame(s) (${pct}%), ` +
         `est. ~${reused * avgTotalMs}ms saved (avg ${avgTotalMs}ms/frame)`,
     );
@@ -5308,16 +5334,21 @@ async function captureDeVerificationFrames(
   // would share the corruption, PSNR would pass on the damaged output.
   // Seeking 0 → ascending reproduces the render's own seek order.
   const fractions = computeDeVerifySampleFractions(k);
-  // A video-free comp reads its truth on a disposable page: callbacks that run there
-  // cannot leave the render's own page changed. The video injector is tied to the render page.
-  const disposable = session.onBeforeCapture
-    ? null
-    : await createStaticVerificationPage(session).catch(() => {
-        logInitPhase("self-verify truth page unavailable; reading it on the render page");
-        return null;
-      });
+  // The truth is read on a disposable page, so callbacks that run there cannot change the render's
+  // own page. A video comp needs an injector of its own for it (the render's tracks its page).
+  const truthInjector = session.onBeforeCapture?.fresh?.() ?? null;
+  const disposable =
+    session.onBeforeCapture && truthInjector === null
+      ? null
+      : await createStaticVerificationPage(session).catch(() => {
+          logInitPhase("self-verify truth page unavailable; reading it on the render page");
+          return null;
+        });
   const isolated = disposable !== null;
   const truthPage = disposable ?? page;
+  const injectFrames = isolated
+    ? (truthInjector ?? session.onBeforeCapture)
+    : session.onBeforeCapture;
   const seekTo = (t: number): Promise<void> => seekDeVerifyTruth(truthPage, t, !isolated);
   const frames = new Map<number, Buffer>();
   try {
@@ -5338,7 +5369,7 @@ async function captureDeVerificationFrames(
       // Video frame injection (same hook the real capture paths run) — without
       // it, <video> elements screenshot black and every video comp would
       // false-positive into the screenshot fallback.
-      if (session.onBeforeCapture) await session.onBeforeCapture(truthPage, t);
+      await injectFrames?.(truthPage, t);
       // The first screenshot forces a frame, which runs rAF-driven callbacks (a count-up lands
       // a tick after seek()); waiting on rAF via evaluate deadlocks, headless fires it only
       // when a frame is produced.
