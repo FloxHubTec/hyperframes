@@ -425,31 +425,31 @@ export interface DeRouterBreaker {
   trip?: DeRouterRevert & { cleanRenders: number };
 }
 
+function hasFields(value: object, types: Record<string, "string" | "number">): boolean {
+  return Object.entries(types).every(([key, type]) => typeof Reflect.get(value, key) === type);
+}
+
 function isDeRouterRevert(value: unknown): value is DeRouterRevert {
-  if (typeof value !== "object" || value === null) return false;
   return (
-    "reason" in value &&
-    typeof value.reason === "string" &&
-    "at" in value &&
-    typeof value.at === "string" &&
-    "version" in value &&
-    typeof value.version === "string" &&
-    "atRender" in value &&
-    typeof value.atRender === "number"
+    typeof value === "object" &&
+    value !== null &&
+    hasFields(value, { reason: "string", at: "string", version: "string", atRender: "number" })
   );
+}
+
+function isDeRouterTrip(value: unknown): value is NonNullable<DeRouterBreaker["trip"]> {
+  return isDeRouterRevert(value) && hasFields(value, { cleanRenders: "number" });
 }
 
 function parseDeRouterBreaker(value: unknown): DeRouterBreaker | undefined {
   if (typeof value !== "object" || value === null) return undefined;
-  const strike = "strike" in value && isDeRouterRevert(value.strike) ? value.strike : undefined;
-  const trip =
-    "trip" in value &&
-    isDeRouterRevert(value.trip) &&
-    "cleanRenders" in value.trip &&
-    typeof value.trip.cleanRenders === "number"
-      ? { ...value.trip, cleanRenders: value.trip.cleanRenders }
-      : undefined;
-  return strike || trip ? { strike, trip } : undefined;
+  const strike = Reflect.get(value, "strike");
+  const trip = Reflect.get(value, "trip");
+  const parsed: DeRouterBreaker = {
+    strike: isDeRouterRevert(strike) ? strike : undefined,
+    trip: isDeRouterTrip(trip) ? trip : undefined,
+  };
+  return parsed.strike || parsed.trip ? parsed : undefined;
 }
 
 export interface HyperframesConfig {

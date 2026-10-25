@@ -422,8 +422,6 @@ export function trackRenderComplete(
     deFallbackFailedDb?: number;
     deFallbackFrameIndex?: number;
     deFallbackThresholdDb?: number;
-    /** The install's breaker held the parallel router off for this render. */
-    deRouterBreakerOff?: boolean;
     deBlankSuspects?: number;
     deBlankDeterministicAccepts?: number;
     deBlankRecaptures?: number;
@@ -448,6 +446,7 @@ export function trackRenderComplete(
     capturePeakMs?: number;
     // Resource usage
     peakMemoryMb?: number;
+    deRouterBreakerOff?: boolean;
     // Aggregate Chrome memory (RenderPerfSummary.chromeMemory); overrides the
     // live observability values when both are present, because the live ones
     // are only the last session's and the aggregate covers every worker.

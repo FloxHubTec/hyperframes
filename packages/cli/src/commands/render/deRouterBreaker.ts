@@ -1,14 +1,13 @@
 import type { DeRouterBreaker, DeRouterRevert } from "../../telemetry/config.js";
 
-/** Router renders (and, once off, clean renders) a single revert stays remembered or an off router waits. */
+/** Router renders a lone strike stays remembered, and clean renders an off router waits. */
 export const DE_ROUTER_BREAKER_WINDOW = 20;
 
-/** The one place that decides when the parallel-drawElement router goes off for an install and when it comes back. */
+/** The one owner of when the router goes off for an install and when it comes back. */
 export function isRouterOff(breaker: DeRouterBreaker | undefined, version: string): boolean {
   return breaker?.trip !== undefined && breaker.trip.version === version;
 }
 
-/** A router outcome other than a clean "routed": off after a second one inside the window. */
 export function afterRevert(
   breaker: DeRouterBreaker | undefined,
   revert: DeRouterRevert,
@@ -19,7 +18,6 @@ export function afterRevert(
   return second ? { trip: { ...revert, cleanRenders: 0 } } : { strike: revert };
 }
 
-/** A render finished with the router off; the Nth one brings it back (undefined = armed). */
 export function afterCleanRender(
   breaker: DeRouterBreaker | undefined,
 ): DeRouterBreaker | undefined {
@@ -29,7 +27,7 @@ export function afterCleanRender(
   return { trip: { ...trip, cleanRenders: trip.cleanRenders + 1 } };
 }
 
-/** A state recorded by another CLI version is stale: a lone strike is dropped, a trip is lifted. */
+/** Drops what another CLI version recorded. */
 export function forVersion(
   breaker: DeRouterBreaker | undefined,
   version: string,

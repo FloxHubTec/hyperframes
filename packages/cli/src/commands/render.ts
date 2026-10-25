@@ -1441,15 +1441,31 @@ function countCleanRenderWithRouterOff(): void {
   writeConfig(config);
 }
 
-/** What the render reported about the rejected frame, for the stored breaker record. */
-function revertFrom(job: RenderJob, outcome: string, atRender: number): DeRouterRevert {
-  const de = job.perfSummary?.drawElement;
+type DeFallback = Pick<
+  NonNullable<NonNullable<RenderJob["perfSummary"]>["drawElement"]>,
+  "fallbackReason" | "fallbackFrameIndex" | "fallbackFailedDb" | "fallbackThresholdDb"
+>;
+
+/** The rejected frame's detail: the perf summary on a finished render, the capture observability on a failed one. */
+function fallbackOf(job: RenderJob): DeFallback {
   const capture = job.errorDetails?.observability?.capture;
+  return (
+    job.perfSummary?.drawElement ?? {
+      fallbackReason: capture?.deFallbackReason,
+      fallbackFrameIndex: capture?.deFallbackFrameIndex,
+      fallbackFailedDb: capture?.deFallbackFailedDb,
+      fallbackThresholdDb: capture?.deFallbackThresholdDb,
+    }
+  );
+}
+
+function revertFrom(job: RenderJob, outcome: string, atRender: number): DeRouterRevert {
+  const fallback = fallbackOf(job);
   return {
-    reason: de?.fallbackReason ?? capture?.deFallbackReason ?? outcome,
-    frameIndex: de?.fallbackFrameIndex ?? capture?.deFallbackFrameIndex,
-    failedDb: de?.fallbackFailedDb ?? capture?.deFallbackFailedDb,
-    thresholdDb: de?.fallbackThresholdDb ?? capture?.deFallbackThresholdDb,
+    reason: fallback.fallbackReason ?? outcome,
+    frameIndex: fallback.fallbackFrameIndex,
+    failedDb: fallback.fallbackFailedDb,
+    thresholdDb: fallback.fallbackThresholdDb,
     at: new Date().toISOString(),
     version: VERSION,
     atRender,
