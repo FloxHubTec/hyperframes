@@ -77,6 +77,13 @@ const HAS_FFMPEG = spawnSync("ffmpeg", ["-version"]).status === 0;
 const HAS_ZSCALE =
   HAS_FFMPEG &&
   /\szscale\s/.test(spawnSync("ffmpeg", ["-hide_banner", "-filters"]).stdout.toString());
+const FFMPEG_ENCODERS = HAS_FFMPEG
+  ? spawnSync("ffmpeg", ["-hide_banner", "-encoders"]).stdout.toString()
+  : "";
+// Homebrew's ffmpeg has libsvtav1 but not libaom-av1. Either one writes an untagged AV1 stream.
+const AV1_ENCODER = ["libaom-av1", "libsvtav1"].find((name) =>
+  new RegExp(`\\s${name}\\s`).test(FFMPEG_ENCODERS),
+);
 
 describe("resolveVideoExtractionDuration", () => {
   const metadata = (
@@ -879,6 +886,21 @@ describe("parseVideoElements", () => {
     expect(videos.find((v) => v.id === "main")?.start).toBe(9);
   });
 
+  it("resolves a reference inside its own composition when another composition reuses the id", () => {
+    const videos = parseVideoElements(
+      '<div data-composition-id="main">' +
+        '<div data-composition-id="scene-a" data-start="0" data-duration="4">' +
+        '<div id="intro" data-start="0" data-duration="2"></div>' +
+        "</div>" +
+        '<div data-composition-id="scene-b" data-start="4" data-duration="4">' +
+        '<div id="intro" data-start="0" data-duration="3"></div>' +
+        '<video id="clip" src="b.mp4" data-start="intro" data-duration="1"></video>' +
+        "</div>" +
+        "</div>",
+    );
+    expect(videos.find((v) => v.id === "clip")?.start).toBe(3);
+  });
+
   it("falls back to 0 (never NaN) for an unknown reference target", () => {
     const videos = parseVideoElements(
       '<video id="orphan" src="a.mp4" data-start="does-not-exist" data-duration="5"></video>',
@@ -1660,7 +1682,9 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
     { codec: "libx264", height: 720, matrix: "bt709", format: "png" },
     { codec: "libx264", height: 720, matrix: "bt709", format: "jpg" },
     { codec: "libvpx-vp9", height: 720, matrix: "bt601", format: "png" },
-    { codec: "libaom-av1", height: 720, matrix: "bt601", format: "png" },
+    ...(AV1_ENCODER
+      ? [{ codec: AV1_ENCODER, height: 720, matrix: "bt601", format: "png" } as const]
+      : []),
   ] as const)(
     "reads an untagged $height-line $codec source as $matrix like Chrome's own playback ($format)",
     async ({ codec, height, matrix, format }) => {
@@ -2362,7 +2386,7 @@ describe.skipIf(!HAS_FFMPEG)("held tails on sparse-timestamp sources", () => {
       {
         path: vfrFixture,
         input: "testsrc2=s=64x64:d=10:rate=1/2",
-        filters: ["-vf", "select='eq(n,0)+eq(n,2)'", "-vsync", "vfr"],
+        filters: ["-vf", "select='eq(n,0)+eq(n,2)'", "-fps_mode", "vfr"],
       },
       {
         path: nonZeroStartFixture,
@@ -2534,7 +2558,7 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
 
   beforeAll(async () => {
     // 10s testsrc2 at 60fps, ~40% of frames dropped via select filter and
-    // encoded with -vsync vfr so timestamps are irregular. Declared fps 60,
+    // encoded with -fps_mode vfr so timestamps are irregular. Declared fps 60,
     // actual average ~36 — well over the 10% threshold used by isVFR.
     // The select expression drops four 1-second windows (frames 30-89,
     // 180-239, 330-389, 480-539) to simulate static segments in a screen
@@ -2552,7 +2576,7 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
       "testsrc2=s=320x180:d=10:rate=60",
       "-vf",
       "select='not(between(n\\,30\\,89))*not(between(n\\,180\\,239))*not(between(n\\,330\\,389))*not(between(n\\,480\\,539))'",
-      "-vsync",
+      "-fps_mode",
       "vfr",
       "-c:v",
       "libx264",
