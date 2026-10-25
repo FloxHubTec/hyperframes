@@ -5093,7 +5093,7 @@ export function computeDeVerifySampleFractions(k: number): number[] {
   return [...Array.from({ length: k - 1 }, (_, i) => (i + 1) / k), 0.95];
 }
 
-/** Runs timeline callbacks like the render's own seek: with them suppressed, a count-up's text stays stale in the truth. */
+/** Runs timeline callbacks like the render's seek; suppressed, a count-up's text is stale in the truth. */
 export async function seekDeVerifyTruth(page: Page, t: number): Promise<void> {
   await page.evaluate((tt: number) => {
     const hf = (
