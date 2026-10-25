@@ -232,6 +232,32 @@ describe("setPreviewRasterScale", () => {
     sheet.remove();
   });
 
+  it("walks no holders for a mounted scene with nothing marked in or around it", async () => {
+    setPreviewRasterScale(0.5);
+    const walks = vi.spyOn(Element.prototype, "closest");
+    const scene = document.createElement("div");
+    for (let i = 0; i < 50; i += 1) layer("position: absolute", scene);
+    document.body.append(scene);
+    await Promise.resolve();
+    const count = walks.mock.calls.length;
+    walks.mockRestore();
+    expect(count).toBeLessThanOrEqual(1);
+  });
+
+  it("does no work for attribute and style writes on a page that nothing hints", async () => {
+    const paths = Array.from({ length: 20 }, () => layer("position: absolute"));
+    setPreviewRasterScale(0.5);
+    const walks = vi.spyOn(Element.prototype, "querySelectorAll");
+    for (const path of paths) {
+      path.setAttribute("fill", "#fff");
+      path.style.left = "4px";
+    }
+    await Promise.resolve();
+    const count = walks.mock.calls.length;
+    walks.mockRestore();
+    expect(count).toBe(0);
+  });
+
   it("re-checks the page when a linked stylesheet loads", async () => {
     const sheet = document.createElement("style");
     document.head.append(sheet);

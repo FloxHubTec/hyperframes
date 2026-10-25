@@ -14,6 +14,8 @@ const RUNTIME_PLAYBACK_ATTRS = new Set<string>([...PREVIEW_ONLY_ATTRS, CLIP_HIDD
 let sheet: HTMLStyleElement | null = null;
 let observer: MutationObserver | null = null;
 let hintRuleSelector: string | null = null;
+let watchingAttributes: boolean | null = null;
+const marked = new Set<Element>();
 const markedWith = new WeakMap<Element, string>();
 
 // Other hints (opacity, filter) make boundaries of their own, so only a pure transform hint goes.
@@ -53,19 +55,23 @@ function inlineFit(element: Element, style: CSSStyleDeclaration): string {
 // the layer, so that only happens when the element itself changed.
 function fits(element: Element, readOwnHints: boolean): boolean {
   if (element === sheet) return false;
-  const marked = element.hasAttribute(PREVIEW_RASTER_ATTR);
-  if (marked && readOwnHints) element.removeAttribute(PREVIEW_RASTER_ATTR);
+  const isMarked = marked.has(element);
+  if (isMarked && readOwnHints) setMark(element, false);
   const style = getComputedStyle(element);
-  const hintsFit = (marked && !readOwnHints) || onlyTransformHints(style);
+  const hintsFit = (isMarked && !readOwnHints) || onlyTransformHints(style);
   const drop = hintsFit && canDropHint(element, style);
   if (drop) markedWith.set(element, inlineFit(element, style));
   return drop;
 }
 
+function setMark(element: Element, on: boolean): void {
+  element.toggleAttribute(PREVIEW_RASTER_ATTR, on);
+  if (on) marked.add(element);
+  else marked.delete(element);
+}
+
 function writeMark(element: Element, drop: boolean): void {
-  if (drop !== element.hasAttribute(PREVIEW_RASTER_ATTR)) {
-    element.toggleAttribute(PREVIEW_RASTER_ATTR, drop);
-  }
+  if (drop !== marked.has(element)) setMark(element, drop);
 }
 
 function check(element: Element, readOwnHints: boolean): void {
@@ -76,7 +82,7 @@ function unmarkHolders(element: Element): void {
   let holder = element.parentElement?.closest(MARKED);
   while (holder) {
     if (escapes(element, getComputedStyle(holder).zIndex !== "auto")) {
-      holder.removeAttribute(PREVIEW_RASTER_ATTR);
+      setMark(holder, false);
     }
     holder = holder.parentElement?.closest(MARKED);
   }
@@ -97,8 +103,8 @@ function readHintRules(): string {
     }
   };
   try {
-    for (const sheet of [...document.styleSheets, ...(document.adoptedStyleSheets ?? [])]) {
-      collect(sheet.cssRules, false);
+    for (const rules of [...document.styleSheets, ...(document.adoptedStyleSheets ?? [])]) {
+      if (rules !== sheet?.sheet) collect(rules.cssRules, false);
     }
     document.createDocumentFragment().querySelector(selectors.join(",") || "*");
   } catch {
@@ -114,7 +120,9 @@ function hintRules(): string {
 }
 
 function mayHint(element: Element): boolean {
-  if ((element as HTMLElement).style?.getPropertyValue("will-change")) return true;
+  if (marked.has(element) || (element as HTMLElement).style?.getPropertyValue("will-change")) {
+    return true;
+  }
   const rules = hintRules();
   return rules !== "" && element.matches(rules);
 }
@@ -128,6 +136,7 @@ function followTree(root: Element, batch: FollowBatch): void {
     decidedBeforeAnyWrite.push([element, mayHint(element) && fits(element, readOwnHints)]);
   }
   for (const [element, drop] of decidedBeforeAnyWrite) writeMark(element, drop);
+  if (!marked.size) return;
   for (const [element] of decidedBeforeAnyWrite) unmarkHolders(element);
 }
 
@@ -135,7 +144,7 @@ type FollowBatch = { changed: Set<Element>; checked: Set<Element> };
 
 // Scripts restyle inline every frame, so only what can break a mark is looked at.
 function followStyle(element: Element): void {
-  if (element.hasAttribute(PREVIEW_RASTER_ATTR)) {
+  if (marked.has(element)) {
     const style = getComputedStyle(element);
     if (style.position === "static" || inlineFit(element, style) !== markedWith.get(element)) {
       check(element, true);
@@ -145,9 +154,8 @@ function followStyle(element: Element): void {
 }
 
 function clearMarks(): void {
-  for (const element of document.querySelectorAll(MARKED)) {
-    element.removeAttribute(PREVIEW_RASTER_ATTR);
-  }
+  for (const element of document.querySelectorAll(MARKED)) setMark(element, false);
+  marked.clear();
 }
 
 // Every mark is decided before any is written, so the page restyles twice, not once per layer.
@@ -157,7 +165,8 @@ function markLayers(): void {
   const layers = [...document.querySelectorAll("*")].filter(
     (element) => mayHint(element) && fits(element, true),
   );
-  for (const layer of layers) layer.setAttribute(PREVIEW_RASTER_ATTR, "");
+  for (const layer of layers) setMark(layer, true);
+  watch();
 }
 
 function followAttribute(record: MutationRecord, batch: FollowBatch): void {
@@ -186,17 +195,33 @@ function ownAttributeChanges(records: MutationRecord[]): Set<Element> {
   return changed;
 }
 
+// With nothing marked and no rule giving a hint, no attribute or inline style change can make or
+// break a mark: only added elements are followed, and a hint missed that way stays as authored.
+function watch(): void {
+  const attributes = marked.size > 0 || hintRules() !== "";
+  if (!observer || attributes === watchingAttributes) return;
+  watchingAttributes = attributes;
+  observer.observe(document.documentElement, { subtree: true, childList: true, attributes });
+}
+
+function forgetRemovedMarks(records: MutationRecord[]): void {
+  if (!records.some((record) => record.removedNodes.length)) return;
+  for (const element of marked) if (!element.isConnected) marked.delete(element);
+}
+
 function follow(records: MutationRecord[]): void {
   const rules = records.flatMap(addedRules);
   for (const rule of rules) {
     rule.addEventListener("load", () => observer && markLayers(), { once: true });
   }
   if (rules.length) return markLayers();
+  forgetRemovedMarks(records);
   const batch: FollowBatch = { changed: ownAttributeChanges(records), checked: new Set() };
   for (const record of records) {
     if (record.type === "attributes") followAttribute(record, batch);
     else for (const node of record.addedNodes) if (isElementNode(node)) followTree(node, batch);
   }
+  watch();
 }
 
 function restore(): void {
@@ -205,6 +230,7 @@ function restore(): void {
   sheet?.remove();
   sheet = null;
   hintRuleSelector = null;
+  watchingAttributes = null;
   clearMarks();
 }
 
@@ -218,9 +244,5 @@ export function setPreviewRasterScale(scale: number): void {
   (document.head ?? document.documentElement).append(sheet);
   markLayers();
   observer = new MutationObserver(follow);
-  observer.observe(document.documentElement, {
-    subtree: true,
-    childList: true,
-    attributes: true,
-  });
+  watch();
 }
