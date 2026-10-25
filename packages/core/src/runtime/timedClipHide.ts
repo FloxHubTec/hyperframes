@@ -36,7 +36,6 @@ export function showHiddenClips(only: (el: HTMLElement) => boolean = () => true)
   );
 }
 
-/** Shows the given hidden clips; returns a function that hides them again. */
 export function showClips(hidden: Array<Element & ElementCSSInlineStyle>): () => void {
   const putMarksBack = hidden.map((el) => revealClip(el));
   return () => {
