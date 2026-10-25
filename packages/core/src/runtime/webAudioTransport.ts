@@ -145,7 +145,18 @@ function isBufferSource(
   return source.sourceKind === "buffer";
 }
 
-const decodeKey = (el: HTMLMediaElement): string | null => el.currentSrc || el.getAttribute("src");
+// Absolute, so the cache and the release pass cannot key the same asset two ways: an element
+// between resources reports no `currentSrc`, and the attribute behind it is usually relative.
+const decodeKey = (el: HTMLMediaElement): string | null => {
+  const src = el.currentSrc || el.getAttribute("src");
+  if (!src) return null;
+  const base = el.ownerDocument?.baseURI;
+  try {
+    return base ? new URL(src, base).href : src;
+  } catch {
+    return src;
+  }
+};
 
 // A pause to scrub or a reschedule mid-play keeps the output awake; a real idle lets it sleep.
 const IDLE_SUSPEND_MS = 10000;
