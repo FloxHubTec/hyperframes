@@ -1,6 +1,5 @@
 // @vitest-environment happy-dom
 
-
 import { describe, expect, it } from "vitest";
 import { usePlayerStore } from "./playerStore";
 import { readStudioUiPreferences } from "../../utils/studioUiPreferences";

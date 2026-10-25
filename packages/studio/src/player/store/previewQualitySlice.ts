@@ -48,7 +48,8 @@ export function createPreviewQualitySlice(
     previewCopies: null,
     setPreviewCopies: (previewCopies) => set({ previewCopies }),
     previewCopiesRetry: 0,
-    retryPreviewCopies: () => set((state) => ({ previewCopiesRetry: state.previewCopiesRetry + 1 })),
+    retryPreviewCopies: () =>
+      set((state) => ({ previewCopiesRetry: state.previewCopiesRetry + 1 })),
   };
 }
 

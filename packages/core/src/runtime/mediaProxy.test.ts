@@ -1042,7 +1042,9 @@ describe("preview quality: lighter copies of heavy files", () => {
 
       setPreviewQuality(0.5);
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(lastCopies(posted)).toMatchObject({ copies: { total: 1, failed: 1, error: "failed" } });
+      expect(lastCopies(posted)).toMatchObject({
+        copies: { total: 1, failed: 1, error: "failed" },
+      });
       expect(isProxied(el)).toBe(false);
 
       vi.stubGlobal(

@@ -12,6 +12,7 @@ export function usePreviewQualityForwarding(iframeRef: RefObject<HTMLIFrameEleme
   }, [iframeRef, level]);
   useEffect(() => {
     const frame = iframeRef.current;
-    if (frame && retries > 0) postRuntimeControlMessage(frame.contentWindow, "retry-preview-copies");
+    if (frame && retries > 0)
+      postRuntimeControlMessage(frame.contentWindow, "retry-preview-copies");
   }, [iframeRef, retries]);
 }
