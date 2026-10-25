@@ -198,6 +198,14 @@ Source: `packages/lint/src/rules/composition.ts`.
 
 **Fix:** Give the root `id="root"` and style it with `#root` plus plain descendant selectors.
 
+### `subcomposition_style_outside_template`
+
+**Warning.** A sub-composition file with a `<template>` has a `<style>`, or a `<link rel="stylesheet">`
+outside `<head>`, that sits outside the template. Mounting keeps only the template's content and the
+stylesheet links in `<head>`, so those styles never apply in preview, snapshot or render.
+
+**Fix:** Move it inside `<template>`, next to the composition root.
+
 ### `template_literal_selector`
 
 **Error.** `querySelector` is called with a template-literal variable, which the bundler's CSS parser crashes on.
@@ -487,6 +495,16 @@ Source: `packages/lint/src/rules/gsap.ts`.
 **Error.** GSAP writes `strokeDasharray` on an element whose CSS declares a multi-component `stroke-dasharray`; GSAP merges dash lists per component, so the CSS gap survives and the draw-on breaks.
 
 **Fix:** Remove the CSS `stroke-dasharray` (decorative dashes belong on a separate element), or set the full two-component value in GSAP.
+
+### `svg_round_cap_hidden_dash`
+
+**Warning.** A round or square capped path is hidden with dasharray = gap = `pathLength` and dashoffset = dash.
+
+Chrome can leave a zero-length sliver at the path end there, and the cap paints it as a dot on some curves.
+
+**Fix:** Make the gap longer than the path (`stroke-dasharray="100 120"`, `stroke-dashoffset="110"`).
+
+Or keep the element `visibility: hidden` until its draw tween starts.
 
 ### `svg_measure_before_path_d`
 

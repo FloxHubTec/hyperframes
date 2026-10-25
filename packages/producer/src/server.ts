@@ -29,6 +29,7 @@ import crypto from "node:crypto";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
+import { fetchPublicHttpsText } from "@hyperframes/engine";
 import {
   RenderCancelledError,
   createRenderJob,
@@ -87,6 +88,7 @@ interface RenderInput {
   pageMotionBlur?: RenderConfig["pageMotionBlur"];
   outputDynamicRange?: "auto" | "hdr" | "sdr";
   workers?: number;
+  maxRenderMs?: number;
   crf?: number;
   videoBitrate?: string;
   useGpu: boolean;
@@ -129,6 +131,7 @@ const SAFE_RENDER_ERROR_CODES = new Set<string>([
   "VIDEO_SOURCE_UNRENDERABLE",
   "VIDEO_EXTRACTION_FAILED",
   "ENCODER_INTERRUPTED",
+  "RENDER_TOO_SLOW",
 ]);
 
 /**
@@ -223,6 +226,7 @@ export function parseRenderOptions(body: Record<string, unknown>): Omit<RenderIn
   const fps = parseServerFps(body.fps);
   const quality = parseServerQuality(body.quality);
   const workers = typeof body.workers === "number" ? body.workers : undefined;
+  const maxRenderMs = typeof body.maxRenderMs === "number" ? body.maxRenderMs : undefined;
   const useGpu = body.gpu === true;
   const debug = body.debug === true;
   // Preserve the pre-structured-warning HTTP contract for callers that do
@@ -247,6 +251,7 @@ export function parseRenderOptions(body: Record<string, unknown>): Omit<RenderIn
     fps,
     quality,
     workers,
+    maxRenderMs,
     crf,
     videoBitrate,
     useGpu,
@@ -308,6 +313,7 @@ function buildRenderJobConfig(input: RenderInput, outputPath: string, log: Produ
       quality: input.quality,
       format: input.format ?? "mp4",
       workers: input.workers,
+      maxRenderMs: input.maxRenderMs,
       crf: input.crf,
       videoBitrate: input.videoBitrate,
       useGpu: input.useGpu,
@@ -351,6 +357,14 @@ function resolvePreparedRenderOutput(
 function validateRenderOverrides(body: Record<string, unknown>): string | undefined {
   const encoder = parseEncoderOptions(body, parseServerFormat(body.format) ?? "mp4");
   if (!encoder.ok) return encoder.error;
+  if (
+    body.maxRenderMs !== undefined &&
+    (typeof body.maxRenderMs !== "number" ||
+      !Number.isInteger(body.maxRenderMs) ||
+      body.maxRenderMs < 0)
+  ) {
+    return "maxRenderMs must be a non-negative integer number of milliseconds";
+  }
   if (body.variables !== undefined && !isPlainObject(body.variables)) {
     return 'variables must be a JSON object keyed by variable id (e.g. {"title":"Hello"})';
   }
@@ -394,6 +408,8 @@ function validateOutputResolutionOverride(body: Record<string, unknown>): string
 
 type PrepareRenderResult = { prepared: PreparedRenderInput } | { error: string };
 
+const MAX_PREVIEW_HTML_BYTES = 20 * 1024 * 1024;
+
 function prepareProjectDirectory(
   projectDir: unknown,
   options: Omit<RenderInput, "projectDir">,
@@ -423,11 +439,7 @@ async function resolveInlineRenderHtml(body: Record<string, unknown>): Promise<
   if (!previewUrl)
     return { error: "Missing render source: provide projectDir, previewUrl, or html" };
   try {
-    const response = await fetch(previewUrl, { method: "GET" });
-    if (!response.ok) {
-      return { error: `Failed to fetch previewUrl: ${response.status} ${response.statusText}` };
-    }
-    return { html: await response.text() };
+    return { html: await fetchPublicHttpsText(previewUrl, { maxBytes: MAX_PREVIEW_HTML_BYTES }) };
   } catch (error) {
     return {
       error: `Failed to fetch previewUrl: ${error instanceof Error ? error.message : String(error)}`,
