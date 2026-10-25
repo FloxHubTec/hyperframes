@@ -1067,10 +1067,12 @@ cover every finding from the full check.
 | `--prepare-media`                            | Only make the browser-playable video copies, then exit: no browser, no report. `--json` lists each file as `ready`, `cached` or `failed`; exit 1 if any failed |
 
 A video Chrome cannot decode (HEVC, ProRes) is copied once, and the first check waits
-for it. A source longer than a few minutes is copied in one-minute pieces that are kept,
-so a copy that is stopped continues from its finished pieces on the next run. For a long
-project, run `hyperframes check --prepare-media` first, then the check itself finds every
-copy ready.
+for it. A source longer than 22 seconds is copied in 15-second pieces that are kept, so a
+copy that is stopped continues from its finished pieces on the next run. While it works, the
+check prints each copy's progress to stderr every 10 seconds (stdout stays clean for `--json`),
+and ends a copy only when it makes no progress for 3 minutes (`HYPERFRAMES_PROXY_STALL_MS`).
+For a long project, run `hyperframes check --prepare-media` first, then the check itself finds
+every copy ready.
 
 `--caption-zone` and `--frame-check` refuse a ranged check when none of their
 configured seek samples falls inside `--range`; a requested gate never silently
@@ -1481,7 +1483,7 @@ How it uses the machine, and when it gives up:
 
 | Flag                                                     | Default                                    | Description                                                                                                       |
 | -------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `--workers, -w`                                          | auto                                       | 1–24 workers. Each is a separate Chrome, roughly 256 MB. Auto weighs cores, memory, frame count, and cost.          |
+| `--workers, -w`                                          | auto                                       | 1–24 workers. Each is a separate Chrome, roughly 256 MB. Auto weighs cores, memory, frame count, and cost. N is a ceiling: a render drawElement can capture still uses one worker. |
 | `--low-memory-mode` / `--no-low-memory-mode`             | auto at 8 GB RAM or less                   | Safe profile: one worker, screenshot capture, no calibration. See the note below.                                   |
 | `--gpu`                                                  | off                                        | Hardware FFmpeg encoding (NVENC, VideoToolbox, AMF, VAAPI, QSV)                                                    |
 | `--browser-gpu` / `--no-browser-gpu`                     | auto locally, off in Docker                | Host GPU for Chrome and WebGL capture, or software rendering. Auto probes WebGL once and falls back.                |
