@@ -1,31 +1,31 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const spawnSync = vi.hoisted(() => vi.fn());
+vi.mock("node:child_process", () => ({ spawnSync }));
 vi.mock("node:os", async (orig) => ({
   ...(await orig<typeof import("node:os")>()),
-  platform: () => "linux",
+  platform: () => "darwin",
 }));
 
-describe.skipIf(process.platform === "win32")("copyToClipboard", () => {
-  const oldPath = process.env.PATH;
-  let dir = "";
-  afterEach(() => {
-    process.env.PATH = oldPath;
-    rmSync(dir, { recursive: true, force: true });
+describe("copyToClipboard", () => {
+  beforeEach(() => {
+    spawnSync.mockReset();
     vi.resetModules();
   });
 
-  it("returns when the clipboard tool leaves a background owner running", async () => {
-    dir = mkdtempSync(join(tmpdir(), "hf-clip-"));
-    const tool = join(dir, "clip.exe");
-    writeFileSync(tool, "#!/bin/sh\ncat >/dev/null\nsleep 8 &\nexit 0\n");
-    chmodSync(tool, 0o755);
-    process.env.PATH = `${dir}:${oldPath}`;
+  it("does not let the tool's background owner hold our output pipes or block forever", async () => {
+    spawnSync.mockReturnValue({ status: 0 });
     const { copyToClipboard } = await import("./clipboard.js");
-    const start = Date.now();
     expect(copyToClipboard("snippet")).toBe(true);
-    expect(Date.now() - start).toBeLessThan(4000);
+    const opts = spawnSync.mock.calls[0]![2];
+    expect(opts.input).toBe("snippet");
+    expect(opts.stdio).toEqual(["pipe", "ignore", "ignore"]);
+    expect(opts.timeout).toBeGreaterThan(0);
+  });
+
+  it("reports not copied when the tool times out", async () => {
+    spawnSync.mockReturnValue({ status: null, error: new Error("ETIMEDOUT") });
+    const { copyToClipboard } = await import("./clipboard.js");
+    expect(copyToClipboard("snippet")).toBe(false);
   });
 });
