@@ -412,7 +412,10 @@ function proxyScaleFilter(box?: PreviewProxyBox): string {
 
 const STDERR_ERROR_LINE = /error|invalid|denied|no space|not found|unknown/i;
 
-/** ffmpeg ends most failures with "Conversion failed!"; the cause is the last error-looking line above it. */
+const OPEN_OUTPUT_LINE = /^Error opening output file /;
+
+/** ffmpeg ends most failures with "Conversion failed!"; the cause is the last error-looking line above it.
+ * When it only says the output could not open, the line before that names why. */
 function stderrReason(stderrTail: string): string {
   const lines = stderrTail
     .split("\n")
@@ -420,7 +423,13 @@ function stderrReason(stderrTail: string): string {
     .filter(Boolean);
   const errorLines = lines.filter((line) => STDERR_ERROR_LINE.test(line));
   const line = errorLines.at(-1) ?? lines.at(-1);
-  return line ? `: ${line.replace(/[.!]+$/, "")}` : "";
+  if (!line) return "";
+  const openedAt = lines.map((candidate) => OPEN_OUTPUT_LINE.test(candidate)).lastIndexOf(true);
+  const cause = openedAt > 0 ? lines[openedAt - 1] : undefined;
+  return `: ${[cause, line]
+    .filter(Boolean)
+    .join("; ")
+    .replace(/[.!]+$/, "")}`;
 }
 
 interface ChunkRange {

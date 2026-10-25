@@ -1518,6 +1518,30 @@ describe("resolveProxy", () => {
     await again;
   });
 
+  it("names why the output could not open, not only that it could not", async () => {
+    const { spawn, calls } = createSpawnSpy();
+    const { resolveProxy } = await loadModule(spawn, FFMPEG_PATH);
+    const projectDir = tmpProject();
+    const sourcePath = join(projectDir, "phone.mov");
+    writeFileSync(sourcePath, "source-bytes");
+
+    const result = resolveProxy(projectDir, sourcePath).catch((error: unknown) => error);
+    await flush();
+    fail(
+      calls[0]!,
+      234,
+      [
+        "[out#0/mp4 @ 0x1] Output file does not contain any stream",
+        "Error opening output file /project/.transcode-cache/.tmp-1-abc.mp4.",
+        "Error opening output files: Invalid argument",
+      ].join("\n"),
+    );
+
+    expect(String(await result)).toContain(
+      "ffmpeg exited with code 234: [out#0/mp4 @ 0x1] Output file does not contain any stream; Error opening output files: Invalid argument",
+    );
+  });
+
   it("remembers a failure per cache key: a second call rethrows without respawning ffmpeg", async () => {
     const { spawn, calls } = createSpawnSpy();
     const { resolveProxy, ProxyTranscodeError, clearFailedTranscodesForTest } = await loadModule(
