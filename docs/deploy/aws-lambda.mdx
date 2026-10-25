@@ -237,7 +237,7 @@ Check the failed invocation's CloudWatch logs to distinguish Plan from RenderChu
 
 Plan v2 leaves eligible constant-frame-rate SDR extraction to chunk workers after a short timing probe. Variable-frame-rate sources and required HDR color conversions still extract during Plan; the deprecated v1 path also extracts videos during Plan. Smaller chunks or a higher `maxParallelChunks` can reduce each chunk's work, but do not divide extraction that still happens during Plan.
 
-If the logs show that a slow extraction needs a longer gap between frames, and the work fits within the Lambda invocation budget, increase `FFMPEG_PROCESS_TIMEOUT_MS` on the deployed function that runs the failing phase. The default arm64 deployment uses the video function for Plan and RenderChunk. Setting the variable only in the terminal running `lambda render` does not configure the remote function. CDK users can configure the construct's render function before deploying:
+If the logs show that a slow extraction needs a longer gap between frames, and the work fits within the Lambda invocation budget, increase `FFMPEG_PROCESS_TIMEOUT_MS` on the deployed function that runs the failing phase. The default arm64 deployment uses the video function for Plan and RenderChunk. Setting the variable only in the terminal running `lambda render` does not configure the remote function. CDK users can configure the construct's render function before deploying. Here, `render` is the `HyperframesRenderStack` instance created in the CDK example above:
 
 ```ts
 render.renderFunction.addEnvironment("FFMPEG_PROCESS_TIMEOUT_MS", "600000");
