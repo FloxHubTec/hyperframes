@@ -418,7 +418,7 @@ const REASON_LINES = 3;
 
 /** ffmpeg ends most failures with "Conversion failed!"; its causes are the last few error-looking lines above it,
  * and the line before "Error opening output file" names why the output could not open. Paths are dropped. */
-function stderrReason(stderrTail: string): string {
+function stderrReason(stderrTail: string, knownPaths: string[]): string {
   const lines = stderrTail
     .split("\n")
     .map((line) => line.trim())
@@ -429,7 +429,13 @@ function stderrReason(stderrTail: string): string {
       !OPEN_OUTPUT_LINE.test(line) && (STDERR_ERROR_LINE.test(line) || index === openedAt - 1),
   );
   const shown = (causes.length ? causes : lines.slice(-1)).slice(-REASON_LINES);
-  const reason = shown.map((line) => line.replace(ABSOLUTE_PATH, "<path>").replace(/[.!]+$/, ""));
+  const byLength = knownPaths.filter(isAbsolute).sort((a, b) => b.length - a.length);
+  const reason = shown.map((line) =>
+    byLength
+      .reduce((text, path) => text.split(path).join("<path>"), line)
+      .replace(ABSOLUTE_PATH, "<path>")
+      .replace(/[.!]+$/, ""),
+  );
   return reason.length ? `: ${reason.join("; ")}` : "";
 }
 
@@ -451,6 +457,7 @@ function describeSource(
   metadata: Awaited<ReturnType<typeof probeMediaMetadata>>,
 ): string {
   const { codecName, pixelFormat, colorTransfer } = metadata.color;
+  const megabytes = statSync(sourcePath, { throwIfNoEntry: false })?.size;
   return [
     metadata.kind,
     codecName,
@@ -459,7 +466,7 @@ function describeSource(
     metadata.hasAudio ? "with audio" : "no audio",
     metadata.streams?.length ? `streams ${metadata.streams.join(" ")}` : undefined,
     metadata.durationSeconds ? `${Math.round(metadata.durationSeconds)}s` : undefined,
-    `${Math.round(statSync(sourcePath).size / 1e6)} MB`,
+    megabytes === undefined ? "missing" : `${Math.round(megabytes / 1e6)} MB`,
     sourceFolderKind(sourcePath),
   ]
     .filter(Boolean)
@@ -467,10 +474,10 @@ function describeSource(
 }
 
 /** A copy's failure message ends with the source it was made from; other errors pass through. */
-function withSource(err: unknown, source: string): unknown {
+function withSource(err: unknown, describe: () => string): unknown {
   if (err instanceof ProxyTranscodeError && err.name === "ProxyTranscodeError") {
     return new ProxyTranscodeError(
-      `${err.message} (source: ${source})`,
+      `${err.message} (source: ${describe()})`,
       err.exitCode,
       err.stderrTail,
     );
@@ -768,7 +775,7 @@ async function runFfmpeg(
       (doneSeconds) => onProgress({ doneSeconds, totalSeconds }),
     );
   } catch (err) {
-    throw withSource(err, describeSource(sourcePath, metadata));
+    throw withSource(err, () => describeSource(sourcePath, metadata));
   }
 }
 
@@ -862,7 +869,7 @@ function spawnFfmpeg(
       } else {
         reject(
           new ProxyTranscodeError(
-            `ffmpeg exited with code ${code}${stderrReason(stderrTail)}`,
+            `ffmpeg exited with code ${code}${stderrReason(stderrTail, args)}`,
             code,
             stderrTail,
           ),

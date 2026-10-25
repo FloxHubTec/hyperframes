@@ -1567,6 +1567,30 @@ describe("resolveProxy", () => {
     expect(message).not.toContain(projectDir);
   });
 
+  it("keeps a spaced file or folder name out of the failure, and survives a source that vanished", async () => {
+    const { spawn, calls } = createSpawnSpy();
+    const { resolveProxy } = await loadModule(spawn, FFMPEG_PATH);
+    const projectDir = tmpProject();
+    const sourcePath = join(projectDir, "My Project", "Screen Recording 2026.mov");
+    mkdirSync(dirname(sourcePath));
+    writeFileSync(sourcePath, "source-bytes");
+
+    const result = resolveProxy(projectDir, sourcePath).catch((error: unknown) => error);
+    await flush();
+    rmSync(sourcePath);
+    const input = calls[0]!.args[calls[0]!.args.indexOf("-i") + 1];
+    fail(
+      calls[0]!,
+      234,
+      `Error opening input file ${input}.\nError opening input files: Invalid argument`,
+    );
+
+    const message = String(await result);
+    expect(message).toContain("Error opening input file <path>");
+    expect(message).toContain("missing");
+    expect(message).not.toMatch(/My Project|Screen Recording/);
+  });
+
   it("remembers a failure per cache key: a second call rethrows without respawning ffmpeg", async () => {
     const { spawn, calls } = createSpawnSpy();
     const { resolveProxy, ProxyTranscodeError, clearFailedTranscodesForTest } = await loadModule(
