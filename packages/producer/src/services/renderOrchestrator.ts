@@ -2141,9 +2141,8 @@ export function resolveDeShortBand(args: {
 }
 
 /**
- * DE priority inversion predicate: should a multi-worker render (auto, or an
- * explicit `--workers N`, which is a ceiling) drop to single-worker verified
- * drawElement streaming?
+ * DE priority inversion predicate: should a multi-worker render drop to
+ * single-worker verified drawElement streaming?
  *
  * Benchmarked 2026-07-08: above ~900 frames DE-single beats screenshot-parallel
  * at every worker count (2,380f: 66s vs 109–127s at W2–W5); below it DE's fixed
