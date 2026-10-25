@@ -183,11 +183,7 @@ function installStateLatchedFired(): boolean {
   return latchedFiredSeen;
 }
 
-/**
- * Lift the router latch from both stores. The latch is otherwise one-way (a
- * stale writer or a config re-mint must never re-arm a failed router), so the
- * state file is cleared first or the next config write would copy it back.
- */
+/** Lift the router latch from both stores; install-state goes first or the next write copies it back. */
 export function releaseDeParallelRouterLatch(): void {
   const read = readInstallState();
   if (isInstallState(read) && read.deParallelRouterTrialFired) {

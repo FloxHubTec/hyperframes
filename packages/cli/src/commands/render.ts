@@ -1417,7 +1417,7 @@ function rearmDeParallelRouter(next: DeRouterBreaker | undefined): void {
   if (!deParallelRouterUserManaged) delete process.env.HF_DE_PARALLEL_ROUTER;
 }
 
-/** Is the router held off for this render? A latch from another version, or one with no record (older CLI), is lifted here. */
+/** Is the router held off for this render? A stale or record-less latch is lifted here. */
 function routerHeldOff(config: HyperframesConfig): boolean {
   if (deParallelRouterBreakerTrippedThisProcess) return true;
   if (!config.deParallelRouterTrialFired) return false;
@@ -1618,18 +1618,8 @@ function persistDeParallelRouterTrialFired(): boolean {
 }
 
 /**
- * After a render the router took part in, record how it went. A clean
- * "routed" only counts the render. Any other outcome (a self-verify revert, a
- * stall) is a strike with the rejected frame's detail; a second strike within
- * `DE_ROUTER_BREAKER_WINDOW` renders turns the router off for this install
- * until a new CLI version or enough clean renders (see `deRouterBreaker.ts`).
- * Checks both the success path (`perfSummary`) and the failure path
- * (`errorDetails.observability.capture`); a crash while merely "routed"
- * (cancellation) is not a router failure.
- *
- * No file locking: the render counter is written once and unverified (a lost
- * increment under-counts by one), while the trip flag is verified and
- * re-asserted by `persistDeParallelRouterTrialFired`.
+ * Record how a router render went: a clean "routed" only counts it, any other
+ * outcome is a strike (see `deRouterBreaker.ts`), and a cancelled "routed" render is not one.
  */
 function maybeConsumeDeParallelRouterTrial(
   routerActive: boolean,
