@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-// Entry: createRenderHandlers().renderStream, the handler HeyGen mounts, with a render that hangs until the test ends it.
+// Entry: createRenderHandlers().renderStream, with a render that hangs until the test ends it.
 const renders = vi.hoisted(() => ({
   jobs: [] as Array<{ framesRendered: number; currentStage: string }>,
   finish: [] as Array<() => void>,
