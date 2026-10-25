@@ -86,7 +86,7 @@ function knownUsage(
   monthly?: UsageWindow | null,
 ): HarnessUsage {
   const windows = [session, weekly, monthly, spend].filter(
-    (window): window is UsageWindow => window !== null,
+    (window): window is UsageWindow => window !== null && window !== undefined,
   );
   if (!windows.length) return unknownUsage("no_usage_windows");
   if (
