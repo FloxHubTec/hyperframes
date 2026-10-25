@@ -34,11 +34,10 @@ console.log = (...args: unknown[]) => {
   }
   log(...args);
 };
-// The command may start several browsers at once; the one that runs the hanging script is the one under test.
 let scriptBrowserPid: number | undefined;
-function recordLaunch(pid: number): void {
-  appendFileSync(`${pidFile}.launched`, `${pid}\n`);
-  if (scriptBrowserPid === undefined) writeFileSync(pidFile, String(pid));
+function recordLaunch(file: string, pid: number): void {
+  appendFileSync(`${file}.launched`, `${pid}\n`);
+  if (scriptBrowserPid === undefined) writeFileSync(file, String(pid));
 }
 const launch = puppeteer.launch.bind(puppeteer);
 puppeteer.launch = async (options) => {
@@ -49,7 +48,7 @@ puppeteer.launch = async (options) => {
   writeFileSync(`${pidFile}.profile`, profile.slice("--user-data-dir=".length));
   const pid = browserProcess?.pid;
   if (!pid) throw new Error("Browser did not expose its process");
-  recordLaunch(pid);
+  recordLaunch(pidFile, pid);
   const newPage = browser.newPage.bind(browser);
   browser.newPage = async () => {
     const page = await newPage();
