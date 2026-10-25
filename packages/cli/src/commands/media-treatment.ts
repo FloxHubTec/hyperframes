@@ -32,6 +32,7 @@ import { c } from "../ui/colors.js";
 import { failCommand } from "../utils/commandResult.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { readOptionalString } from "../utils/pathArgs.js";
+import { projectCompositionFiles } from "../utils/mountedCompositions.js";
 import { resolveProject } from "../utils/project.js";
 import { withMeta } from "../utils/updateCheck.js";
 import { analyzeMediaTreatment } from "./media-treatment-analysis.js";
@@ -625,9 +626,29 @@ function runCapabilityQuery(args: MediaTreatmentCommandArgs): void {
   console.log(JSON.stringify(withMeta({ ok: true, capabilities }), null, 2));
 }
 
-function resolveMutationFile(args: MediaTreatmentCommandArgs) {
+/** Without --file, the one project file that declares an element matching `selector`: index.html or a mounted scene. */
+function fileDeclaringSelector(projectDir: string, selector: string): string {
+  const declaring = projectCompositionFiles(projectDir).filter((file) => {
+    try {
+      const document = parseSourceDocument(readFileSync(resolve(projectDir, file), "utf8"));
+      return queryIncludingTemplates(document, selector).length > 0;
+    } catch {
+      return false;
+    }
+  });
+  if (declaring.length > 1) {
+    throw new Error(
+      `Selector matches clips in ${declaring.join(", ")}; pass --file to pick one: ${selector}`,
+    );
+  }
+  return declaring[0] ?? "index.html";
+}
+
+function resolveMutationFile(args: MediaTreatmentCommandArgs, selector: string | undefined) {
   const project = resolveProject(readOptionalString(args.project));
-  const fileArg = readOptionalString(args.file) ?? "index.html";
+  const fileArg =
+    readOptionalString(args.file) ??
+    (selector ? fileDeclaringSelector(project.dir, selector) : "index.html");
   const filePath = resolve(project.dir, fileArg);
   if (!isPathInside(filePath, project.dir) || !filePath.toLowerCase().endsWith(".html")) {
     throw new Error("--file must be an HTML file inside the project");
@@ -637,8 +658,8 @@ function resolveMutationFile(args: MediaTreatmentCommandArgs) {
 }
 
 function analyzeTarget(args: MediaTreatmentCommandArgs) {
-  const { project, filePath } = resolveMutationFile(args);
   const selector = readOptionalString(args.selector);
+  const { project, filePath } = resolveMutationFile(args, selector);
   if (!selector) throw new Error("--selector is required");
   if (
     readOptionalString(args.grading) ||
@@ -670,8 +691,8 @@ function analyzeTarget(args: MediaTreatmentCommandArgs) {
 }
 
 async function prepareMutation(args: MediaTreatmentCommandArgs) {
-  const { project, filePath } = resolveMutationFile(args);
   const selector = readOptionalString(args.selector);
+  const { project, filePath } = resolveMutationFile(args, selector);
   if (!selector) throw new Error("--selector is required");
   const clear = args.clear === true;
   const apply = args.apply === true;
