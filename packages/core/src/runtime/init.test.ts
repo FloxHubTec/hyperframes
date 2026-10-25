@@ -626,7 +626,8 @@ describe("initSandboxRuntimeModular", () => {
       });
       const raf = createManualRaf();
       vi.spyOn(performance, "now").mockImplementation(() => raf.now());
-      window.requestAnimationFrame = raf.requestAnimationFrame as typeof window.requestAnimationFrame;
+      window.requestAnimationFrame =
+        raf.requestAnimationFrame as typeof window.requestAnimationFrame;
       window.cancelAnimationFrame = raf.cancelAnimationFrame as typeof window.cancelAnimationFrame;
       try {
         initSandboxRuntimeModular();
