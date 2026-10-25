@@ -49,6 +49,7 @@ import {
   envInt,
   isDeParallelRouterEnabled,
   mergeWorkerInitObservability,
+  PROBE_READ_TIMEOUT_MS,
   resolveCompositionElementCount,
   detectAdaptersStatic,
   resolveAdaptersUsed,
@@ -96,6 +97,20 @@ describe("resolveRenderWorkDirPrefix", () => {
 
     expect(resolveRenderWorkDirPrefix(outputPath, "long-render-job-id", "win32", "C:/Temp")).toBe(
       join("C:/Temp", "hf-render-"),
+    );
+  });
+
+  it("keeps macOS frames out of the project folder, which a sync client may be watching", () => {
+    const outputPath = join("/Users/me/Nextcloud/project", "renders", "final.mp4");
+
+    expect(resolveRenderWorkDirPrefix(outputPath, "job-id", "darwin", "/var/folders/x/T")).toBe(
+      join("/var/folders/x/T", "hf-render-"),
+    );
+  });
+
+  it("keeps Linux frames beside the output, where a container's small /tmp cannot fill", () => {
+    expect(resolveRenderWorkDirPrefix("/work/renders/final.mp4", "job-id", "linux", "/tmp")).toBe(
+      join("/work/renders", "work-job-id-"),
     );
   });
 });
@@ -1302,6 +1317,26 @@ describe("resolveRenderWorkerCount", () => {
     expect(log.warn).toHaveBeenCalledOnce();
   });
 
+  it("does not pin a capture-motion-blur page to one worker", () => {
+    const log = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+
+    const workers = resolveRenderWorkerCount(
+      900,
+      4,
+      cfg,
+      {
+        hasShaderTransitions: false,
+        renderModeHints: {
+          recommendScreenshot: true,
+          reasons: [{ code: "captureMotionBlur", message: "data-motion-blur" }],
+        },
+      },
+      log,
+    );
+
+    expect(workers).toBe(4);
+  });
+
   // fallow-ignore-next-line code-duplication
   it("pins to 1 worker in low-memory mode when no explicit --workers is set", () => {
     const log = {
@@ -1761,15 +1796,26 @@ describe("resolveDeviceScaleFactor", () => {
     );
   });
 
-  it("rejects downsampling (4K composition → 1080p output)", () => {
-    expect(() =>
+  it("returns 0.5 for a 4K composition → 1080p output", () => {
+    expect(
       resolveDeviceScaleFactor({
         ...defaults,
         compositionWidth: 3840,
         compositionHeight: 2160,
         outputResolution: "landscape",
       }),
-    ).toThrow(/Downsampling/);
+    ).toBe(0.5);
+  });
+
+  it("scales 1080p down for 720p and 480p, so 480p frames are 854×480", () => {
+    const scale = (outputResolution: "landscape-720p" | "landscape-480p") =>
+      resolveDeviceScaleFactor({ ...defaults, outputResolution });
+    expect(scale("landscape-720p")).toBeCloseTo(2 / 3);
+    expect(scale("landscape-480p")).toBe(854 / 1920);
+    expect([
+      Math.round(1920 * scale("landscape-480p")),
+      Math.round(1080 * scale("landscape-480p")),
+    ]).toEqual([854, 480]);
   });
 
   it("rejects non-integer scale factors", () => {
@@ -2454,6 +2500,27 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
   });
 
   describe("resolveCompositionElementCount", () => {
+    it("returns the static answer and warns when the live read never answers", async () => {
+      vi.useFakeTimers();
+      try {
+        const warn = vi.fn();
+        const session = {
+          isInitialized: true,
+          page: { evaluate: () => new Promise<never>(() => {}) },
+        };
+        const pending = resolveCompositionElementCount(session, "<div><span></span></div>", {
+          warn,
+        });
+        await vi.advanceTimersByTimeAsync(PROBE_READ_TIMEOUT_MS);
+        const resolved = await pending;
+        expect(resolved.source).toBe("static");
+        expect(resolved.count).toBe(2);
+        expect(warn).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     // Review finding (R3): a static scan of SOURCE markup cannot see DOM a
     // composition's own script creates at runtime (document.createElement) —
     // an unbounded undercount no regex can close. style-10-prod's real
@@ -2628,6 +2695,23 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
   });
 
   describe("resolveAdaptersUsed", () => {
+    it("returns the static adapters and warns when the live read never answers", async () => {
+      vi.useFakeTimers();
+      try {
+        const warn = vi.fn();
+        const session = {
+          isInitialized: true,
+          page: { evaluate: () => new Promise<never>(() => {}) },
+        };
+        const pending = resolveAdaptersUsed(session, "<script>gsap.timeline();</script>", { warn });
+        await vi.advanceTimersByTimeAsync(PROBE_READ_TIMEOUT_MS);
+        expect(await pending).toEqual(["gsap"]);
+        expect(warn).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("falls back to the static scan when there is no probe session", async () => {
       const html = "<script>gsap.timeline();</script>";
       expect(await resolveAdaptersUsed(null, html)).toEqual(["gsap"]);
@@ -3288,7 +3372,7 @@ describe("sequential capture stall recovery", () => {
 describe("resolveParallelCaptureMode", () => {
   const beginframe = {
     platform: "linux" as NodeJS.Platform,
-    headlessShell: true,
+    headlessShellPath: "/cache/chrome-headless-shell" as string | undefined,
     forceScreenshot: false,
     deviceScaleFactor: 1,
   };
@@ -3303,7 +3387,9 @@ describe("resolveParallelCaptureMode", () => {
     // System Chrome on linux: resolveObservedCaptureMode calls this beginframe,
     // the engine launches screenshot. Getting this wrong would default-enable
     // the router for a cohort whose real path is the screenshot one.
-    expect(resolveParallelCaptureMode({ ...beginframe, headlessShell: false })).toBe("screenshot");
+    expect(resolveParallelCaptureMode({ ...beginframe, headlessShellPath: undefined })).toBe(
+      "screenshot",
+    );
     expect(resolveParallelCaptureMode({ ...beginframe, forceScreenshot: true })).toBe("screenshot");
     // Supersampling: BeginFrame ignores deviceScaleFactor, so preMode falls back.
     expect(resolveParallelCaptureMode({ ...beginframe, deviceScaleFactor: 2 })).toBe("screenshot");

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initSandboxRuntimeModular, installAuthoredMediaCapture } from "./init";
 import type { RuntimeTimelineLike } from "./types";
@@ -25,12 +25,8 @@ vi.mock("./colorGrading", async (importOriginal) => {
   };
 });
 
-// The library itself, the repo's vendored 3.15.0, for what a stand-in would only assume.
-const vendoredGsap = () =>
-  join(
-    dirname(expect.getState().testPath!),
-    "../../../../skills/music-to-video/references/motion-primitives/assets/gsap.min.js",
-  );
+// The library itself, core's own gsap dependency, for what a stand-in would only assume.
+const vendoredGsap = () => createRequire(import.meta.url).resolve("gsap/dist/gsap.min.js");
 type RealGsap = {
   ticker: { sleep: () => void };
   getProperty: (target: Element, property: string) => unknown;
@@ -242,6 +238,30 @@ describe("__hfSwapScenes", () => {
     const meta =
       document.querySelector('meta[name="hf-scene-parts"]')?.getAttribute("content") ?? "";
     expect(JSON.parse(meta).scenes.a).toBe("ha2");
+  });
+
+  it("adds only the fonts a swapped scene brings, leaving the loaded ones' style as it was", async () => {
+    const faceA = '@font-face{font-family:"A";src:url(a.woff2)}';
+    const faceB = '@font-face{font-family:"B";src:url(b.woff2)}';
+    boot(
+      [A1, B],
+      trackingRoot().root,
+      (head) => `<style data-hf-scene-fonts>${faceA}</style>${head}`,
+    );
+    await tick();
+    const loaded = document.querySelector("style[data-hf-scene-fonts]")!;
+
+    const next = preview([A2, B]).html.replace(
+      "<head>",
+      `<head><style data-hf-scene-fonts>${faceA}\n${faceB}</style>`,
+    );
+    await window.__hfSwapScenes!(next);
+
+    expect(sceneHost("a").textContent).toBe("A two");
+    const holders = [...document.querySelectorAll("style[data-hf-scene-fonts]")];
+    expect(holders[0]).toBe(loaded);
+    expect(loaded.textContent).toBe(faceA);
+    expect(holders.map((el) => el.textContent)).toEqual([faceA, faceB]);
   });
 
   it("runs the swapped scene's script only once web fonts are ready", async () => {

@@ -239,6 +239,10 @@ function readVideoMetadata(
       record.videoStreamStartSeconds === undefined
         ? 0
         : readFiniteNumber(record.videoStreamStartSeconds, `${field}.videoStreamStartSeconds`),
+    videoStreamLeadSeconds:
+      record.videoStreamLeadSeconds === undefined
+        ? 0
+        : readFiniteNumber(record.videoStreamLeadSeconds, `${field}.videoStreamLeadSeconds`),
     width: readPositiveInteger(record.width, `${field}.width`),
     height: readPositiveInteger(record.height, `${field}.height`),
     fps: readFiniteNumber(record.fps, `${field}.fps`),
@@ -457,6 +461,7 @@ export function buildSyntheticRenderJob(input: SyntheticRenderJobInput): RenderJ
     strictness: input.strictness,
     producerConfig: input.producerConfig,
     variables: input.variables,
+    pageMotionBlur: "off",
   };
   return createRenderJob(renderConfig);
 }
