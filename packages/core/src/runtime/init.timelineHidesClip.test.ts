@@ -37,14 +37,16 @@ describe("a timeline set that hides a timed clip", () => {
   };
 
   for (const [name, seek] of Object.entries(paths)) {
-    it(`hides the clip from its position on the ${name} path`, () => {
+    const visibilityAt = (times: number[]) => {
       const { clip, late } = mountClipHiddenByTimeline();
-      const seen: string[] = [];
-      for (const t of [0.5, 1.5, 2.6, 2.7, 4, 2.6, 1.5]) {
+      return times.map((t) => {
         seek(t);
-        seen.push(`${clip.style.visibility}/${late.style.visibility}`);
-      }
-      expect(seen).toEqual([
+        return `${clip.style.visibility}/${late.style.visibility}`;
+      });
+    };
+
+    it(`hides the clip from its position on the ${name} path`, () => {
+      expect(visibilityAt([0.5, 1.5, 2.6, 2.7, 4, 2.6, 1.5])).toEqual([
         "visible/hidden",
         "visible/visible",
         "visible/visible",
@@ -53,6 +55,10 @@ describe("a timeline set that hides a timed clip", () => {
         "visible/visible",
         "visible/visible",
       ]);
+    });
+
+    it(`hides the clip on a first seek past its position on the ${name} path`, () => {
+      expect(visibilityAt([3]).map((seen) => seen.split("/")[0])).toEqual(["hidden"]);
     });
   }
 });

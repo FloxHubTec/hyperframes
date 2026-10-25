@@ -3079,6 +3079,14 @@ export function initSandboxRuntimeModular(): void {
     dueAtLoopStart(el, visibleAt);
 
   const visibilityDecided = new WeakMap<Element, boolean>();
+  // The pass hides with `!important`; a script's write replaces the declaration and drops it. So a
+  // plain inline hidden on a clip in its window is the script's, except on a clip authored that way.
+  const clipsSeen = new WeakSet<Element>();
+  const authoredInlineHidden = new WeakSet<Element>();
+  const hiddenByScript = (el: HTMLElement): boolean =>
+    el.style.visibility === "hidden" &&
+    el.style.getPropertyPriority("visibility") !== "important" &&
+    !authoredInlineHidden.has(el);
   // Every time at which an element's visibility, upcoming or preload decision can flip: its own window
   // edges, the look-ahead and release edges around them, and the window edges of each timed ancestor.
   const decisionEdges = new Map<Element, number[] | null>();
@@ -3200,15 +3208,18 @@ export function initSandboxRuntimeModular(): void {
       const isVisibleNow =
         visibleAt(rawNode, currentTime) &&
         clipChainVisibleAt(rawNode.parentElement, currentTime, visibleAt, rootComp);
-      // A script that hid a clip this pass showed keeps it hidden until the clip's window flips.
-      const hiddenByScript =
-        isVisibleNow &&
-        visibilityDecided.get(rawNode) === true &&
-        rawNode.style.visibility === "hidden";
       visibilityDecided.set(rawNode, isVisibleNow);
       const isRuntimeStamped = isDiscoveryStamped(rawNode);
-      if (!isRuntimeStamped && !hiddenByScript)
-        rawNode.style.visibility = isVisibleNow ? "visible" : "hidden";
+      if (!clipsSeen.has(rawNode)) {
+        clipsSeen.add(rawNode);
+        if (rawNode.style.visibility === "hidden") authoredInlineHidden.add(rawNode);
+      }
+      if (!isRuntimeStamped && !(isVisibleNow && hiddenByScript(rawNode)))
+        rawNode.style.setProperty(
+          "visibility",
+          isVisibleNow ? "visible" : "hidden",
+          isVisibleNow ? "" : "important",
+        );
       rawNode.toggleAttribute(CLIP_HIDDEN_ATTR, !isRuntimeStamped && !isVisibleNow);
       if (!isRuntimeStamped && !isVisibleNow && !clipsStyledVisible.has(rawNode))
         clipsNeverStyledVisible.add(rawNode);
