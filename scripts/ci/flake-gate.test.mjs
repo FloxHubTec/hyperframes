@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { addsRetry, runnerFor, runsFor, selectTestFiles } from "./flake-gate.mjs";
+import { addsRetry, runnerFor, runsFor, selectTestFiles, verdictFor } from "./flake-gate.mjs";
 
 test("selects added, modified and renamed package tests, not deleted or non-test files", () => {
   const out = [
@@ -30,4 +30,10 @@ test("picks the runner from the import and bounds runs by file count", () => {
   assert.equal(runnerFor('import { it } from "vitest";'), "vitest");
   assert.equal(runsFor(20), 10);
   assert.equal(runsFor(21), 3);
+});
+
+test("names a file that fails every run differently from a partial failure", () => {
+  assert.equal(verdictFor(0, 10), "ok");
+  assert.equal(verdictFor(3, 10), "flaky");
+  assert.equal(verdictFor(10, 10), "fails in the gate");
 });

@@ -7,7 +7,8 @@ import { cpus } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const TEST_FILE = /^packages\/[^/]+\/.+\.(test|spec)\.(ts|tsx|mjs)$/;
-const RETRY_ADDED = /^\+(?!\+\+).*(\bretry\s*:\s*(?:[1-9]|true)|\.retry\(\s*[1-9]|vi\.retryOnce|--retry\b)/m;
+const RETRY_ADDED =
+  /^\+(?!\+\+).*(\bretry\s*:\s*(?:[1-9]|true)|\.retry\(\s*[1-9]|vi\.retryOnce|--retry\b)/m;
 
 export function selectTestFiles(nameStatus) {
   const files = [];
@@ -62,48 +63,66 @@ function runOnce({ cwd, cmd, args, env }) {
   return { ok: r.status === 0, output: `${r.stdout}${r.stderr}` };
 }
 
-function main() {
-  const base = process.argv[process.argv.indexOf("--base") + 1];
-  const list = process.argv.includes("--list");
-  const files = selectTestFiles(git("diff", "-M", "--name-status", base, "HEAD", "--", "packages"));
-  const patch = git(
-    "diff", "-M", "-U0", base, "HEAD", "--",
-    "packages/**/*.test.*", "packages/**/*.spec.*", "packages/**/vitest.config.*", "vitest.config.*", "vitest.workspace.*",
-  );
-  if (addsRetry(patch)) {
-    console.error("::error::This change adds a test retry. Retries hide flaky tests; fix the flake instead.");
-    process.exit(1);
+export function verdictFor(failed, runs) {
+  if (failed === 0) return "ok";
+  return failed === runs ? "fails in the gate" : "flaky";
+}
+
+const CONFIG_AND_TESTS = [
+  "packages/**/*.test.*",
+  "packages/**/*.spec.*",
+  "packages/**/vitest.config.*",
+  "vitest.config.*",
+  "vitest.workspace.*",
+];
+
+function runFile(file, runs) {
+  const spec = command(file);
+  let failed = 0;
+  for (let i = 1; i <= runs; i++) {
+    const { ok, output } = runOnce(spec);
+    if (ok) continue;
+    failed++;
+    console.log(`::group::${file} run ${i}/${runs} failed\n${output}\n::endgroup::`);
   }
-  if (list) {
-    console.log(files.join("\n"));
-    if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `any=${files.length > 0}\n`);
-    return;
-  }
+  const verdict = verdictFor(failed, runs);
+  console.log(`${verdict}: ${file}: ${runs - failed}/${runs} passed`);
+  return failed === 0 ? [] : [`${file} (${verdict}, ${failed}/${runs} failed)`];
+}
+
+function rerun(files) {
   const runs = runsFor(files.length);
   console.log(`Re-running ${files.length} test file(s) ${runs} times each under CPU contention`);
   const burners = startBurners();
-  const failures = [];
   try {
-    for (const file of files) {
-      const spec = command(file);
-      let failed = 0;
-      for (let i = 1; i <= runs; i++) {
-        const { ok, output } = runOnce(spec);
-        if (ok) continue;
-        failed++;
-        console.log(`::group::${file} run ${i}/${runs} failed\n${output}\n::endgroup::`);
-      }
-      const verdict = failed === 0 ? "ok" : failed === runs ? "fails in the gate" : "flaky";
-      console.log(`${verdict}: ${file}: ${runs - failed}/${runs} passed`);
-      if (failed > 0) failures.push(`${file} (${verdict}, ${failed}/${runs} failed)`);
-    }
+    return files.flatMap((file) => runFile(file, runs));
   } finally {
     for (const b of burners) b.kill();
   }
-  if (failures.length > 0) {
-    console.error(`::error::Failing tests: ${failures.join(", ")}`);
-    process.exit(1);
-  }
+}
+
+function fail(message) {
+  console.error(`::error::${message}`);
+  process.exit(1);
+}
+
+function rejectRetries(base) {
+  if (!addsRetry(git("diff", "-M", "-U0", base, "HEAD", "--", ...CONFIG_AND_TESTS))) return;
+  fail("This change adds a test retry. Retries hide flaky tests; fix the flake instead.");
+}
+
+function printList(files) {
+  console.log(files.join("\n"));
+  appendFileSync(process.env.GITHUB_OUTPUT ?? "/dev/null", `any=${files.length > 0}\n`);
+}
+
+function main() {
+  const base = process.argv[process.argv.indexOf("--base") + 1];
+  const files = selectTestFiles(git("diff", "-M", "--name-status", base, "HEAD", "--", "packages"));
+  rejectRetries(base);
+  if (process.argv.includes("--list")) return printList(files);
+  const failures = rerun(files);
+  if (failures.length > 0) fail(`Failing tests: ${failures.join(", ")}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();
