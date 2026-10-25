@@ -1097,6 +1097,23 @@ export async function scanCssEffects(page: Page, collect: boolean): Promise<CssE
       for (const scan of [scanComputed, scanStyleSheets, scanTweenVars, scanWebgl]) {
         if (scan()) break;
       }
+
+      // A timeline callback can add the effect's class to any element mid-render, so the
+      // elements found now are not the only ones it can reach.
+      const hasCallback = (tl: unknown): boolean => {
+        const node = tl as {
+          vars?: Record<string, unknown>;
+          getChildren?: (n: boolean, t: boolean, l: boolean) => unknown[];
+        };
+        const calls = ["onStart", "onUpdate", "onComplete", "onRepeat", "onReverseComplete"];
+        if (calls.some((k) => typeof node.vars?.[k] === "function")) return true;
+        return typeof node.getChildren === "function"
+          ? node.getChildren(false, true, true).some(hasCallback)
+          : false;
+      };
+      const timelines = (window as unknown as { __timelines?: Record<string, unknown> })
+        .__timelines;
+      if (reason && Object.values(timelines ?? {}).some(hasCallback)) bounded = false;
       (window as unknown as { __hfCssFxTargets?: Element[] }).__hfCssFxTargets = [...targets];
       return { reason, bounded };
     }, collect);

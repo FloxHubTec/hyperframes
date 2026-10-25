@@ -180,4 +180,34 @@ describe("scanCssEffects", () => {
     );
     expect(scan.reason).toBe("filter:blur");
   });
+
+  it("is unbounded when a timeline callback can change the DOM mid-render", async () => {
+    const timeline = {
+      vars: {},
+      getChildren: () => [{ vars: { onComplete: () => {} }, getChildren: undefined }],
+    };
+    const scan = await scanCssEffects(
+      makeMockPage({
+        computed: { filter: "drop-shadow(0 0 4px #000)" },
+        timelines: { main: timeline },
+      }),
+      true,
+    );
+    expect(scan).toEqual({ reason: "filter:drop-shadow", bounded: false });
+  });
+
+  it("stays bounded for a timeline of plain tweens", async () => {
+    const timeline = {
+      vars: {},
+      getChildren: () => [{ vars: { x: 10 }, getChildren: undefined }],
+    };
+    const scan = await scanCssEffects(
+      makeMockPage({
+        computed: { filter: "drop-shadow(0 0 4px #000)" },
+        timelines: { main: timeline },
+      }),
+      true,
+    );
+    expect(scan.bounded).toBe(true);
+  });
 });

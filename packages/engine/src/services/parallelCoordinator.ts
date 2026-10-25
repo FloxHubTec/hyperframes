@@ -1121,7 +1121,6 @@ export async function executeParallelCapture(
     captureOptions.deVerifySamples,
     tasks.length,
   );
-  // Workers have no screenshot session to hand risk frames to.
   const workerCaptureOptions: CaptureOptions = {
     ...captureOptions,
     deVerifySamples,

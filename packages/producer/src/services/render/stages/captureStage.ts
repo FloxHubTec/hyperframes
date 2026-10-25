@@ -352,7 +352,6 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
     }
   }
 
-  // Disk capture has no screenshot session to hand drawElement's unreproducible frames to.
   const captureOptions = { ...buildCaptureOptions(), deFrameFallback: false };
   const remedy = diskCaptureRemedy(cfg, job.config.format ?? "mp4", job.duration ?? 0, workerCount);
   const checkDiskProjection = createDiskCaptureProjection({

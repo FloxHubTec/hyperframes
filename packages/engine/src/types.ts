@@ -240,7 +240,6 @@ export interface CaptureOptions {
    * Clamped to 0..8 like the env knob; HF_DE_VERIFY, when set, still wins.
    */
   deVerifySamples?: number;
-  /** The caller captures frames in `session.deRiskFrames` with a screenshot session. */
   deFrameFallback?: boolean;
 }
 
@@ -418,7 +417,6 @@ export interface CapturePerfSummary {
   deVerifyInitMs: number;
   /** Clip-cut boundary frames routed to per-frame screenshot (Lim 6). */
   deBoundaryFrames: number;
-  /** Frames captured by screenshot because drawElement cannot reproduce them (per-frame fallback). */
   deRiskFrames: number;
   /** Per-frame "No cached paint record" screenshot fallbacks during capture. */
   deNcprFallbacks: number;

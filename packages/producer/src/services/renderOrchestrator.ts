@@ -674,7 +674,6 @@ export interface RenderPerfSummary {
     blankRecaptures: number;
     /** Clip-cut boundary frames captured via per-frame screenshot. */
     boundaryFrames: number;
-    /** Frames captured by screenshot while the rest used drawElement. */
     riskFrames: number;
     /** Per-frame "No cached paint record" screenshot fallbacks. */
     ncprFallbacks: number;
