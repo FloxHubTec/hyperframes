@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { addsRetry, runnerFor, runsFor, selectTestFiles } from "./flake-gate.mjs";
+
+test("selects added, modified and renamed package tests, not deleted or non-test files", () => {
+  const out = [
+    "A\tpackages/core/src/a.test.ts",
+    "M\tpackages/studio/src/b.test.tsx",
+    "R100\tpackages/cli/src/old.test.ts\tpackages/cli/src/new.test.ts",
+    "D\tpackages/cli/src/gone.test.ts",
+    "M\tpackages/core/src/a.ts",
+    "M\tscripts/x.test.mjs",
+  ].join("\n");
+  assert.deepEqual(selectTestFiles(out), [
+    "packages/core/src/a.test.ts",
+    "packages/studio/src/b.test.tsx",
+    "packages/cli/src/new.test.ts",
+  ]);
+});
+
+test("flags added retries only", () => {
+  assert.equal(addsRetry("+  retry: 2,"), true);
+  assert.equal(addsRetry('+it("x", { retry: 3 }, () => {})'), true);
+  assert.equal(addsRetry("-  retry: 2,"), false);
+  assert.equal(addsRetry("+  retry: 0,"), false);
+});
+
+test("picks the runner from the import and bounds runs by file count", () => {
+  assert.equal(runnerFor('import { test } from "bun:test";'), "bun");
+  assert.equal(runnerFor('import { it } from "vitest";'), "vitest");
+  assert.equal(runsFor(20), 10);
+  assert.equal(runsFor(21), 3);
+});
