@@ -1195,7 +1195,7 @@ async function initDrawElementOrTransparentBackground(
             "risk_session_memory",
             riskReasons.join("+"),
             `${plan.size} frames need screenshot capture (${riskReasons.join(", ")}) but too little ` +
-              `memory is available for a second browser`,
+              `memory is available for per-frame capture`,
           );
           return;
         }
