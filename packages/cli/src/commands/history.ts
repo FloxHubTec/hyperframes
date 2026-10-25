@@ -1,5 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { defineCommand, type ArgsDef } from "citty";
@@ -7,6 +16,7 @@ import {
   HISTORY_START,
   HistoryBusyError,
   HistoryIdError,
+  HistoryRefusedError,
   type HistoryEntry,
   type HistoryListItem,
   type HistoryResult,
@@ -21,8 +31,10 @@ import {
   historyDeps,
   lastTurnParts,
   withOwner as withHistoryOwner,
+  withReader as withHistoryReader,
   writeTurn,
   type Owner,
+  type Reader,
   type Turn,
   type UndoMode,
 } from "../utils/historyOwner.js";
@@ -54,6 +66,16 @@ const withOwner = <T>(
     return task(owner, turn, projectDir);
   });
 
+const withReader = <T>(
+  action: string,
+  dir: string | undefined,
+  task: (reader: Reader) => Promise<T>,
+) =>
+  withHistoryReader(dir, (reader) => {
+    trackHistoryAction({ action, via: reader.via });
+    return task(reader);
+  });
+
 /** An agent names itself with --who; without it the caller is the person, even during an agent's turn. */
 const whoOf = (name: string | undefined): HistoryWho => (name ? { kind: "agent", name } : YOU);
 
@@ -65,6 +87,39 @@ function lastIndex<T>(items: readonly T[], match: (item: T) => boolean): number 
 }
 
 /** An entry id or a unique prefix of one. */
+async function latestWrite(owner: Owner, turn: Turn): Promise<number> {
+  const entries = await owner.list();
+  return entries.reduce((latest, entry) => {
+    const same =
+      entry.id === turn.id ||
+      turn.parts.includes(entry.id) ||
+      (entry.who.kind === turn.who.kind &&
+        entry.who.name === turn.who.name &&
+        entry.label === turn.label &&
+        entry.startedAt === turn.startedAt);
+    return same ? Math.max(latest, entry.endedAt) : latest;
+  }, turn.lastWriteAt);
+}
+
+async function releaseOpenTurn(
+  owner: Owner,
+  turn: Turn | null,
+  who: HistoryWho,
+  exclusive: boolean,
+  projectDir: string,
+): Promise<void> {
+  if (!turn) return;
+  if (owner.via !== "direct") {
+    if (!exclusive || turn.who.name === who.name) await endTurn(owner, turn, projectDir);
+    return;
+  }
+  const latest = await latestWrite(owner, turn);
+  const live = historyDeps.now() - latest <= historyDeps.turnIdleMs;
+  if (exclusive && live && turn.who.name !== who.name)
+    throw new Refusal(`${turn.who.name}'s turn is open; it has to end before yours begins`);
+  await endTurn(owner, turn, projectDir);
+}
+
 function entryOf(entries: readonly HistoryListItem[], ref: string): HistoryListItem {
   const found = entries.filter((entry) => entry.id.startsWith(ref));
   if (found.length === 1) return found[0]!;
@@ -111,6 +166,16 @@ function ago(at: number): string {
   return `${Math.round(seconds / 86_400)}d ago`;
 }
 
+function endedTurnText(entry: HistoryEntry | null, parts: readonly string[]): string {
+  const earlier = parts.length - (entry ? 1 : 0);
+  const text = entry
+    ? line(entry)
+    : earlier
+      ? "Nothing changed since this turn's last command."
+      : "Nothing changed in this turn.";
+  return earlier ? `${text}\n(+${earlier} earlier part${earlier > 1 ? "s" : ""})` : text;
+}
+
 function line(entry: HistoryListItem | HistoryEntry): string {
   const paths = entry.files.map((file) => file.path);
   const files = paths.slice(0, 2).join(", ") + (paths.length > 2 ? ` +${paths.length - 2}` : "");
@@ -138,13 +203,13 @@ function print(json: boolean, data: object, text: string): void {
   console.log(json ? JSON.stringify(withMeta(data), null, 2) : text);
 }
 
-async function textDiff(owner: Owner, entry: HistoryEntry): Promise<string> {
+async function textDiff(reader: Reader, entry: HistoryEntry): Promise<string> {
   const work = mkdtempSync(join(tmpdir(), "hf-history-diff-"));
   try {
     const out: string[] = [];
     for (const file of entry.files) {
       const sides = await Promise.all(
-        [file.before, file.after].map((hash) => (hash ? owner.blob(hash) : Buffer.alloc(0))),
+        [file.before, file.after].map((hash) => (hash ? reader.blob(hash) : Buffer.alloc(0))),
       );
       if (sides.some((bytes) => bytes.subarray(0, 8000).includes(0))) {
         out.push(`Binary ${file.path} changed`);
@@ -156,12 +221,26 @@ async function textDiff(owner: Owner, entry: HistoryEntry): Promise<string> {
         writeFileSync(join(work, path), sides[index]!);
         return path;
       });
-      const diff = spawnSync("git", ["diff", "--no-index", "--no-color", "--no-prefix", a!, b!], {
-        cwd: work,
-        encoding: "utf-8",
-      });
-      if (diff.error) throw new Refusal("--diff needs git on PATH");
-      out.push(diff.stdout.trimEnd());
+      const outputPath = join(work, "diff");
+      const outputFd = openSync(outputPath, "w+", 0o600);
+      try {
+        const diff = spawnSync("git", ["diff", "--no-index", "--no-color", "--no-prefix", a!, b!], {
+          cwd: work,
+          encoding: "utf-8",
+          stdio: ["ignore", outputFd, "pipe"],
+        });
+        if (diff.error) throw new Refusal("--diff needs git on PATH");
+        const output = Buffer.alloc(fstatSync(outputFd).size);
+        let offset = 0;
+        while (offset < output.length) {
+          const count = readSync(outputFd, output, offset, output.length - offset, offset);
+          if (count === 0) break;
+          offset += count;
+        }
+        out.push(output.subarray(0, offset).toString("utf-8").trimEnd());
+      } finally {
+        closeSync(outputFd);
+      }
     }
     return out.join("\n");
   } finally {
@@ -280,10 +359,14 @@ function guarded<A>(run: (args: A) => Promise<void>) {
         error instanceof Refusal ||
         error instanceof AmbiguousPreviewServerError ||
         error instanceof HistoryBusyError ||
-        error instanceof HistoryIdError;
+        error instanceof HistoryIdError ||
+        error instanceof HistoryRefusedError;
       if (!refused) throw error;
       setCommandExitCode(2);
-      const { message } = error as Error;
+      const message =
+        error instanceof HistoryBusyError
+          ? `This project is open in another app (pid ${error.pid}), which keeps its history: undo, restore or pin there.`
+          : (error as Error).message;
       if ((args as { json?: boolean }).json) print(true, { ok: false, error: message }, message);
       else console.error(message);
     }
@@ -316,8 +399,8 @@ const listEntries = async (args: {
   json: boolean;
 }) => {
   if (args._?.[0]) return;
-  await withOwner("list", args.dir, async (owner) => {
-    const all = await owner.list();
+  await withReader("list", args.dir, async (reader) => {
+    const all = await reader.list();
     const picked = args.since ? since(all, args.since, whoOf(args.who)) : all;
     const limit = Number(args.limit ?? 20);
     if (!Number.isInteger(limit) || limit < 1)
@@ -348,13 +431,13 @@ export default defineCommand({
         "One entry's files, before and after",
         { ref: { type: "positional", required: true }, diff: { type: "boolean", default: false } },
         (args) =>
-          withOwner("show", args.dir, async (owner) => {
-            const entry = entryOf(await owner.list(), args.ref);
+          withReader("show", args.dir, async (reader) => {
+            const entry = entryOf(await reader.list(), args.ref);
             const changes = entry.files.map((file) => ({
               path: file.path,
               change: changeOf(file),
             }));
-            const diff = args.diff ? await textDiff(owner, entry) : undefined;
+            const diff = args.diff ? await textDiff(reader, entry) : undefined;
             const marks = changes.map((file) => `  ${file.change[0]!.toUpperCase()} ${file.path}`);
             print(
               args.json,
@@ -402,13 +485,13 @@ export default defineCommand({
           path: { type: "positional", required: false },
         },
         (args) =>
-          withOwner("peek", args.dir, async (owner) => {
-            const files = await owner.peek(pointOf(await owner.list(), args.ref));
+          withReader("peek", args.dir, async (reader) => {
+            const files = await reader.peek(pointOf(await reader.list(), args.ref));
             if (!files) throw new Refusal("That point is no longer kept");
             if (!args.path) return print(args.json, { files }, Object.keys(files).join("\n"));
             const hash = files[args.path];
             if (!hash) throw new Refusal(`${args.path} did not exist then`);
-            process.stdout.write(await owner.blob(hash));
+            process.stdout.write(await reader.blob(hash));
           }),
       ),
     pin: () =>
@@ -428,15 +511,27 @@ export default defineCommand({
           }),
       ),
     begin: () =>
-      sub<{ who: string; label: string; dir?: string; json: boolean }>(
+      sub<{ who: string; label: string; exclusive: boolean; dir?: string; json: boolean }>(
         "begin",
         "Start a turn: your writes until `end` become one entry under your name",
-        { who: { type: "string", required: true }, label: { type: "string", required: true } },
+        {
+          who: { type: "string", required: true },
+          label: { type: "string", required: true },
+          exclusive: {
+            type: "boolean",
+            default: false,
+            description: "Refuse while another agent's turn is open, instead of ending it",
+          },
+        },
         (args) =>
           withOwner("begin", args.dir, async (owner, turn, projectDir) => {
-            if (turn) await endTurn(owner, turn, projectDir);
             const who = whoOf(args.who);
-            const { id, startedAt } = await owner.begin(who, args.label);
+            await releaseOpenTurn(owner, turn, who, args.exclusive, projectDir);
+            const { id, startedAt } = await owner.begin(
+              who,
+              args.label,
+              args.exclusive && owner.via === "preview",
+            );
             writeTurn(projectDir, {
               via: owner.via,
               id,
@@ -450,22 +545,31 @@ export default defineCommand({
           }),
       ),
     end: () =>
-      sub<{ dir?: string; json: boolean }>("end", "End your turn and print its entry", {}, (args) =>
-        withOwner("end", args.dir, async (owner, turn, projectDir) => {
-          if (!turn) throw new Refusal("No turn is open; start one with history begin");
-          const { entry, parts } = await endTurn(owner, turn, projectDir);
-          const earlier = parts.length - (entry ? 1 : 0);
-          const text = entry
-            ? line(entry)
-            : earlier
-              ? "Nothing changed since this turn's last command."
-              : "Nothing changed in this turn.";
-          print(
-            args.json,
-            { entry: entry && publicEntry(entry), parts },
-            earlier ? `${text}\n(+${earlier} earlier part${earlier > 1 ? "s" : ""})` : text,
-          );
-        }),
+      sub<{ who?: string; ifOpen: boolean; dir?: string; json: boolean }>(
+        "end",
+        "End your turn and print its entry",
+        {
+          who: { type: "string", description: "Refuse unless the open turn is this agent's" },
+          "if-open": {
+            type: "boolean",
+            default: false,
+            description: "Succeed with no entry when no turn is open",
+          },
+        },
+        (args) =>
+          withOwner("end", args.dir, async (owner, turn, projectDir) => {
+            if (!turn && args.ifOpen)
+              return print(args.json, { entry: null, parts: [] }, "No turn is open.");
+            if (!turn) throw new Refusal("No turn is open; start one with history begin");
+            if (args.who !== undefined && turn.who.name !== args.who)
+              throw new Refusal(`The open turn is ${turn.who.name}'s, not ${args.who}'s`);
+            const { entry, parts } = await endTurn(owner, turn, projectDir);
+            print(
+              args.json,
+              { entry: entry && publicEntry(entry), parts },
+              endedTurnText(entry, parts),
+            );
+          }),
       ),
   },
   run: ({ args }) => guarded(listEntries)(args),

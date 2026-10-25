@@ -5,7 +5,13 @@ import {
   type EngineConfig,
   type VideoFrameFormat,
 } from "@hyperframes/engine";
-import { VALID_CANVAS_RESOLUTIONS, type CanvasResolution, type Fps } from "@hyperframes/core";
+import {
+  VALID_CANVAS_RESOLUTIONS,
+  type CanvasResolution,
+  type DistributedFps,
+  type Fps,
+  isDistributedFps,
+} from "@hyperframes/core";
 import type { ProducerLogger } from "./logger.js";
 import type { RenderConfig } from "./services/renderOrchestrator.js";
 import type { DistributedRenderConfig } from "./services/distributed/plan.js";
@@ -51,6 +57,7 @@ export interface RenderRequestOptions {
   videoBitrate?: string;
   videoFrameFormat?: VideoFrameFormat;
   hdrMode?: RenderConfig["hdrMode"];
+  pageMotionBlur?: RenderConfig["pageMotionBlur"];
   variables?: Record<string, unknown>;
   outputResolution?: CanvasResolution;
   outputResolutionAspectAgnostic?: boolean;
@@ -175,6 +182,7 @@ function assertRequestOptionScalars(options: Record<string, unknown>): void {
   }
   assertOptionalEnum(options, "strictness", ["strict", "best-effort"]);
   assertOptionalEnum(options, "hdrMode", ["auto", "force-hdr", "force-sdr"]);
+  assertOptionalEnum(options, "pageMotionBlur", ["off"]);
   if (options.videoFrameFormat !== undefined && !isVideoFrameFormat(options.videoFrameFormat)) {
     throw new Error("Render request videoFrameFormat is invalid");
   }
@@ -270,8 +278,8 @@ export function renderConfigFromRequest(
   };
 }
 
-function distributedFps(fps: Fps): 24 | 30 | 60 {
-  if (fps.den === 1 && (fps.num === 24 || fps.num === 30 || fps.num === 60)) return fps.num;
+function distributedFps(fps: Fps): DistributedFps {
+  if (fps.den === 1 && isDistributedFps(fps.num)) return fps.num;
   throw new Error(`Distributed render does not support fps ${fps.num}/${fps.den}`);
 }
 
@@ -299,6 +307,7 @@ export function distributedConfigFromRequest(
     codec: distributed.codec,
     quality: options.quality,
     crf: options.crf,
+    pageMotionBlur: options.pageMotionBlur,
     bitrate: options.videoBitrate,
     videoFrameFormat: options.videoFrameFormat,
     outputResolution: options.outputResolution,
@@ -354,6 +363,7 @@ export function renderRequestFromDistributedConfig(input: {
     format: config.format,
     distributed,
     ...optionalProperty("crf", config.crf),
+    ...optionalProperty("pageMotionBlur", config.pageMotionBlur),
     ...optionalProperty("videoBitrate", config.bitrate),
     ...optionalProperty("videoFrameFormat", config.videoFrameFormat),
     ...optionalProperty("outputResolution", config.outputResolution),

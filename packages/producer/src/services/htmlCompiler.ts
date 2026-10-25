@@ -28,6 +28,7 @@ import {
   readMediaStart,
   redactTelemetryString,
   resolveNaturalMediaTimelineDurationFromValues,
+  rewriteAssetPath,
   rewriteAssetPaths,
   rewriteCssAssetUrls,
   rewriteInlineStyleAssetUrls,
@@ -36,7 +37,9 @@ import {
   type UnresolvedElement,
 } from "@hyperframes/core";
 import { MAX_AUDIO_GAIN } from "@hyperframes/core/audio-gain";
-import { gsapCdnDist } from "@hyperframes/core/gsap-cdn";
+import { readPlaybackRate } from "@hyperframes/parsers/media-duration";
+import { resolveRateSpec } from "@hyperframes/core/speed-ramp";
+import { gsapCdnDist, normalizeGsapBaseUrl } from "@hyperframes/core/gsap-cdn";
 import {
   assignBundledRuntimeCompositionIds,
   assignMediaRenderIds,
@@ -79,6 +82,7 @@ import {
   analyzeKeyframeIntervals,
   assertMediaPayload,
   NotMediaPayloadError,
+  parseMasterFxChain,
   probeMediaProfile,
 } from "@hyperframes/engine";
 import {
@@ -110,6 +114,8 @@ export interface CompiledComposition {
   videos: VideoElement[];
   audios: AudioElement[];
   images: ImageElement[];
+  droppedMediaIds: Set<string>;
+  masterFxChain?: string;
   unresolvedCompositions: UnresolvedElement[];
   /** Assets that resolve outside projectDir. Keys are the path used in HTML, values are absolute filesystem paths. */
   externalAssets: Map<string, string>;
@@ -287,7 +293,11 @@ function assertSubCompositionsUsable(
   }
 }
 
-export type RenderModeHintCode = "iframe" | "requestAnimationFrame" | "htmlInCanvas";
+export type RenderModeHintCode =
+  | "iframe"
+  | "requestAnimationFrame"
+  | "htmlInCanvas"
+  | "captureMotionBlur";
 
 export interface RenderModeHint {
   code: RenderModeHintCode;
@@ -317,7 +327,15 @@ function stripCompilerMountBootstrap(source: string): string {
   );
 }
 
-export function detectRenderModeHints(html: string): RenderModeHints {
+/** The composition the runtime reads data-motion-blur from: `data-root="true"`, else the first. */
+function runtimeRoot(document: ParentNode): Element | null {
+  return (
+    document.querySelector('[data-composition-id][data-root="true"]') ??
+    document.querySelector("[data-composition-id]")
+  );
+}
+
+export function detectRenderModeHints(html: string, pageMotionBlur?: "off"): RenderModeHints {
   const reasons: RenderModeHint[] = [];
   const { document } = parseHTML(html);
 
@@ -326,6 +344,16 @@ export function detectRenderModeHints(html: string): RenderModeHints {
       code: "htmlInCanvas",
       message:
         "Detected html-in-canvas API (layoutsubtree canvas). Chrome does not support concurrent drawElementImage across multiple workers; render is pinned to a single worker.",
+    });
+  } else if (
+    pageMotionBlur !== "off" &&
+    runtimeRoot(document)?.getAttribute("data-motion-blur") === "on"
+  ) {
+    // Not pinned to one worker: k3-promo measured identical across 1 and 4 workers, 2× faster.
+    reasons.push({
+      code: "captureMotionBlur",
+      message:
+        'Detected capture motion blur (data-motion-blur="on"), which draws each frame with html-in-canvas; routed through screenshot capture mode.',
     });
   }
 
@@ -470,6 +498,7 @@ async function resolveMediaDuration(
   tagName: string,
   elementIdentity: string,
   log?: ProducerLogger,
+  urlByAbsentLocalPath?: ReadonlyMap<string, string>,
 ): Promise<{ duration: number | null; resolvedPath: string }> {
   let filePath = src;
 
@@ -487,9 +516,11 @@ async function resolveMediaDuration(
   } else {
     filePath = decodedUrlPath(src);
     if (!filePath.startsWith("/")) filePath = join(baseDir, filePath);
+    // ffprobe reads only the header of a remote source, so it is probed in place.
+    filePath = urlByAbsentLocalPath?.get(filePath) ?? filePath;
   }
 
-  if (!existsSync(filePath)) {
+  if (!isHttpUrl(filePath) && !existsSync(filePath)) {
     return { duration: null, resolvedPath: filePath };
   }
 
@@ -540,7 +571,7 @@ async function resolveMediaDuration(
           // as `prepare/ffmpeg_failed` with owner "system".
           log?.warn(
             `[compile] Audio "${elementIdentity}" (${src}) is a text document, not a media ` +
-              "file — the element is dropped from the render. Point it at a rendered media file.",
+              "file, so the element is dropped from the render. Point it at a rendered media file.",
           );
         }
         return { duration: null, resolvedPath: filePath };
@@ -604,6 +635,7 @@ async function compileHtmlFile(
   baseDir: string,
   downloadDir: string,
   log?: ProducerLogger,
+  urlByAbsentLocalPath?: ReadonlyMap<string, string>,
 ): Promise<{ html: string; unresolvedCompositions: UnresolvedElement[] }> {
   const { html: staticCompiled, unresolved } = compileTimingAttrs(html);
 
@@ -625,6 +657,7 @@ async function compileHtmlFile(
         el.tagName,
         el.id,
         log,
+        urlByAbsentLocalPath,
       ).then(({ duration }) => ({ id: el.id, duration })),
     ),
   );
@@ -669,7 +702,7 @@ async function compileHtmlFile(
       // thread `log` through parseSubCompositions to warn for it too.
       log?.warn(
         `[compile] Audio "${r.id}" (${r.src}) is ${r.maxDuration.toFixed(2)}s but its ` +
-          `data-duration is ${r.duration.toFixed(2)}s — the slot is shortened to the media ` +
+          `data-duration is ${r.duration.toFixed(2)}s, so the slot is shortened to the media ` +
           `length. Set data-duration to ~${r.maxDuration.toFixed(2)}s, trim data-media-start, ` +
           `or use a longer/looping source if that isn't intended.`,
       );
@@ -719,6 +752,7 @@ async function parseSubCompositions(
   projectDir: string,
   downloadDir: string,
   visited: Set<string> = new Set(),
+  urlByAbsentLocalPath?: ReadonlyMap<string, string>,
 ): Promise<{ subCompositions: Map<string, string> }> {
   const subCompositions = new Map<string, string>();
 
@@ -760,9 +794,11 @@ async function parseSubCompositions(
   const results = await Promise.all(
     workItems.map(async (item) => {
       const { html: compiledSub } = await compileHtmlFile(
-        item.rawSubHtml,
+        rewriteUnresolvableGsapToCdn(item.rawSubHtml, projectDir, item.srcPath),
         dirname(item.filePath),
         downloadDir,
+        undefined,
+        urlByAbsentLocalPath,
       );
 
       const nested = await parseSubCompositions(
@@ -770,6 +806,7 @@ async function parseSubCompositions(
         projectDir,
         downloadDir,
         item.nestedVisited,
+        urlByAbsentLocalPath,
       );
 
       return {
@@ -1020,7 +1057,9 @@ function inlineSubCompositions(
         let compHtml = subCompositions.get(srcPath) || null;
         if (!compHtml) {
           const read = readProjectFile(resolve(projectDir, srcPath));
-          if (read.kind === "file") compHtml = read.text;
+          if (read.kind === "file") {
+            compHtml = rewriteUnresolvableGsapToCdn(read.text, projectDir, srcPath);
+          }
         }
         return compHtml;
       },
@@ -1273,7 +1312,7 @@ export async function inlineExternalScripts(html: string): Promise<string> {
       // browser support for integrity metadata (including casing) can differ.
       if (download.reason instanceof ScriptIntegrityError) throw download.reason;
       defaultLogger.warn(
-        `[Compiler] WARNING: Failed to download CDN script: ${src} — ${download.reason}. ` +
+        `[Compiler] WARNING: Failed to download CDN script: ${src} (${download.reason}). ` +
           `The render may fail if this script is required (e.g. GSAP). ` +
           `Consider bundling it locally in your project.`,
       );
@@ -1351,7 +1390,7 @@ export function collectExternalAssets(
 
   if (externalAssets.size > 0) {
     defaultLogger.info(
-      `[Compiler] Found ${externalAssets.size} asset(s) outside project directory — will copy to render output`,
+      `[Compiler] Found ${externalAssets.size} asset(s) outside project directory, will copy to render output`,
     );
   }
 
@@ -1409,7 +1448,7 @@ async function downloadAndRewriteUrls(
         urlToLocal.set(url, localPath);
       } catch (err) {
         const identity = safeDownloadUrlIdentity(url);
-        defaultLogger.warn(`[Compiler] ${warnLabel} — using original URL as fallback.`, {
+        defaultLogger.warn(`[Compiler] ${warnLabel}, using original URL as fallback.`, {
           urlFingerprint: identity.urlFingerprint,
           host: identity.host,
           error: err instanceof Error ? err.message : String(err),
@@ -1601,7 +1640,7 @@ async function fetchExternalStylesheetCss(href: string): Promise<string | null> 
       timeoutMs: 15_000,
     });
   } catch (err) {
-    defaultLogger.warn("[Compiler] External stylesheet fetch failed — preserving link tag.", {
+    defaultLogger.warn("[Compiler] External stylesheet fetch failed, preserving link tag.", {
       urlFingerprint: identity.urlFingerprint,
       host: identity.host,
       error: err instanceof Error ? err.message : String(err),
@@ -1838,7 +1877,7 @@ async function embedLocalFontFaces(html: string, projectDir: string): Promise<st
               embeddedPaths.add(localPath);
               continue;
             }
-            dataUri = await toDataUri(font.buffer, ext);
+            dataUri = await toDataUri(font.buffer, ext, { compressToWoff2: false });
             dataUriByAbsolutePath.set(absPath, dataUri);
             defaultLogger.info(
               `[Compiler] Embedded local font file: ${localPath} (${(font.buffer.length / 1024).toFixed(0)} KB → data URI)`,
@@ -1881,6 +1920,8 @@ export interface CompileForRenderOptions {
    * mismatch warning). Optional so non-render callers can omit it.
    */
   log?: ProducerLogger;
+  /** Absolute project paths not on disk, readable at these URLs instead. */
+  urlByAbsentLocalPath?: ReadonlyMap<string, string>;
   /**
    * Threaded through to {@link injectDeterministicFontFaces}. When `true`,
    * deterministic font resolution and exhausted transient fetch failures
@@ -1913,21 +1954,37 @@ export interface CompileForRenderOptions {
    * `window.__hfVariables` injection covers script reads, not var() in CSS.
    */
   variables?: Record<string, unknown>;
+  pageMotionBlur?: "off";
 }
 
-const GSAP_CDN_BASE = gsapCdnDist();
+/** Renders follow the same `HYPERFRAMES_GSAP_BASE_URL` mirror as Studio preview. */
+function renderGsapDist(): string {
+  try {
+    return gsapCdnDist(undefined, normalizeGsapBaseUrl(process.env.HYPERFRAMES_GSAP_BASE_URL));
+  } catch (cause) {
+    throw new Error(
+      "Invalid HYPERFRAMES_GSAP_BASE_URL: use an absolute HTTPS npm mirror root (plain HTTP only for localhost) without credentials, query, or fragment",
+      { cause },
+    );
+  }
+}
 
-function rewriteUnresolvableGsapToCdn(html: string, projectDir: string): string {
+/** `compSrcPath` resolves a sub-composition's script the way the inliner will hoist it. */
+function rewriteUnresolvableGsapToCdn(
+  html: string,
+  projectDir: string,
+  compSrcPath?: string,
+): string {
+  let gsapDist: string | undefined;
+  const exists = (path: string) => existsSync(resolve(projectDir, path));
   return html.replace(
     /(<script\b[^>]*\bsrc=["'])([^"']*gsap[^"']*\/dist\/([^"']+))(["'][^>]*>)/gi,
     (full, prefix, src, file, suffix) => {
       if (/^https?:\/\//i.test(src)) return full;
-      const absPath = resolve(projectDir, src);
-      if (existsSync(absPath)) return full;
-      defaultLogger.info(
-        `[Compiler] Rewriting missing gsap script to CDN: ${src} → ${GSAP_CDN_BASE}${file}`,
-      );
-      return `${prefix}${GSAP_CDN_BASE}${file}${suffix}`;
+      if (exists(compSrcPath ? rewriteAssetPath(compSrcPath, src, exists) : src)) return full;
+      gsapDist ??= renderGsapDist();
+      defaultLogger.info(`[Compiler] Rewriting missing gsap script: ${src} → ${gsapDist}${file}`);
+      return `${prefix}${gsapDist}${file}${suffix}`;
     },
   );
 }
@@ -1995,10 +2052,17 @@ export async function compileForRender(
     projectDir,
     downloadDir,
     options.log,
+    options.urlByAbsentLocalPath,
   );
 
   // Compile each referenced sub-composition so the inliner can hoist it.
-  const { subCompositions } = await parseSubCompositions(compiledHtml, projectDir, downloadDir);
+  const { subCompositions } = await parseSubCompositions(
+    compiledHtml,
+    projectDir,
+    downloadDir,
+    undefined,
+    options.urlByAbsentLocalPath,
+  );
 
   // Ensure the HTML is a full document before inlining sub-compositions.
   // When index.html is a fragment (no <html>/<head>/<body>), linkedom.parseHTML()
@@ -2024,7 +2088,7 @@ export async function compileForRender(
     /(<(?:video|audio)\b[^>]*?)\s+preload\s*=\s*["']none["']/gi,
     "$1",
   );
-  const renderModeHints = detectRenderModeHints(sanitizedHtml);
+  const renderModeHints = detectRenderModeHints(sanitizedHtml, options.pageMotionBlur);
   const hasShaderTransitions = detectShaderTransitionUsage(sanitizedHtml);
   // Detected BEFORE inlineExternalScripts: GSAP's own source contains
   // `transformPerspective`, so scanning post-inline HTML would flag every
@@ -2145,7 +2209,8 @@ export async function compileForRender(
   // within one composition file: two scenes declaring `<video id="clip">` — or
   // two bare `<video>`s, both auto-numbered `hf-video-0` — collapsed into one
   // entry and injected frames onto whichever element came first. See #3340.
-  const { videos, audios, images } = collectRenderMedia(html);
+  const { videos, audios, images, droppedMediaIds } = collectRenderMedia(html);
+  const masterFxChain = parseMasterFxChain(html);
 
   // Advisory video checks (sparse keyframes, VFR). Fire-and-forget — these spawn
   // ffprobe subprocesses and should not block compilation since they only produce warnings.
@@ -2163,7 +2228,7 @@ export async function compileForRender(
       if (analysis.isProblematic) {
         defaultLogger.warn(
           `[Compiler] WARNING: Video "${video.id}" has sparse keyframes (max interval: ${analysis.maxIntervalSeconds}s). ` +
-            `This causes seek failures and frame freezing. Re-encode with: ${reencode}`,
+            `Long GOPs can make preview seeking slower; rendering is unaffected. If preview seeking is slow, re-encode with: ${reencode}`,
         );
       }
       if (metadata.isVFR) {
@@ -2198,6 +2263,8 @@ export async function compileForRender(
     videos,
     audios,
     images,
+    droppedMediaIds,
+    ...(masterFxChain ? { masterFxChain } : {}),
     unresolvedCompositions,
     externalAssets,
     width,
@@ -2229,6 +2296,7 @@ export interface BrowserMediaElement {
   /** True when compilation inferred duration from the fallback source. */
   durationInferred: boolean;
   mediaStart: number;
+  playbackRate: RateSpec;
   loop: boolean;
   hasAudio: boolean;
   volume: number;
@@ -2254,6 +2322,9 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
       durationInferred: boolean;
       playbackStartRaw: string | null;
       mediaStartRaw: string | null;
+      playbackRateRaw: string | null;
+      automationRaw: string | null;
+      defaultPlaybackRate: number;
       loop: boolean;
       hasAudio: boolean;
       volume: number;
@@ -2294,7 +2365,10 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
       if (!id) return;
 
       // currentSrc is authoritative for <video>/<audio><source> and responsive images.
-      const src = htmlEl.currentSrc || htmlEl.src || htmlEl.getAttribute("src") || "";
+      const ownSrc = htmlEl.getAttribute("src");
+      const blankSrc =
+        ownSrc !== null && ownSrc.trim() === "" && !htmlEl.querySelector("source[src]");
+      const src = blankSrc ? "" : htmlEl.currentSrc || htmlEl.src || ownSrc || "";
       const start = parseFloat(htmlEl.getAttribute("data-start") || "0");
       const endRaw = htmlEl.getAttribute("data-end");
       const durationRaw = htmlEl.getAttribute("data-duration");
@@ -2304,6 +2378,12 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
         : (htmlEl as HTMLVideoElement | HTMLAudioElement).duration;
       const playbackStartRaw = htmlEl.getAttribute("data-playback-start");
       const mediaStartRaw = htmlEl.getAttribute("data-media-start");
+      const playbackRateRaw = htmlEl.getAttribute("data-playback-rate");
+      const automationRaw = htmlEl.getAttribute("data-automation");
+      // playbackRate can include the transport speed; defaultPlaybackRate is the clip's own rate.
+      const defaultPlaybackRate = isImage
+        ? 1
+        : (htmlEl as HTMLVideoElement | HTMLAudioElement).defaultPlaybackRate;
       const loop = htmlEl.hasAttribute("loop");
       const hasAudio = htmlEl.getAttribute("data-has-audio") === "true";
       const volume = parseFloat(htmlEl.getAttribute("data-volume") || "1");
@@ -2322,6 +2402,9 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
         durationInferred,
         playbackStartRaw,
         mediaStartRaw,
+        playbackRateRaw,
+        automationRaw,
+        defaultPlaybackRate,
         loop,
         hasAudio,
         volume,
@@ -2333,7 +2416,17 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
   });
 
   return elements.map(
-    ({ endRaw, durationRaw, intrinsicDuration, playbackStartRaw, mediaStartRaw, ...element }) => ({
+    ({
+      endRaw,
+      durationRaw,
+      intrinsicDuration,
+      playbackStartRaw,
+      mediaStartRaw,
+      playbackRateRaw,
+      automationRaw,
+      defaultPlaybackRate,
+      ...element
+    }) => ({
       ...element,
       end: parseStrictFiniteTimingNumber(endRaw) ?? 0,
       duration:
@@ -2347,6 +2440,13 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
           return null;
         },
       }),
+      playbackRate: resolveRateSpec(
+        automationRaw,
+        readPlaybackRate(
+          (name) => (name === "data-playback-rate" ? playbackRateRaw : null),
+          defaultPlaybackRate,
+        ),
+      ),
     }),
   );
 }
@@ -2662,12 +2762,15 @@ export async function resolveCompositionDurations(
     for (const id of compIds) {
       // Try window.__timelines[id].duration() first (GSAP timeline)
       const tl = timelines[id];
-      if (tl && typeof tl.duration === "function") {
-        const dur = tl.duration();
-        if (dur > 0) {
-          resolved.push({ id, duration: dur, source: "__timelines" });
-          continue;
-        }
+      let dur = 0;
+      try {
+        dur = typeof tl?.duration === "function" ? Number(tl.duration()) : 0;
+      } catch {
+        dur = 0;
+      }
+      if (dur > 0) {
+        resolved.push({ id, duration: dur, source: "__timelines" });
+        continue;
       }
 
       // Fallback: check for authored duration on the element itself

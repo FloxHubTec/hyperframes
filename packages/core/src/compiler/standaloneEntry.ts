@@ -1,32 +1,43 @@
 import { parseHTML } from "linkedom";
+import { HF_AUDIO_FX_ATTR } from "../audioFx";
 
-export function isTemplateEntry(html: string): boolean {
-  return html.trimStart().startsWith("<template");
-}
+export { isTemplateEntry } from "./htmlDocument";
 
 function normalizeCompositionSrcPath(srcPath: string): string {
   return srcPath.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
 // linkedom has no inert <template> content, so the template's innerHTML is re-parsed.
-function readSceneRootDuration(entryHtml: string | undefined): string | null {
+function readSceneRoot(entryHtml: string | undefined): Element | null {
   if (!entryHtml) return null;
   const { document } = parseHTML(entryHtml);
   const template = document.querySelector("template");
   const scope = template ? parseHTML(template.innerHTML).document : document;
-  const root = scope.querySelector("[data-composition-id]") as Element | null;
-  return root?.getAttribute("data-duration") ?? null;
+  return scope.querySelector("[data-composition-id]") as Element | null;
+}
+
+// The scene's own chain replaces the index's, which belongs to the whole project.
+function setSceneFxChain(el: Element, sceneFxChain: string | null): void {
+  if (sceneFxChain) {
+    el.setAttribute(HF_AUDIO_FX_ATTR, sceneFxChain);
+  } else {
+    el.removeAttribute(HF_AUDIO_FX_ATTR);
+  }
 }
 
 function createStandaloneEntryRenderClone(
   root: Element,
   host: Element,
   sceneDuration: string | null,
+  sceneFxChain: string | null,
 ): Element {
   const hostClone = host.cloneNode(true) as Element;
   hostClone.setAttribute("data-start", "0");
 
-  if (root === host) return hostClone;
+  if (root === host) {
+    setSceneFxChain(hostClone, sceneFxChain);
+    return hostClone;
+  }
 
   const rootClone = root.cloneNode(false) as Element;
   // The wrapper takes the scene's length, not the whole project's; with none declared
@@ -36,6 +47,7 @@ function createStandaloneEntryRenderClone(
   } else {
     rootClone.removeAttribute("data-duration");
   }
+  setSceneFxChain(rootClone, sceneFxChain);
   rootClone.appendChild(hostClone);
   return rootClone;
 }
@@ -78,9 +90,12 @@ export function extractStandaloneEntryFromIndex(
   if (!root) return null;
 
   // The scene file owns its duration; the mount's window is the fallback.
-  const sceneDuration = readSceneRootDuration(entryHtml) ?? host.getAttribute("data-duration");
+  const sceneRoot = readSceneRoot(entryHtml);
+  const sceneDuration =
+    sceneRoot?.getAttribute("data-duration") ?? host.getAttribute("data-duration");
+  const sceneFxChain = sceneRoot?.getAttribute(HF_AUDIO_FX_ATTR) || null;
 
-  const renderClone = createStandaloneEntryRenderClone(root, host, sceneDuration);
+  const renderClone = createStandaloneEntryRenderClone(root, host, sceneDuration, sceneFxChain);
   replaceBodyWithRenderClone(body, renderClone);
 
   return document.toString();

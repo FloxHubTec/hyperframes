@@ -32,6 +32,12 @@
       "types": "./dist/telemetryRedaction.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./distributed-fps": {
+      "source": "./src/distributedFps.ts",
+      "runtime": "./dist/distributedFps.js",
+      "types": "./dist/distributedFps.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./beats": {
       "source": "./src/beats/index.ts",
       "runtime": "./dist/beats/index.js",
@@ -50,10 +56,22 @@
       "types": "./dist/safePath.d.ts",
       "environments": ["bun", "node"]
     },
+    "./browser-marker": {
+      "source": "./src/browserMarker.ts",
+      "runtime": "./dist/browserMarker.js",
+      "types": "./dist/browserMarker.d.ts",
+      "environments": ["bun", "node"]
+    },
     "./atomic-file": {
       "source": "./src/atomicFile.ts",
       "runtime": "./dist/atomicFile.js",
       "types": "./dist/atomicFile.d.ts",
+      "environments": ["bun", "node"]
+    },
+    "./project-folders": {
+      "source": "./src/projectFolders.ts",
+      "runtime": "./dist/projectFolders.js",
+      "types": "./dist/projectFolders.d.ts",
       "environments": ["bun", "node"]
     },
     "./asset-paths": {
@@ -84,6 +102,24 @@
       "source": "./src/studioPreviewMark.ts",
       "runtime": "./dist/studioPreviewMark.js",
       "types": "./dist/studioPreviewMark.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./keyframe-defaults": {
+      "source": "./src/keyframeDefaults.ts",
+      "runtime": "./dist/keyframeDefaults.js",
+      "types": "./dist/keyframeDefaults.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./html-in-canvas": {
+      "source": "./src/htmlInCanvas.ts",
+      "runtime": "./dist/htmlInCanvas.js",
+      "types": "./dist/htmlInCanvas.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./motion-blur-settings": {
+      "source": "./src/motionBlurSettings.ts",
+      "runtime": "./dist/motionBlurSettings.js",
+      "types": "./dist/motionBlurSettings.d.ts",
       "environments": ["browser", "bun", "node"]
     },
     "./gsap-cdn": {
@@ -242,6 +278,12 @@
       "types": "./dist/audibleVideo.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./audio-analysis": {
+      "source": "./src/audioAnalysis.ts",
+      "runtime": "./dist/audioAnalysis.js",
+      "types": "./dist/audioAnalysis.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./audio-gain": {
       "source": "./src/audioGain.ts",
       "runtime": "./dist/audioGain.js",
@@ -336,6 +378,12 @@
       "source": "./src/runtime/clipWindow.ts",
       "runtime": "./dist/runtime/clipWindow.js",
       "types": "./dist/runtime/clipWindow.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./runtime/clip-reveal": {
+      "source": "./src/runtime/clipReveal.ts",
+      "runtime": "./dist/runtime/clipReveal.js",
+      "types": "./dist/runtime/clipReveal.d.ts",
       "environments": ["browser", "bun", "node"]
     },
     "./runtime/stacking-context": {

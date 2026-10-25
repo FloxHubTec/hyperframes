@@ -125,6 +125,8 @@ export interface StudioApiAdapter {
   getProjectSignature?: (projectDir: string) => string;
   invalidateProjectSignature?: (projectDir: string) => void;
 
+  loadSharp?: () => Promise<typeof import("sharp").default>;
+
   /** Lint a single HTML string. */
   lint(
     html: string,
@@ -140,6 +142,8 @@ export interface StudioApiAdapter {
 
   /** URL to the hyperframe runtime JS (injected into preview HTML). */
   runtimeUrl: string;
+
+  gsapLocalRoot?: `/${string}`;
 
   /**
    * Optional: post-process preview HTML before Studio augments it.
@@ -171,6 +175,10 @@ export interface StudioApiAdapter {
      */
     fps: import("@hyperframes/core").Fps;
     quality: string;
+    crf?: number;
+    videoBitrate?: string;
+    videoFrameFormat?: "auto" | "jpg" | "png";
+    hdrMode?: "auto" | "force-hdr" | "force-sdr";
     jobId: string;
     /**
      * The triggering browser profile has telemetry disabled (localStorage
@@ -179,6 +187,7 @@ export interface StudioApiAdapter {
      * for a user who had opted out, under the CLI's own policy.
      */
     telemetryOptOut?: boolean;
+    pageMotionBlur?: "off";
     /**
      * Optional output resolution preset. See `resolveDeviceScaleFactor` in
      * the producer for the integer-scale + aspect + HDR constraints.

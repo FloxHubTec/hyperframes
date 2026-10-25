@@ -60,17 +60,26 @@ if (rootVersionRequested) {
   process.exit(0);
 }
 
-// ── Load .env from CWD ─────────────────────────────────────────────────────
-// Agents run from the project directory where .env holds API keys (Gemini,
-// HeyGen, ElevenLabs). Load it automatically so they don't need `source .env`.
-const { applyDotEnv } = await import("./utils/dotEnv.js");
-try {
-  const { readFileSync } = await import("node:fs");
-  const { resolve } = await import("node:path");
-  const envPath = resolve(process.cwd(), ".env");
-  applyDotEnv(readFileSync(envPath, "utf-8"), process.env);
-} catch {
-  /* .env not present — fine, env vars may be set another way */
+// Capture treats CWD as project data too: its early loader must use the same
+// allowlist/opt-out as output ancestors, before browser selection can observe it.
+const { applyDotEnv, CAPTURE_ENV_KEYS } = await import("./utils/dotEnv.js");
+// The root has no value-taking options: Citty skips flags up to the first
+// positional command, and stops subcommand selection at the -- separator.
+const separator = argv.indexOf("--");
+const commandArgs = separator < 0 ? argv : argv.slice(0, separator);
+const captureEnv = commandArgs.find((arg) => !arg.startsWith("-")) === "capture";
+if (!captureEnv || process.env.HYPERFRAMES_NO_CAPTURE_DOTENV !== "1") {
+  try {
+    const { readFileSync } = await import("node:fs");
+    const envPath = resolve(process.cwd(), ".env");
+    applyDotEnv(
+      readFileSync(envPath, "utf-8"),
+      process.env,
+      captureEnv ? CAPTURE_ENV_KEYS : undefined,
+    );
+  } catch {
+    /* .env not present — fine, env vars may be set another way */
+  }
 }
 
 // ── Lazy imports ────────────────────────────────────────────────────────────
@@ -89,6 +98,7 @@ import {
   CliRuntimeError,
   CliUsageError,
   consumeCommandResult,
+  outputWritten,
   registerRootExitCodeSanitizer,
   registerRootExitRequester,
   type CommandResult,
@@ -135,6 +145,7 @@ const commandLoaders = {
   lint: () => import("./commands/lint.js").then((m) => m.default),
   check: () => import("./commands/check.js").then((m) => m.default),
   beats: () => import("./commands/beats.js").then((m) => m.default),
+  audio: () => import("./commands/audio.js").then((m) => m.default),
   "normalize-audio": () => import("./commands/normalize-audio.js").then((m) => m.default),
   inspect: () => import("./commands/inspect.js").then((m) => m.default),
   keyframes: () => import("./commands/keyframes.js").then((m) => m.default),
@@ -255,31 +266,32 @@ if (
 // cached check while reporting fresh results of its own).
 if (
   !isHelp &&
-  !hasJsonFlag &&
   command !== "upgrade" &&
   command !== "events" &&
   command !== "telemetry" &&
   command !== "skills" &&
   command !== "usage"
 ) {
-  // Report any completed auto-install from the previous run first, before
-  // kicking off the next check — so the user sees "updated to vX" once and
-  // we don't over-print.
-  import("./utils/autoUpdate.js").then((mod) => mod.reportCompletedUpdate()).catch(() => {});
+  if (!hasJsonFlag) {
+    // Report any completed auto-install from the previous run first, before
+    // kicking off the next check — so the user sees "updated to vX" once and
+    // we don't over-print.
+    import("./utils/autoUpdate.js").then((mod) => mod.reportCompletedUpdate()).catch(() => {});
 
-  import("./utils/updateCheck.js")
-    .then(async (mod) => {
-      _printUpdateNotice = mod.printUpdateNotice;
-      _printStalePinNotice = mod.printStalePinNotice;
-      const result = mod.cachedUpdateCheck();
-      if (result.updateAvailable) {
-        const auto = await import("./utils/autoUpdate.js").catch(() => null);
-        auto?.scheduleBackgroundInstall(result.latest, result.current);
-      }
-    })
-    .catch(() => {});
+    import("./utils/updateCheck.js")
+      .then(async (mod) => {
+        _printUpdateNotice = mod.printUpdateNotice;
+        _printStalePinNotice = mod.printStalePinNotice;
+        const result = mod.cachedUpdateCheck();
+        if (result.updateAvailable) {
+          const auto = await import("./utils/autoUpdate.js").catch(() => null);
+          auto?.scheduleBackgroundInstall(result.latest, result.current);
+        }
+      })
+      .catch(() => {});
+  }
 
-  // Skills freshness nudge — same gating as the CLI self-update notice.
+  // Skills freshness nudge: stderr only, so it also runs under --json, which agents pass.
   import("./utils/skillsUpdateCheck.js")
     .then((mod) => {
       _printSkillsUpdateNotice = mod.printSkillsUpdateNotice;
@@ -331,8 +343,8 @@ async function finalizeCli(result: CommandResult): Promise<void> {
   if (!hasJsonFlag) {
     _printUpdateNotice?.();
     _printStalePinNotice?.();
-    _printSkillsUpdateNotice?.();
   }
+  _printSkillsUpdateNotice?.();
   if (_appHistoryNotice) process.stderr.write(`◇  ${_appHistoryNotice}\n`);
   process.exitCode = exitCode;
 }
@@ -342,7 +354,10 @@ registerRootExitRequester((exitCode) => {
     exitCode,
     kind: exitCode === 0 ? "success" : "runtime_error",
     presented: true,
-  }).finally(() => process.exit(exitCode));
+  }).finally(async () => {
+    await outputWritten();
+    process.exit(exitCode);
+  });
 });
 
 registerRootExitCodeSanitizer(() => {

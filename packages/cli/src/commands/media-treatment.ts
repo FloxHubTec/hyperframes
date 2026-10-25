@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import {
   HF_COLOR_GRADING_ATTR,
   HF_COLOR_GRADING_HUE_CURVE_KEYS,
@@ -10,16 +10,20 @@ import {
   serializeHfColorGrading,
 } from "@hyperframes/core";
 import {
+  COLOR_GRADING_SOURCE_TAGS,
   isColorGradingVariableRef,
   validateColorGradingContract,
 } from "@hyperframes/parsers/color-grading-contract";
 import {
   cleanAssetUrl,
   isRemoteOrInlineUrl,
-  resolveExistingLocalAsset,
+  resolveAuthoredAssetFile,
 } from "@hyperframes/parsers/asset-resolution";
-import { rewriteAssetPath } from "@hyperframes/parsers/asset-paths";
-import { patchElementInHtml } from "@hyperframes/studio-server/source-mutation";
+import {
+  isHTMLElement,
+  parseSourceDocument as parseMutableSource,
+} from "@hyperframes/studio-server/source-mutation";
+import { ensureHfIds } from "@hyperframes/parsers/hf-ids";
 import { defineCommand } from "citty";
 import { lintHyperframeHtml } from "@hyperframes/lint";
 import { parseHTML } from "linkedom";
@@ -44,6 +48,7 @@ export function getMediaTreatmentCapabilityOverview() {
     version: capabilities.version,
     targetTags: capabilities.targetTags,
     colorSpace: capabilities.colorSpace,
+    example: capabilities.example,
     families: [
       family("correction", "Adjust", "Fix exposure, tonal balance, color casts, and saturation."),
       family(
@@ -134,7 +139,7 @@ export function getMediaTreatmentCapabilityDetail(id: string): unknown {
     };
   }
 
-  const adjustment = capabilities.adjustments.find(({ key }) => key === id);
+  const adjustment = capabilities.adjust.find(({ key }) => key === id);
   if (adjustment) {
     return {
       id,
@@ -146,7 +151,7 @@ export function getMediaTreatmentCapabilityDetail(id: string): unknown {
     };
   }
 
-  const finishing = capabilities.finishing.find(({ key }) => key === id);
+  const finishing = capabilities.details.find(({ key }) => key === id);
   if (finishing) {
     return {
       id,
@@ -190,7 +195,8 @@ export function getMediaTreatmentCapabilityDetail(id: string): unknown {
     correction: {
       id,
       description: "Fix exposure, tonal balance, color casts, and saturation.",
-      controls: capabilities.adjustments,
+      controls: capabilities.adjust,
+      apply: { adjust: capabilities.example.adjust },
     },
     wheels: {
       id,
@@ -269,7 +275,8 @@ export function getMediaTreatmentCapabilityDetail(id: string): unknown {
     finishing: {
       id,
       description: "Vignette and deterministic film-grain controls.",
-      controls: capabilities.finishing,
+      controls: capabilities.details,
+      apply: { details: capabilities.example.details },
     },
     palettes: {
       id,
@@ -338,13 +345,20 @@ interface ApplyMediaTreatmentOptions {
   clear?: boolean;
 }
 
-interface ApplyMediaTreatmentResult {
-  html: string;
+type GradingSourceTag = (typeof COLOR_GRADING_SOURCE_TAGS)[number];
+
+interface MediaTreatmentTargetResult {
+  selectorIndex: number;
+  tag: GradingSourceTag;
   changed: boolean;
-  tag: "img" | "video";
   value: string | null;
   before: unknown;
   after: unknown;
+}
+
+interface ApplyMediaTreatmentResult extends Omit<MediaTreatmentTargetResult, "selectorIndex"> {
+  html: string;
+  targets: MediaTreatmentTargetResult[];
 }
 
 function parseSourceDocument(source: string): Document {
@@ -432,12 +446,13 @@ function queryIncludingTemplates(root: Document | Element, selector: string): El
   return [];
 }
 
-function selectMediaElement(
-  source: string,
+type MediaTarget = { element: Element; selectorIndex: number; tag: GradingSourceTag };
+
+function selectMediaElements(
+  document: Document,
   selector: string,
   selectorIndex?: number,
-): { element: Element; selectorIndex: number; tag: "img" | "video" } {
-  const document = parseSourceDocument(source);
+): MediaTarget[] {
   let matches: Element[];
   try {
     matches = queryIncludingTemplates(document, selector);
@@ -445,46 +460,66 @@ function selectMediaElement(
     throw new Error(`Invalid selector: ${selector}`);
   }
   if (matches.length === 0) throw new Error(`Selector did not match: ${selector}`);
-  if (selectorIndex === undefined && matches.length > 1) {
+  if (selectorIndex !== undefined && !matches[selectorIndex]) {
+    throw new Error(`--selector-index ${selectorIndex} is outside ${matches.length} matches`);
+  }
+  const indexes = selectorIndex === undefined ? matches.keys() : [selectorIndex];
+  return Array.from(indexes, (index) => {
+    const element = matches[index]!;
+    const tag = element.tagName.toLowerCase() as GradingSourceTag;
+    if (!COLOR_GRADING_SOURCE_TAGS.includes(tag)) {
+      throw new Error(
+        `Color grading requires a <video>, <img> or <canvas>; selector matched <${tag}>`,
+      );
+    }
+    if (!isHTMLElement(element)) {
+      throw new Error(`Color grading requires an HTML <${tag}>; selector matched one inside <svg>`);
+    }
+    return { element, selectorIndex: index, tag };
+  });
+}
+
+function selectMediaElement(source: string, selector: string, selectorIndex?: number): MediaTarget {
+  const targets = selectMediaElements(parseSourceDocument(source), selector, selectorIndex);
+  if (targets.length > 1) {
     throw new Error(
-      `Selector matched ${matches.length} elements; use a unique selector or --selector-index`,
+      `Selector matched ${targets.length} elements; use a unique selector or --selector-index`,
     );
   }
-
-  const resolvedIndex = selectorIndex ?? 0;
-  const element = matches[resolvedIndex];
-  if (!element) {
-    throw new Error(`--selector-index ${resolvedIndex} is outside ${matches.length} matches`);
-  }
-  const tag = element.tagName.toLowerCase();
-  if (tag !== "img" && tag !== "video") {
-    throw new Error(`Color grading requires an <img> or <video>; selector matched <${tag}>`);
-  }
-  return { element, selectorIndex: resolvedIndex, tag };
+  return targets[0]!;
 }
 
 export function applyMediaTreatmentToHtml(
   source: string,
   options: ApplyMediaTreatmentOptions,
 ): ApplyMediaTreatmentResult {
-  const { element, selectorIndex, tag } = selectMediaElement(
-    source,
-    options.selector,
-    options.selectorIndex,
+  const { document, wrappedFragment } = parseMutableSource(source);
+  const targets = selectMediaElements(document, options.selector, options.selectorIndex).map(
+    ({ element, selectorIndex, tag }) => {
+      const current = element.getAttribute(HF_COLOR_GRADING_ATTR);
+      const before = parseStoredGrading(current);
+      const value = options.clear ? null : serializeGradingPatch(before, options.grading);
+      const changed = current !== value;
+      if (changed) {
+        if (value === null) element.removeAttribute(HF_COLOR_GRADING_ATTR);
+        else element.setAttribute(HF_COLOR_GRADING_ATTR, value);
+      }
+      return { selectorIndex, tag, changed, value, before, after: parseStoredGrading(value) };
+    },
   );
-  const before = parseStoredGrading(element.getAttribute(HF_COLOR_GRADING_ATTR));
-
-  const value = options.clear ? null : serializeGradingPatch(before, options.grading);
-
-  const changed = element.getAttribute(HF_COLOR_GRADING_ATTR) !== value;
-  const after = parseStoredGrading(value);
-  if (!changed) return { html: source, changed: false, tag, value, before, after };
-
-  const patched = patchElementInHtml(source, { selector: options.selector, selectorIndex }, [
-    { type: "attribute", property: HF_COLOR_GRADING_ATTR, value },
-  ]);
-  if (!patched.matched) throw new Error(`Could not persist selector: ${options.selector}`);
-  return { html: patched.html, changed: true, tag, value, before, after };
+  const changed = targets.some((target) => target.changed);
+  const serialized = wrappedFragment ? document.body.innerHTML || "" : document.toString();
+  const html = changed ? ensureHfIds(serialized) : source;
+  const first = targets[0]!;
+  return {
+    html,
+    changed,
+    tag: first.tag,
+    value: first.value,
+    before: first.before,
+    after: first.after,
+    targets,
+  };
 }
 
 function parseSelectorIndex(raw: string | undefined): number | undefined {
@@ -518,14 +553,10 @@ export function resolveMediaTreatmentSource(
       "Media analysis requires a local project asset; freeze remote media with media-use first",
     );
   }
-  const cleanSource = cleanAssetUrl(sourceUrl);
-  if (!cleanSource) throw new Error("Selected media has no analyzable local src");
-  const projectRelative = cleanSource.startsWith("/")
-    ? cleanSource
-    : rewriteAssetPath(compositionFile, cleanSource, (path) => existsSync(join(projectDir, path)));
-  const asset = resolveExistingLocalAsset(projectDir, projectRelative);
-  if (!asset) throw new Error(`Media file not found: ${source}`);
-  return asset.resolved;
+  if (!cleanAssetUrl(sourceUrl)) throw new Error("Selected media has no analyzable local src");
+  const file = resolveAuthoredAssetFile(projectDir, compositionFile, sourceUrl);
+  if (!file) throw new Error(`Media file not found: ${source}`);
+  return file;
 }
 
 function parseGrading(
@@ -657,7 +688,9 @@ async function prepareMutation(args: MediaTreatmentCommandArgs) {
   const lint = { ok: findings.every(({ severity }) => severity !== "error"), findings };
   if (result.changed && !dryRun) writeFileSync(filePath, result.html);
 
-  const action: "clear" | "apply" = result.value === null ? "clear" : "apply";
+  const action: "clear" | "apply" = result.targets.every(({ value }) => value === null)
+    ? "clear"
+    : "apply";
   return {
     action,
     result,
@@ -667,14 +700,19 @@ async function prepareMutation(args: MediaTreatmentCommandArgs) {
       action,
       file: relative(project.dir, filePath) || "index.html",
       selector,
-      selectorIndex: selectorIndex ?? 0,
-      tag: result.tag,
+      count: result.targets.length,
+      ...(result.targets.length === 1
+        ? {
+            selectorIndex: result.targets[0]!.selectorIndex,
+            tag: result.tag,
+            before: result.before,
+            after: result.after,
+            value: result.value,
+          }
+        : { targets: result.targets }),
       changed: result.changed,
       dryRun,
-      before: result.before,
-      after: result.after,
       attribute: HF_COLOR_GRADING_ATTR,
-      value: result.value,
       lint,
     },
   };
@@ -705,7 +743,12 @@ async function printMutation(args: MediaTreatmentCommandArgs): Promise<void> {
     return;
   }
   const verb = mutationVerb(action, result.changed, payload.dryRun);
-  console.log(`${c.success("◇")}  ${verb} media treatment on ${c.accent(selector)}`);
+  const changedCount = result.targets.filter(({ changed }) => changed).length;
+  const count =
+    result.targets.length > 1
+      ? ` (${changedCount} of ${result.targets.length} elements ${payload.dryRun ? "would change" : "changed"})`
+      : "";
+  console.log(`${c.success("◇")}  ${verb} media treatment on ${c.accent(selector)}${count}`);
 }
 
 function printFailure(error: unknown, json: boolean): void {
@@ -742,11 +785,11 @@ export const mediaTreatmentCommand = defineCommand({
     },
     selector: {
       type: "string",
-      description: "Unique CSS selector for one <img> or <video>",
+      description: "CSS selector; every matched <img> or <video> gets the patch",
     },
     "selector-index": {
       type: "string",
-      description: "Zero-based match index when the selector is not unique",
+      description: "Zero-based match index to patch only one of several matches",
     },
     grading: { type: "string", description: "Canonical color-grading JSON patch" },
     apply: {

@@ -324,6 +324,69 @@ describe("POST /projects/:id/render — fps wire format", () => {
   });
 });
 
+describe("POST /projects/:id/render — crf", () => {
+  async function post(body: Record<string, unknown>) {
+    const spy = vi.fn();
+    const { app, cleanup } = buildApp(spy);
+    try {
+      const res = await app.request("http://localhost/projects/demo/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fps: 30, quality: "standard", ...body }),
+      });
+      return { res, opts: spy.mock.calls[0]?.[0] };
+    } finally {
+      cleanup();
+    }
+  }
+
+  it("forwards a valid crf for mp4 and webm", async () => {
+    expect((await post({ format: "mp4", crf: 12 })).opts.crf).toBe(12);
+    expect((await post({ format: "webm", crf: 63 })).opts.crf).toBe(63);
+  });
+
+  it("omits crf when the request does not specify one", async () => {
+    const { res, opts } = await post({ format: "mp4" });
+    expect(res.status).toBe(200);
+    expect(opts).not.toHaveProperty("crf");
+  });
+
+  it("ignores crf for mov, which has no CRF", async () => {
+    const { res, opts } = await post({ format: "mov", crf: 12 });
+    expect(res.status).toBe(200);
+    expect(opts).not.toHaveProperty("crf");
+  });
+
+  it("forwards the other encoder options and refuses crf with a bitrate", async () => {
+    const { opts } = await post({
+      format: "mp4",
+      videoBitrate: "10M",
+      videoFrameFormat: "png",
+      hdrMode: "force-sdr",
+    });
+    expect(opts).toMatchObject({
+      videoBitrate: "10M",
+      videoFrameFormat: "png",
+      hdrMode: "force-sdr",
+    });
+    const both = await post({ format: "mp4", crf: 12, videoBitrate: "10M" });
+    expect(both.res.status).toBe(400);
+    expect(both.opts).toBeUndefined();
+  });
+
+  it.each([
+    ["mp4", 52],
+    ["mp4", -1],
+    ["mp4", 12.5],
+    ["mp4", "12"],
+    ["webm", 64],
+  ])("rejects %s crf %j with 400 and does not start a render", async (format, crf) => {
+    const { res, opts } = await post({ format, crf });
+    expect(res.status).toBe(400);
+    expect(opts).toBeUndefined();
+  });
+});
+
 describe("POST /projects/:id/render — composition path safety", () => {
   const tmpDirs: string[] = [];
 
@@ -721,6 +784,69 @@ describe("POST /projects/:id/render — telemetryDistinctId forwarding", () => {
       cleanup();
     }
   });
+
+  // WYSIWYG: the browser says whether its preview could blur; only `false` is a signal, and the
+  // route hands every adapter the final render value.
+  it.each([
+    [false, "off"],
+    [true, undefined],
+    ["false", undefined],
+    [undefined, undefined],
+  ])("maps previewMotionBlur %s to pageMotionBlur %s", async (flag, expected) => {
+    const spy = vi.fn();
+    const { app, cleanup } = buildApp(spy);
+    try {
+      await app.request("http://localhost/projects/demo/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          fps: 30,
+          quality: "standard",
+          format: "mp4",
+          previewMotionBlur: flag,
+        }),
+      });
+      expect(spy.mock.calls[0][0].pageMotionBlur).toBe(expected);
+      expect(spy.mock.calls[0][0]).not.toHaveProperty("previewMotionBlur");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("preserves explicit page motion blur off over preview capability", async () => {
+    const spy = vi.fn();
+    const { app, cleanup } = buildApp(spy);
+    try {
+      const res = await app.request("http://localhost/projects/demo/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageMotionBlur: "off", previewMotionBlur: true }),
+      });
+      expect(res.status).toBe(200);
+      expect(spy.mock.calls[0][0].pageMotionBlur).toBe("off");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it.each(["on", "", false, true, null, 0])(
+    "rejects invalid page motion blur %s before starting a render",
+    async (pageMotionBlur) => {
+      const spy = vi.fn();
+      const { app, cleanup } = buildApp(spy);
+      try {
+        const res = await app.request("http://localhost/projects/demo/render", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ pageMotionBlur }),
+        });
+        expect(res.status).toBe(400);
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        cleanup();
+      }
+    },
+  );
 
   // An old client omits the flag, and a non-boolean is not a signal either.
   // Defaulting those to "opted out" would silently drop every pre-upgrade

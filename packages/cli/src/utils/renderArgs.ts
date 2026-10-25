@@ -1,3 +1,4 @@
+import { DEFAULT_CONFIG, resolvePageNavigationTimeout } from "@hyperframes/engine";
 import { failUsage } from "./commandResult.js";
 /**
  * Pure parsers for `hyperframes render` argv that aren't already shared
@@ -10,8 +11,8 @@ import { failUsage } from "./commandResult.js";
  * `timeout: 0` footguns at the rate of "one per missing branch".
  */
 
-import { readFileSync, type Stats } from "node:fs";
-import { resolve, sep } from "node:path";
+import { readFileSync, realpathSync, type Stats } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { parseFps } from "@hyperframes/core";
 import { errorBox } from "../ui/format.js";
 import { readCompositionFps } from "./compositionFps.js";
@@ -118,20 +119,13 @@ export function resolveBrowserTimeoutMsArg(raw: string | undefined): number | un
   return result.value;
 }
 
-/**
- * Navigation budget shared by snapshot/check/inspect browser diagnostics.
- *
- * The environment variable remains the historical global override. Callers
- * with their own timeout knob can supply a minimum without shortening that
- * override or the existing 10-second default.
- */
-export function resolveDiagnosticNavigationTimeoutMs(
-  env: Record<string, string | undefined> = process.env,
-  minimumTimeoutMs = 0,
-): number {
-  const parsed = Number(env.PRODUCER_PAGE_NAVIGATION_TIMEOUT_MS);
-  const configured = Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
-  return Math.max(configured, minimumTimeoutMs);
+/** The page-load budget render uses, raised to a command's own longer `--timeout`. */
+export function pageNavigationTimeoutMs(minimumTimeoutMs = 0): number {
+  const configured = resolvePageNavigationTimeout();
+  return Math.max(
+    configured > 0 ? configured : DEFAULT_CONFIG.pageNavigationTimeout,
+    minimumTimeoutMs,
+  );
 }
 
 // ── --composition ──────────────────────────────────────────────────────
@@ -171,6 +165,7 @@ export function parseCompositionEntryArg(
   raw: string | undefined,
   projectDir: string,
   stat: (path: string) => Stats,
+  real: (path: string) => string = realpathOrSame,
 ): CompositionEntryParseResult {
   const trimmed = normalizeCompositionEntryArg(raw);
   // Normalize the project-root shorthands to "no entry override" so the
@@ -180,12 +175,11 @@ export function parseCompositionEntryArg(
 
   const absProjectDir = resolve(projectDir);
   const entryPath = resolve(absProjectDir, trimmed);
-  // Trailing-separator guard: `startsWith` alone treats `/proj` as a
-  // prefix of `/proj-evil`, letting a sibling-directory escape through.
-  // Allow the resolved path to BE the project dir (already covered by
-  // the trimmed === "." branch above) or to live beneath it with a
-  // path separator.
-  if (entryPath !== absProjectDir && !entryPath.startsWith(absProjectDir + sep)) {
+  // An absolute entry may name the project through a symlink (macOS /tmp), so try both spellings of each.
+  const relativeEntry = [absProjectDir, real(absProjectDir)]
+    .flatMap((root) => [entryPath, real(entryPath)].map((path) => relative(root, path)))
+    .find((rel) => rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  if (relativeEntry === undefined) {
     return { ok: false, error: { kind: "outside-project", entryFile: trimmed } };
   }
 
@@ -201,7 +195,15 @@ export function parseCompositionEntryArg(
     // producer's readFileSync. Reject here with an actionable message.
     return { ok: false, error: { kind: "not-a-file", entryFile: trimmed } };
   }
-  return { ok: true, value: trimmed };
+  return { ok: true, value: relativeEntry.split(sep).join("/") };
+}
+
+function realpathOrSame(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 function compositionEntryErrorMessage(error: CompositionEntryParseError): {

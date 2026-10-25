@@ -105,6 +105,31 @@ describe("bundleToSingleHtml", () => {
     }
   });
 
+  it("stops inlining a repeated asset once the bundle's inline budget is spent instead of overflowing the string", async () => {
+    // 300 references to one 1.9 MB image inline ~760M characters, past V8's
+    // maximum string length: without a bundle-wide budget this throws
+    // "Invalid string length".
+    const references = 300;
+    const dir = makeTempProject({
+      "index.html": `<html><body><main data-composition-id="root" data-width="320" data-height="180">${'<img src="unit.png">'.repeat(references)}</main></body></html>`,
+      "unit.png": "x".repeat(1_900_000),
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const bundled = await bundleToSingleHtml(dir);
+      const inlined = bundled.split("data:image/png;base64,").length - 1;
+      const relative = bundled.split('src="unit.png"').length - 1;
+      expect(inlined).toBeGreaterThan(0);
+      expect(relative).toBeGreaterThan(0);
+      expect(inlined + relative).toBe(references);
+      expect(bundled.length).toBeLessThan(300 * 1024 * 1024);
+      expect(warn.mock.calls.filter(([m]) => String(m).includes("inline")).length).toBe(1);
+    } finally {
+      warn.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("resolves encoded URL filenames once across asset, stylesheet and script consumers", async () => {
     const dir = makeTempProject({
       "index.html":
@@ -192,31 +217,34 @@ describe("bundleToSingleHtml", () => {
     expect(bundled).toContain(".direct-scene { color: rgb(1, 2, 3); }");
   });
 
-  it("bundles a template scene entry inside the index that mounts it", async () => {
-    const dir = makeTempProject({
-      "index.html": `<!doctype html><html><head><script src="vendor/gsap.js"></script></head><body>
+  it.each(["", "<!-- Scene author notes -->\n"])(
+    "bundles a template scene entry with prefix %j inside the index that mounts it",
+    async (prefix) => {
+      const dir = makeTempProject({
+        "index.html": `<!doctype html><html><head><script src="vendor/gsap.js"></script></head><body>
         <div data-composition-id="root" data-width="320" data-height="180" data-duration="9">
           <div data-composition-id="intro" data-composition-src="compositions/intro.html" data-start="0" data-duration="3"></div>
           <div data-composition-id="scene" data-composition-src="./compositions/scene.html" data-start="3" data-duration="6"></div>
         </div>
       </body></html>`,
-      "vendor/gsap.js": "window.ROOT_GSAP_LOADED = true;",
-      "compositions/intro.html": `<template><div data-composition-id="intro">intro scene</div></template>`,
-      "compositions/scene.html": `<template><div data-composition-id="scene" data-duration="6">
+        "vendor/gsap.js": "window.ROOT_GSAP_LOADED = true;",
+        "compositions/intro.html": `<template><div data-composition-id="intro">intro scene</div></template>`,
+        "compositions/scene.html": `${prefix}<template><div data-composition-id="scene" data-duration="6">
         <h1 id="title">mounted scene</h1></div></template>`,
-    });
+      });
 
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const bundled = await bundleToSingleHtml(dir, { entryFile: "compositions/scene.html" });
-    const guardWarnings = warn.mock.calls.filter(([m]) => String(m).includes("[StaticGuard]"));
-    warn.mockRestore();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const bundled = await bundleToSingleHtml(dir, { entryFile: "compositions/scene.html" });
+      const guardWarnings = warn.mock.calls.filter(([m]) => String(m).includes("[StaticGuard]"));
+      warn.mockRestore();
 
-    expect(guardWarnings).toEqual([]);
-    expect(bundled).toContain("window.ROOT_GSAP_LOADED = true;");
-    expect(bundled).toContain('data-composition-id="root"');
-    expect(bundled).toContain("mounted scene");
-    expect(bundled).not.toContain("intro scene");
-  });
+      expect(guardWarnings).toEqual([]);
+      expect(bundled).toContain("window.ROOT_GSAP_LOADED = true;");
+      expect(bundled).toContain('data-composition-id="root"');
+      expect(bundled).toContain("mounted scene");
+      expect(bundled).not.toContain("intro scene");
+    },
+  );
 
   it("rebases direct-entry authored asset paths before inlining", async () => {
     const spriteSvg = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>';
@@ -349,6 +377,37 @@ describe("bundleToSingleHtml", () => {
     const bundled = await bundleToSingleHtml(dir);
 
     expect(bundled).toContain('var __hfCompositionSrc = "compositions/blk/blk.html";');
+  });
+
+  it("bundles mounted import maps with blocked entries and object-property specifiers", async () => {
+    const dir = makeTempProject({
+      "index.html":
+        '<!doctype html><html><head></head><body><div data-composition-id="main" data-width="320" data-height="180"><div data-composition-id="blk" data-composition-src="blocks/blk.html" data-start="0" data-duration="2"></div></div></body></html>',
+      "blocks/ok.js": "export const VALUE = 1;",
+      "blocks/lib/witness.js": "export const WITNESS = 3;",
+      "blocks/scoped.js": "export const VALUE = 2;",
+      "blocks/blk.html":
+        '<div data-composition-id="blk" data-width="320" data-height="180"><script type="importmap">{"imports":{"ok":"./ok.js","blocked":null,"number":17,"constructor":"./ok.js","__proto__":"./ok.js"},"scopes":{"./lib/":{"ok":"./scoped.js","blocked":null}}}</script><script type="module">import "ok";</script></div>',
+    });
+    try {
+      const { document } = parseHTML(await bundleToSingleHtml(dir));
+      const map = document.querySelector('script[type="importmap"]');
+      expect(JSON.parse(map?.textContent || "null")).toEqual({
+        imports: Object.fromEntries([
+          ["ok", "./blocks/ok.js"],
+          ["blocked", null],
+          ["number", null],
+          ["constructor", "./blocks/ok.js"],
+          ["__proto__", "./blocks/ok.js"],
+        ]),
+        scopes: { "./blocks/lib/": { ok: "./blocks/scoped.js", blocked: null } },
+      });
+      expect(
+        document.querySelector(`script[type="${AFTER_FONTS_SCRIPT_TYPE}+module"]`),
+      ).not.toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("keeps a mounted file's import map and module script as such, bound to that file", async () => {
@@ -1080,6 +1139,30 @@ describe("bundleToSingleHtml", () => {
     expect(bundled).toContain('var __hfTimelineCompId = "scene__hf2"');
   });
 
+  it("gives a mount that shares the page root's id its own runtime id", async () => {
+    const cliRoot = (title: string) =>
+      `<div id="root" data-composition-id="main" data-width="1920" data-height="1080"><h1>${title}</h1>`;
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><head></head><body>
+  ${cliRoot("Host")}
+    <div id="main_2" data-composition-id="main" data-composition-src="compositions/scene.html"></div>
+  </div>
+  <script>window.__timelines={};</script>
+</body></html>`,
+      "compositions/scene.html": `<!doctype html><html><body>${cliRoot("Scene")}</div>
+  <script>window.__timelines["main"] = "scene";</script>
+</body></html>`,
+    });
+
+    const bundled = await bundleToSingleHtml(dir);
+    const host = parseHTML(bundled).document.querySelector("#main_2");
+
+    expect(host?.getAttribute("data-composition-id")).toBe("main__hf1");
+    expect(host?.getAttribute("data-hf-original-composition-id")).toBe("main");
+    expect(bundled).toContain('var __hfTimelineCompId = "main__hf1"');
+  });
+
   it("uniquifies duplicate sub-compositions across inline-template and external hosts", async () => {
     const dir = makeTempProject({
       "index.html": `<!doctype html>
@@ -1479,6 +1562,27 @@ describe("bundleToSingleHtml", () => {
     expect(bundled).toContain("display: block");
     expect(styleText(bundled)).not.toContain("@import");
   });
+
+  it.each([false, true])(
+    "keeps repeated CSS imports under each media condition (nested: %s)",
+    async (nested) => {
+      const dir = makeTempProject({
+        "index.html": `<link rel="stylesheet" href="main.css"><div data-composition-id="root" data-width="320" data-height="180"></div>`,
+        "main.css": nested
+          ? '@import "first.css" print;\n@import "second.css" screen;'
+          : '@import "shared.css" print;\n@import "shared.css" screen;',
+        "first.css": '@import "shared.css";',
+        "second.css": '@import "shared.css";',
+        "shared.css": "#root { background: green; }",
+      });
+
+      const css = styleText(await bundleToSingleHtml(dir));
+
+      expect(css).toMatch(/@media print\s*\{\s*#root \{ background: green; \}\s*\}/);
+      expect(css).toMatch(/@media screen\s*\{\s*#root \{ background: green; \}\s*\}/);
+      expect(css).not.toContain("@import");
+    },
+  );
 
   describe("head style coalescing", () => {
     async function bundledHeadStyles(head: string, files: Record<string, string> = {}) {
@@ -1998,23 +2102,138 @@ describe("bundleToSingleHtml", () => {
     expect(bundled).toContain(`url('${inlinedAs("image/png", "fake")}')`);
   });
 
-  it("preserves url() query strings and hash fragments during rebasing", async () => {
-    const dir = makeTempProject({
-      "index.html": `<!doctype html>
+  it.each([true, false])(
+    "handles CSS asset suffixes with inlineAssets %s",
+    async (inlineAssets) => {
+      const dir = makeTempProject({
+        "index.html": `<!doctype html>
 <html><body>
   <link rel="stylesheet" href="styles/icons.css">
   <div data-composition-id="root" data-width="320" data-height="180"></div>
   <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
 </body></html>`,
-      "styles/icons.css": `.icon { background: url('./sprite.png?v=2#section'); }`,
-      "styles/sprite.png": "fake-sprite",
+        "styles/icons.css": `.icon { background: url('./sprite.png?v=2#section'); }`,
+        "styles/sprite.png": "fake-sprite",
+      });
+
+      try {
+        const bundled = await bundleToSingleHtml(dir, { inlineAssets });
+        const assetUrl = inlineAssets
+          ? `${inlinedAs("image/png", "fake-sprite")}#section`
+          : "styles/sprite.png?v=2#section";
+        expect(styleText(bundled)).toContain(`url('${assetUrl}')`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["?v=2", "#sprite", "?v=2#sprite"])(
+    "keeps inlined image bytes decodable with suffix %s",
+    async (suffix) => {
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHUlEQVR4AdzKMREAAACCQI/+nbWB7sL6yH00+gABAAD//9z6uLQAAAAGSURBVAMAa8EQAfftxdwAAAAASUVORK5CYII=",
+        "base64",
+      );
+      const dir = makeTempProject({
+        "index.html": `<div data-composition-id="root" data-width="320" data-height="180"><img id="photo" src="green.png${suffix}"></div>`,
+      });
+      writeFileSync(join(dir, "green.png"), png);
+      try {
+        const bundled = await bundleToSingleHtml(dir);
+        const { document } = parseHTML(bundled);
+        const src = document.getElementById("photo")?.getAttribute("src");
+        expect(src).toBe(
+          `data:image/png;base64,${png.toString("base64")}${suffix.includes("#") ? "#sprite" : ""}`,
+        );
+        const response = await fetch(src ?? "");
+        expect(response.headers.get("content-type")).toBe("image/png");
+        expect(Buffer.from(await response.arrayBuffer())).toEqual(png);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "handles font query strings with inlineAssets %s",
+    async (inlineAssets) => {
+      const dir = makeTempProject({
+        "index.html": `<style>@font-face { font-family: Icon; src: url('icon.woff2?v=4.7.0'); }</style><div data-composition-id="root" data-width="320" data-height="180"></div>`,
+        "icon.woff2": "font-bytes",
+      });
+      try {
+        const bundled = await bundleToSingleHtml(dir, { inlineAssets });
+        const fontUrl = inlineAssets ? inlinedAs("font/woff2", "font-bytes") : "icon.woff2?v=4.7.0";
+        expect(styleText(bundled)).toContain(`url('${fontUrl}')`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "preserves srcset URL commas with inlineAssets %s",
+    async (inlineAssets) => {
+      const srcset = `${inlinedAs("image/svg+xml", '<svg xmlns="http://www.w3.org/2000/svg"/>')} 1x, https://cdn.example/hero,blue.png 2x`;
+      const dir = makeTempProject({
+        "index.html": `<html><body><div data-composition-id="root" data-width="320" data-height="180" data-duration="1" data-no-timeline><img id="photo" srcset="${srcset}"></div></body></html>`,
+      });
+      try {
+        const bundled = await bundleToSingleHtml(dir, { inlineAssets });
+        const { document } = parseHTML(bundled);
+        expect(document.getElementById("photo")?.getAttribute("srcset")).toBe(srcset);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("inlines a comma-named srcset image beside an existing data URL", async () => {
+    const dataUrl = inlinedAs("image/svg+xml", '<svg xmlns="http://www.w3.org/2000/svg"/>');
+    const dir = makeTempProject({
+      "index.html": `<html><body><div data-composition-id="root" data-width="320" data-height="180" data-duration="1" data-no-timeline><img id="photo" srcset="${dataUrl} 1x, hero,blue.png 2x"></div></body></html>`,
+      "hero,blue.png": "blue-image-bytes",
     });
-
-    const bundled = await bundleToSingleHtml(dir);
-
-    // The query/hash suffix rides along onto the inlined data URL.
-    expect(bundled).toContain(`url('${inlinedAs("image/png", "fake-sprite")}?v=2#section')`);
+    try {
+      const bundled = await bundleToSingleHtml(dir);
+      const { document } = parseHTML(bundled);
+      expect(document.getElementById("photo")?.getAttribute("srcset")).toBe(
+        `${dataUrl} 1x, ${inlinedAs("image/png", "blue-image-bytes")} 2x`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
+
+  it.each([true, false])(
+    "rebases complete picture srcset URLs with inlineAssets %s",
+    async (inlineAssets) => {
+      const dataUrl = inlinedAs("image/svg+xml", '<svg xmlns="http://www.w3.org/2000/svg"/>');
+      const dir = makeTempProject({
+        "scenes/scene.html": `<html><body><div data-composition-id="root" data-width="320" data-height="180" data-duration="1" data-no-timeline><picture><source id="photo" srcset="${dataUrl} 160w, hero,blue.png?v=2#sprite 320w"><img id="fallback" src="hero,blue.png" srcset="hero,blue.png?v=2 1x"></picture></div></body></html>`,
+        "scenes/hero,blue.png": "blue-image-bytes",
+      });
+      try {
+        const bundled = await bundleToSingleHtml(dir, {
+          entryFile: "scenes/scene.html",
+          inlineAssets,
+        });
+        const { document } = parseHTML(bundled);
+        const image = inlineAssets
+          ? inlinedAs("image/png", "blue-image-bytes")
+          : "scenes/hero%2Cblue.png";
+        expect(document.getElementById("photo")?.getAttribute("srcset")).toBe(
+          `${dataUrl} 160w, ${image}${inlineAssets ? "#sprite" : "?v=2#sprite"} 320w`,
+        );
+        expect(document.getElementById("fallback")?.getAttribute("srcset")).toBe(
+          `${image}${inlineAssets ? "" : "?v=2"} 1x`,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("inlines fonts, images and scripts so no relative asset reference survives", async () => {
     const dir = makeTempProject({
@@ -2215,7 +2434,7 @@ describe("bundleToSingleHtml", () => {
     warn.mockRestore();
   });
 
-  it("deduplicates diamond @import (same file imported by two parents)", async () => {
+  it("preserves cascade order when two CSS imports share a dependency", async () => {
     const dir = makeTempProject({
       "index.html": `<!doctype html>
 <html><body>
@@ -2226,16 +2445,34 @@ describe("bundleToSingleHtml", () => {
       "styles/main.css": `@import url('./a.css');\n@import url('./b.css');`,
       "styles/a.css": `@import url('./shared.css');\n.a { color: red; }`,
       "styles/b.css": `@import url('./shared.css');\n.b { color: blue; }`,
-      "styles/shared.css": `:root { --shared: 1; }`,
+      "styles/shared.css": `.a { color: green; }`,
     });
 
     const bundled = await bundleToSingleHtml(dir);
 
-    const sharedCount = (bundled.match(/--shared: 1/g) || []).length;
-    expect(sharedCount).toBe(1);
-    expect(bundled).toContain(".a { color: red; }");
-    expect(bundled).toContain(".b { color: blue; }");
+    expect(styleText(bundled).match(/\.[ab] \{ color: \w+; \}/g)).toEqual([
+      ".a { color: green; }",
+      ".a { color: red; }",
+      ".a { color: green; }",
+      ".b { color: blue; }",
+    ]);
     expect(styleText(bundled)).not.toContain("@import");
+  });
+
+  it("cuts a CSS import cycle without repeating the entry stylesheet", async () => {
+    const dir = makeTempProject({
+      "index.html": `<link rel="stylesheet" href="main.css"><div data-composition-id="root" data-width="320" data-height="180"></div>`,
+      "main.css": '@import "child.css";\n.main { color: red; }',
+      "child.css": '@import "main.css";\n.child { color: green; }',
+    });
+
+    const css = styleText(await bundleToSingleHtml(dir));
+
+    expect(css.match(/\.(?:child|main) \{ color: \w+; \}/g)).toEqual([
+      ".child { color: green; }",
+      ".main { color: red; }",
+    ]);
+    expect(css).not.toContain("@import");
   });
 
   it("does not resolve @import inside CSS comments", async () => {
@@ -3158,7 +3395,7 @@ describe("bundleToSingleHtml sceneParts", () => {
   const partsOf = (doc: Document, scene: string) =>
     [...doc.querySelectorAll(`[data-hf-scene="${scene}"]`)].map((el) => el.tagName.toLowerCase());
 
-  it("keeps each scene's own copy of a shared @font-face, so one scene still swaps alone", async () => {
+  it("puts a @font-face two scenes share in one style outside the scenes, once", async () => {
     const face = `@font-face { font-family: "Brand"; src: url('assets/fonts/brand.woff2'); }`;
     const dir = makeTempProject({
       "index.html": `<!doctype html>
@@ -3178,8 +3415,14 @@ describe("bundleToSingleHtml sceneParts", () => {
       const css = [...doc.querySelectorAll(`style[data-hf-scene="${scene}"]`)]
         .map((el) => el.textContent ?? "")
         .join("\n");
-      expect(css).toContain("@font-face");
+      expect(css).not.toContain("@font-face");
     }
+    const fonts = doc.querySelector("style[data-hf-scene-fonts]");
+    expect(fonts?.hasAttribute("data-hf-scene")).toBe(false);
+    const faces = (css: string) => css.match(/@font-face/g)?.length ?? 0;
+    expect(faces(fonts?.textContent ?? "")).toBe(1);
+    const allCss = [...doc.querySelectorAll("style")].map((el) => el.textContent ?? "").join("\n");
+    expect(faces(allCss)).toBe(1);
   });
 
   it("tags each top-level scene's host, styles and scripts, with nested scenes in their parent's parts", async () => {
@@ -3614,5 +3857,36 @@ describe("stampHfIds", () => {
     const html = await bundleToSingleHtml(project(), { inlineAssets: false });
     expect(logo(html)).toContain("compositions/logo.png");
     expect(logo(html)).not.toContain("data-hf-id");
+  });
+});
+
+describe("emitRootCompositionVariableStyles — authored definitions", () => {
+  function emitted(authoredCss: string): string {
+    const { document } = parseHTML(
+      `<!doctype html><html><head><style>${authoredCss}</style></head>` +
+        `<body><div data-composition-id="card"></div></body></html>`,
+    );
+    emitRootCompositionVariableStyles(document, {
+      card: { accent: "blue", "accent-dark": "navy" },
+    });
+    return document.querySelector("style[data-hf-composition-variables]")?.textContent ?? "";
+  }
+
+  it("leaves a variable the stylesheet defines, whatever space sits before its colon", () => {
+    for (const authored of [
+      ":root{--accent:red}",
+      ":root { --accent : red }",
+      ":root {\n  --accent\n  : red }",
+    ]) {
+      const css = emitted(authored);
+      expect(css).not.toContain("--accent:");
+      expect(css).toContain("--accent-dark: navy");
+    }
+  });
+
+  it("still emits a variable whose name only begins a longer authored one, or is only read", () => {
+    const css = emitted(":root { --accent-dark: black; } .badge { color: var(--accent); }");
+    expect(css).toContain("--accent: blue");
+    expect(css).not.toContain("--accent-dark");
   });
 });

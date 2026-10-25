@@ -78,6 +78,31 @@ Run `docker info`.
 
 Confirm Docker is installed, its daemon is running, your user has permission, and the first image download can reach the registry.
 
+### Preview checks an unexpected port range
+
+When starting a managed background preview, choose the discovery range with an explicit port:
+
+```bash
+npx hyperframes preview --background --port 4567
+```
+
+Discovery checks ports 4567–4666. If this project has a saved preview on another
+port outside that range, only that saved port is checked separately. When moving
+an existing managed preview to the requested port, add `--force-new` to stop and
+replace it. Without `--port`, discovery starts at the saved preview's port.
+
+`preview --status --port 4567` uses the same discovery range and checks an
+out-of-range saved port separately. Among previews for this project, status
+prefers the exact requested port, then the saved preview's port, then another
+match. The saved log path appears only when the selected server is verified as
+that background preview. If the listener PID cannot be determined, JSON reports
+`pid: null` and text output omits the PID.
+
+`preview --stop` checks only this project's saved port when a session exists,
+even with an explicit `--port`. Without a saved session, `--stop --port 4567`
+discovers previews in ports 4567–4666. Shutdown waits check only the port being
+stopped.
+
 ## Media problems
 
 ### Video is black in preview but renders
@@ -228,6 +253,36 @@ During iteration:
 - avoid increasing resolution or frame rate before needed.
 
 Run `npx hyperframes benchmark` when tuning worker settings.
+
+### The render is slow under WSL2
+
+WSL2 can expose a graphics card to Linux, but headless Chrome may not be able to use
+it. The render then falls back to software rendering, which can be several times
+slower on a long or effect-heavy video. The render log says so:
+
+```text
+[hyperframes] browserGpuMode probe → software (WebGL unavailable)
+[hyperframes] WSL: the GPU check found no hardware GPU, so this render uses software WebGL ...
+```
+
+The lines after it say what HyperFrames checked. If they say your user is not in
+the `render` group, add yourself, restart WSL, and render again:
+
+```bash
+sudo usermod -aG render $USER
+# then, in Windows PowerShell:
+wsl --shutdown
+```
+
+If the GPU is still not used, render from Windows instead. Copy the project to
+a Windows drive (for example `C:\Users\you\renders\my-video`) and run the same
+command from PowerShell, where Chrome uses the graphics card through Direct3D:
+
+```powershell
+npx hyperframes render --output final.mp4
+```
+
+Run it from a normal Windows folder, not a `\\wsl.localhost\...` path.
 
 ### Expected HDR but received SDR
 

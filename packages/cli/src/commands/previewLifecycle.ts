@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import {
   activeServerOnPort,
   MAX_PORT_SCAN,
@@ -46,12 +47,22 @@ export interface PreviewSession {
   logPath: string;
 }
 
-type SpawnResult = { pid?: number; unref(): void };
+type PreviewStatus = Pick<PreviewSession, "port" | "projectDir"> & {
+  pid: number | null;
+  logPath?: string;
+};
+
+type SpawnResult = {
+  pid?: number;
+  unref(): void;
+  once?(event: "exit", listener: (code: number | null, signal: string | null) => void): unknown;
+};
 type SpawnPreview = (
   command: string,
   args: string[],
   options: {
     detached: boolean;
+    windowsHide: boolean;
     stdio: ["ignore", number, number];
     env: NodeJS.ProcessEnv;
   },
@@ -226,7 +237,12 @@ function spawnDetachedPreview(
   projectDir: string,
   stateHome: string,
   dependencies: LifecycleDependencies,
-): { pid: number; wrapperIdentity: string | undefined; logPath: string } {
+): {
+  pid: number;
+  wrapperIdentity: string | undefined;
+  logPath: string;
+  exitedWith: () => string | null;
+} {
   const logPath = previewLogPath(projectDir, stateHome);
   mkdirSync(dirname(logPath), { recursive: true });
   const logFd = openSync(logPath, "a", 0o600);
@@ -238,6 +254,7 @@ function spawnDetachedPreview(
       buildBackgroundPreviewArgs(dependencies.argv ?? process.argv.slice(1)),
       {
         detached: true,
+        windowsHide: true,
         stdio: ["ignore", logFd, logFd],
         env: process.env,
       },
@@ -246,11 +263,16 @@ function spawnDetachedPreview(
     closeSync(logFd);
   }
   if (!child.pid) throw new Error("background preview child did not report a PID");
+  let exit: string | null = null;
+  child.once?.("exit", (code, signal) => {
+    exit = signal ? `signal ${signal}` : `exit code ${code}`;
+  });
   child.unref();
   return {
     pid: child.pid,
     wrapperIdentity: (dependencies.identity ?? processIdentity)(child.pid) ?? undefined,
     logPath,
+    exitedWith: () => exit,
   };
 }
 
@@ -285,25 +307,69 @@ export function buildBackgroundPreviewArgs(argv: string[]): string[] {
   return [...filtered, "--foreground", "--no-open", "--force-new"];
 }
 
+function statusServer(
+  servers: ActiveServer[],
+  projectDir: string,
+  saved: PreviewSession | null,
+  preferredPort: number | undefined,
+): ActiveServer | null {
+  const candidates = sameProjectServers(servers, projectDir);
+  return (
+    candidates.find((server) => server.port === preferredPort) ??
+    candidates.find((server) => server.port === saved?.port) ??
+    candidates[0] ??
+    null
+  );
+}
+
+function isCurrentPreviewWrapper(
+  saved: PreviewSession,
+  dependencies: LifecycleDependencies,
+): boolean {
+  return (
+    !!saved.wrapperIdentity &&
+    (dependencies.identity ?? processIdentity)(saved.pid) === saved.wrapperIdentity
+  );
+}
+
+function managedStatusLogPath(
+  server: ActiveServer,
+  saved: PreviewSession | null,
+  pid: number,
+  dependencies: LifecycleDependencies,
+): string | undefined {
+  if (!saved || saved.port !== server.port || server.pidSource !== "os") {
+    return undefined;
+  }
+  if (!isCurrentPreviewWrapper(saved, dependencies)) {
+    return undefined;
+  }
+  const isDescendant = dependencies.isDescendant ?? isProcessDescendant;
+  return pid === saved.pid || isDescendant(pid, saved.pid) ? saved.logPath : undefined;
+}
+
 export async function readBackgroundPreviewStatus(
   projectDir: string,
   startPort: number,
   dependencies: LifecycleDependencies = {},
-): Promise<PreviewSession | null> {
-  const scan = dependencies.scan ?? scanActiveServers;
-  const stateHome = dependencies.stateHome ?? defaultStateHome();
-  const saved = readPreviewSession(projectDir, stateHome);
-  const server = matchingServer(await scan(saved?.port ?? startPort), projectDir);
+): Promise<PreviewStatus | null> {
+  const { stateHome, saved, scanned } = await readPreviewLifecycleState(
+    projectDir,
+    startPort,
+    dependencies,
+  );
+  const server = statusServer(scanned, projectDir, saved, dependencies.preferredPort);
   if (server) {
-    const pid = Number(server.pid ?? saved?.pid);
-    if (Number.isInteger(pid) && pid > 0) {
-      return {
-        pid,
-        port: server.port,
-        projectDir: resolve(projectDir),
-        logPath: saved?.logPath ?? previewLogPath(projectDir, stateHome),
-      };
-    }
+    const listenerPid = Number(server.pid);
+    const pid = Number.isInteger(listenerPid) && listenerPid > 0 ? listenerPid : null;
+    const logPath =
+      pid === null ? undefined : managedStatusLogPath(server, saved, pid, dependencies);
+    return {
+      pid,
+      port: server.port,
+      projectDir: resolve(projectDir),
+      ...(logPath ? { logPath } : {}),
+    };
   }
 
   // A missed probe is not proof the preview is gone: a server whose event loop
@@ -366,7 +432,7 @@ function wrapperProcessIsAlive(
 
 export async function listBackgroundPreviewStatuses(
   dependencies: LifecycleDependencies = {},
-): Promise<PreviewSession[]> {
+): Promise<PreviewStatus[]> {
   const stateHome = dependencies.stateHome ?? defaultStateHome();
   const directory = sessionDirectory(stateHome);
   let files: string[];
@@ -389,7 +455,7 @@ export async function listBackgroundPreviewStatuses(
       }),
     ),
   );
-  return statuses.filter((status): status is PreviewSession => status !== null);
+  return statuses.filter((status): status is PreviewStatus => status !== null);
 }
 
 function readyPreviewSession(
@@ -454,6 +520,21 @@ function savedOwnedPreview(
   return matchingServer(savedPortServers, projectDir);
 }
 
+function isPortInScanRange(port: number, scanStart: number): boolean {
+  return port >= scanStart && port < scanStart + MAX_PORT_SCAN;
+}
+
+async function addSavedPortServer(
+  scanned: ActiveServer[],
+  savedPort: number | undefined,
+  scanStart: number,
+  dependencies: LifecycleDependencies,
+): Promise<void> {
+  if (savedPort === undefined || isPortInScanRange(savedPort, scanStart)) return;
+  const server = await (dependencies.probe ?? activeServerOnPort)(savedPort);
+  if (server) scanned.push(server);
+}
+
 async function readPreviewLifecycleState(
   projectDir: string,
   startPort: number,
@@ -462,9 +543,10 @@ async function readPreviewLifecycleState(
   const scan = dependencies.scan ?? scanActiveServers;
   const stateHome = dependencies.stateHome ?? defaultStateHome();
   const saved = readPreviewSession(projectDir, stateHome);
-  const scanStart = saved?.port ?? startPort;
+  const scanStart = dependencies.preferredPort ?? saved?.port ?? startPort;
   const scanned = await scan(scanStart);
-  return { scan, stateHome, saved, scanStart, scanned };
+  await addSavedPortServer(scanned, saved?.port, scanStart, dependencies);
+  return { scan, stateHome, saved, scanned };
 }
 
 function unmetPreferredPort(port: number, preferredPort: number | undefined): number | undefined {
@@ -497,33 +579,19 @@ function reuseExistingPreview(
   };
 }
 
-// The scan only covers scanStart..+MAX_PORT_SCAN-1; an explicit --port outside it is probed directly.
-async function addPreferredPortServer(
-  scanned: ActiveServer[],
-  scanStart: number,
-  dependencies: LifecycleDependencies,
-): Promise<void> {
-  const preferred = dependencies.preferredPort;
-  if (preferred === undefined) return;
-  if (preferred >= scanStart && preferred < scanStart + MAX_PORT_SCAN) return;
-  const server = await (dependencies.probe ?? activeServerOnPort)(preferred);
-  if (server) scanned.push(server);
-}
-
 export async function startBackgroundPreview(
   projectDir: string,
   startPort: number,
   dependencies: LifecycleDependencies = {},
 ): Promise<BackgroundPreviewResult> {
-  const { scan, stateHome, saved, scanStart, scanned } = await readPreviewLifecycleState(
+  const launchStart = dependencies.preferredPort ?? startPort;
+  const { scan, stateHome, saved, scanned } = await readPreviewLifecycleState(
     projectDir,
     startPort,
     dependencies,
   );
-  await addPreferredPortServer(scanned, scanStart, dependencies);
-  // Always inspect a saved custom port first. `--force-new --port <new>` must
-  // replace that owned server before recording the replacement, otherwise the
-  // single per-project ownership record would orphan the old listener.
+  // A saved custom port stays eligible for replacement even outside the scan
+  // window, or overwriting the ownership record would orphan its listener.
   const candidates = policyMatchingServers(scanned, projectDir, dependencies.browserGpuMode);
   // A policy-matching server on the explicit --port satisfies it even when it is not the owned one,
   // so `--port 3003` reuses the 3003 sibling instead of reporting a mismatch against the owned 3002.
@@ -545,17 +613,30 @@ export async function startBackgroundPreview(
   // Snapshot every same-project listener in the prospective launch range only
   // after the owned listener is gone. Readiness must identify a newly appeared
   // server, never a pre-existing unmanaged sibling.
-  const preLaunchPorts = sameProjectPorts(await scan(startPort), projectDir);
+  const preLaunchPorts = sameProjectPorts(await scan(launchStart), projectDir);
 
-  const { pid, wrapperIdentity, logPath } = spawnDetachedPreview(
+  const { pid, wrapperIdentity, logPath, exitedWith } = spawnDetachedPreview(
     projectDir,
     stateHome,
     dependencies,
   );
 
   const kill = dependencies.kill ?? stopProcess;
-  const server = await awaitStartedServer(projectDir, startPort, preLaunchPorts, pid, dependencies);
+  const server = await awaitStartedServer(
+    projectDir,
+    launchStart,
+    preLaunchPorts,
+    pid,
+    exitedWith,
+    dependencies,
+  );
   if (!server) {
+    const exit = exitedWith();
+    if (exit) {
+      throw new Error(
+        `background preview exited (${exit}) before it was ready; see ${logPath}${logTail(logPath)}`,
+      );
+    }
     await kill(pid);
     throw new Error(`background preview did not become ready; see ${logPath}`);
   }
@@ -564,7 +645,7 @@ export async function startBackgroundPreview(
   if (unmet !== undefined) {
     // Wait until it stops answering so a concurrent launch or --status cannot adopt a dying server.
     await kill(pid);
-    if (!(await awaitServerGone(projectDir, startPort, server.port, dependencies))) {
+    if (!(await awaitServerGone(projectDir, server.port, dependencies))) {
       throw new Error(
         `background preview on port ${server.port} did not stop after failing to bind port ${unmet}; see ${logPath}`,
       );
@@ -587,16 +668,27 @@ export async function startBackgroundPreview(
   };
 }
 
+function logTail(logPath: string): string {
+  try {
+    const text = stripVTControlCharacters(readFileSync(logPath, "utf8"));
+    const lines = text.trimEnd().split("\n").slice(-5);
+    return lines.join("").trim() ? `\n${lines.join("\n")}` : "";
+  } catch {
+    return "";
+  }
+}
+
 async function awaitStartedServer(
   projectDir: string,
   startPort: number,
   preLaunchPorts: Set<number>,
   launchedPid: number,
+  exitedWith: () => string | null,
   dependencies: LifecycleDependencies,
 ): Promise<ActiveServer | null> {
   const scan = dependencies.scan ?? scanActiveServers;
   const sleep = dependencies.sleep ?? delay;
-  for (let attempt = 0; attempt < 50; attempt++) {
+  for (let attempt = 0; attempt < 50 && !exitedWith(); attempt++) {
     const server = startedServer(
       await scan(startPort),
       projectDir,
@@ -615,14 +707,12 @@ export async function stopBackgroundPreview(
   startPort: number,
   dependencies: LifecycleDependencies = {},
 ): Promise<boolean> {
-  const { stateHome, saved, scanStart, scanned } = await readPreviewLifecycleState(
-    projectDir,
-    startPort,
-    dependencies,
-  );
+  const stateHome = dependencies.stateHome ?? defaultStateHome();
+  const saved = readPreviewSession(projectDir, stateHome);
+  const scan = dependencies.scan ?? scanActiveServers;
   const server = saved
-    ? matchingServerAtPort(scanned, projectDir, saved.port)
-    : matchingServer(scanned, projectDir);
+    ? await probeMatchingServerAtPort(projectDir, saved.port, dependencies)
+    : matchingServer(await scan(dependencies.preferredPort ?? startPort), projectDir);
   if (!server) {
     removePreviewSession(projectDir, stateHome);
     return false;
@@ -638,23 +728,30 @@ export async function stopBackgroundPreview(
   const kill = dependencies.kill ?? stopProcess;
   await kill(ownedStopTargetPid(saved, pid, dependencies));
 
-  if (!(await awaitServerGone(projectDir, scanStart, server.port, dependencies))) {
+  if (!(await awaitServerGone(projectDir, server.port, dependencies))) {
     throw new Error(`background preview did not stop for ${resolve(projectDir)}`);
   }
   removePreviewSession(projectDir, stateHome);
   return true;
 }
 
+async function probeMatchingServerAtPort(
+  projectDir: string,
+  port: number,
+  dependencies: LifecycleDependencies,
+): Promise<ActiveServer | null> {
+  const server = await (dependencies.probe ?? activeServerOnPort)(port);
+  return matchingServerAtPort(server ? [server] : [], projectDir, port);
+}
+
 async function awaitServerGone(
   projectDir: string,
-  scanStart: number,
   port: number,
   dependencies: LifecycleDependencies,
 ): Promise<boolean> {
-  const scan = dependencies.scan ?? scanActiveServers;
   const sleep = dependencies.sleep ?? delay;
   for (let attempt = 0; attempt < 25; attempt++) {
-    if (!matchingServerAtPort(await scan(scanStart), projectDir, port)) return true;
+    if (!(await probeMatchingServerAtPort(projectDir, port, dependencies))) return true;
     await sleep(100);
   }
   return false;

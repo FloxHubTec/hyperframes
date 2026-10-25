@@ -13,6 +13,7 @@
   },
   "files": [
     "src/runtime/clipTree.ts",
+    "src/runtime/clipReveal.ts",
     "src/runtime/compositionLength.ts",
     "src/runtime/customEase.ts",
     "src/runtime/mediaVolumeEnvelope.ts",
@@ -30,6 +31,7 @@
     "src/tests",
     "src/runtime",
     "**/*.test.ts",
+    "**/*.test-helpers.ts",
     "src/parsers/test-utils.ts"
   ]
 }
