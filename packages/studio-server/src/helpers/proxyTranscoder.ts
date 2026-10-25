@@ -542,7 +542,6 @@ const H264_ARGS = [
   "-movflags",
   "+faststart",
 ];
-// libvpx encodes on one thread unless told; four is as fast as eight and keeps the file the same size.
 const VP8_THREADS = String(Math.min(4, availableParallelism()));
 const VP8_ARGS = [
   "-c:v",
