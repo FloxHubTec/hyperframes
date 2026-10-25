@@ -125,7 +125,7 @@ it("merges partial updates while preserving uncaptured frames and manifest setti
       writeGoldenBaselines(
         project,
         { compositionId: "intro", times: [time], captures, manifest },
-        { threshold: 0.02 },
+        { threshold: 0.02, at: [time] },
       );
       if (time === 3.5) rmSync(join(dir, "golden", "intro", "golden.json"));
     }
@@ -135,6 +135,42 @@ it("merges partial updates while preserving uncaptured frames and manifest setti
       const path = goldenBaselinePath(dir, "intro", time * 1000);
       expect(readFileSync(path, "utf8")).toBe(`frame-${time}`);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it("replaces the set on a full refresh, dropping times removed from the manifest", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hf-golden-full-"));
+  const project = { dir, name: "intro", indexPath: join(dir, "index.html") };
+  try {
+    const capture = (time: number) => ({
+      time,
+      timeMs: time * 1000,
+      png: Buffer.from(`f-${time}`),
+    });
+    writeGoldenBaselines(
+      project,
+      {
+        compositionId: "intro",
+        times: [0.5, 2, 3.5],
+        captures: [0.5, 2, 3.5].map(capture),
+        manifest: null,
+      },
+      {},
+    );
+    writeGoldenBaselines(
+      project,
+      {
+        compositionId: "intro",
+        times: [0.5, 2],
+        captures: [0.5, 2].map(capture),
+        manifest: { times: [0.5, 2], threshold: 0.05 },
+      },
+      {},
+    );
+    expect(readGoldenManifest(dir, "intro")).toEqual({ times: [0.5, 2], threshold: 0.05 });
+    expect(listGoldenBaselineTimesMs(dir, "intro")).toEqual([500, 2000]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

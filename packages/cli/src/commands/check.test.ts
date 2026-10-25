@@ -57,6 +57,7 @@ import type {
 } from "../utils/layoutAudit.js";
 import type { CraftFrame, SeekClock } from "../utils/checkTypes.js";
 import type { ProjectDir } from "../utils/project.js";
+import type { GoldenSummary } from "../golden/baseline.js";
 
 const PROJECT: ProjectDir = {
   dir: "/project",
@@ -3209,7 +3210,8 @@ describe("golden gate wiring", () => {
     }));
     const command = createCheckCommand({
       resolveProject: () => PROJECT,
-      runPipeline: async () => passingReport(),
+      runPipeline: async (_project, _options, finish) =>
+        finish ? finish(passingReport()) : passingReport(),
       prepareMedia: vi.fn(async () => []),
       withMeta: (value) => value,
       runGolden,
@@ -3227,12 +3229,53 @@ describe("golden gate wiring", () => {
     expect(consumeCommandResult().exitCode).toBe(1);
   });
 
+  it("hands the pipeline the golden result before the report is saved", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const runGolden = vi.fn(async () => ({
+      ok: false,
+      updated: false,
+      compositionId: "intro",
+      compared: 1,
+      times: [1.5],
+      failed: [
+        {
+          id: "intro",
+          time: 1.5,
+          timeMs: 1500,
+          maxDelta: 210,
+          diffRatio: 0.0042,
+          reason: "pixel-diff" as const,
+        },
+      ],
+      diffSheet: null,
+      baselines: ["golden/intro/1500.png"],
+    }));
+    let saved: (CheckReport & { golden?: GoldenSummary }) | undefined;
+    const command = createCheckCommand({
+      resolveProject: () => PROJECT,
+      runPipeline: async (_project, _options, finish) => {
+        saved = finish ? await finish(passingReport()) : passingReport();
+        return saved;
+      },
+      prepareMedia: vi.fn(async () => []),
+      withMeta: (value) => value,
+      runGolden,
+    });
+
+    await runCommand(command, { rawArgs: ["--golden"] });
+
+    expect(saved?.ok).toBe(false);
+    expect(saved?.golden).toEqual(expect.objectContaining({ ok: false, compared: 1 }));
+    expect(consumeCommandResult().exitCode).toBe(1);
+  });
+
   it("does not run the golden gate when not requested", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const runGolden = vi.fn();
     const command = createCheckCommand({
       resolveProject: () => PROJECT,
-      runPipeline: async () => passingReport(),
+      runPipeline: async (_project, _options, finish) =>
+        finish ? finish(passingReport()) : passingReport(),
       prepareMedia: vi.fn(async () => []),
       withMeta: (value) => value,
       runGolden,
@@ -3258,7 +3301,8 @@ describe("golden gate wiring", () => {
     }));
     const command = createCheckCommand({
       resolveProject: () => PROJECT,
-      runPipeline: async () => passingReport(),
+      runPipeline: async (_project, _options, finish) =>
+        finish ? finish(passingReport()) : passingReport(),
       prepareMedia: vi.fn(async () => []),
       withMeta: (value) => value,
       runGolden,

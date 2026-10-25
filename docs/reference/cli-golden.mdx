@@ -39,7 +39,7 @@ hyperframes check --golden --json    # agent-readable envelope
 | Flag                        | Command           | Meaning                                                                                            |
 | --------------------------- | ----------------- | -------------------------------------------------------------------------------------------------- |
 | `--golden`                  | `check`           | Run the gate after the normal check pipeline; either failing makes the exit code non-zero.         |
-| `--update-golden`           | `check`, `snapshot` | Capture at the resolved sample times and (re)write `golden/<compositionId>/` plus its manifest.  |
+| `--update-golden`           | `check`, `snapshot` | Capture at the resolved sample times and rewrite `golden/<compositionId>/` plus its manifest; baselines for times no longer sampled are removed. |
 | `--golden-threshold <0-1>`  | `check`           | Per-channel pixel tolerance override for this run (does not enable the gate by itself).            |
 | `--at <times>`              | `snapshot`        | With `--update-golden`: refresh only these times (seconds); other baselines and their manifest times stay. |
 

@@ -51,11 +51,17 @@ export const examples: Example[] = [
 ];
 
 type SavedCheck = Pick<ArtifactRecord, "id" | "revision" | "report" | "attribution">;
-type SavedCheckReport = CheckReport & { saved?: SavedCheck };
+type GoldenCheckReport = CheckReport & { golden?: GoldenSummary };
+type SavedCheckReport = GoldenCheckReport & { saved?: SavedCheck };
+type FinishCheckReport = (report: CheckReport) => Promise<GoldenCheckReport>;
 
 export interface CheckCommandDependencies {
   resolveProject(dir: string | undefined): ProjectDir;
-  runPipeline(project: ProjectDir, options: CheckOptions): Promise<SavedCheckReport>;
+  runPipeline(
+    project: ProjectDir,
+    options: CheckOptions,
+    finish?: FinishCheckReport,
+  ): Promise<SavedCheckReport>;
   prepareMedia(project: ProjectDir, options: CheckOptions): Promise<PreparedMediaFile[]>;
   withMeta(value: object): object;
   runGolden?(project: ProjectDir, options: GoldenGateOptions): Promise<GoldenSummary>;
@@ -63,9 +69,10 @@ export interface CheckCommandDependencies {
 
 const DEFAULT_COMMAND_DEPENDENCIES: CheckCommandDependencies = {
   resolveProject,
-  async runPipeline(project, options) {
+  async runPipeline(project, options, finish) {
     const capturing = captureArtifactRevision(project.dir).catch(warnNotRecorded);
-    const report = await runCheckPipeline(project, options);
+    const checked = await runCheckPipeline(project, options);
+    const report = finish ? await finish(checked) : checked;
     const images = (files: readonly string[]) => files.map((file) => resolve(project.dir, file));
     reportArtifacts("check", "frame", images(report.snapshots.files));
     reportArtifacts("check", "finding", images(report.snapshots.findingFiles));
@@ -372,29 +379,27 @@ async function runPrepareMedia(
   setCommandExitCode(failed.length === 0 ? 0 : 1);
 }
 
-async function resolveGoldenSummary(
+async function withGoldenSummary(
   dependencies: CheckCommandDependencies,
   project: ProjectDir,
-  goldenOptions: GoldenGateOptions | undefined,
-): Promise<GoldenSummary | undefined> {
-  if (!goldenOptions) return undefined;
+  goldenOptions: GoldenGateOptions,
+  report: CheckReport,
+): Promise<GoldenCheckReport> {
   const runGolden = dependencies.runGolden ?? (await import("../golden/baseline.js")).runGoldenGate;
-  return runGolden(project, goldenOptions);
+  const golden = await runGolden(project, goldenOptions);
+  return { ...report, ok: report.ok && golden.ok, golden };
 }
 
 function emitCheckReport(
   dependencies: CheckCommandDependencies,
   report: SavedCheckReport,
-  golden: GoldenSummary | undefined,
-  ok: boolean,
   asJson: boolean,
 ): void {
   if (asJson) {
-    const payload = golden ? { ...report, ok, golden } : report;
-    console.log(JSON.stringify(dependencies.withMeta(payload), null, 2));
+    console.log(JSON.stringify(dependencies.withMeta(report), null, 2));
     return;
   }
-  printHumanReport(report, golden);
+  printHumanReport(report, report.golden);
   if (report.saved) {
     console.log(`Report: ${report.saved.report}`);
     console.log(`Revision: ${report.saved.revision ?? "none"} (${report.saved.attribution})`);
@@ -416,13 +421,16 @@ async function executeCheck(
     await runPrepareMedia(dependencies, project, options, asJson);
     return;
   }
-  const { report, golden } = await withProjectLock(project.dir, "check", async () => {
-    const report = await dependencies.runPipeline(project, options);
-    return { report, golden: await resolveGoldenSummary(dependencies, project, goldenOptions) };
-  });
-  const ok = checkExitCode(report) === 0 && (golden?.ok ?? true);
-  emitCheckReport(dependencies, report, golden, ok, asJson);
-  setCommandExitCode(ok ? 0 : 1);
+  const finish: FinishCheckReport | undefined = goldenOptions
+    ? (checked) => withGoldenSummary(dependencies, project, goldenOptions, checked)
+    : undefined;
+  const report = await withProjectLock(project.dir, "check", () =>
+    finish
+      ? dependencies.runPipeline(project, options, finish)
+      : dependencies.runPipeline(project, options),
+  );
+  emitCheckReport(dependencies, report, asJson);
+  setCommandExitCode(checkExitCode(report));
 }
 
 function parseCheckOptions(args: Record<string, unknown>): CheckOptions {

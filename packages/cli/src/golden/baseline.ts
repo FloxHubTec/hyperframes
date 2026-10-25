@@ -358,10 +358,16 @@ export function writeGoldenBaselines(
   const dir = goldenCompositionDir(project.dir, captured.compositionId);
   mkdirSync(dir, { recursive: true });
 
-  // Merge into the existing set so refreshing one frame (`--at 2`) keeps the others.
-  const timesMs = new Set(listGoldenBaselineTimesMs(project.dir, captured.compositionId));
-  for (const time of [...(captured.manifest?.times ?? []), ...captured.times]) {
-    timesMs.add(timeMsFromSeconds(time));
+  // `--at` refreshes only those frames; a full refresh replaces the set.
+  const existingMs = listGoldenBaselineTimesMs(project.dir, captured.compositionId);
+  const timesMs = new Set(captured.times.map(timeMsFromSeconds));
+  if (opts.at?.length) {
+    for (const time of captured.manifest?.times ?? []) timesMs.add(timeMsFromSeconds(time));
+    for (const timeMs of existingMs) timesMs.add(timeMs);
+  } else {
+    for (const timeMs of existingMs) {
+      if (!timesMs.has(timeMs)) rmSync(join(dir, goldenTimeFileName(timeMs)), { force: true });
+    }
   }
 
   const baselines: string[] = [];

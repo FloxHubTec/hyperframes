@@ -1,12 +1,6 @@
-/**
- * Pixel-level PNG comparison for the golden baseline gate.
- *
- * Pure diff math on raw RGBA buffers (unit-testable without Chrome or
- * fixtures) plus thin sharp-backed encode/decode helpers. No new
- * dependencies: sharp is already a CLI dependency for contact sheets.
- */
+/** Pixel-level PNG comparison for the golden baseline gate. */
 
-import sharp from "sharp";
+import { loadSharp } from "../utils/optionalPackages.js";
 
 /** Decoded RGBA image (4 channels, row-major). */
 export interface RawImage {
@@ -207,6 +201,7 @@ export function diffRawImages(
 
 /** Decode a PNG file path or buffer into flat RGBA. */
 export async function decodeRawImage(input: string | Uint8Array): Promise<RawImage> {
+  const sharp = await loadSharp("golden baselines");
   const { data, info } = await sharp(input).ensureAlpha().raw().toBuffer({
     resolveWithObject: true,
   });
@@ -215,6 +210,7 @@ export async function decodeRawImage(input: string | Uint8Array): Promise<RawIma
 
 /** Encode flat RGBA back into a PNG file. */
 export async function writeRawImagePng(image: RawImage, outputPath: string): Promise<void> {
+  const sharp = await loadSharp("golden baselines");
   await sharp(Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength), {
     raw: { width: image.width, height: image.height, channels: 4 },
   })
