@@ -1266,6 +1266,31 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
   });
 });
 
+describe("cropPackFallbackSize", () => {
+  const { cropPackFallbackSize } = renderModule;
+
+  it("uses the composition size without --resolution", () => {
+    expect(cropPackFallbackSize(1920, 1080, undefined, undefined)).toEqual({
+      width: 1920,
+      height: 1080,
+    });
+  });
+
+  it("uses the requested preset, not the composition size, with --resolution", () => {
+    expect(cropPackFallbackSize(1920, 1080, "landscape-4k", false)).toEqual({
+      width: 3840,
+      height: 2160,
+    });
+  });
+
+  it("matches an aspect-agnostic tier to the composition's orientation", () => {
+    expect(cropPackFallbackSize(1080, 1920, "landscape-4k", true)).toEqual({
+      width: 2160,
+      height: 3840,
+    });
+  });
+});
+
 describe("checkRenderResolutionPreflight", () => {
   const { checkRenderResolutionPreflight } = renderModule;
 

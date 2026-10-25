@@ -103,6 +103,7 @@ import {
   type VideoFrameFormat,
 } from "@hyperframes/engine";
 import {
+  CANVAS_DIMENSIONS,
   checkOutputResolutionCompatibility,
   suggestMatchingPreset,
   fpsToNumber,
@@ -786,7 +787,7 @@ async function renderDocker(
 
   // Sized from the master's probed dimensions, as the producer plans them, so
   // `--resolution` renders report the siblings' real size.
-  const cropPack = await cropPackListing(outputPath, options.cropPack);
+  const cropPack = await cropPackListing(outputPath, options.cropPack, options);
 
   // Track metrics (no job object available from Docker — use a minimal stub)
   runPostRenderStep("trackRenderComplete", () =>
@@ -1620,15 +1621,42 @@ function trackRenderMetrics(
   });
 }
 
+/**
+ * Size the Docker crop-pack listing falls back to when the host can't probe
+ * the master (Docker mode doesn't need FFmpeg on the host). With
+ * `--resolution` the master is the requested preset, not the composition
+ * size, so the listing uses that preset instead of reporting a guess.
+ */
+export function cropPackFallbackSize(
+  compositionWidth: number,
+  compositionHeight: number,
+  outputResolution: CanvasResolution | undefined,
+  aspectAgnostic: boolean | undefined,
+): { width: number; height: number } {
+  if (!outputResolution) return { width: compositionWidth, height: compositionHeight };
+  const effective = aspectAgnostic
+    ? (suggestMatchingPreset(compositionWidth, compositionHeight, outputResolution) ??
+      outputResolution)
+    : outputResolution;
+  return CANVAS_DIMENSIONS[effective];
+}
+
 async function cropPackListing(
   masterPath: string,
   spec: RenderOptions["cropPack"] | undefined,
+  resolution: Pick<RenderOptions, "outputResolution" | "outputResolutionAspectAgnostic">,
 ): Promise<SingleRenderResult["cropPack"]> {
   if (!spec || spec.members.length === 0) return undefined;
-  const plans = await planCropPackMembersForMaster(
-    spec.members,
+  const fallback = cropPackFallbackSize(
     spec.compositionWidth,
     spec.compositionHeight,
+    resolution.outputResolution,
+    resolution.outputResolutionAspectAgnostic,
+  );
+  const plans = await planCropPackMembersForMaster(
+    spec.members,
+    fallback.width,
+    fallback.height,
     masterPath,
   );
   return plans.map((plan) => ({
