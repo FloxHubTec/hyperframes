@@ -7,6 +7,7 @@
 
 import { isFullHtmlDocument, parseHTMLContent } from "@hyperframes/core/compiler/html-document";
 import { findTimelineScript } from "@hyperframes/core/gsap-parser-acorn";
+import { decodeCssEscapes } from "@hyperframes/parsers";
 import { findVariableDeclaration } from "./variableModel.js";
 import {
   ensureHfIds,
@@ -261,7 +262,7 @@ function advanceStyleDeclarationScan(scan: StyleDeclarationScan, ch: string, nex
   else if (ch === ")") scan.depth = Math.max(0, scan.depth - 1);
 }
 
-function splitStyleDeclarations(style: string): string[] {
+function splitStyleAtTopLevel(style: string, delimiter: ";" | "!"): string[] {
   const declarations: string[] = [];
   const scan: StyleDeclarationScan = { depth: 0, quote: null, skip: false };
   let start = 0;
@@ -270,27 +271,49 @@ function splitStyleDeclarations(style: string): string[] {
       scan.skip = false;
       continue;
     }
-    const ch = style[i] ?? "";
-    if (ch === ";" && scan.depth === 0 && scan.quote === null) {
+    const ch = style.charAt(i);
+    const topLevel = scan.depth === 0 && scan.quote === null;
+    // Unquoted URL tokens can contain literal comment markers inside parentheses.
+    if (topLevel && style.startsWith("/*", i)) {
+      const end = style.indexOf("*/", i + 2);
+      i = end === -1 ? style.length : end + 1;
+      continue;
+    }
+    if (ch === delimiter && topLevel) {
       declarations.push(style.slice(start, i));
       start = i + 1;
-    } else {
-      advanceStyleDeclarationScan(scan, ch, style[i + 1] ?? "");
+      continue;
     }
+    advanceStyleDeclarationScan(scan, ch, style.charAt(i + 1));
   }
   declarations.push(style.slice(start));
   return declarations;
 }
 
+function hasImportant(value: string): boolean {
+  const parts = splitStyleAtTopLevel(value, "!");
+  if (parts.length === 1) return false;
+  const suffix = parts
+    .at(-1)
+    ?.match(
+      /^(?:[ \t\r\n\f]|\/\*[\s\S]*?\*\/)*((?:\\(?:[0-9a-f]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f0-9a-f])|[-\w\u0080-\uffff])+)(?:[ \t\r\n\f]|\/\*[\s\S]*?\*\/)*$/i,
+    );
+  return suffix?.[1] !== undefined && decodeCssEscapes(suffix[1]).toLowerCase() === "important";
+}
+
 function parseStyleAttr(styleAttr: string): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const decl of splitStyleDeclarations(styleAttr)) {
+  for (const decl of splitStyleAtTopLevel(styleAttr, ";")) {
     const idx = decl.indexOf(":");
     if (idx === -1) continue;
     const rawProp = decl.slice(0, idx).trim();
-    const value = decl.slice(idx + 1).trim();
+    const value = decl.slice(idx + 1).replace(/^[ \t\r\n\f]+|[ \t\r\n\f]+$/g, "");
     if (!rawProp) continue;
-    result[toCamel(rawProp)] = value;
+    const prop = toCamel(rawProp);
+    const previous = result[prop];
+    if (previous === undefined || !hasImportant(previous) || hasImportant(value)) {
+      result[prop] = value;
+    }
   }
   return result;
 }
