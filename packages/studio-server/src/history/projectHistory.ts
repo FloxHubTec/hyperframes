@@ -1107,12 +1107,11 @@ class Engine {
     const changes = [...target]
       .filter(([path, hash]) => (this.tracked.get(path)?.hash ?? null) !== hash)
       .sort(([, a], [, b]) => Number(a !== null) - Number(b !== null));
-    // Deletes run first and set their media aside, so a rename taken back finds its bytes there.
-    const setAside = new Set(
+    const setAsideByDeletesFirst = new Set(
       changes.filter(([, hash]) => hash === null).map(([path]) => this.tracked.get(path)?.hash),
     );
     const gone = changes.find(
-      ([, hash]) => hash !== null && !this.blobs.has(hash) && !setAside.has(hash),
+      ([, hash]) => hash !== null && !this.blobs.has(hash) && !setAsideByDeletesFirst.has(hash),
     );
     if (gone)
       throw new Error(
