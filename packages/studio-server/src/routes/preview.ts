@@ -764,7 +764,7 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
         if (err instanceof ProxyWaitTimeoutError) {
           const progress = proxyCopyProgress(project.dir, file, proxyVariant, proxyBox);
           return c.text("media proxy is being made", 202, {
-            "Retry-After": String(PROXY_PENDING_RETRY_AFTER_SECONDS),
+            "Retry-After": progress === undefined ? String(PROXY_PENDING_RETRY_AFTER_SECONDS) : "1",
             "Cache-Control": "no-store",
             ...(progress !== undefined && { [PREVIEW_PROXY_PROGRESS_HEADER]: progress.toFixed(3) }),
           });

@@ -989,6 +989,74 @@ describe("preview quality: lighter copies of heavy files", () => {
     expect(params(el).get("hf-proxy-box")).toBe("2048x1218");
   });
 
+  describe("reporting the copies", () => {
+    const copiesMessages = () =>
+      postRuntimeMessageMock.mock.calls
+        .map(([message]) => message)
+        .filter((message) => message.type === "preview-copies");
+    const lastCopies = () => copiesMessages().at(-1);
+
+    it("counts the copies wanted, with how far the making has got, and says none at full quality", async () => {
+      vi.useFakeTimers();
+      let reply = new Response(null, {
+        status: 202,
+        headers: { "Retry-After": "1", "X-HF-Proxy-Progress": "0.5" },
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => reply.clone()),
+      );
+      const { video, setPreviewQuality } = await stage({ "/video.mp4": HEAVY });
+      video();
+
+      setPreviewQuality(0.5);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(lastCopies()).toMatchObject({
+        copies: { total: 1, ready: 0, failed: 0, progress: 0, error: null },
+      });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(lastCopies()).toMatchObject({ copies: { total: 1, ready: 0, progress: 0.5 } });
+
+      reply = new Response("x", { status: 206 });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(lastCopies()).toMatchObject({
+        copies: { total: 1, ready: 1, failed: 0, progress: 1, error: null },
+      });
+
+      setPreviewQuality(1);
+      expect(lastCopies()).toMatchObject({ copies: null });
+    });
+
+    it("reports a copy that could not be made, and asks again with the retry flag", async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("no", { status: 502 })),
+      );
+      const { video, setPreviewQuality, retryPreviewCopies } = await stage({
+        "/video.mp4": HEAVY,
+      });
+      const el = video();
+
+      setPreviewQuality(0.5);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(lastCopies()).toMatchObject({ copies: { total: 1, failed: 1, error: "failed" } });
+      expect(isProxied(el)).toBe(false);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("x", { status: 206 })),
+      );
+      retryPreviewCopies();
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(vi.mocked(fetch).mock.calls[0]?.[0]).toContain("hf-proxy-retry=1");
+      expect(lastCopies()).toMatchObject({ copies: { total: 1, ready: 1, failed: 0 } });
+      expect(isProxied(el)).toBe(true);
+    });
+  });
+
   it("ignores a level that is not one of the four", async () => {
     const { video, setPreviewQuality } = await stage({ "/video.mp4": HEAVY });
     const el = video();

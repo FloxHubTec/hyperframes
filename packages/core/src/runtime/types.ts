@@ -23,6 +23,7 @@ type RuntimeBridgeControlActionBase =
   | "set-idle-heartbeat"
   | "set-display-scale"
   | "set-preview-quality"
+  | "retry-preview-copies"
   | "set-root-duration"
   | "set-play-range"
   | "stop-media"
@@ -248,8 +249,22 @@ export type RuntimeGroupLevelsMessage = {
   levels: Array<{ groupId: string; level: number; clipped: boolean }>;
 };
 
+export type RuntimePreviewCopiesMessage = {
+  source: "hf-preview";
+  type: "preview-copies";
+  /** The lighter copies wanted at the current quality; null when none are. */
+  copies: {
+    total: number;
+    ready: number;
+    failed: number;
+    progress: number;
+    error: string | null;
+  } | null;
+};
+
 export type RuntimeOutboundMessage =
   | RuntimeStateMessage
+  | RuntimePreviewCopiesMessage
   | RuntimeTimelineMessage
   | RuntimeDiagnosticMessage
   | RuntimePickerHoveredMessage
