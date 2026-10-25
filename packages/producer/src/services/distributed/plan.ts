@@ -860,7 +860,7 @@ export function buildChunkSlices(
 
 /**
  * The plan's chunk cut: auto-sized plans re-cut the same chunk count by estimated capture cost;
- * an explicit `chunkSize` or uniform cost keeps {@link buildChunkSlices}. `targetChunkFrames` and the worker time limit stay frame ceilings.
+ * explicit `chunkSize` or uniform cost keeps {@link buildChunkSlices}; `targetChunkFrames` and the time limit cap it.
  */
 export function buildPlanChunkSlices(
   frameWeights: Float64Array,
