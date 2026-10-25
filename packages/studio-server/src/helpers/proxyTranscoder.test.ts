@@ -1377,7 +1377,8 @@ describe("resolveProxy", () => {
       const first = await made(env, calls, original, join(original, "video.mov"));
       const copied = join(tmpProject(), "project");
       cpSync(original, copied, { recursive: true, dereference: true });
-      for (const name of readdirSync(copied)) utimesSync(join(copied, name), new Date(), new Date(Date.now() + 5_000));
+      for (const name of readdirSync(copied))
+        utimesSync(join(copied, name), new Date(), new Date(Date.now() + 5_000));
 
       const viaLink = await made(env, calls, original, join(original, "linked.mov"));
       const inCopy = await made(env, calls, copied, join(copied, "video.mov"));

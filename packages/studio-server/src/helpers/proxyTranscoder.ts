@@ -11,10 +11,7 @@ import {
 } from "node:fs";
 import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import {
-  hdrToSdrToneMapFilter,
-  type PreviewProxyBox,
-} from "@hyperframes/core";
+import { hdrToSdrToneMapFilter, type PreviewProxyBox } from "@hyperframes/core";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { alphaDecoderFor } from "@hyperframes/parsers/media-alpha";
 import { probeFirstFrameColour, probeMediaMetadata } from "./mediaMetadata.js";
@@ -834,7 +831,13 @@ async function transcodeToCache(
     mkdirWithinProject(projectDir, cacheDir);
     const contentIndex = contentIndexPath(
       cacheDir,
-      await contentCopyKey(absoluteSourcePath, PROXY_PARAMS_VERSION, variant, box, job.abandoned.signal),
+      await contentCopyKey(
+        absoluteSourcePath,
+        PROXY_PARAMS_VERSION,
+        variant,
+        box,
+        job.abandoned.signal,
+      ),
     );
     const sameContent = readCopyIndex(contentIndex);
     if (sameContent) {

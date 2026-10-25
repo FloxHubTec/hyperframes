@@ -22,7 +22,14 @@ export function fastCopyKey(
   box: PreviewProxyBox | undefined,
 ): string {
   const stat = statSync(sourcePath);
-  return digest(sourcePath, String(stat.mtimeMs), String(stat.size), version, variant, boxPart(box));
+  return digest(
+    sourcePath,
+    String(stat.mtimeMs),
+    String(stat.size),
+    version,
+    variant,
+    boxPart(box),
+  );
 }
 
 /** What a source holds, whole file: a copied project or a re-saved file with the same bytes finds its copy. */
