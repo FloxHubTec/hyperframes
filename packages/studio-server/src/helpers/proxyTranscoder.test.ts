@@ -103,7 +103,7 @@ function fail(call: SpawnCall, code = 1, stderr = "boom"): void {
   call.proc.emit("close", code);
 }
 
-async function flush(times = 6): Promise<void> {
+async function flush(times = 30): Promise<void> {
   for (let i = 0; i < times; i++) await Promise.resolve();
 }
 

@@ -3,6 +3,7 @@ import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } f
 import { basename, dirname, extname, join } from "node:path";
 import { formatPreviewProxyBox, type PreviewProxyBox } from "@hyperframes/core";
 
+const SMALL_FILE_BYTES = 16 * 1024 * 1024;
 const COPY_NAME = /^[0-9a-f]{64}\.(?:mp4|webm)$/;
 
 function digest(...parts: string[]): string {
@@ -33,7 +34,8 @@ export async function contentCopyKey(
   signal: AbortSignal,
 ): Promise<string> {
   const hash = createHash("sha256");
-  for await (const chunk of createReadStream(sourcePath, { signal })) hash.update(chunk);
+  if (statSync(sourcePath).size <= SMALL_FILE_BYTES) hash.update(readFileSync(sourcePath));
+  else for await (const chunk of createReadStream(sourcePath, { signal })) hash.update(chunk);
   return digest(hash.digest("hex"), version, variant, boxPart(box));
 }
 

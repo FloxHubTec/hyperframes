@@ -5,7 +5,6 @@ import {
   mkdtempSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
