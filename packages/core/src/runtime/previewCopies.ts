@@ -54,6 +54,9 @@ function scheduleReport(): void {
 export function setCopyReportingLevel(level: number): void {
   copies.clear();
   reporting = level < 1;
+  clearTimeout(timer);
+  timer = undefined;
+  dirtyWhileWaiting = false;
   scheduleReport();
 }
 
