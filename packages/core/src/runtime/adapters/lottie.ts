@@ -1,14 +1,8 @@
 import type { RuntimeDeterministicAdapter } from "../types";
 import { swallow } from "../diagnostics";
 
-/**
- * Seeks registered lottie-web and dotLottie animations.
- *
- * Register each paused instance on window.__hfLottie; lottie-web also supports
- * discovery through lottie.getRegisteredAnimations(). Load dotLottie through
- * an ESM import and set a local WASM URL before constructing its player.
- * Browser setup and registration examples:
- * https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/references/runtimes.md
+/** Seeks paused lottie-web and dotLottie instances registered on window.__hfLottie.
+ * Setup: skills/hyperframes/references/runtimes.md
  */
 export function createLottieAdapter(params?: {
   resolveStartSeconds?: (element: Element) => number;
