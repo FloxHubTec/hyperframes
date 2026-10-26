@@ -3,9 +3,7 @@ export const PREVIEW_PROXY_BOX_PARAM = "hf-proxy-box";
 
 export const PREVIEW_PROXY_LIGHT_PARAM = "hf-proxy-light";
 
-/** Query parameter asking the server to forget a failed copy and try it again. */
 export const PREVIEW_PROXY_RETRY_PARAM = "hf-proxy-retry";
-/** Reply header on a copy still being made: how far along it is, from 0 to 1. */
 export const PREVIEW_PROXY_PROGRESS_HEADER = "X-HF-Proxy-Progress";
 
 export type PreviewProxyBox = { width: number; height: number };

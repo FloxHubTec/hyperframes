@@ -19,7 +19,7 @@ const healths = (): Health[] =>
     message.type === "preview-health" ? (message.health as Health) : null,
   );
 
-/** Plays `seconds` of film from `startMs`; `drawEvery` ticks of 16.7 ms advance the film one frame per due frame. */
+/** Plays `seconds` of film from `startMs`, one tick every `step` ms. */
 function play(
   startMs: number,
   seconds: number,
