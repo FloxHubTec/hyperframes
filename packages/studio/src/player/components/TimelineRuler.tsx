@@ -5,6 +5,7 @@ import { RULER_H, getTimelineBeatEntries } from "./timelineLayout";
 import { formatTimelineTickLabel } from "./timelineRulerGeometry";
 import { usePlayerStore } from "../store/playerStore";
 import { secondsToFrame } from "../lib/time";
+import { useLinkedClipPreferences } from "../../utils/linkedClipPreferences";
 import type { MusicBeatAnalysis } from "@hyperframes/core/beats";
 import type { TimelineTimeRange } from "../lib/timelineClipIndex";
 
@@ -91,6 +92,7 @@ export const TimelineRuler = memo(function TimelineRuler({
   scrollRef,
 }: TimelineRulerProps) {
   const timeDisplayMode = usePlayerStore((s) => s.timeDisplayMode);
+  const compositionFps = useLinkedClipPreferences((s) => s.compositionFps);
   const beatTimes = beatAnalysis?.beatTimes ?? [];
   const beatStrengths = beatAnalysis?.beatStrengths ?? [];
   const beatEntries = getTimelineBeatEntries(beatTimes, beatStrengths, renderTimeRange);
@@ -195,7 +197,7 @@ export const TimelineRuler = memo(function TimelineRuler({
                 }}
               >
                 {timeDisplayMode === "frame"
-                  ? secondsToFrame(t)
+                  ? secondsToFrame(t, compositionFps)
                   : formatTimelineTickLabel(t, effectiveDuration, majorTickInterval)}
               </span>
               <div className="w-px" style={{ height: RULER_H, background: theme.tickMajor }} />

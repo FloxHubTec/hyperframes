@@ -1,4 +1,4 @@
-import { formatTime, STUDIO_PREVIEW_FPS } from "../lib/time";
+import { formatTime } from "../lib/time";
 import type { TimelineTimeDisplayMode } from "../../utils/studioUiPreferences";
 import type { TimelineTimeRange } from "../lib/timelineClipIndex";
 
@@ -94,8 +94,8 @@ function tickSpacing(duration: number, pixelsPerSecond?: number, frameRate?: num
   return { majorInterval, subdivisions };
 }
 
-export function rulerFrameRate(mode: TimelineTimeDisplayMode): number | undefined {
-  return mode === "frame" ? STUDIO_PREVIEW_FPS : undefined;
+export function rulerFrameRate(mode: TimelineTimeDisplayMode, fps: number): number | undefined {
+  return mode === "frame" ? fps : undefined;
 }
 
 /** Seconds between neighbouring ruler lines (minor ticks when drawn, else major): the snap grid. */

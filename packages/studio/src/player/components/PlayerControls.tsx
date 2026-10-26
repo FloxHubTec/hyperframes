@@ -6,6 +6,7 @@ import { liveTime, usePlayerStore } from "../store/playerStore";
 import { trackStudioEvent } from "../../utils/studioTelemetry";
 import { Tooltip } from "../../components/ui";
 import { useMountEffect } from "../../hooks/useMountEffect";
+import { useLinkedClipPreferences } from "../../utils/linkedClipPreferences";
 import { ShortcutsButton } from "./ShortcutsPanel";
 import type { ShortcutSection } from "./studioShortcuts";
 import { SpeedMenu } from "./SpeedMenu";
@@ -196,14 +197,17 @@ export const PlayerControls = memo(function PlayerControls({
 
   const durationRef = useRef(duration);
   durationRef.current = duration;
+  const compositionFps = useLinkedClipPreferences((s) => s.compositionFps);
+  const compositionFpsRef = useRef(compositionFps);
+  compositionFpsRef.current = compositionFps;
   const controlsDisabled = disabled || !timelineReady;
 
   useEffect(() => {
     if (!timeDisplayRef.current) return;
     const t = currentTimeRef.current;
     timeDisplayRef.current.textContent =
-      timeDisplayMode === "frame" ? formatFrameTime(t, duration) : formatTime(t);
-  }, [duration, timeDisplayMode]);
+      timeDisplayMode === "frame" ? formatFrameTime(t, duration, compositionFps) : formatTime(t);
+  }, [compositionFps, duration, timeDisplayMode]);
 
   useMountEffect(() => {
     const updateTime = (time: number) => {
@@ -212,7 +216,7 @@ export const PlayerControls = memo(function PlayerControls({
       const currentDuration = durationRef.current;
       const text =
         timeDisplayModeRef.current === "frame"
-          ? formatFrameTime(time, currentDuration)
+          ? formatFrameTime(time, currentDuration, compositionFpsRef.current)
           : formatTime(time);
       if (timeDisplayRef.current.textContent !== text) timeDisplayRef.current.textContent = text;
     };
