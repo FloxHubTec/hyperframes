@@ -190,7 +190,7 @@ describe("runtime entry: composition scripts after web fonts", () => {
     expect(log()).toBe("a in-place b ready ");
   });
 
-  it("runs the scripts at the timeout when a declared face fails to load", async () => {
+  it("runs the scripts at the timeout when a declared face fails to load or never settles", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const posted = vi.spyOn(window.parent, "postMessage").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -202,12 +202,25 @@ describe("runtime entry: composition scripts after web fonts", () => {
         return Promise.reject(new Error("404"));
       }),
     };
-    serveFonts(new Promise(() => {}), [missing, { family: "Hanken Grotesk", status: "loading" }]);
+    const silent: Face = {
+      family: "Silent Face",
+      status: "unloaded",
+      load: vi.fn(() => {
+        silent.status = "loading";
+        return new Promise(() => {});
+      }),
+    };
+    serveFonts(new Promise(() => {}), [
+      missing,
+      silent,
+      { family: "Hanken Grotesk", status: "loading" },
+    ]);
     mountDeferredScripts();
 
     await parseThenLoad();
     await vi.advanceTimersByTimeAsync(FONT_WAIT_TIMEOUT_MS - 1);
     expect(missing.load).toHaveBeenCalledTimes(1);
+    expect(silent.load).toHaveBeenCalledTimes(1);
     expect(log()).toBe("");
 
     await vi.advanceTimersByTimeAsync(1);
@@ -216,7 +229,10 @@ describe("runtime entry: composition scripts after web fonts", () => {
       expect.objectContaining({
         type: "diagnostic",
         code: "runtime_font_wait_timeout",
-        details: { loadingFamilies: ["Hanken Grotesk"], timeoutMs: FONT_WAIT_TIMEOUT_MS },
+        details: {
+          loadingFamilies: ["Silent Face", "Hanken Grotesk"],
+          timeoutMs: FONT_WAIT_TIMEOUT_MS,
+        },
       }),
       "*",
     );
