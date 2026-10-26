@@ -23,6 +23,7 @@ import {
   mergeHelperDrafts,
   samplingBrowserCount,
 } from "./checkBrowser.js";
+import { CheckDeadline } from "./checkDeadline.js";
 import { closeManagedBrowser } from "../browser/launch.js";
 import type { ProjectDir } from "./project.js";
 
@@ -1909,6 +1910,36 @@ describe("motion blur findings in the check output (T6)", () => {
 });
 
 describe("finding frame capture", () => {
+  it("keeps a progressing frame batch alive past 120 seconds", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(join(tmpdir(), "finding-frames-progress-"));
+    const deadline = new CheckDeadline();
+    const page = Object.assign(fakePage(), { evaluateOnNewDocument: vi.fn(async () => undefined) });
+    page.screenshot.mockImplementation(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+      deadline.signal.throwIfAborted();
+      return "frame";
+    });
+    installSessionMock(page);
+    const requests = Array.from({ length: 40 }, (_, index) => ({
+      time: index,
+      filename: `frame-${index}.png`,
+    }));
+    try {
+      const result = await deadline
+        .run(() =>
+          captureFindingFrames({ ...PROJECT, dir }, DEFAULT_CHECK_OPTIONS, requests, deadline),
+        )
+        .catch((error: unknown) => error);
+      expect(result).toHaveLength(40);
+      expect(deadline.signal.aborted).toBe(false);
+    } finally {
+      await deadline.close();
+      vi.useRealTimers();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("seeks each requested time, writes its screenshot and closes the session", async () => {
     const dir = mkdtempSync(join(tmpdir(), "finding-frames-"));
     const page = fakePage();

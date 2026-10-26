@@ -593,6 +593,7 @@ export async function captureFindingFrames(
   return withFindingCapturePage(project, options, deadline, "frames", async (page, snapshotDir) => {
     const written: string[] = [];
     for (const request of requests) {
+      deadline?.enter("frames");
       await seekCompositionTimeline(page, request.time, SCREENSHOT_SEEK_OPTIONS);
       const buffer = await page.screenshot({ type: "png", optimizeForSpeed: true });
       writeFileSync(join(snapshotDir, request.filename), buffer);

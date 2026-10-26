@@ -1801,7 +1801,7 @@ async function withOptionalFindingFrames(
   report: CheckReport,
   deadline: CheckDeadline,
 ): Promise<CheckReport> {
-  if (!options.findingFrames) return report;
+  if (!options.findingFrames || deadline.signal.aborted) return report;
   const plan = selectFindingFrames(report);
   if (plan.requests.length === 0) return report;
   if (plan.skipped > 0) {

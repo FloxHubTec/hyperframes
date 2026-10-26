@@ -1884,6 +1884,34 @@ describe("check pipeline", () => {
     },
   );
 
+  it.each([false, true])(
+    "does not duplicate an earlier stop when frames are enabled (snapshots=%s)",
+    async (snapshots) => {
+      const driver = fakeDriver({
+        collectLayout: vi.fn(async (time: number) => [
+          layoutIssue("warning", { time, code: "container_overflow" }),
+        ]),
+      });
+      const { deps } = dependencies(driver);
+      deps.runBrowserCheck = async (_project, options, motion, deadline) => {
+        const partial = await runAuditGrid(driver, options, motion);
+        deadline?.keepPartial(() => partial);
+        deadline?.stop("SIGINT");
+        deadline?.signal.throwIfAborted();
+        return partial;
+      };
+      const report = await runCheckPipeline(
+        PROJECT,
+        { ...DEFAULT_CHECK_OPTIONS, findingFrames: true, snapshots },
+        deps,
+      );
+      expect(
+        report.runtime.findings.filter((finding) => finding.message.includes("SIGINT")),
+      ).toHaveLength(1);
+      expect(deps.captureFindingFrames).not.toHaveBeenCalled();
+    },
+  );
+
   it("reports cancellation during finding frames", async () => {
     const { report } = await runScenario(
       fakeDriver({
