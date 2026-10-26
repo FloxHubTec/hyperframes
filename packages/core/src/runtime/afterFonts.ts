@@ -12,6 +12,12 @@ export async function waitForFonts(): Promise<void> {
   if (!fonts) return;
   // Layout starts loading the faces laid-out text uses; with none loading, ready resolves at once.
   void document.body?.offsetHeight;
+  // A face no laid-out text uses yet has not started loading, so ready would not wait for it and
+  // text a script builds would measure the fallback. Start every declared face; a load that fails
+  // leaves the face to the timeout below rather than stopping the scripts.
+  for (const face of Array.from(fonts)) {
+    if (face.status === "unloaded") void face.load().catch(() => {});
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = await Promise.race([
     fonts.ready.then(() => false),
