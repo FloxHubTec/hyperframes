@@ -135,9 +135,8 @@ const VENDOR_RULES: VendorRule[] = [
     check: (env) => typeof env["HERMES_QUIET"] === "string",
   },
   // openclaw — multi-channel AI gateway. It sets OPENCLAW_CONFIG_PATH on the
-  // CLI subprocesses it spawns (extensions/qa-matrix/src/runners/contract/scenario-runtime-cli.ts:344-351).
-  // Never name its state-dir var here: endpoint scanners flag that string as
-  // an IoC and quarantine the bundle (#5245).
+  // CLI subprocesses it spawns. Never name its state-dir var here: endpoint
+  // scanners flag that string as an IoC and quarantine the bundle (#5245).
   // Source: https://github.com/openclaw/openclaw
   {
     name: "openclaw",
