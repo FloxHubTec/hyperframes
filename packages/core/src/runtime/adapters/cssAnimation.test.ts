@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCssAdapter } from "./css";
 import { createAuthoredCssAnimations, cssClip, splitNames } from "./cssAnimation";
 import { createWaapiAdapter } from "./waapi";
+import { createRuntimeStartTimeResolver } from "../startResolver";
 
 describe("authored CSS animation clocks", () => {
   const names = new Map<Element, Map<string, string>>();
@@ -173,6 +174,62 @@ describe("authored CSS animation clocks", () => {
     expect(handle.currentTime).toBe(1000);
     expect(adapter.getInferredDurationSeconds?.()).toBe(11);
     adapter.revert?.();
+  });
+
+  describe.each(["pseudo", "shadow"])("a wrapped composition's %s clock", (kind) => {
+    it.each([
+      { name: "neutral wrapper", wrapperStart: "", childStart: "", start: 6 },
+      { name: "timed wrapper", wrapperStart: 'data-start="2"', childStart: "", start: 8 },
+      {
+        name: "explicit child start",
+        wrapperStart: 'data-start="2"',
+        childStart: 'data-start="1"',
+        start: 7,
+      },
+    ])("resolves a local clip through a $name", ({ wrapperStart, childStart, start }) => {
+      document.body.innerHTML = `
+        <div data-composition-id="root" data-start="0">
+          <div data-composition-id="scene" data-start="5">
+            <section ${wrapperStart}>
+              <article>
+                <div data-composition-id="child" ${childStart}>
+                  <div id="local-clip" data-start="1"><div id="target"></div></div>
+                </div>
+              </article>
+            </section>
+          </div>
+        </div>`;
+      const host = document.getElementById("target")!;
+      const clip = document.getElementById("local-clip")!;
+      const target = kind === "shadow" ? document.createElement("div") : host;
+      if (kind === "shadow") host.attachShadow({ mode: "open" }).append(target);
+      const pseudo = kind === "pseudo" ? "::before" : "";
+      name(target, "slide", pseudo);
+      const authored = createAuthoredCssAnimations();
+      authored.discover();
+      const resolver = createRuntimeStartTimeResolver({});
+      expect(resolver.resolveStartForElement(clip)).toBe(start);
+      const handle = animation(target, "slide", pseudo || null);
+      const adapter = createWaapiAdapter({
+        authored,
+        resolveStartSeconds: (element) => resolver.resolveStartForElement(element),
+        readPageAnimations: () => [handle],
+      });
+      adapter.discover();
+      for (const [time, expected] of [
+        [start - 0.25, 0],
+        [start, 0],
+        [start + 1, 1000],
+        [start + 3, 3000],
+        [start + 0.5, 500],
+        [start - 0.25, 0],
+      ]) {
+        adapter.seek({ time });
+        expect(handle.currentTime).toBe(expected);
+      }
+      expect(adapter.getInferredDurationSeconds?.()).toBe(start + 4);
+      adapter.revert?.();
+    });
   });
 
   it.each(["pseudo", "shadow"])("refreshes the containing clip for a live %s animation", (kind) => {
