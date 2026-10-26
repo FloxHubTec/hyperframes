@@ -8,11 +8,11 @@
     "unpacked": 23722874
   },
   "@hyperframes/core": {
-    "packed": 1645000,
-    "unpacked": 3965000
+    "packed": 1661748,
+    "unpacked": 4024585
   },
   "@hyperframes/engine": {
-    "packed": 456055,
+    "packed": 456397,
     "unpacked": 1526873
   },
   "@hyperframes/gcp-cloud-run": {
@@ -36,8 +36,8 @@
     "unpacked": 541601
   },
   "@hyperframes/producer": {
-    "packed": 768210,
-    "unpacked": 2807938
+    "packed": 781312,
+    "unpacked": 2840135
   },
   "@hyperframes/sdk": {
     "packed": 90662,
@@ -52,7 +52,7 @@
     "unpacked": 24360208
   },
   "@hyperframes/studio-server": {
-    "packed": 144500,
+    "packed": 145266,
     "unpacked": 568500
   }
 }

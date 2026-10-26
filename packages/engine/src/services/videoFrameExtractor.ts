@@ -933,7 +933,7 @@ interface SegmentedExtraction {
   fps: number;
   segments: readonly FrameRange[];
   gate: typeof inExtractionSlot;
-  runOptions: { signal?: AbortSignal; stallTimeout: number };
+  runOptions: { signal?: AbortSignal; timeout: number };
 }
 
 /** Split runs so no single ffmpeg process extracts more than `segmentFrames` frames. */
@@ -1158,8 +1158,7 @@ async function extractVideoFramesRangeUnredacted(
   if (format === "png") encodeArgs.push("-compression_level", "1");
   encodeArgs.push("-y", outputPattern);
 
-  // A long 4K run can take far longer than the timeout and still be healthy; only a stall is a hang.
-  const runOptions = { signal, stallTimeout: ffmpegProcessTimeout };
+  const runOptions = { signal, timeout: ffmpegProcessTimeout };
   const filterArgsFor = (seek: number): string[] => {
     const filters = [...vfFilters];
     filters.splice(samplingAt, 0, ...samplingFilters(seek));
@@ -1608,7 +1607,7 @@ export function resolveVideoExtractionDuration(
 
 /** Codecs whose bitstream can carry alpha: decoded with the alpha-aware decoder whether or not a tag says so. */
 const ALPHA_CAPABLE_CODECS = new Set(["vp9", "vp8", "prores"]);
-/** Their alpha rides a side channel ffprobe can miss, so frames stay PNG; ProRes alpha shows in its pixel format. */
+/** Alpha can hide from ffprobe: PNG unless a decoded frame had no alpha; ProRes alpha shows in pix_fmt. */
 const SIDECAR_ALPHA_CODECS = new Set(["vp9", "vp8"]);
 
 export function codecMayHaveAlpha(codec: string | undefined): boolean {
@@ -1623,8 +1622,8 @@ export function resolveFrameFormat(
   metadata: VideoMetadata,
   requested?: VideoFrameFormat,
 ): CacheFrameFormat {
-  if (metadata.hasAlpha || SIDECAR_ALPHA_CODECS.has((metadata.videoCodec ?? "").toLowerCase()))
-    return "png";
+  const sidecar = SIDECAR_ALPHA_CODECS.has((metadata.videoCodec ?? "").toLowerCase());
+  if (metadata.hasAlpha || (sidecar && metadata.alphaPlaneDecoded !== false)) return "png";
   if (requested === "png" || requested === "jpg") return requested;
   return "jpg";
 }

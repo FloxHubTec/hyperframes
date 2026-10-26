@@ -74,6 +74,14 @@
             "group": "Choose where to create",
             "pages": [
               "guides/choose-creation-path",
+              {
+                "group": "With your agent",
+                "pages": [
+                  "guides/with-claude-code",
+                  "guides/with-codex",
+                  "guides/with-cursor"
+                ]
+              },
               "guides/mcp",
               "guides/design-tools"
             ]
@@ -82,17 +90,6 @@
             "group": "Prompt Guide",
             "pages": [
               "prompting/overview",
-              {
-                "group": "Level 1 — Your first video",
-                "pages": [
-                  "prompting/product-launch",
-                  "prompting/explainers",
-                  "prompting/code-and-prs",
-                  "prompting/captions-and-talking-heads",
-                  "prompting/music-and-slideshows",
-                  "prompting/motion-graphics"
-                ]
-              },
               {
                 "group": "Level 2 — Control",
                 "pages": [
@@ -1129,8 +1126,8 @@
             "href": "/product-updates"
           },
           {
-            "label": "Playground",
-            "href": "https://www.hyperframes.dev/"
+            "label": "Download the Studio app",
+            "href": "https://hyperframes.dev/studio/download?src=docs-footer"
           },
           {
             "label": "GitHub",
@@ -1149,8 +1146,8 @@
     ],
     "primary": {
       "type": "button",
-      "label": "Playground",
-      "href": "https://www.hyperframes.dev/"
+      "label": "Download Studio",
+      "href": "https://hyperframes.dev/studio/download?src=docs-navbar"
     }
   },
   "redirects": [
@@ -1281,6 +1278,36 @@
     {
       "source": "/sdk/overview",
       "destination": "/sdk/quickstart",
+      "permanent": true
+    },
+    {
+      "source": "/prompting/product-launch",
+      "destination": "/guides/product-launch-video#prompts-that-work",
+      "permanent": true
+    },
+    {
+      "source": "/prompting/explainers",
+      "destination": "/guides/faceless-explainer#prompts-that-work",
+      "permanent": true
+    },
+    {
+      "source": "/prompting/code-and-prs",
+      "destination": "/guides/pr-to-video#prompts-that-work",
+      "permanent": true
+    },
+    {
+      "source": "/prompting/captions-and-talking-heads",
+      "destination": "/guides/captions-and-recuts#prompts-that-work",
+      "permanent": true
+    },
+    {
+      "source": "/prompting/music-and-slideshows",
+      "destination": "/guides/music-to-video#prompts-that-work",
+      "permanent": true
+    },
+    {
+      "source": "/prompting/motion-graphics",
+      "destination": "/guides/motion-graphics#prompts-that-work",
       "permanent": true
     }
   ],

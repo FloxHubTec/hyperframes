@@ -154,6 +154,11 @@ import {
   type CaptureRouting,
 } from "./render/capturePlan.js";
 import { runCaptureSegmentedStage } from "./render/stages/captureSegmentedStage.js";
+import {
+  RenderTooSlowError,
+  checkRenderEta,
+  startRenderEtaGuard,
+} from "./render/renderEtaGuard.js";
 import { resolveSegmentFrames } from "./render/segmentPlan.js";
 import { resolveSegmentBrowserRecycle } from "./render/segmentRecycle.js";
 import {
@@ -333,51 +338,40 @@ export interface RenderConfig {
   /** Segmented capture: keep renders/.hf-segments/<planHash> after a successful render. */
   keepSegments?: boolean;
   /**
-   * Output container format. Defaults to `"mp4"`; existing renders are
-   * unaffected unless this field is set explicitly.
+   * Output container format. Defaults to `"mp4"`; set explicitly for other formats.
    *
-   * - `"mp4"`: H.264 by default, or H.265 + HDR10 when HDR auto-detect
-   *   engages or `hdrMode: "force-hdr"` is set. Opaque. The
-   *   default streaming/social deliverable. Faststart is applied so the
-   *   `moov` atom sits at the file start and the file plays from a
-   *   partial download.
-   * - `"webm"`: VP9 + `yuva420p` pixel format → **true alpha channel**, no
-   *   chroma key. Plays in Chrome, Edge, and Firefox; Safari support for
-   *   alpha-WebM is incomplete. Use this when the output should drop
-   *   straight into a `<video>` over a colored background on the web.
-   *   Audio is muxed as Opus.
-   * - `"mov"`: ProRes 4444 + `yuva444p10le` → **true alpha channel +
-   *   10-bit color**. Sized for editor ingest (Premiere, Final Cut Pro,
-   *   DaVinci Resolve), not direct web playback. Audio is muxed as AAC.
-   * - `"gif"`: animated GIF encoded from captured RGBA frames with a two-pass
-   *   FFmpeg palette (`palettegen` + `paletteuse`). Use for PRs, READMEs,
-   *   and docs where inline autoplay matters more than file size. No audio
-   *   stream; transparency is binary because GIF has no partial alpha.
-   * - `"png-sequence"`: a directory of zero-padded RGBA PNGs
-   *   (`frame_000001.png` …). Lossless alpha, largest on disk, no muxed
-   *   audio (an `audio.m4a` sidecar is written alongside the PNGs when
-   *   the composition has audio elements). Use for After Effects / Nuke
-   *   / Fusion ingest, or when frames need post-processing before
-   *   encoding. `outputPath` is treated as a directory; it is created if
-   *   it doesn't exist.
-   * - `"hls"`: HLS VOD package — the same opaque H.264 + AAC encode as
-   *   `"mp4"`, stream-copied (no re-encode) into a directory of MPEG-TS
-   *   segments: `master.m3u8`, `video.m3u8` + `video_%05d.ts`, and
-   *   `audio.m3u8` + `audio_%05d.ts` when the composition has audio.
-   *   Segments are fixed-length (see {@link RenderConfig.hlsSegmentSeconds})
-   *   and every one starts on an IDR frame, because the encoder's GOP is
-   *   locked to `hlsSegmentSeconds × fps`. Like `"png-sequence"`,
-   *   `outputPath` is treated as a directory. SDR only, software encoder
-   *   only, and not available in distributed / Lambda / Cloud Run mode.
+   * - `"mp4"`: opaque H.264, or H.265 + HDR10 with HDR auto-detection or
+   *   `hdrMode: "force-hdr"`. For streaming/social delivery; faststart puts the
+   *   `moov` atom first so playback can begin during a partial download.
+   * - `"webm"`: VP9 + `yuva420p` with true alpha (no chroma key) and Opus audio.
+   *   For `<video>` overlays in Chrome, Edge and Firefox; Safari's alpha-WebM
+   *   support is incomplete.
+   * - `"mov"`: ProRes 4444 + `yuva444p10le` with true alpha and AAC audio.
+   *   Chrome captures 8-bit RGBA; encoding it as 10-bit ProRes does not add
+   *   capture precision. For editor ingest (Premiere, Final Cut Pro, DaVinci
+   *   Resolve), rather than direct web playback.
+   * - `"gif"`: animated GIF from RGBA captures, using FFmpeg's two-pass
+   *   `palettegen` + `paletteuse`. For inline autoplay in PRs, READMEs and docs
+   *   when file size matters less. No audio; transparency is binary, not partial.
+   * - `"png-sequence"`: zero-padded RGBA PNGs (`frame_000001.png` ...), with
+   *   lossless alpha and the largest disk footprint. No muxed audio; an
+   *   `audio.m4a` sidecar is written when the composition contains audio.
+   *   For After Effects / Nuke / Fusion or post-processing before encoding.
+   *   `outputPath` is a directory, created if it does not exist.
+   * - `"hls"`: HLS VOD using the opaque H.264 + AAC encode from `"mp4"`,
+   *   stream-copied without re-encoding into MPEG-TS in the `outputPath` directory:
+   *   `master.m3u8`, `video.m3u8` + `video_%05d.ts`, and `audio.m3u8` +
+   *   `audio_%05d.ts` when the composition contains audio. Segment length is
+   *   {@link RenderConfig.hlsSegmentSeconds}; the encoder's GOP is locked to
+   *   that length in frames, so each segment starts on an IDR frame.
+   *   SDR and software encoders only; unavailable in distributed rendering,
+   *   including Lambda and Cloud Run.
    *
-   * Alpha output (`"webm"`, `"mov"`, `"png-sequence"`, `"gif"`) automatically
-   * forces screenshot capture (Chrome's BeginFrame compositor does not
-   * preserve alpha on Linux headless-shell) and disables HDR — HDR +
-   * alpha is not a supported combination, a warning is logged and HDR
-   * falls back to SDR. The transparent-background CSS is injected by
-   * the engine's `initTransparentBackground` helper, so authors should
-   * not paint a fullscreen `body` / `#root` background in their
-   * compositions when targeting alpha output.
+   * Alpha formats (`"webm"`, `"mov"`, `"png-sequence"`, `"gif"`) force screenshot
+   * capture because BeginFrame does not preserve alpha on Linux headless-shell.
+   * HDR + alpha is unsupported: a warning is logged and output falls back to SDR.
+   * The engine's `initTransparentBackground` injects transparent-background CSS;
+   * avoid painting a fullscreen `body` / `#root` background for alpha output.
    */
   format?: RenderOutputFormat;
   /** GIF Netscape loop count. 0 means infinite looping. Only used with `format: "gif"`. */
@@ -400,6 +394,8 @@ export interface RenderConfig {
   motionBlur?: MotionBlurOptions;
   pageMotionBlur?: "off";
   workers?: number;
+  /** Wall-time budget in ms for the whole render. Absent or 0 disables the ETA guard. */
+  maxRenderMs?: number;
   useGpu?: boolean;
   debug?: boolean;
   /** Strict rejects correctness warnings; best-effort returns a qualified outcome. */
@@ -590,7 +586,7 @@ export interface RenderPerfSummary {
   drawElement?: {
     /** Final capture mode: "drawelement" | "screenshot" | "beginframe" (|-joined if workers diverge). */
     mode: string;
-    /** Compile-time gate that disabled default DE: 3d | mix_blend_mode | shader_transitions. */
+    /** Compile-time gate that disabled default DE: 3d | ancestor_background_image | shader_transitions. */
     compileGate?: string;
     /** Producer clamp that disabled default DE: parallel | disk_path. */
     clampReason?: string;
@@ -667,6 +663,7 @@ export interface RenderPerfSummary {
     blankRecaptures: number;
     /** Clip-cut boundary frames captured via per-frame screenshot. */
     boundaryFrames: number;
+    riskFrames: number;
     /** Per-frame "No cached paint record" screenshot fallbacks. */
     ncprFallbacks: number;
     /**
@@ -2141,19 +2138,17 @@ export function resolveDeShortBand(args: {
 }
 
 /**
- * DE priority inversion predicate: should an AUTO-resolved multi-worker render
- * drop to single-worker verified drawElement streaming?
+ * DE priority inversion predicate: should a multi-worker render drop to
+ * single-worker verified drawElement streaming?
  *
  * Benchmarked 2026-07-08: above ~900 frames DE-single beats screenshot-parallel
  * at every worker count (2,380f: 66s vs 109–127s at W2–W5); below it DE's fixed
  * init cost (verify + dedup arming) loses by a small margin. Only fires for the
  * exact benchmarked configuration: default-on DE, mp4, streaming-eligible,
- * no compile gate, no forced screenshot, workers not explicitly requested.
+ * no compile gate, no forced screenshot.
  */
 export function shouldPreferSingleWorkerDrawElement(args: {
   workerCount: number;
-  /** job.config.workers — a number means the user explicitly chose. */
-  requestedWorkers: number | "auto" | undefined;
   useDrawElement: boolean;
   deCompileGate: string | undefined;
   forceScreenshot: boolean;
@@ -2187,7 +2182,6 @@ export function shouldPreferSingleWorkerDrawElement(args: {
 }): boolean {
   return (
     args.workerCount > 1 &&
-    typeof args.requestedWorkers !== "number" &&
     args.useDrawElement &&
     !args.deCompileGate &&
     !args.forceScreenshot &&
@@ -2200,6 +2194,14 @@ export function shouldPreferSingleWorkerDrawElement(args: {
     !args.probeDeGated &&
     !args.experimentalParallelDeOptIn
   );
+}
+
+/**
+ * The session kept drawElement but left some frames to a screenshot session. Only the
+ * single-worker streaming capture hands those over, so parallel drawElement must not be chosen.
+ */
+function probeNeedsScreenshotFrames(session: CaptureSession | null): boolean {
+  return (session?.deRiskFrames?.size ?? 0) > 0;
 }
 
 /** The session ran the engine's init-time drawElement gates and one refused it. */
@@ -2898,7 +2900,11 @@ async function executeRenderPipeline(input: {
   const log = execution.logger;
   const eventPublisher = execution.events;
   const onProgress = execution.onProgress;
-  const executionSignal = execution.signal;
+  const tooSlow = new AbortController();
+  let tooSlowError: RenderTooSlowError | undefined;
+  const executionSignal = job.config.maxRenderMs
+    ? AbortSignal.any([tooSlow.signal, ...(execution.signal ? [execution.signal] : [])])
+    : execution.signal;
   let fileServer: FileServerHandle | null = null;
   let probeSession: CaptureSession | null = null;
   let lastBrowserConsole: string[] = [];
@@ -3536,6 +3542,7 @@ async function executeRenderPipeline(input: {
       height,
       fps: job.config.fps,
       format: captureImageFormat,
+      transparent: needsAlpha,
       quality:
         captureImageFormat === "png" ? undefined : resolveCaptureJpegQuality(job.config.quality),
       variables: job.config.variables,
@@ -3571,6 +3578,7 @@ async function executeRenderPipeline(input: {
       // Probe-resolved duration: drawElement self-verification derives its
       // sample frame indices from this so they land inside the drained range.
       compositionDurationSeconds: job.duration,
+      deFrameFallback: true,
       requiresWebGpu: compositionRequiresWebGpu(compiled.html),
       // Live route for Chrome memory (spec §5 Phase −1). The aggregate route
       // through CapturePerfSummary only exists on success; a mid-capture
@@ -3697,7 +3705,6 @@ async function executeRenderPipeline(input: {
     const WOULD_RESOLVE_MULTI_WORKER = 2;
     const deInversionArgs = {
       workerCount: WOULD_RESOLVE_MULTI_WORKER,
-      requestedWorkers: job.config.workers,
       useDrawElement: cfg.useDrawElement,
       deCompileGate,
       forceScreenshot: captureForceScreenshot,
@@ -3797,7 +3804,7 @@ async function executeRenderPipeline(input: {
       minFrames: deParallelMinFrames,
       layeredOrEffectRoute: hasHdrContent || compiled.hasShaderTransitions,
       supersampling: deviceScaleFactor !== 1,
-      probeDeGated: isProbeDeGated(probeSession),
+      probeDeGated: isProbeDeGated(probeSession) || probeNeedsScreenshotFrames(probeSession),
       experimentalParallelDeOptIn:
         process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE === "true" ||
         process.env.HF_DE_PARALLEL_STREAM === "true",
@@ -3845,6 +3852,8 @@ async function executeRenderPipeline(input: {
         deInversionEligible = false;
         deParallelRouterEligible = false;
         deShortBand = undefined;
+      } else if (probeNeedsScreenshotFrames(probeSession)) {
+        deParallelRouterEligible = false;
       }
     }
     // Workers capturing by screenshot report no gate of their own, so carry the probe's.
@@ -4017,7 +4026,7 @@ async function executeRenderPipeline(input: {
         "[Render] Fast capture: single-worker drawElement streaming preferred over " +
           `${workerCount}-worker screenshot capture (${totalFrames} frames >= ` +
           `${deInversionEffectiveMinFrames}; verified path, measured faster at every worker count). ` +
-          "Set HF_DE_SINGLE_MIN_FRAMES=0 or --workers N to override.",
+          "Set HF_DE_SINGLE_MIN_FRAMES=0 to override.",
       );
       workerCount = 1;
     }
@@ -4062,6 +4071,30 @@ async function executeRenderPipeline(input: {
       deParallelRouter: deParallelRouter ?? "none",
     });
 
+    // No calibration estimate (explicit workers, short or forced-screenshot renders) skips the
+    // pre-capture check; the measured-rate guard below still covers capture.
+    const calibratedTooSlow = checkRenderEta("capture_calibration", {
+      maxRenderMs: job.config.maxRenderMs,
+      elapsedMs: Date.now() - pipelineStart,
+      framesCompleted: 0,
+      totalFrames,
+      msPerFrame: (captureCalibration?.estimate.p95Ms ?? 0) / workerCount,
+    });
+    if (calibratedTooSlow) throw calibratedTooSlow;
+    execution.defer(
+      "stop render ETA guard",
+      startRenderEtaGuard({
+        maxRenderMs: job.config.maxRenderMs,
+        job,
+        totalFrames,
+        pipelineStartMs: pipelineStart,
+        onTooSlow: (error) => {
+          tooSlowError = error;
+          tooSlow.abort(error);
+        },
+      }),
+    );
+
     // Streaming encode pipes captured frames through ffmpeg's stdin to produce
     // a single video file. Keep the default enabled for sequential capture, but
     // let auto-parallel renders use disk frames: the current ordered streaming
@@ -4092,7 +4125,14 @@ async function executeRenderPipeline(input: {
       (deParallelStreamForced || process.env.HF_DE_PARALLEL_STREAM === "true") &&
       useStreamingEncode &&
       workerCount > 1;
+    // Frames drawElement cannot reproduce go to a screenshot session only on single-worker
+    // streaming capture; any other route captures them all by screenshot, as before.
+    const routeDropsScreenshotFrames =
+      cfg.useDrawElement &&
+      probeNeedsScreenshotFrames(probeSession) &&
+      (!useStreamingEncode || workerCount !== 1);
     if (
+      routeDropsScreenshotFrames ||
       shouldClampDefaultDrawElement({
         useDrawElement: cfg.useDrawElement,
         fastCaptureExplicitOptIn: process.env.PRODUCER_EXPERIMENTAL_FAST_CAPTURE === "true",
@@ -5260,8 +5300,9 @@ async function executeRenderPipeline(input: {
     job.outputPath = outputPath;
     updateJobStatus(job, "complete", "Render complete", 100, onProgress);
     await eventPublisher.flush();
-  } catch (error) {
-    if (error instanceof RenderCancelledError || executionSignal?.aborted) {
+  } catch (caught) {
+    const error = tooSlowError ?? caught;
+    if (!tooSlowError && (error instanceof RenderCancelledError || executionSignal?.aborted)) {
       job.error = error instanceof Error ? error.message : "render_cancelled";
       updateJobStatus(job, "cancelled", "Render cancelled", job.progress, onProgress);
       await eventPublisher.flush();

@@ -644,6 +644,26 @@ function envWithoutWaylandDisplay(): NodeJS.ProcessEnv {
   return env;
 }
 
+// ANGLE and Dawn load SwiftShader via VK_ICD_FILENAMES, which these override or filter:
+// https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md
+const VULKAN_VARS_THAT_OVERRIDE_SWIFTSHADER = [
+  "VK_DRIVER_FILES",
+  "VK_LOADER_DRIVERS_SELECT",
+  "VK_LOADER_DRIVERS_DISABLE",
+];
+
+function launchEnv(fingerprint: Readonly<BrowserLaunchFingerprint>): NodeJS.ProcessEnv | undefined {
+  if (fingerprint.withoutWaylandDisplay) return envWithoutWaylandDisplay();
+  const swiftShader = fingerprint.args.some(
+    (arg) => arg === "--use-angle=swiftshader" || arg === "--use-vulkan=swiftshader",
+  );
+  const overriding = VULKAN_VARS_THAT_OVERRIDE_SWIFTSHADER.filter((name) => name in process.env);
+  if (!swiftShader || overriding.length === 0) return undefined;
+  const env = { ...process.env };
+  for (const name of overriding) delete env[name];
+  return env;
+}
+
 /** True when a `resolvedMode` render must launch without WAYLAND_DISPLAY to reach the GPU. */
 export async function captureWithoutWaylandDisplay(
   resolvedMode: "software" | "hardware",
@@ -848,7 +868,7 @@ async function launchBrowser(
   fingerprint: Readonly<BrowserLaunchFingerprint>,
 ): Promise<{ browser: Browser; captureMode: CaptureMode }> {
   const ppt = await getPuppeteer();
-  const env = fingerprint.withoutWaylandDisplay ? envWithoutWaylandDisplay() : undefined;
+  const env = launchEnv(fingerprint);
   let captureMode = fingerprint.requestedCaptureMode;
   let browser: Browser | undefined;
   try {
@@ -867,7 +887,7 @@ async function launchBrowser(
     const gpuFlags = fingerprint.args.filter(
       (a) => a.startsWith("--use-gl=") || a.startsWith("--use-angle="),
     );
-    console.log(
+    console.error(
       `[BrowserManager] Browser launched (${browserVersion}, ${captureMode}, gl=${gpuFlags.join(" ") || "default"}, headlessShell=${!!fingerprint.executablePath}, platform=${process.platform})`,
     );
 
@@ -1162,12 +1182,12 @@ export function compositionRequiresWebGpu(html: string): boolean {
   return false;
 }
 
-/** No hardware WebGPU adapter on this host; distinct from a browser or navigation failure. */
+/** No usable WebGPU device on this launch; distinct from a browser or navigation failure. */
 export class WebGpuUnavailableError extends Error {
   constructor() {
     super(
-      "This composition declares data-requires-webgpu, but no hardware WebGPU adapter could be " +
-        "obtained on this browser launch. Run on a host with a GPU, set " +
+      "This composition declares data-requires-webgpu, but a usable WebGPU device could not be " +
+        "created on this browser launch. Run on a host with a GPU, set " +
         "PRODUCER_ALLOW_SOFTWARE_WEBGPU=true to render it on SwiftShader (slow), or remove " +
         "data-requires-webgpu.",
     );
@@ -1175,11 +1195,11 @@ export class WebGpuUnavailableError extends Error {
   }
 }
 
-const WEBGPU_ADAPTER_PROBE_TIMEOUT_MS = 10_000;
+const WEBGPU_DEVICE_PROBE_TIMEOUT_MS = 10_000;
 
 /**
- * Confirms the already-navigated page can obtain a hardware WebGPU adapter, or any adapter when the launch runs
- * software WebGPU ({@link usesSoftwareWebGpu}); no-op otherwise.
+ * Confirms the already-navigated page can create a device on a hardware WebGPU adapter, or any adapter when
+ * the launch runs software WebGPU ({@link usesSoftwareWebGpu}); no-op otherwise.
  * `page` must be on a secure-context origin, or navigator.gpu always reads absent.
  */
 export async function assertWebGpuAdapterAvailable(
@@ -1188,26 +1208,44 @@ export async function assertWebGpuAdapterAvailable(
   softwareWebGpu = false,
 ): Promise<void> {
   if (!requiresWebGpu) return;
-  // requestAdapter() has no native timeout; a broken driver can hang it
-  // indefinitely. Race it in-page so a stuck adapter reads as "unavailable"
-  // instead of hanging the caller.
-  const hasUsableAdapter = await page.evaluate(
+  // An adapter can exist even when missing driver libraries make device creation fail.
+  // Both requests can hang; share one deadline and release late devices as well.
+  const hasUsableDevice = await page.evaluate(
     async (timeoutMs, acceptFallback) => {
       if (typeof navigator === "undefined" || !navigator.gpu) return false;
+      let expired = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const adapter = await Promise.race([
-          navigator.gpu.requestAdapter(),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+        const probe = async () => {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (!adapter || expired || (!acceptFallback && adapter.info.isFallbackAdapter))
+            return false;
+          const device = await adapter.requestDevice();
+          try {
+            return !expired;
+          } finally {
+            device.destroy();
+          }
+        };
+        return await Promise.race([
+          probe(),
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => {
+              expired = true;
+              resolve(false);
+            }, timeoutMs);
+          }),
         ]);
-        return !!adapter && (acceptFallback || !adapter.info.isFallbackAdapter);
       } catch {
         return false;
+      } finally {
+        clearTimeout(timer);
       }
     },
-    WEBGPU_ADAPTER_PROBE_TIMEOUT_MS,
+    WEBGPU_DEVICE_PROBE_TIMEOUT_MS,
     softwareWebGpu,
   );
-  if (!hasUsableAdapter) throw new WebGpuUnavailableError();
+  if (!hasUsableDevice) throw new WebGpuUnavailableError();
 }
 
 function getBrowserGpuArgs(

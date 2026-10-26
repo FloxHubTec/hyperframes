@@ -144,6 +144,8 @@ export {
   type StaticVerificationOutcome,
   VfxFailureError,
   waitForImagesReady,
+  evaluateHfDiagnostic,
+  buildZeroDurationDiagnostic,
 } from "./services/frameCapture.js";
 export {
   CaptureFailure,
@@ -168,6 +170,7 @@ export {
   cdpSessionCache,
   probeBeginFrameLiveness,
   initTransparentBackground,
+  capturesAlpha,
   captureAlphaPng,
   applyDomLayerMask,
   removeDomLayerMask,
@@ -216,6 +219,7 @@ export {
   resolveVideoExtractionWindow,
   rebaseVideoToWindow,
   resolveFinalFrameExtractionWindow,
+  resolveFrameFormat,
   resolveVideoExtractionDuration,
   resolvePlayableVideoDuration,
   extractionFrameCountForDuration,
@@ -250,6 +254,7 @@ export {
   isVideoFrameFormat,
   EXTRACT_CACHE_MIN_AGE_MS,
 } from "./services/videoFrameExtractor.js";
+export { isSelfOrAncestorHidden } from "./services/mediaHidden.js";
 export { directorySizeBytes, gcExtractionCache } from "./services/extractionCache.js";
 
 export {

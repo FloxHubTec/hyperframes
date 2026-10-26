@@ -198,6 +198,14 @@ Source: `packages/lint/src/rules/composition.ts`.
 
 **Fix:** Give the root `id="root"` and style it with `#root` plus plain descendant selectors.
 
+### `subcomposition_style_outside_template`
+
+**Warning.** A sub-composition file with a `<template>` has a `<style>`, or a `<link rel="stylesheet">`
+outside `<head>`, that sits outside the template. Mounting keeps only the template's content and the
+stylesheet links in `<head>`, so those styles never apply in preview, snapshot or render.
+
+**Fix:** Move it inside `<template>`, next to the composition root.
+
 ### `template_literal_selector`
 
 **Error.** `querySelector` is called with a template-literal variable, which the bundler's CSS parser crashes on.
@@ -250,6 +258,15 @@ Source: `packages/lint/src/rules/core.ts`.
 
 **Fix:** Rename the id to start with a letter (recommended), or build selectors with `CSS.escape(id)` at runtime.
 
+### `inline_style_attribute_selector`
+
+**Error.** A selector reads the inline `style` attribute (`[style]`, `[style*=...]` and the other forms).
+GSAP writes inline styles every frame, and each write then restyles far more than the animated element.
+The preview slows to a crawl.
+
+**Fix:** Let the runtime hide hidden clips; it already hides their contents.
+For a state of your own, toggle a class or data attribute from your script and select on that.
+
 ### `invalid_inline_script_syntax`
 
 **Error.** An inline `<script>` is closed with malformed syntax.
@@ -296,7 +313,8 @@ Source: `packages/lint/src/rules/core.ts`.
 
 **Error.** A selector observes the runtime-owned hidden style (used to hide native video during frame copying) and forces `opacity` to zero, which breaks the video replacement pipeline.
 
-**Fix:** Restrict the guard to sub-composition hosts (for example `[data-composition-src][style*="visibility: hidden"]`) and do not derive element or media opacity from the runtime's hidden style.
+**Fix:** Remove the rule; the runtime already hides a hidden clip and its contents.
+To fade or hide something yourself, animate it on the timeline, or toggle a class or data attribute and select on that.
 
 ### `scoped_css_missing_wrapper`
 
@@ -488,6 +506,16 @@ Source: `packages/lint/src/rules/gsap.ts`.
 
 **Fix:** Remove the CSS `stroke-dasharray` (decorative dashes belong on a separate element), or set the full two-component value in GSAP.
 
+### `svg_round_cap_hidden_dash`
+
+**Warning.** A round or square capped path is hidden with dasharray = gap = `pathLength` and dashoffset = dash.
+
+Chrome can leave a zero-length sliver at the path end there, and the cap paints it as a dot on some curves.
+
+**Fix:** Make the gap longer than the path (`stroke-dasharray="100 120"`, `stroke-dashoffset="110"`).
+
+Or keep the element `visibility: hidden` until its draw tween starts.
+
 ### `svg_measure_before_path_d`
 
 **Error / warning.** `getTotalLength()` is called on a path with no static `d` attribute, so it returns 0 and the dash animation dies. Error when no `d` assignment exists anywhere, warning when `d` is only assigned inside a function body.
@@ -509,6 +537,12 @@ Source: `packages/lint/src/rules/media.ts`.
 **Warning.** An `<hf-audio-group>` carries `data-fx-carve` (or a carve-derived chain), but a carve belongs on the bed clip, not the bus.
 
 **Fix:** Remove `data-fx-carve` from the group and carve the bed clip instead.
+
+### `audio_group_holds_elements`
+
+**Warning.** Elements sit inside an `<hf-audio-group>`. Most often the group was written self-closed (`<hf-audio-group id="sfx" />`), which HTML does not close on a custom element, so every later sibling lands inside it. Being inside routes no audio through the bus, and while the group has `data-hidden` those elements are hidden and silenced in preview and render.
+
+**Fix:** Close the group with `</hf-audio-group>` right after its opening tag, and give clips meant for the bus `data-audio-group`.
 
 ### `audio_group_no_members`
 
