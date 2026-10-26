@@ -1699,16 +1699,13 @@ pre.shiki {
 .hf-film-track {
   display: flex;
   width: max-content;
-  animation: hf-film-drift 90s linear infinite;
+  cursor: grab;
+  /* Vertical swipes still scroll the page; sideways ones drag the row (film-rows.jsx). */
+  touch-action: pan-y;
 }
-.hf-film-row.is-reverse .hf-film-track {
-  animation-direction: reverse;
-  animation-duration: 105s;
-}
-@keyframes hf-film-drift {
-  to {
-    transform: translateX(-50%);
-  }
+.hf-film-track.is-dragging {
+  cursor: grabbing;
+  user-select: none;
 }
 .hf-film-card {
   position: relative;
@@ -1792,7 +1789,8 @@ pre.shiki {
 }
 @media (prefers-reduced-motion: reduce) {
   .hf-film-track {
-    animation: none;
+    cursor: auto;
+    touch-action: auto;
   }
   .hf-film-row {
     overflow-x: auto;
@@ -1804,11 +1802,23 @@ pre.shiki {
   }
 }
 
-.hf-film-rows.is-paused .hf-film-track { animation-play-state: paused; }
 .hf-film-pause { display: block; margin: 0.5rem 0 0 auto; padding: 0.25rem 0.75rem; border: 1px solid var(--hf-border-color-light);
   border-radius: 999px; font-size: 0.8125rem; font-weight: 600; background: transparent; color: inherit; }
 
-/* Remix cards in the docs palette: frosted cream on the ground (a Night card in dark mode), ink text, black pill. */
+/* Remix shelves are columns that each stack their cards, so cards of different shapes leave no holes. */
+.hf-remix-shelf {
+  columns: 2 16rem;
+  column-gap: 1rem;
+}
+.hf-remix-shelf.is-tall {
+  columns: 3 9.5rem;
+}
+.hf-remix-shelf > * {
+  break-inside: avoid;
+  margin-bottom: 1rem;
+}
+
+/* Remix cards in the docs palette: an app card on the paper (a Night card in dark mode), ink text, ink pill. */
 .hf-remix-card { background: var(--hf-background-light); border-color: var(--hf-ui-border); backdrop-filter: blur(12px); }
 .hf-remix-media { background: var(--hf-surface2); }
 .hf-remix-name { color: var(--hf-heading); }
