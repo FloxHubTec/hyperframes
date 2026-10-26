@@ -115,7 +115,9 @@ export const FilmRows = () => {
     const pick = () => {
       const mid = window.innerWidth / 2;
       const centre = (v) => { const r = v.getBoundingClientRect(); return Math.abs(r.left + r.width / 2 - mid); };
-      const first = root.classList.contains("is-paused") ? null : [...near].sort((a, b) => centre(a) - centre(b))[0];
+      // Paused rows, or a full film open in the dialog: no preview plays.
+      const resting = root.classList.contains("is-paused") || root.dataset.watching === "true";
+      const first = resting ? null : [...near].sort((a, b) => centre(a) - centre(b))[0];
       for (const v of near) {
         if (v === first) v.play().catch(() => {});
         else v.pause();
@@ -128,6 +130,14 @@ export const FilmRows = () => {
   useEffect(() => {
     if (paused) for (const v of rootRef.current?.querySelectorAll("video") ?? []) v.pause();
   }, [paused]);
+
+  // While a full film plays in the dialog, the previews stop, so only one film plays at a time.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    root.dataset.watching = open ? "true" : "false";
+    if (open) for (const v of root.querySelectorAll("video[data-src]")) v.pause();
+  }, [open]);
 
   useEffect(() => {
     const d = dialogRef.current;
