@@ -14,6 +14,7 @@ import {
   type AudioTag,
   type LoudnessLimit,
 } from "@hyperframes/studio-server/loudness";
+import { resolveAuthoredAssetFile } from "@hyperframes/parsers/asset-resolution";
 import { defineCommand } from "citty";
 import { c } from "../ui/colors.js";
 import { projectCompositionFiles } from "../utils/mountedCompositions.js";
@@ -84,8 +85,10 @@ function selectedTags(tags: readonly ProjectAudioTag[], referenceId: string, tar
   return { referenceTag, targetTag };
 }
 
-function existingAudioFile(projectDir: string, tag: AudioTag): string {
-  const file = resolveLocalAudioPath(projectDir, tag.src);
+function existingAudioFile(projectDir: string, tag: ProjectAudioTag): string {
+  const file =
+    resolveAuthoredAssetFile(projectDir, tag.file, tag.src) ??
+    resolveLocalAudioPath(projectDir, tag.src);
   if (!existsSync(file)) {
     throw new Error(`Audio #${tag.id} file was not found: ${relative(projectDir, file)}`);
   }
@@ -94,8 +97,8 @@ function existingAudioFile(projectDir: string, tag: AudioTag): string {
 
 async function measuredPlan(
   projectDir: string,
-  referenceTag: AudioTag,
-  targetTag: AudioTag,
+  referenceTag: ProjectAudioTag,
+  targetTag: ProjectAudioTag,
 ): Promise<AudioNormalizationPlan> {
   const ffmpegPath = requiredFfmpeg();
   const referenceFile = existingAudioFile(projectDir, referenceTag);
@@ -132,7 +135,7 @@ function parsedLufs(raw: string): number {
 
 async function measuredAbsolutePlan(
   projectDir: string,
-  targetTag: AudioTag,
+  targetTag: ProjectAudioTag,
   targetLufs: number,
 ): Promise<AbsoluteLoudnessPlan> {
   const measurement = await measureAudio(

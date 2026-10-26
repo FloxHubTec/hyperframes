@@ -101,4 +101,28 @@ describe("normalize-audio on a clip inside a mounted scene", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("resolves the scene's audio source against the scene file, not the project root", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-normalize-scene-src-test-"));
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const root = `<div data-composition-id="main"><div data-composition-id="intro" data-composition-src="compositions/intro.html"></div></div>`;
+      const scene = `<audio id="voice" src="../assets/voice.wav" data-volume="0" data-duration="2"></audio>`;
+      mkdirSync(join(dir, "compositions"));
+      mkdirSync(join(dir, "assets"));
+      writeFileSync(join(dir, "index.html"), root);
+      writeFileSync(join(dir, "compositions", "intro.html"), scene);
+      writeFileSync(join(dir, "assets", "voice.wav"), "audio bytes");
+      measureAudio.mockClear();
+      measureAudio.mockResolvedValue({ integratedLufs: -16, truePeakDbfs: -12.3 });
+
+      await runCommand(normalizeAudioCommand, { rawArgs: [dir, "--target", "voice", "--json"] });
+
+      expect(JSON.parse(String(log.mock.calls.at(-1)?.[0]))).toMatchObject({ ok: true });
+      expect(measureAudio.mock.calls[0]?.[1]).toBe(join(dir, "assets", "voice.wav"));
+    } finally {
+      log.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
