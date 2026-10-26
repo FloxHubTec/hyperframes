@@ -171,7 +171,6 @@ export interface CaptureOptions {
   format?: "jpeg" | "png";
   transparent?: boolean;
   quality?: number;
-  transparentBackground?: boolean;
   /**
    * Opt into sub-frame multi-sample motion blur (issue #4010). Absent means off and the
    * capture path is byte-identical to a render without it. Requires `format: "png"` and
