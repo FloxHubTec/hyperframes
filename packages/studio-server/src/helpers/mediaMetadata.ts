@@ -218,6 +218,7 @@ function sourceFactsOf(
     bitDepth: bitDepthOf(stream),
     bitrate: Number.isFinite(bitrate) ? bitrate : 0,
   };
+}
 
 const STREAM_SUMMARY_MAX = 12;
 
