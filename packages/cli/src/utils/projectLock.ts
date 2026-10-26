@@ -54,7 +54,6 @@ function breakStaleHolder(path: string, current: Holder, holder: Holder): boolea
   }
 }
 
-/** Creates `path` holding `holder` whole, or reports that it already exists; no refused hard link stops it. */
 function createNew(path: string, holder: Holder): boolean {
   try {
     createFileAtomically(path, JSON.stringify(holder));
