@@ -1320,10 +1320,5 @@
       "apiKey": "phc_zjjbX0PnWxERXrMHhkEJWj9A9BhGVLRReICgsfTMmpx",
       "sessionRecording": false
     }
-  },
-  "styling": {
-    "codeblocks": {
-      "theme": "css-variables"
-    }
   }
 }

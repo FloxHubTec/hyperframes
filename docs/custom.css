@@ -1501,30 +1501,6 @@ html:not(.dark) .hf-ve {
   /* Read by snippets that fall back to neutral greys. */
   --border-color: var(--hf-border-color);
   --code-block-background: var(--hf-code-bg);
-  /* Code colours are the browser editor's (packages/studio theme.css --color-code-*). */
-  --mint-foreground: var(--hf-heading);
-  --mint-background: var(--hf-code-bg);
-  --mint-token-keyword: oklch(0.509 0.211 329);
-  --mint-token-parameter: oklch(0.504 0.179 28);
-  --mint-token-function: oklch(0.492 0.193 263);
-  --mint-token-constant: oklch(0.495 0.13 50);
-  --mint-token-link: oklch(0.471 0.127 237);
-  --mint-token-comment: oklch(0.48 0.009 279);
-  --mint-token-string: oklch(0.468 0.142 143);
-  --mint-token-string-expression: oklch(0.468 0.142 143);
-  --mint-token-punctuation: var(--hf-text-secondary);
-}
-
-.dark,
-[data-theme="dark"] {
-  --mint-token-keyword: oklch(0.829 0.164 318);
-  --mint-token-parameter: oklch(0.856 0.145 17);
-  --mint-token-function: oklch(0.805 0.121 245);
-  --mint-token-constant: oklch(0.815 0.11 50);
-  --mint-token-link: oklch(0.793 0.092 206);
-  --mint-token-comment: oklch(0.806 0.03 262);
-  --mint-token-string: oklch(0.793 0.11 133);
-  --mint-token-string-expression: oklch(0.793 0.11 133);
 }
 
 /* The beige ground is darker than the page these steps were made for: in light mode
@@ -1615,4 +1591,81 @@ html.dark .hf-ve {
 
 #content-area tbody tr {
   border-bottom-color: var(--hf-ui-border) !important;
+}
+
+/* ── Code colours: the browser editor's (packages/studio theme.css --color-code-*) ──
+ * Mintlify highlights code with fixed themes (GitHub light, VS Code dark) and its hosted build ignores a custom
+ * code theme, so each of those themes' colours is mapped by role to the editor's colour for the same role. */
+html:not(.dark) pre span[style*="color: rgb(10, 48, 105)"] {
+  color: oklch(0.468 0.142 143) !important;
+}
+
+html:not(.dark) pre span[style*="color: rgb(207, 34, 46)"] {
+  color: oklch(0.509 0.211 329) !important;
+}
+
+html:not(.dark) pre span[style*="color: rgb(110, 119, 129)"] {
+  color: oklch(0.48 0.009 279) !important;
+}
+
+html:not(.dark) pre span[style*="color: rgb(130, 80, 223)"],
+html:not(.dark) pre span[style*="color: rgb(149, 56, 0)"] {
+  color: oklch(0.492 0.193 263) !important;
+}
+
+html:not(.dark) pre span[style*="color: rgb(5, 80, 174)"] {
+  color: oklch(0.495 0.13 50) !important;
+}
+
+html:not(.dark) pre span[style*="color: rgb(17, 99, 41)"] {
+  color: oklch(0.48 0.12 92) !important;
+}
+
+.dark pre span[style*="--shiki-dark: #CE9178"] {
+  color: oklch(0.793 0.11 133) !important;
+}
+
+.dark pre span[style*="--shiki-dark: #569CD6"] {
+  color: oklch(0.829 0.164 318) !important;
+}
+
+.dark pre span[style*="--shiki-dark: #DCDCAA"] {
+  color: oklch(0.805 0.121 245) !important;
+}
+
+.dark pre span[style*="--shiki-dark: #9CDCFE"] {
+  color: oklch(0.856 0.145 17) !important;
+}
+
+.dark pre span[style*="--shiki-dark: #6A9955"] {
+  color: oklch(0.806 0.03 262) !important;
+}
+
+.dark pre span[style*="--shiki-dark: #B5CEA8"],
+.dark pre span[style*="--shiki-dark: #4FC1FF"] {
+  color: oklch(0.815 0.11 50) !important;
+}
+
+.dark pre span[style*="--shiki-dark: #D7BA7D"] {
+  color: oklch(0.805 0.1 92) !important;
+}
+
+.dark pre span[style*="--shiki-dark: #808080"] {
+  color: var(--hf-text-tertiary) !important;
+}
+
+/* Code blocks sit on the code token (frosted cream in light mode, the Night field in dark), not the theme's own. */
+[class*="dark:bg-codeblock"],
+html.dark body .code-block-background,
+.code-block {
+  background-color: var(--hf-code-bg) !important;
+}
+
+pre.shiki {
+  background-color: transparent !important;
+}
+
+/* The fade that hides long lines under the copy button fades into the same code token. */
+.code-block-fade-overlay {
+  background-image: linear-gradient(to right, transparent, var(--hf-code-bg) 24px) !important;
 }
