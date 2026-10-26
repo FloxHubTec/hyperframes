@@ -3374,6 +3374,7 @@ async function executeRenderPipeline(input: {
     const {
       extractionResult,
       frameLookup,
+      toneMapVideosToSdr,
       videoReadinessSkipIds,
       videoMetadataHints,
       nativeHdrVideoIds,
@@ -4561,6 +4562,7 @@ async function executeRenderPipeline(input: {
             effectiveHdr,
             nativeHdrVideoIds,
             nativeHdrImageIds,
+            toneMapVideosToSdr,
             videoTransfers,
             imageTransfers,
             hdrImageSrcPaths,

@@ -286,6 +286,7 @@ mock.module("../../hdrCompositor.js", () => ({
 mock.module("./captureHdrResources.js", () => ({
   cleanupHdrVideoFrameSource: () => {},
   decodeHdrImageBuffers: () => new Map(),
+  findCssFilteredVideos: async () => [],
   extractHdrVideoFrames: async () => ({
     sources: new Map(),
     estimatedBytes: 0,

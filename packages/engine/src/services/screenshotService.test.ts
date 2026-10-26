@@ -917,6 +917,40 @@ describe("video-frame injection respects ancestor visibility", () => {
     }
   });
 
+  it("applyDomLayerMask hides a promoted overlay's children with it, except a layer shown on its own", async () => {
+    const { window, document } = parseHTML(
+      `<html><head></head><body>
+        <div id="host" data-start="0" data-duration="6">
+          <div id="overlay"><span id="plain">tint</span><div id="nested"><b id="deep">layer</b></div></div>
+        </div>
+      </body></html>`,
+    );
+    const visibilityOf = (id: string) =>
+      (document.getElementById(id) as HTMLElement).style.visibility || "";
+    Object.defineProperty(window, "getComputedStyle", {
+      configurable: true,
+      value: (el: Element) => ({
+        display: (el as HTMLElement).style.display || "block",
+        visibility: (el as HTMLElement).style.visibility || "visible",
+      }),
+    });
+
+    const teardown = installDomMaskGlobals({ window, document });
+    try {
+      await applyDomLayerMask(passthroughPage(), ["host", "nested"], ["overlay"]);
+      expect(visibilityOf("overlay")).toBe("hidden");
+      expect(visibilityOf("plain")).toBe("hidden");
+      expect(visibilityOf("nested")).toBe("");
+      expect(visibilityOf("deep")).toBe("");
+
+      await removeDomLayerMask(passthroughPage(), ["overlay"]);
+      expect(visibilityOf("overlay")).toBe("");
+      expect(visibilityOf("plain")).toBe("");
+    } finally {
+      teardown();
+    }
+  });
+
   it("removeDomLayerMask restores extraHideIds and render frames to previous visibility", async () => {
     const { window, document } = parseHTML(
       `<html><head></head><body>
