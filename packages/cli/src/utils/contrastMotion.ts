@@ -1,39 +1,28 @@
-export interface ContrastTweenWindow {
-  start: number;
-  end: number;
+export interface ContrastTweenState {
+  active: boolean;
   duration: number;
   repeat: number;
 }
 
 export interface ContrastMotionSample {
   opacity: number;
-  tweens: ContrastTweenWindow[];
+  tweens: ContrastTweenState[];
 }
 
 /** A repeating tween or one this long is set dressing (a camera drift, a pulse), not an entrance or exit. */
 const AMBIENT_TWEEN_SECONDS = 4;
-const EPSILON = 1e-6;
 
-function isAmbientTween(tween: ContrastTweenWindow): boolean {
+function isAmbientTween(tween: ContrastTweenState): boolean {
   return tween.repeat !== 0 || tween.duration >= AMBIENT_TWEEN_SECONDS;
 }
 
-/** True when a non-ambient tween on the text or an ancestor is running at `time`, or the text is not fully opaque. */
-export function measuredInMotion(sample: ContrastMotionSample, time: number): boolean {
+/** True when a non-ambient tween on the text or an ancestor is running at the current seek, or the text is not fully opaque. */
+export function measuredInMotion(sample: ContrastMotionSample): boolean {
   if (Math.round(sample.opacity * 1000) < 1000) return true;
-  return sample.tweens.some(
-    (tween) =>
-      !isAmbientTween(tween) && tween.start <= time + EPSILON && time < tween.end - EPSILON,
-  );
+  return sample.tweens.some((tween) => !isAmbientTween(tween) && tween.active);
 }
 
-/**
- * Runs in the page after `__contrastAuditPrepare` (serialized by puppeteer, so it is self-contained): for each
- * prepared candidate, in order, the GSAP tweens on its element or an ancestor, timed on the composition
- * timeline, and the element's opacity multiplied up its ancestors. Null when no tween with a duration targets
- * the element or an ancestor, which includes a page without GSAP.
- */
-// One serialized page function; its helpers cannot live outside it.
+// Serialized into the page: read prepared elements at the current seek without advancing GSAP.
 // fallow-ignore-next-line complexity
 export function readContrastMotion(): (ContrastMotionSample | null)[] {
   type Animation = {
@@ -42,17 +31,21 @@ export function readContrastMotion(): (ContrastMotionSample | null)[] {
     duration: () => number;
     totalDuration: () => number;
     repeat: () => number;
-    globalTime: (localTime: number) => number;
+    time: () => number;
+    startTime: () => number;
+    endTime: () => number;
+    timeScale: () => number;
+    paused: () => boolean;
     getChildren: (nested: boolean, tweens: boolean, timelines: boolean) => Animation[];
   };
   const restores: unknown = Reflect.get(window, "__contrastAuditRestores");
   const registry: unknown = Reflect.get(window, "__timelines");
   const timelines = Object.values(typeof registry === "object" && registry ? registry : {}).filter(
     (timeline): timeline is Animation =>
-      typeof timeline?.getChildren === "function" && typeof timeline.globalTime === "function",
+      typeof timeline?.getChildren === "function" && typeof timeline.time === "function",
   );
   const registered = new Set<Animation>(timelines);
-  const byTarget = new Map<Element, ContrastTweenWindow[]>();
+  const byTarget = new Map<Element, ContrastTweenState[]>();
 
   function nestedInAnother(timeline: Animation): boolean {
     for (let parent = timeline.parent; parent; parent = parent.parent) {
@@ -61,27 +54,37 @@ export function readContrastMotion(): (ContrastMotionSample | null)[] {
     return false;
   }
 
+  function activeInRoot(animation: Animation, root: Animation): boolean {
+    if (animation === root) return true;
+    const parent = animation.parent;
+    if (!parent || animation.paused() || animation.timeScale() === 0) return false;
+    const time = parent.time();
+    return (
+      animation.startTime() <= time + 1e-6 &&
+      time < animation.endTime() - 1e-6 &&
+      activeInRoot(parent, root)
+    );
+  }
+
   function addTweens(timeline: Animation): void {
-    const origin = timeline.globalTime(0);
     for (const tween of timeline.getChildren(true, true, false)) {
       const total = tween.totalDuration();
       if (!(total > 0)) continue;
-      const window = {
-        start: tween.globalTime(0) - origin,
-        end: tween.globalTime(total) - origin,
+      const state = {
+        active: activeInRoot(tween, timeline),
         duration: tween.duration(),
         repeat: tween.repeat(),
       };
       for (const target of tween.targets()) {
         if (target instanceof Element)
-          byTarget.set(target, [...(byTarget.get(target) ?? []), window]);
+          byTarget.set(target, [...(byTarget.get(target) ?? []), state]);
       }
     }
   }
 
   function sampleOf(element: unknown): ContrastMotionSample | null {
     if (!(element instanceof Element)) return null;
-    const tweens: ContrastTweenWindow[] = [];
+    const tweens: ContrastTweenState[] = [];
     let opacity = 1;
     for (let node: Element | null = element; node; node = node.parentElement) {
       tweens.push(...(byTarget.get(node) ?? []));

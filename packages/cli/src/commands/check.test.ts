@@ -461,6 +461,9 @@ describe("skip contrast in motion", () => {
     });
     vi.stubEnv("HYPERFRAMES_CHECK_SKIP_CONTRAST_IN_MOTION", "1");
     expect(await parsedOptions([])).toMatchObject({ skipContrastInMotion: true });
+    expect(await parsedOptions(["--no-skip-contrast-in-motion"])).toMatchObject({
+      skipContrastInMotion: true,
+    });
     vi.stubEnv("HYPERFRAMES_CHECK_SKIP_CONTRAST_IN_MOTION", "0");
     expect(await parsedOptions([])).not.toHaveProperty("skipContrastInMotion");
   });

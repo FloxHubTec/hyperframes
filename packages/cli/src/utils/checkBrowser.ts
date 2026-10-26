@@ -1851,8 +1851,7 @@ function joinContrastEntries(
     );
     const match = index >= 0 ? remaining.splice(index, 1)[0] : undefined;
     if (!match) return [];
-    if (!entry.wcagAA && match.motion && measuredInMotion(match.motion, match.anchor.time))
-      return [];
+    if (!entry.wcagAA && match.motion && measuredInMotion(match.motion)) return [];
     return [{ ...entry, ...match.anchor }];
   });
 }
