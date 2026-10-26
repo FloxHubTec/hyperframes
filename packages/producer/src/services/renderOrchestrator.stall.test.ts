@@ -16,6 +16,7 @@ const capture = vi.hoisted(() => ({
   hdrSignal: undefined as AbortSignal | undefined,
   workerCount: 4,
   shaderTransitions: false,
+  blocked: 0,
 }));
 
 type ScriptedFrame = { dir: string; index: number };
@@ -44,13 +45,27 @@ function writeFrame(frame: ScriptedFrame, extension: string): void {
 }
 
 function neverSettlesUntilAborted(signal: AbortSignal): Promise<never> {
-  return new Promise((_, reject) =>
-    signal?.addEventListener("abort", () => reject(new Error("worker cancelled")), { once: true }),
+  return block(
+    new Promise<never>((_, reject) =>
+      signal?.addEventListener("abort", () => reject(new Error("worker cancelled")), {
+        once: true,
+      }),
+    ),
   );
 }
 
+/** Holds the scripted attempt on `pending`; fake time only advances while an attempt is held. */
+async function block<T>(pending: Promise<T>): Promise<T> {
+  capture.blocked += 1;
+  try {
+    return await pending;
+  } finally {
+    capture.blocked -= 1;
+  }
+}
+
 function wait(ms: number): Promise<unknown> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return block(new Promise((resolve) => setTimeout(resolve, ms)));
 }
 
 async function landFrame(
@@ -176,7 +191,7 @@ vi.mock("./render/captureCost.js", async (importOriginal) => ({
 vi.mock("./render/stages/captureHdrStage.js", () => ({
   runCaptureHdrStage: (input: { abortSignal: AbortSignal }) => {
     capture.hdrSignal = input.abortSignal;
-    return new Promise<never>(() => {});
+    return block(new Promise<never>(() => {}));
   },
 }));
 vi.mock("./render/stages/encodeStage.js", () => ({
@@ -203,6 +218,7 @@ beforeEach(() => {
   capture.hdrSignal = undefined;
   capture.shaderTransitions = false;
   capture.workerCount = 4;
+  capture.blocked = 0;
   vi.useFakeTimers({
     toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"],
   });
@@ -257,10 +273,26 @@ async function settled(outcome: () => unknown): Promise<unknown> {
   return outcome();
 }
 
-/** Advances fake time a second at a time, letting real file IO run between steps. */
+/** Real file IO outlasts any fixed number of turns on a slow host: wait, within a budget, until an attempt is held. */
+async function untilHeld(outcome: () => unknown, budget: { ms: number }): Promise<void> {
+  const started = performance.now();
+  while (
+    outcome() === PENDING &&
+    capture.blocked === 0 &&
+    performance.now() - started < budget.ms
+  ) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  budget.ms -= performance.now() - started;
+}
+
+/** Advances fake time a second at a time while the scripted attempt waits, with real IO between steps. */
 async function runFor(ms: number, outcome: () => unknown): Promise<void> {
+  const budget = { ms: 1_000 };
+  await untilHeld(outcome, budget);
   for (let elapsed = 0; elapsed < ms && outcome() === PENDING; elapsed += 1_000) {
     await ioTurns();
+    await untilHeld(outcome, budget);
     await vi.advanceTimersByTimeAsync(1_000);
   }
   await ioTurns();
