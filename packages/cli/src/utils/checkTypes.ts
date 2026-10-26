@@ -22,6 +22,8 @@ export interface CheckOptions {
   tolerance: number;
   timeout: number;
   contrast: boolean;
+  /** `--skip-contrast-in-motion` or HYPERFRAMES_CHECK_SKIP_CONTRAST_IN_MOTION. */
+  skipContrastInMotion?: boolean;
   strict: boolean;
   snapshots: boolean;
   captionZone?: CaptionZoneOptions;
@@ -264,9 +266,11 @@ export interface CheckAuditDriver {
     livenessScopes: string[],
   ): Promise<MotionFrame>;
   anchorMotionIssues(issues: LayoutIssue[]): Promise<AnchoredLayoutIssue[]>;
+  /** `skipInMotion` drops failures measured while GSAP moves the text or an ancestor, or at partial opacity. */
   collectContrast(
     time: number,
     snapshotAnnotations?: CheckAnnotationBox[],
+    skipInMotion?: boolean,
   ): Promise<ContrastCapture>;
   /** Craft section: text, stillness and paint at the current seek. A driver without it skips the section. */
   collectCraftFrame?(time: number): Promise<CraftFrame>;

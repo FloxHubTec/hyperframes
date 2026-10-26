@@ -432,6 +432,53 @@ describe("check --prepare-media", () => {
   });
 });
 
+describe("skip contrast in motion", () => {
+  async function parsedOptions(rawArgs: string[]): Promise<CheckOptions | undefined> {
+    const { report } = await runScenario(fakeDriver());
+    const runPipeline = vi.fn(async (_project: ProjectDir, _options: CheckOptions) => report);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await runCommand(
+      createCheckCommand({
+        resolveProject: () => PROJECT,
+        runPipeline,
+        prepareMedia: vi.fn(async () => []),
+        withMeta: (value) => value,
+      }),
+      { rawArgs: ["--json", ...rawArgs] },
+    );
+    return runPipeline.mock.calls[0]?.[1];
+  }
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("is off unless the flag or the environment turns it on", async () => {
+    vi.stubEnv("HYPERFRAMES_CHECK_SKIP_CONTRAST_IN_MOTION", "");
+    expect(await parsedOptions([])).not.toHaveProperty("skipContrastInMotion");
+    expect(await parsedOptions(["--skip-contrast-in-motion"])).toMatchObject({
+      skipContrastInMotion: true,
+    });
+    vi.stubEnv("HYPERFRAMES_CHECK_SKIP_CONTRAST_IN_MOTION", "1");
+    expect(await parsedOptions([])).toMatchObject({ skipContrastInMotion: true });
+    vi.stubEnv("HYPERFRAMES_CHECK_SKIP_CONTRAST_IN_MOTION", "0");
+    expect(await parsedOptions([])).not.toHaveProperty("skipContrastInMotion");
+  });
+
+  it("asks the driver to skip in-motion contrast only when enabled", async () => {
+    const off = fakeDriver();
+    await runScenario(off);
+    for (const call of vi.mocked(off.collectContrast).mock.calls) expect(call).toHaveLength(1);
+
+    const on = fakeDriver();
+    await runScenario(on, { skipContrastInMotion: true });
+    expect(vi.mocked(on.collectContrast).mock.calls.length).toBeGreaterThan(0);
+    for (const call of vi.mocked(on.collectContrast).mock.calls) {
+      expect(call).toEqual([expect.any(Number), undefined, true]);
+    }
+  });
+});
+
 it("parses the caption-zone grammar and enables the frame gate", async () => {
   const { report } = await runScenario(fakeDriver());
   const runPipeline = vi.fn(async (_project: ProjectDir, _options: CheckOptions) => report);
