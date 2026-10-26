@@ -14,6 +14,10 @@ import * as manager from "./manager.js";
 import * as linuxDeps from "./linuxDeps.js";
 
 const runProcess = vi.hoisted(() => vi.fn());
+const launchManagedBrowser = vi.hoisted(() => vi.fn());
+const closeManagedBrowser = vi.hoisted(() => vi.fn());
+
+vi.mock("./launch.js", () => ({ launchManagedBrowser, closeManagedBrowser }));
 
 vi.mock("../utils/cancellableProcess.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../utils/cancellableProcess.js")>();
@@ -209,6 +213,53 @@ describe("runEnvironmentChecks", () => {
     });
     expect(result.browserVersionMajor).toBe(7);
     expect(result.browserInstall).toMatchObject({ pathAscii: true });
+  });
+
+  describe("on Windows", () => {
+    const realPlatform = process.platform;
+    beforeEach(() => {
+      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+      launchManagedBrowser.mockReset();
+      closeManagedBrowser.mockReset();
+    });
+    afterEach(() => {
+      Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
+    });
+
+    it("takes Chrome's version from a launch, not from a `--version` run that exits 21", async () => {
+      runProcess.mockImplementation((binaryPath: string, args: string[]) => {
+        if (args[0] === "--version" && binaryPath === process.execPath)
+          throw Object.assign(new Error("exit 21"), { status: 21 });
+        return Promise.resolve({ stdout: "ffmpeg version 7.1.1\n", stderr: "" });
+      });
+      const browser = { version: async () => "HeadlessChrome/131.0.6778.85" };
+      launchManagedBrowser.mockResolvedValue(browser);
+
+      const result = await runEnvironmentChecks({
+        includeBrowser: true,
+        browserPath: process.execPath,
+      });
+
+      expect(result.outcomes.find((outcome) => outcome.name === "Chrome")).toMatchObject({
+        ok: true,
+        versionMajor: 131,
+      });
+      expect(closeManagedBrowser).toHaveBeenCalledWith(browser);
+    });
+
+    it("reports Chrome cannot start when the launch itself fails", async () => {
+      launchManagedBrowser.mockRejectedValue(Object.assign(new Error("boom"), { code: "ENOENT" }));
+
+      const result = await runEnvironmentChecks({
+        includeBrowser: true,
+        browserPath: process.execPath,
+      });
+
+      expect(result.outcomes.find((outcome) => outcome.name === "Chrome")).toMatchObject({
+        ok: false,
+        title: "Chrome cannot start",
+      });
+    });
   });
 
   it("reports Chrome as not found (no throw) when browser discovery throws on a corrupt cache", async () => {

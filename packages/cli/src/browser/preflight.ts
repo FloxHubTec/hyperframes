@@ -15,6 +15,7 @@ import {
   distroLabel,
   parseLddMissingLibs,
 } from "./linuxDeps.js";
+import { closeManagedBrowser, launchManagedBrowser } from "./launch.js";
 import { getFreeDiskMb } from "../telemetry/system.js";
 import { runCancellableProcess } from "../utils/cancellableProcess.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
@@ -255,6 +256,33 @@ function chromeLaunchFailureDetails(error: unknown): string {
     .join(", ");
 }
 
+/**
+ * chrome.exe is a GUI-subsystem binary: `--version` prints nothing and can exit non-zero (21)
+ * on a Chrome that renders fine. On Windows ask the browser capture launches instead.
+ */
+async function chromeVersionBanner(executablePath: string, signal?: AbortSignal): Promise<string> {
+  if (process.platform !== "win32") {
+    const { stdout } = await runCancellableProcess(executablePath, ["--version"], {
+      signal,
+      timeoutMs: FIRST_LAUNCH_TIMEOUT_MS,
+      maxBufferBytes: 64 * 1024,
+    });
+    return stdout;
+  }
+  const puppeteer = await import("puppeteer-core");
+  const browser = await launchManagedBrowser(puppeteer.default, {
+    headless: true,
+    executablePath,
+    timeout: FIRST_LAUNCH_TIMEOUT_MS,
+    signal,
+  });
+  try {
+    return await browser.version();
+  } finally {
+    await closeManagedBrowser(browser);
+  }
+}
+
 async function chromeLaunchOutcome(
   executablePath: string,
   found: EnvironmentCheckOutcome,
@@ -263,12 +291,10 @@ async function chromeLaunchOutcome(
   const libraries = await chromeSharedLibOutcome(executablePath, found, signal);
   if (!libraries.ok) return libraries;
   try {
-    const { stdout } = await runCancellableProcess(executablePath, ["--version"], {
-      signal,
-      timeoutMs: FIRST_LAUNCH_TIMEOUT_MS,
-      maxBufferBytes: 64 * 1024,
-    });
-    return { ...found, versionMajor: extractMajorVersion(stdout) };
+    return {
+      ...found,
+      versionMajor: extractMajorVersion(await chromeVersionBanner(executablePath, signal)),
+    };
   } catch (error) {
     if (signal?.aborted) signal.throwIfAborted();
     const details = chromeLaunchFailureDetails(error);
@@ -277,7 +303,7 @@ async function chromeLaunchOutcome(
       ok: false,
       level: "error",
       title: "Chrome cannot start",
-      detail: `Failed to run "${executablePath}" --version${details ? ` (${details})` : ""}.`,
+      detail: `Failed to start "${executablePath}"${details ? ` (${details})` : ""}.`,
       hint:
         "Select a working Chrome/Chromium binary for this OS and architecture with " +
         "HYPERFRAMES_BROWSER_PATH, or reinstall with: npx hyperframes browser ensure --force",
