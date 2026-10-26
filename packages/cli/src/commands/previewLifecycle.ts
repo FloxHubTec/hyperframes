@@ -11,7 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { devNull, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import {
@@ -234,8 +234,7 @@ async function stopProcess(pid: number): Promise<void> {
 
 const delay = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
 
-/** The preview's log is a convenience: a folder that refuses it costs the log, never the preview. */
-function openLog(logPath: string): number | undefined {
+function openLog(logPath: string): number {
   try {
     mkdirSync(dirname(logPath), { recursive: true });
     return openSync(logPath, "a", 0o600);
@@ -243,7 +242,7 @@ function openLog(logPath: string): number | undefined {
     console.warn(
       `[hyperframes] background preview log not written: cannot open ${logPath} (${error})`,
     );
-    return undefined;
+    return openSync(devNull, "a");
   }
 }
 
@@ -268,12 +267,12 @@ function spawnDetachedPreview(
       {
         detached: true,
         windowsHide: true,
-        stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
+        stdio: ["ignore", logFd, logFd],
         env: process.env,
       },
     );
   } finally {
-    if (logFd !== undefined) closeSync(logFd);
+    closeSync(logFd);
   }
   if (!child.pid) throw new Error("background preview child did not report a PID");
   let exit: string | null = null;
