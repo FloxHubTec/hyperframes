@@ -142,7 +142,7 @@ export interface CheckFindingCropRequest {
   bbox: CheckBbox;
 }
 
-/** One plain full-frame PNG for `check --finding-frames`, shared by every finding framed at `time`. */
+/** One plain full-frame PNG for `check-review.findingFrames`, shared by every finding framed at `time`. */
 export interface CheckFindingFrameRequest {
   time: number;
   filename: string;

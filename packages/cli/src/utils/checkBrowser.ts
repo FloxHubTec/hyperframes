@@ -583,7 +583,7 @@ export async function captureFindingCrops(
   });
 }
 
-/** `check --finding-frames`: one plain full frame per distinct finding time. */
+/** `check-review.findingFrames`: one plain full frame per distinct finding time. */
 export async function captureFindingFrames(
   project: ProjectDir,
   options: CheckOptions,
