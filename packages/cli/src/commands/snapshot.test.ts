@@ -865,6 +865,7 @@ describe("extractVideoFrameToBuffer", () => {
   });
 
   it.skipIf(noProbe)("selects frames in a TS whose timestamps start below zero", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-negative-"));
     try {
       const clip = join(dir, "clip.ts");
@@ -908,7 +909,10 @@ describe("extractVideoFrameToBuffer", () => {
         [1, 30],
       ] as const)
         await frameAt(time, index);
+      // Colours cannot be matched to render without ffprobe: said once, not per frame.
+      expect(warn.mock.calls.filter(([m]) => /colours may differ/.test(String(m)))).toHaveLength(1);
     } finally {
+      warn.mockRestore();
       vi.unstubAllEnvs();
       rmSync(dir, { recursive: true, force: true });
     }

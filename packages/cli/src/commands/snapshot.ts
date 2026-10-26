@@ -3,7 +3,6 @@ import {
   buildZeroDurationDiagnostic,
   evaluateHfDiagnostic,
   extractMediaMetadata,
-  isHdrColorSpace,
   sdrCanvasColourFilters,
 } from "@hyperframes/engine";
 import type { Page } from "puppeteer-core";
@@ -397,6 +396,17 @@ async function probeSeekLanding(
   }
 }
 
+let warnedColourUnknown = false;
+
+/** Render needs ffprobe for the source's colour space; without it snapshot cannot match render's colours. */
+function warnColourUnknownOnce(): void {
+  if (warnedColourUnknown) return;
+  warnedColourUnknown = true;
+  console.warn(
+    `   ${c.warn("⚠")} snapshot colours may differ from render: install ffmpeg/ffprobe so video colours can be matched`,
+  );
+}
+
 class FrameExtractTimeoutError extends Error {}
 
 export async function extractVideoFrameToBuffer(
@@ -423,11 +433,9 @@ export async function extractVideoFrameToBuffer(
     const filters: string[] = [];
     if (seek.select !== undefined) filters.push(`select=gte(t-start_t\\,${seek.select})`);
     // Render retags SDR footage the same way, so the injected frame matches the exported one.
-    // Without ffprobe the source's colour space is unknown, so the frame is left as decoded.
     const metadata = findFFprobe() ? await extractMediaMetadata(videoPath) : null;
-    if (metadata && !isHdrColorSpace(metadata.colorSpace)) {
-      filters.push(...sdrCanvasColourFilters(metadata));
-    }
+    if (metadata) filters.push(...sdrCanvasColourFilters(metadata));
+    else warnColourUnknownOnce();
     // Shrink so the short side still covers the displayed box at any rotation or fit; never enlarge.
     if (displayedPixels > 0) {
       filters.push(
