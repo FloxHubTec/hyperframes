@@ -398,7 +398,6 @@ async function probeSeekLanding(
 
 let warnedColourUnknown = false;
 
-/** Render needs ffprobe for the source's colour space; without it snapshot cannot match render's colours. */
 function warnColourUnknownOnce(): void {
   if (warnedColourUnknown) return;
   warnedColourUnknown = true;
@@ -432,7 +431,6 @@ export async function extractVideoFrameToBuffer(
     args.push("-i", videoPath, "-map", "0:v:0");
     const filters: string[] = [];
     if (seek.select !== undefined) filters.push(`select=gte(t-start_t\\,${seek.select})`);
-    // Render retags SDR footage the same way, so the injected frame matches the exported one.
     const metadata = findFFprobe() ? await extractMediaMetadata(videoPath) : null;
     if (metadata) filters.push(...sdrCanvasColourFilters(metadata));
     else warnColourUnknownOnce();

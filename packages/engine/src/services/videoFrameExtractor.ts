@@ -907,7 +907,6 @@ function chromeGuessForUntaggedMatrix(metadata: VideoMetadata): string[] {
   return [`setparams=colorspace=${hd ? "bt709" : "smpte170m"}`];
 }
 
-/** Tags a decoded frame with the colours Chrome shows for it; HDR yields none unless tone-mapped first. */
 export function sdrCanvasColourFilters(metadata: VideoMetadata, toneMappedToSdr = false): string[] {
   if (!isHdrColorSpaceUtil(metadata.colorSpace)) {
     return [...chromeGuessForUntaggedMatrix(metadata), SDR_CANVAS_PASSTHROUGH_FILTER];
