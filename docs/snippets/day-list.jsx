@@ -56,9 +56,10 @@ export const DayList = ({ part }) => {
     query.addEventListener("change", follow);
     return () => query.removeEventListener("change", follow);
   }, []);
-  const hover = (event, on, n) => {
+  const hover = (event, on) => {
     const video = event.currentTarget.querySelector("video");
-    if (!video || chosen === n) return;
+    // While a film is chosen, other rows don't preview: one film plays at a time.
+    if (!video || chosen !== null) return;
     if (on && !reduced) {
       video.dataset.hover = "1";
       video.play().catch(() => {});
@@ -74,16 +75,18 @@ export const DayList = ({ part }) => {
     if (chosen === n && !video.paused) {
       video.pause();
       setChosen(null);
-    } else {
-      delete video.dataset.hover;
-      video.play().catch(() => {});
-      setChosen(n);
+      return;
     }
+    // Choosing a film stops the one chosen before, so each button always matches its film.
+    for (const v of listRef.current?.querySelectorAll("video") ?? []) if (v !== video) v.pause();
+    delete video.dataset.hover;
+    video.play().catch(() => {});
+    setChosen(n);
   };
   return (
     <ol className="hf-days not-prose" ref={listRef}>
       {days.filter((d) => d[0] === part).map(([, n, title, post, account, file, line]) => (
-        <li key={n} className="hf-day" onMouseEnter={(e) => hover(e, true, n)} onMouseLeave={(e) => hover(e, false, n)}>
+        <li key={n} className="hf-day" onMouseEnter={(e) => hover(e, true)} onMouseLeave={(e) => hover(e, false)}>
           <span className="hf-day-n">{String(n).padStart(2, "0")}</span>
           <div className="hf-day-text">
             <a className="hf-day-title" href={`https://x.com/${account}/status/${post}`} target="_blank" rel="noopener">{title}</a>
