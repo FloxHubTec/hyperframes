@@ -1,6 +1,12 @@
-import { PREVIEW_PROXY_PROGRESS_HEADER } from "../previewProxyBox";
+import { PREVIEW_PROXY_PROGRESS_HEADER, PREVIEW_PROXY_RETRY_PARAM } from "../previewProxyBox";
 
 const MAX_FAILED_ASKS = 3;
+
+function withoutRetryFlag(href: string): string {
+  const url = new URL(href, document.baseURI);
+  url.searchParams.delete(PREVIEW_PROXY_RETRY_PARAM);
+  return url.href;
+}
 
 /** Asks for one byte of a `?hf-proxy=` URL until it is served, after each Retry-After: while the
  * server answers 202 (copy being made) or 503 (queue full), and after up to 3 failed asks. */
@@ -10,10 +16,12 @@ export async function waitForServedProxy(
   onProgress?: (fraction: number) => void,
 ): Promise<boolean> {
   let failed = 0;
+  let ask = href;
   while (live()) {
-    const res = await fetch(href, { headers: { Range: "bytes=0-0" }, cache: "no-store" }).catch(
+    const res = await fetch(ask, { headers: { Range: "bytes=0-0" }, cache: "no-store" }).catch(
       () => null,
     );
+    ask = withoutRetryFlag(href);
     void res?.body?.cancel().catch(() => {});
     const pending = res?.status === 202 || res?.status === 503;
     const reached = res?.status === 202 ? res.headers.get(PREVIEW_PROXY_PROGRESS_HEADER) : null;

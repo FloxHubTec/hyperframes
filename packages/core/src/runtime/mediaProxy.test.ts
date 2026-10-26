@@ -1076,6 +1076,25 @@ describe("preview quality: lighter copies of heavy files", () => {
     });
   });
 
+  it("sends the retry flag on the first ask only, so a copy that fails again is not remade on every poll", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => new Response("no", { status: 502 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { video, setPreviewQuality, retryPreviewCopies } = await stage({ "/video.mp4": HEAVY });
+    video();
+    setPreviewQuality(0.5);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    fetchMock.mockClear();
+    retryPreviewCopies();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const asked = fetchMock.mock.calls.map(([href]) => String(href));
+    expect(asked.length).toBeGreaterThan(1);
+    expect(asked[0]).toContain("hf-proxy-retry=1");
+    expect(asked.slice(1).some((href) => href.includes("hf-proxy-retry"))).toBe(false);
+  });
+
   it("ignores a level that is not one of the four", async () => {
     const { video, setPreviewQuality } = await stage({ "/video.mp4": HEAVY });
     const el = video();
