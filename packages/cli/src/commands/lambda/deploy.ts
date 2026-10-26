@@ -13,7 +13,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { c } from "../../ui/colors.js";
 import { stagePrebuiltHandler } from "./prebuiltHandler.js";
-import { fetchStackOutputs, locateSamTemplate, samDeploy } from "./sam.js";
+import { fetchStackOutputs, locateSamTemplate, samDeploy, warmFunction } from "./sam.js";
 import { repoRoot } from "./repoRoot.js";
 import { DEFAULT_STACK_NAME, readStackOutputs, writeStackOutputs } from "./state.js";
 import { pushVideoImage, type VideoArch } from "./videoImage.js";
@@ -29,6 +29,7 @@ export interface DeployArgs {
   videoArch: VideoArch;
   /** Override the handler-ZIP rebuild step. Useful for CI runs that already built it. */
   skipBuild: boolean;
+  warm: boolean;
 }
 
 const DEFAULT_REGION = "us-east-1";
@@ -44,6 +45,7 @@ export async function runDeploy(args: Partial<DeployArgs> = {}): Promise<void> {
     lambdaMemoryMb: args.lambdaMemoryMb ?? DEFAULT_MEMORY_MB,
     videoArch: args.videoArch ?? "arm64",
     skipBuild: args.skipBuild ?? false,
+    warm: args.warm ?? true,
   };
 
   if (resolved.videoArch === "arm64" && resolved.chromeSource !== "sparticuz") {
@@ -95,6 +97,19 @@ export async function runDeploy(args: Partial<DeployArgs> = {}): Promise<void> {
     videoRepository: video?.repositoryName ?? readStackOutputs(resolved.stackName)?.videoRepository,
     deployedAt: new Date().toISOString(),
   });
+
+  if (resolved.warm && outputs.videoFunctionName) {
+    console.log(c.dim("→ Warming up the video function"));
+    try {
+      warmFunction({
+        functionName: outputs.videoFunctionName,
+        region: resolved.region,
+        awsProfile: resolved.awsProfile,
+      });
+    } catch (error) {
+      console.log(c.warn(`Warm-up skipped, the deploy is fine: ${(error as Error).message}`));
+    }
+  }
 
   if (resolved.reservedConcurrency === -1) {
     console.log(
