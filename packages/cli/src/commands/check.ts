@@ -375,7 +375,6 @@ async function runPrepareMedia(
   setCommandExitCode(failed.length === 0 ? 0 : 1);
 }
 
-/** Review switches a harness turns on through HF_TOOL_CONTEXT's `check-review` capability. */
 function checkReview(): ToolContext["checkReview"] {
   return readToolContext().checkReview;
 }
