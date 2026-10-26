@@ -221,15 +221,9 @@ export interface RenderChunkOptions {
    * this many, one browser per 20 frames; never lowers it.
    */
   maxCaptureWorkers?: number;
-  /**
-   * Round-robin the chunk's frames across the capture browsers while the encoder runs, which
-   * shortens wall time but costs CPU. Set it where wall time is billed (Lambda); the default is
-   * contiguous ranges, which bill the least CPU.
-   */
   interleaveCapture?: boolean;
 }
 
-/** Round-robin capture only feeds the overlapped encoder, and only for a caller that bills wall time. */
 export function interleavesCapture(overlapping: boolean, options?: RenderChunkOptions): boolean {
   return overlapping && options?.interleaveCapture === true;
 }
