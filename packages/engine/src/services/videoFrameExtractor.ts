@@ -907,6 +907,12 @@ function chromeGuessForUntaggedMatrix(metadata: VideoMetadata): string[] {
   return [`setparams=colorspace=${hd ? "bt709" : "smpte170m"}`];
 }
 
+/** Tags an SDR source's decoded frame with the colours Chrome shows for it; render and snapshot share it. */
+export function sdrCanvasColourFilters(metadata: VideoMetadata): string[] {
+  const isHdr = isHdrColorSpaceUtil(metadata.colorSpace);
+  return [...(isHdr ? [] : chromeGuessForUntaggedMatrix(metadata)), SDR_CANVAS_PASSTHROUGH_FILTER];
+}
+
 /**
  * Longest stretch of output one ffmpeg process extracts; longer ranges split into segments
  * that run side by side. Segments sample the same absolute times as a single pass, so their
@@ -1153,10 +1159,7 @@ async function extractVideoFramesRangeUnredacted(
     vfFilters.push(hdrToSdrToneMapFilter(metadata.colorSpace ?? {}, frameColour));
   }
   if (toneMappedToSdr || (!isHdr && !options.sdrToHdrTransfer)) {
-    vfFilters.push(
-      ...(isHdr ? [] : chromeGuessForUntaggedMatrix(metadata)),
-      SDR_CANVAS_PASSTHROUGH_FILTER,
-    );
+    vfFilters.push(...sdrCanvasColourFilters(metadata));
     if (format === "jpg") {
       if (options.shownBox) vfFilters.push(halveToCoverScaleFilter(options.shownBox));
       vfFilters.push(SDR_JPEG_AS_BT601_FULL_RANGE_FILTER);

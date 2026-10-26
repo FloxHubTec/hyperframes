@@ -2,6 +2,9 @@ import {
   DEFAULT_CONFIG,
   buildZeroDurationDiagnostic,
   evaluateHfDiagnostic,
+  extractMediaMetadata,
+  isHdrColorSpace,
+  sdrCanvasColourFilters,
 } from "@hyperframes/engine";
 import type { Page } from "puppeteer-core";
 import { reportArtifacts } from "../utils/toolContext.js";
@@ -419,6 +422,12 @@ export async function extractVideoFrameToBuffer(
     args.push("-i", videoPath, "-map", "0:v:0");
     const filters: string[] = [];
     if (seek.select !== undefined) filters.push(`select=gte(t-start_t\\,${seek.select})`);
+    // Render retags SDR footage the same way, so the injected frame matches the exported one.
+    // Without ffprobe the source's colour space is unknown, so the frame is left as decoded.
+    const metadata = findFFprobe() ? await extractMediaMetadata(videoPath) : null;
+    if (metadata && !isHdrColorSpace(metadata.colorSpace)) {
+      filters.push(...sdrCanvasColourFilters(metadata));
+    }
     // Shrink so the short side still covers the displayed box at any rotation or fit; never enlarge.
     if (displayedPixels > 0) {
       filters.push(
