@@ -69,6 +69,9 @@ describe.skipIf(!ffmpeg)("inspectAudio", () => {
   wav("tone.wav", 3, tone);
   wav("silent.wav", 3, silent);
   wav("late.wav", 4, lateTone(2.5));
+  // Long enough to be sampled at spots first; sound only between the spots.
+  wav("long-silent.wav", 20, silent);
+  wav("long-gap.wav", 20, (t) => (t > 5 && t < 6 ? tone(t) : 0));
   // Not audio at all: the render's audio probe rejects it and the whole mix fails.
   writeFileSync(join(dir, "notes.wav"), "RIFF but not really a wave file");
   // A 1x1 PNG: it probes, but as a still image, so render refuses it as an <audio> source.
@@ -156,6 +159,13 @@ describe.skipIf(!ffmpeg)("inspectAudio", () => {
       media([clip("silent.wav", { id: "vo-2" })], [], bundled),
     );
     expect(finding).toMatchObject({ selector: "#vo-2", sourceFile: "compositions/scene-2.html" });
+  });
+
+  it("only calls a long clip silent after reading all of it", async () => {
+    expect(await codes(media([clip("long-silent.wav", { end: 20 })]))).toEqual([
+      "audio_clip_silent:#long-silent-wav",
+    ]);
+    expect(await codes(media([clip("long-gap.wav", { end: 20 })]))).toEqual([]);
   });
 
   it("judges only the part of the file the clip plays", async () => {

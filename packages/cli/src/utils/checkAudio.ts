@@ -29,6 +29,9 @@ export interface AudioCheckDependencies {
 const SILENCE_SAMPLE_RATE = 8_000;
 /** The silence measure's last analysis window can stop short of the decoded end. */
 const EDGE_SECONDS = 0.02;
+/** A long clip is first sampled at a few short spots; sound in any one ends the decode. */
+const SPOT_SECONDS = 1;
+const SPOTS = 3;
 const PROBE_CONCURRENCY = 4;
 
 const DEFAULT_DEPENDENCIES: AudioCheckDependencies = {
@@ -41,27 +44,37 @@ const DEFAULT_DEPENDENCIES: AudioCheckDependencies = {
   probeAudio: (path) => extractAudioMetadata(path),
   videoHasAudio: async (path) => (await extractMediaMetadata(path)).hasAudio,
   async isSilent(path, from, seconds, probed) {
-    const decoded = await decodeAudio(
-      path,
-      { from, seconds },
-      {
-        sampleRate: probed.sampleRate,
-        channels: probed.channels,
-        duration: probed.durationSeconds,
-      },
-      { mono: true, sampleRate: SILENCE_SAMPLE_RATE },
-    );
-    const samples = decoded?.signal.channels[0]?.length ?? 0;
-    if (!decoded || samples === 0) return true;
-    const [quiet, ...rest] = silence(decoded.signal);
-    return (
-      !!quiet &&
-      rest.length === 0 &&
-      quiet.start === 0 &&
-      quiet.end >= samples / SILENCE_SAMPLE_RATE - EDGE_SECONDS
-    );
+    if (seconds > SPOT_SECONDS * SPOTS) {
+      const step = (seconds - SPOT_SECONDS) / (SPOTS - 1);
+      for (let spot = 0; spot < SPOTS; spot++)
+        if (!(await silentPart(path, from + spot * step, SPOT_SECONDS, probed))) return false;
+    }
+    return silentPart(path, from, seconds, probed);
   },
 };
+
+async function silentPart(
+  path: string,
+  from: number,
+  seconds: number,
+  probed: AudioMetadata,
+): Promise<boolean> {
+  const decoded = await decodeAudio(
+    path,
+    { from, seconds },
+    { sampleRate: probed.sampleRate, channels: probed.channels, duration: probed.durationSeconds },
+    { mono: true, sampleRate: SILENCE_SAMPLE_RATE },
+  );
+  const samples = decoded?.signal.channels[0]?.length ?? 0;
+  if (!decoded || samples === 0) return true;
+  const [quiet, ...rest] = silence(decoded.signal);
+  return (
+    !!quiet &&
+    rest.length === 0 &&
+    quiet.start === 0 &&
+    quiet.end >= samples / SILENCE_SAMPLE_RATE - EDGE_SECONDS
+  );
+}
 
 /** Findings for the clips the render mixes: unreadable source, start past the file's end, silent
  * played part; or a film with no sound at all. */
