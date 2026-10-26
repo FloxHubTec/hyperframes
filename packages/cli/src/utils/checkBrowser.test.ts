@@ -2021,6 +2021,108 @@ describe("finding frame capture", () => {
     }
   });
 
+  it.each(["prepare", "ready"] as const)(
+    "does not capture after cancellation during inspector %s",
+    async (stage) => {
+      const dir = mkdtempSync(join(tmpdir(), "finding-inspect-setup-abort-"));
+      const deadline = new CheckDeadline();
+      const page = Object.assign(fakePage(), {
+        evaluateOnNewDocument: vi.fn(async () => undefined),
+      });
+      installSessionMock(page);
+      const inspect = vi.fn();
+      mocks.prepareFindingInspector.mockImplementationOnce(async () => {
+        if (stage === "prepare") deadline.stop("SIGTERM");
+        return {
+          html: "<html>inspected</html>",
+          ready: async () => {
+            deadline.stop("SIGTERM");
+          },
+          inspect,
+        };
+      });
+      const launches = vi.mocked(openSettledCompositionPage).mock.calls.length;
+      const closes = mocks.serverClose.mock.calls.length;
+      try {
+        const result = await deadline
+          .run(() =>
+            captureFindingFrames(
+              { ...PROJECT, dir },
+              DEFAULT_CHECK_OPTIONS,
+              [{ time: 1, filename: "first.png", inspect: [{ selector: "#a" }] }],
+              deadline,
+            ),
+          )
+          .catch((error: unknown) => error);
+        expect(result).toBe(deadline.signal.reason);
+        await deadline.close();
+        expect(page.screenshot).not.toHaveBeenCalled();
+        expect(inspect).not.toHaveBeenCalled();
+        expect(vi.mocked(openSettledCompositionPage).mock.calls.length - launches).toBe(
+          stage === "prepare" ? 0 : 1,
+        );
+        expect(mocks.serverClose.mock.calls.length - closes).toBe(stage === "prepare" ? 0 : 1);
+      } finally {
+        await deadline.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["stop", "timeout"] as const)(
+    "ends inspection work after a %s and closes the session",
+    async (reason) => {
+      vi.useFakeTimers();
+      const dir = mkdtempSync(join(tmpdir(), "finding-inspect-abort-"));
+      const deadline = new CheckDeadline();
+      const page = Object.assign(fakePage(), {
+        evaluateOnNewDocument: vi.fn(async () => undefined),
+      });
+      installSessionMock(page);
+      const inspect = vi.fn(async () => {
+        if (reason === "stop") deadline.stop("SIGTERM");
+        else await vi.advanceTimersByTimeAsync(120_001);
+        return { error: "page closed" };
+      });
+      mocks.prepareFindingInspector.mockResolvedValue({
+        html: "<html>inspected</html>",
+        ready: async () => undefined,
+        inspect,
+      });
+      const closeCalls = mocks.serverClose.mock.calls.length;
+      try {
+        const result = await deadline
+          .run(() =>
+            captureFindingFrames(
+              { ...PROJECT, dir },
+              DEFAULT_CHECK_OPTIONS,
+              [
+                {
+                  time: 1,
+                  filename: "first.png",
+                  inspect: [{ selector: "#a" }, { selector: "#b" }],
+                },
+                { time: 2, filename: "later.png", inspect: [{ selector: "#c" }] },
+              ],
+              deadline,
+            ),
+          )
+          .catch((error: unknown) => error);
+        expect(result).toBe(deadline.signal.reason);
+        await deadline.close();
+        expect(inspect).toHaveBeenCalledTimes(1);
+        expect(page.screenshot).toHaveBeenCalledTimes(1);
+        expect(mocks.serverClose.mock.calls.length).toBe(closeCalls + 1);
+        const session = await vi.mocked(openSettledCompositionPage).mock.results.at(-1)?.value;
+        expect(closeManagedBrowser).toHaveBeenCalledWith(session.browser);
+      } finally {
+        await deadline.close();
+        vi.useRealTimers();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("does not prepare the inspector when no request asks for it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "finding-frames-no-inspect-"));
     installSessionMock(fakePage());

@@ -72,7 +72,6 @@ function findingFrameFilename(order: number, time: number): string {
   return `finding-frame-${String(order).padStart(2, "0")}-at-${time.toFixed(3)}s.png`;
 }
 
-/** The finding's element for the inspector: its `data-hf-id` when it has one, else its selector. */
 function inspectTargetOf(finding: CheckFinding): CheckInspectTarget {
   const hfId = finding.dataAttributes["data-hf-id"];
   return hfId ? { hfId } : { selector: finding.selector };
@@ -81,7 +80,6 @@ function inspectTargetOf(finding: CheckFinding): CheckInspectTarget {
 const inspectionKey = (time: number, target: CheckInspectTarget) =>
   `${time}\n${JSON.stringify(target)}`;
 
-/** With `inspect`, each frame request also names the distinct inspector targets framed at its time. */
 export function findingFrameRequests(
   report: CheckReport,
   plan: FindingFramePlan,

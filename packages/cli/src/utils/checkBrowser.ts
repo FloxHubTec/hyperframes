@@ -605,6 +605,7 @@ export async function captureFindingFrames(
         );
       })
     : undefined;
+  deadline?.signal.throwIfAborted();
   return withFindingCapturePage(
     project,
     options,
@@ -612,6 +613,7 @@ export async function captureFindingFrames(
     "frames",
     async (page, snapshotDir, server) => {
       await inspector?.ready(server);
+      deadline?.signal.throwIfAborted();
       const written: string[] = [];
       const inspected: CheckFindingInspection[] = [];
       for (const request of requests) {
@@ -624,6 +626,7 @@ export async function captureFindingFrames(
         for (const target of request.inspect ?? []) {
           deadline?.enter("frames");
           const inspect = await inspector.inspect(page, target);
+          deadline?.signal.throwIfAborted();
           inspected.push({ time: request.time, target, inspect });
         }
       }
