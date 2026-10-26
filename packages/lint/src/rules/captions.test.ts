@@ -325,6 +325,29 @@ describe("caption rules", () => {
         findings.find((f) => f.code === "caption_textshadow_on_group_container"),
       ).toBeUndefined();
     });
+
+    it("does not warn for a glowing title group outside a caption composition", async () => {
+      // The rule only looks at the caption classes in the CSS, so a file without
+      // them must stay silent even though the tween shape is the one it matches.
+      const html = `
+<html><body>
+  <div data-composition-id="main" data-width="1920" data-height="1080">
+    <style>.title-group { position: absolute; }</style>
+    <div id="title-group"></div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+      var el = document.getElementById("title-group");
+      tl.to(el, { textShadow: "0 0 24px #0ff", duration: 0.2 }, 0);
+      window.__timelines["main"] = tl;
+    </script>
+  </div>
+</body></html>`;
+      const { findings } = await lintHyperframeHtml(html);
+      expect(
+        findings.find((f) => f.code === "caption_textshadow_on_group_container"),
+      ).toBeUndefined();
+    });
   });
 
   describe("caption_fittext_scale_mismatch", () => {
