@@ -8,7 +8,7 @@ import { createRenderJob, executeRenderJob, type ProgressCallback } from "./rend
 
 // Entry: executeRenderJob with the real disk capture stage and retry ladder. Each parallel attempt is
 // scripted: "stall" lands three frames then hangs until its signal aborts; a pace lands every frame.
-type AttemptScript = "stall" | { firstFrameAfterMs: number; frameEveryMs: number };
+type AttemptScript = "stall" | "spread" | { firstFrameAfterMs: number; frameEveryMs: number };
 const capture = vi.hoisted(() => ({
   scripts: [] as AttemptScript[],
   calls: 0,
@@ -49,10 +49,16 @@ vi.mock("@hyperframes/engine", async (importOriginal) => {
           index: task.startFrame + i,
         })),
       );
-      const landed = frames.slice(0, script === "stall" ? 3 : frames.length);
+      const stalls = script === "stall" || script === "spread";
+      // "spread" lands the first frame of each worker's range, leaving four missing ranges.
+      const landed =
+        script === "spread"
+          ? frames.filter((frame) => frame.index % 10 === 0)
+          : frames.slice(0, script === "stall" ? 3 : frames.length);
       let captured = 0;
       for (const frame of landed) {
-        await wait(captured === 0 && script !== "stall" ? script.firstFrameAfterMs : 1_000);
+        await wait(captured === 0 && !stalls ? script.firstFrameAfterMs : 1_000);
+        if (signal?.aborted) throw new Error("worker cancelled");
         mkdirSync(frame.dir, { recursive: true });
         writeFileSync(
           join(
@@ -63,9 +69,9 @@ vi.mock("@hyperframes/engine", async (importOriginal) => {
         );
         captured += 1;
         onProgress({ capturedFrames: captured, totalFrames: frames.length, activeWorkers: 1 });
-        if (script !== "stall") await wait(script.frameEveryMs - 1_000);
+        if (!stalls) await wait(script.frameEveryMs - 1_000);
       }
-      if (script === "stall") {
+      if (stalls) {
         await new Promise((_, reject) =>
           signal?.addEventListener("abort", () => reject(new Error("worker cancelled")), {
             once: true,
@@ -215,6 +221,14 @@ async function ioTurns(): Promise<void> {
   for (let turn = 0; turn < 50; turn++) await new Promise((resolve) => setImmediate(resolve));
 }
 
+/** Real file IO after the last frame takes a varying number of turns: wait for the render to settle. */
+async function settled(outcome: () => unknown): Promise<unknown> {
+  for (let turn = 0; turn < 20_000 && outcome() === PENDING; turn++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return outcome();
+}
+
 /** Advances fake time a second at a time, letting real file IO run between steps. */
 async function runFor(ms: number, outcome: () => unknown): Promise<void> {
   for (let elapsed = 0; elapsed < ms && outcome() === PENDING; elapsed += 1_000) {
@@ -229,7 +243,21 @@ it("retries a stalled attempt on fewer workers, with a fresh window, and the ren
   const outcome = startRender();
   await runFor(400_000, outcome);
   expect(capture.retriedWithWorkers).toEqual([2]);
-  expect(outcome()).toBe("completed");
+  expect(await settled(outcome)).toBe("completed");
+});
+
+it("gives each retry batch its own first-frame window", async () => {
+  // Four missing ranges on two workers: two batches; the second pool lands its first frame after 100 s.
+  capture.scripts = [
+    "spread",
+    { firstFrameAfterMs: 1_000, frameEveryMs: 1_000 },
+    { firstFrameAfterMs: 100_000, frameEveryMs: 1_000 },
+  ];
+  const outcome = startRender();
+  await runFor(600_000, outcome);
+  expect(capture.retriedWithWorkers).toEqual([2]);
+  expect(capture.calls).toBe(3);
+  expect(await settled(outcome)).toBe("completed");
 });
 
 it("fails typed and non-retryable once every attempt down the ladder stalls", async () => {
@@ -249,7 +277,7 @@ it("never kills a capture that keeps landing frames", async () => {
   const outcome = startRender();
   await runFor(250_000 + 40 * 50_000 + 10_000, outcome);
   expect(capture.calls).toBe(1);
-  expect(outcome()).toBe("completed");
+  expect(await settled(outcome)).toBe("completed");
 });
 
 it("fails a sequential disk capture at the first frame after its window ran out", async () => {
@@ -273,5 +301,5 @@ it("completes even when the progress sink never drains", async () => {
   const sinkNeverDrains: ProgressCallback = () => new Promise<void>(() => {});
   const outcome = startRender(sinkNeverDrains);
   await runFor(120_000, outcome);
-  expect(outcome()).toBe("completed");
+  expect(await settled(outcome)).toBe("completed");
 });

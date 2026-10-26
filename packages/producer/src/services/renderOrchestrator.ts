@@ -1300,9 +1300,10 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
     // twice, inflating reused/predicted past totalFrames. The common no-retry path keeps
     // exactly one attempt's perf; a retry reports only the final attempt's set.
     options.dedupPerfs.length = 0;
-    const attemptSignal = options.openAttempt?.(options.abortSignal) ?? options.abortSignal;
+    let attemptSignal = options.abortSignal;
     try {
       for (const tasks of batches) {
+        attemptSignal = options.openAttempt?.(options.abortSignal) ?? options.abortSignal;
         const capturedBeforeBatch = countCapturedFrames(
           options.totalFrames,
           options.framesDir,
