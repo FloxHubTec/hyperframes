@@ -10,6 +10,7 @@
 
 import {
   type Browser,
+  type CDPSession,
   type Page,
   type Protocol,
   type Viewport,
@@ -1410,7 +1411,6 @@ async function installMediaPageHooks(page: Page, options: CaptureOptions): Promi
   }
 }
 
-// fallow-ignore-next-line unit-size
 export async function createCaptureSession(
   serverUrl: string,
   outputDir: string,
@@ -2643,14 +2643,49 @@ export function classifyPageError(
   // Frameless: a parse error names its script; a rejection names whatever document is current, so it is unattributable.
   if (frames.length === 0 && details.text.startsWith("Uncaught (in promise)")) return null;
   const urls = frames.length > 0 ? frames : [details.url];
-  // The render compiler names the composition's inline code.
-  // Inline handlers report the document, which a widget can move.
-  const owned = (url: string | undefined) =>
-    url !== undefined && (projectScripts.has(url) || url.startsWith(COMPOSITION_SOURCE_URL));
-  return urls.some(owned) ? `runtime-error:${firstLine}` : null;
+  return urls.some((url) => isOwnedScriptUrl(url, projectScripts))
+    ? `runtime-error:${firstLine}`
+    : null;
 }
 
-// fallow-ignore-next-line unit-size
+// The render compiler names the composition's inline code.
+// Inline handlers report the document, which a widget can move.
+function isOwnedScriptUrl(url: string | undefined, projectScripts: ReadonlySet<string>): boolean {
+  return url !== undefined && (projectScripts.has(url) || url.startsWith(COMPOSITION_SOURCE_URL));
+}
+
+const LOOKUP_CALL =
+  /\b(?:getElementById|querySelectorAll|querySelector|getElementsByClassName|getElementsByTagName)\(\s*(["'`])((?:(?!\1).)*)\1/g;
+
+/** ` [thrown at: <url>:<line>:<col>, <lookup>]` for a throw's authored frame, so the author can find the element. */
+export async function describeThrowSite(
+  client: CDPSession,
+  details: Protocol.Runtime.ExceptionDetails,
+  projectScripts: ReadonlySet<string>,
+): Promise<string> {
+  const frame = (details.stackTrace?.callFrames ?? []).find((f) =>
+    isOwnedScriptUrl(f.url, projectScripts),
+  );
+  if (!frame) return "";
+  let where = `${frame.url}:${frame.lineNumber + 1}:${frame.columnNumber + 1}`;
+  try {
+    // Source is only fetchable with the debugger on; enabling after the fact keeps script ids.
+    await client.send("Debugger.enable");
+    const { scriptSource } = await client.send("Debugger.getScriptSource", {
+      scriptId: frame.scriptId,
+    });
+    const line = scriptSource.split("\n")[frame.lineNumber] ?? "";
+    const lookups = [...line.matchAll(LOOKUP_CALL)];
+    // Only a lone lookup is certain to be the one that returned null; with several the position alone is given.
+    if (lookups.length === 1) where += `, ${lookups[0]?.[0]})`;
+  } catch {
+    // Source unavailable: line:col alone still locates the throw.
+  } finally {
+    await client.send("Debugger.disable").catch(() => undefined);
+  }
+  return ` [thrown at: ${where}]`;
+}
+
 export async function initializeSession(session: CaptureSession): Promise<void> {
   const { page, serverUrl } = session;
 
@@ -2731,7 +2766,16 @@ export async function initializeSession(session: CaptureSession): Promise<void> 
   // Unlike the pageerror Error, this keeps the script URL of syntax errors and thrown non-errors.
   const runtimeClient = await getCdpSession(page);
   runtimeClient.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
-    recordPageError(session, classifyPageError(exceptionDetails, projectScripts));
+    const error = classifyPageError(exceptionDetails, projectScripts);
+    recordPageError(session, error);
+    if (!error) return;
+    // Recorded first so fail-fast sees it; the throw site is appended once the source is fetched.
+    void describeThrowSite(runtimeClient, exceptionDetails, projectScripts).then((site) => {
+      const i = session.pageErrors.indexOf(error);
+      if (!site || i < 0) return;
+      if (session.pageErrors.includes(`${error}${site}`)) session.pageErrors.splice(i, 1);
+      else session.pageErrors[i] = `${error}${site}`;
+    });
   });
   await runtimeClient.send("Runtime.enable");
 
@@ -4571,8 +4615,8 @@ async function captureAccumulatedFrame(
   await seekPageTimeline(session.page, frameTime, undefined);
   const totals = { seekMs: Date.now() - eventfulSeekStart, beforeCaptureMs: 0, screenshotMs: 0 };
   if (session.onBeforeCapture) {
-    // The injector copies a video's own style only when its frame changes: inject at frameTime
-    // first so the held frame carries frameTime's style, not the first sample's.
+    // Sub-samples leave a video's style alone: inject at frameTime first so the held frame
+    // carries frameTime's style, not the first sample's.
     const injectStart = Date.now();
     session.captureStep = "injecting video frames";
     await session.onBeforeCapture(session.page, frameTime, frameTime);
@@ -5135,7 +5179,7 @@ export async function closeCaptureSession(session: CaptureSession): Promise<void
     session.chromeMemory.stop();
     // One last sample so the summary reflects the session's end state, not a
     // point up to `intervalMs` earlier. Best effort; the page may be gone.
-    await session.chromeMemory.sampleOnce();
+    await waitForCloseWithTimeout(session.chromeMemory.sampleOnce());
   }
   if (session.page && !session.pageReleased) {
     const blur = await describePageMotionBlurAtEnd(session.page);

@@ -5,7 +5,7 @@ description: "Check a project and render MP4, MOV, WebM, GIF, or PNG output."
 
 import { DocsVideo } from "/snippets/docs-video.jsx";
 
-Studio is the simplest place to export a project. Use the command line when an agent, script, CI job, or advanced delivery workflow needs to control the render.
+The browser editor is the simplest place to export a project. Use the command line when an agent, script, CI job, or advanced delivery workflow needs to control the render.
 
 <DocsVideo
   title="One command turns the project into an MP4"
@@ -16,6 +16,14 @@ Studio is the simplest place to export a project. Use the command line when an a
 The whole loop: the project, the render command, progress, and the finished file
 playing. The flags shown are the ones people actually reach for — format,
 resolution, frame rate, quality.
+
+## Export a GIF from Studio
+
+Open the **Renders** panel, choose **GIF**, set the loop count, and click **Export**.
+Use `0` to loop forever or an integer from `1` to `65535` for a finite loop count.
+GIF exports have no audio and are capped at 30 fps; the 60 fps option is disabled
+while GIF is selected. Finished GIFs preview in the render list and can be
+opened, downloaded, or deleted there.
 
 ## Render a normal video
 
@@ -119,7 +127,7 @@ lock that fixed-length segments depend on. Cloud rendering (`lambda`,
 
 ## Input video codecs
 
-Studio, preview, `check`, and published projects normally create cached browser
+The browser editor, preview, `check`, and published projects normally create cached browser
 proxies for local video that Chrome cannot decode reliably, including common
 HEVC and ProRes inputs. The original file stays in the project and remains the
 render source.
@@ -160,7 +168,7 @@ npx hyperframes render --output final.mp4
 
 It starts quickly and can use the computer’s browser GPU.
 On WSL2, Chrome may not reach the GPU; see
-[the render is slow under WSL2](/guides/troubleshooting#the-render-is-slow-under-wsl2).
+[the render is slow under WSL2](/help#the-render-is-slow-under-wsl2).
 
 Use Docker when a controlled Chrome, FFmpeg, and font environment matters:
 
@@ -343,7 +351,7 @@ npx hyperframes lint
 npx hyperframes check
 ```
 
-Keep the first exact error rather than only the final “render failed” message. See [Troubleshooting](/guides/troubleshooting) for the next checks.
+Keep the first exact error rather than only the final “render failed” message. See [Troubleshooting](/help) for the next checks.
 
 <Tip>
   Always watch the exported file itself. Preview proves that the project can play; the output file
@@ -353,5 +361,5 @@ Keep the first exact error rather than only the final “render failed” messag
 ## Related topics
 
 - [Compare local, hosted, and self-managed rendering](/deploy/overview)
-- [Render and export from Studio](/studio/export)
-- [Diagnose a failed render](/guides/troubleshooting)
+- [Render and export from the browser editor](/studio/export)
+- [Diagnose a failed render](/help)

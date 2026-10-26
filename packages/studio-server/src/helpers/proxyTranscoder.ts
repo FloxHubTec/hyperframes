@@ -1,26 +1,31 @@
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import {
-  formatPreviewProxyBox,
-  hdrToSdrToneMapFilter,
-  type PreviewProxyBox,
-} from "@hyperframes/core";
+import { hdrToSdrToneMapFilter, type PreviewProxyBox } from "@hyperframes/core";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { alphaDecoderFor } from "@hyperframes/parsers/media-alpha";
 import { probeFirstFrameColour, probeMediaMetadata } from "./mediaMetadata.js";
 import { cleanupProxyCache } from "./proxyCache.js";
+import {
+  contentCopyKey,
+  contentIndexPath,
+  fastCopyKey,
+  fastIndexPath,
+  readCopyIndex,
+  sourceSizeBytes,
+  writeCopyIndex,
+} from "./proxyCacheKey.js";
+import { acquireCopyLock } from "./proxyLock.js";
 import { PROXY_VARIANT_CONFIG, type ProxyVariant } from "./mediaCodecMap.js";
 import { mkdirWithinProject, realpath, realProjectRoot } from "./safePath.js";
 
@@ -146,18 +151,12 @@ export async function waitForProxy<T>(
 }
 
 /**
- * Cache key inputs per the plan: project-relative source path (portable across
- * checkouts), canonical source identity (so retargeted external symlinks do
- * not reuse a proxy), mtime and file size (mtime alone can collide on
- * same-second re-exports on coarse-timestamp filesystems; size catches nearly
- * all such cases at zero cost), and a params version token so changing the
- * ffmpeg recipe below invalidates every cached proxy cleanly.
+ * A copy is found by its source's place and time at no cost; when that misses, by the whole file's hash, once,
+ * and an index file makes the next lookup free. A params version invalidates every copy when the recipe changes.
  */
 type CanonicalProxySource = {
   projectDir: string;
   sourcePath: string;
-  relativePath: string;
-  cacheIdentity: string;
 };
 
 function canonicalizeProxySource(
@@ -174,52 +173,22 @@ function canonicalizeProxySource(
   ) {
     throw new ProxySourceOutsideProjectError();
   }
-
-  const canonicalProjectDir = realProjectRoot(projectDir);
-  const canonicalSourcePath = realpath(absoluteSourcePath);
-  const canonicalRelativePath = relative(canonicalProjectDir, canonicalSourcePath);
-  const sourceIsInsideCanonicalProject =
-    canonicalRelativePath !== ".." &&
-    !canonicalRelativePath.startsWith(`..${sep}`) &&
-    !isAbsolute(canonicalRelativePath);
-  return {
-    projectDir: canonicalProjectDir,
-    sourcePath: canonicalSourcePath,
-    relativePath: requestedRelativePath.normalize("NFC"),
-    // An external target needs a stable identity in addition to its project-local
-    // symlink path, otherwise retargeting the link can reuse an unrelated proxy.
-    cacheIdentity: (sourceIsInsideCanonicalProject
-      ? canonicalRelativePath
-      : canonicalSourcePath
-    ).normalize("NFC"),
-  };
+  return { projectDir: realProjectRoot(projectDir), sourcePath: realpath(absoluteSourcePath) };
 }
 
-function buildProxyCacheKey(
-  source: CanonicalProxySource,
-  variant: ProxyVariant,
-  box: PreviewProxyBox | undefined,
-): string {
-  const stat = statSync(source.sourcePath);
-  const size = box ? `\0${formatPreviewProxyBox(box)}` : "";
-  return createHash("sha256")
-    .update(
-      `${source.relativePath}\0${source.cacheIdentity}\0${stat.mtimeMs}\0${stat.size}\0${PROXY_PARAMS_VERSION}\0${variant}${size}`,
-    )
-    .digest("hex");
-}
-
+/** The copy for this source: the one at its fast name, the one its fast index names, or where a new one goes. */
 function getCanonicalProxyCachePath(
   source: CanonicalProxySource,
   variant: ProxyVariant,
   box?: PreviewProxyBox,
 ): string {
-  const key = buildProxyCacheKey(source, variant, box);
-  return join(
+  const key = fastCopyKey(source.sourcePath, PROXY_PARAMS_VERSION, variant, box);
+  const made = join(
     source.projectDir,
     CACHE_DIR_NAME,
     `${key}${PROXY_VARIANT_CONFIG[variant].extension}`,
   );
+  return existsSync(made) ? made : (readCopyIndex(fastIndexPath(made)) ?? made);
 }
 
 /**
@@ -444,15 +413,77 @@ function proxyScaleFilter(box?: PreviewProxyBox): string {
 
 const STDERR_ERROR_LINE = /error|invalid|denied|no space|not found|unknown/i;
 
-/** ffmpeg ends most failures with "Conversion failed!"; the cause is the last error-looking line above it. */
-function stderrReason(stderrTail: string): string {
+const OPEN_OUTPUT_LINE = /^Error opening output file /;
+const ABSOLUTE_PATH = /(?:[A-Za-z]:)?(?:[\\/][^\\/\s'"]+){2,}/g;
+const REASON_LINES = 3;
+
+/** ffmpeg ends most failures with "Conversion failed!"; its causes are the last few error-looking lines above it,
+ * and the line before "Error opening output file" names why the output could not open. Paths are dropped. */
+function stderrReason(stderrTail: string, knownPaths: string[]): string {
   const lines = stderrTail
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  const errorLines = lines.filter((line) => STDERR_ERROR_LINE.test(line));
-  const line = errorLines.at(-1) ?? lines.at(-1);
-  return line ? `: ${line.replace(/[.!]+$/, "")}` : "";
+  const openedAt = lines.map((candidate) => OPEN_OUTPUT_LINE.test(candidate)).lastIndexOf(true);
+  const causes = lines.filter(
+    (line, index) =>
+      !OPEN_OUTPUT_LINE.test(line) && (STDERR_ERROR_LINE.test(line) || index === openedAt - 1),
+  );
+  const shown = (causes.length ? causes : lines.slice(-1)).slice(-REASON_LINES);
+  const byLength = knownPaths.filter(isAbsolute).sort((a, b) => b.length - a.length);
+  const reason = shown.map((line) =>
+    byLength
+      .reduce((text, path) => text.split(path).join("<path>"), line)
+      .replace(ABSOLUTE_PATH, "<path>")
+      .replace(/[.!]+$/, ""),
+  );
+  return reason.length ? `: ${reason.join("; ")}` : "";
+}
+
+export type SourceFolderKind = "icloud" | "cloud-storage" | "external-volume" | "local";
+
+const CLOUD_FOLDER = /\/(?:Library\/CloudStorage|Dropbox|OneDrive|Google Drive)(?:[ \-/]|$)/i;
+
+/** Where a source lives, in the terms that decide whether its file can be read and written normally. */
+export function sourceFolderKind(sourcePath: string): SourceFolderKind {
+  const path = sourcePath.replace(/\\/g, "/");
+  if (path.includes("/Library/Mobile Documents/")) return "icloud";
+  if (CLOUD_FOLDER.test(path)) return "cloud-storage";
+  return path.startsWith("/Volumes/") ? "external-volume" : "local";
+}
+
+/** What a failure report needs about the source, without its name or folder. */
+function describeSource(
+  sourcePath: string,
+  metadata: Awaited<ReturnType<typeof probeMediaMetadata>>,
+): string {
+  const { codecName, pixelFormat, colorTransfer } = metadata.color;
+  const megabytes = sourceSizeBytes(sourcePath);
+  return [
+    metadata.kind,
+    codecName,
+    pixelFormat,
+    colorTransfer,
+    metadata.hasAudio ? "with audio" : "no audio",
+    metadata.streams?.length ? `streams ${metadata.streams.join(" ")}` : undefined,
+    metadata.durationSeconds ? `${Math.round(metadata.durationSeconds)}s` : undefined,
+    megabytes === undefined ? "missing" : `${Math.round(megabytes / 1e6)} MB`,
+    sourceFolderKind(sourcePath),
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+/** A copy's failure message ends with the source it was made from; other errors pass through. */
+function withSource(err: unknown, describe: () => string): unknown {
+  if (err instanceof ProxyTranscodeError && err.name === "ProxyTranscodeError") {
+    return new ProxyTranscodeError(
+      `${err.message} (source: ${describe()})`,
+      err.exitCode,
+      err.stderrTail,
+    );
+  }
+  return err;
 }
 
 interface ChunkRange {
@@ -727,22 +758,26 @@ async function runFfmpeg(
       onEncoded,
     );
   const ranges = chunkRanges(totalSeconds);
-  if (!ranges) {
-    return encode(outputPath, undefined, signal, (encodedSeconds) =>
-      onProgress({ doneSeconds: encodedSeconds, totalSeconds }),
+  try {
+    if (!ranges) {
+      return await encode(outputPath, undefined, signal, (encodedSeconds) =>
+        onProgress({ doneSeconds: encodedSeconds, totalSeconds }),
+      );
+    }
+    await encodeInChunks(
+      ranges,
+      chunkPrefix,
+      outputPath,
+      encode,
+      (listPath, target) =>
+        spawnFfmpeg(ffmpegPath, concatArgs(listPath, target, variant), CONCAT_TIMEOUT_MS, signal),
+      signal,
+      gate,
+      (doneSeconds) => onProgress({ doneSeconds, totalSeconds }),
     );
+  } catch (err) {
+    throw withSource(err, () => describeSource(sourcePath, metadata));
   }
-  await encodeInChunks(
-    ranges,
-    chunkPrefix,
-    outputPath,
-    encode,
-    (listPath, target) =>
-      spawnFfmpeg(ffmpegPath, concatArgs(listPath, target, variant), CONCAT_TIMEOUT_MS, signal),
-    signal,
-    gate,
-    (doneSeconds) => onProgress({ doneSeconds, totalSeconds }),
-  );
 }
 
 function concatArgs(listPath: string, target: string, variant: ProxyVariant): string[] {
@@ -835,7 +870,7 @@ function spawnFfmpeg(
       } else {
         reject(
           new ProxyTranscodeError(
-            `ffmpeg exited with code ${code}${stderrReason(stderrTail)}`,
+            `ffmpeg exited with code ${code}${stderrReason(stderrTail, args)}`,
             code,
             stderrTail,
           ),
@@ -860,6 +895,23 @@ async function transcodeToCache(
 
     const cacheDir = dirname(cachePath);
     mkdirWithinProject(projectDir, cacheDir);
+    const contentIndex = contentIndexPath(
+      cacheDir,
+      await contentCopyKey(
+        absoluteSourcePath,
+        PROXY_PARAMS_VERSION,
+        variant,
+        box,
+        job.abandoned.signal,
+      ),
+    );
+    const sameContent = readCopyIndex(contentIndex);
+    if (sameContent) {
+      writeCopyIndex(fastIndexPath(cachePath), sameContent);
+      return sameContent;
+    }
+    const release = await acquireCopyLock(cachePath, job.abandoned.signal);
+    if (!release) return cachePath;
     const tempPath = join(cacheDir, `.tmp-${randomUUID()}-${basename(cachePath)}`);
     try {
       const chunkPrefix = join(
@@ -876,16 +928,41 @@ async function transcodeToCache(
         (progress) => reportProgress(job, progress),
       );
       renameSync(tempPath, cachePath);
+      writeCopyIndex(contentIndex, cachePath);
       maintainProxyCache(cacheDir);
       return cachePath;
     } finally {
       // No partial files: if anything above threw, remove whatever ffmpeg
       // may have partially written under the temp name.
       if (existsSync(tempPath)) unlinkSync(tempPath);
+      release();
     }
   } finally {
     releaseSlot();
   }
+}
+
+export function proxyCopyProgress(
+  projectDir: string,
+  absoluteSourcePath: string,
+  variant: ProxyVariant,
+  box?: PreviewProxyBox,
+): number | undefined {
+  const source = canonicalizeProxySource(projectDir, absoluteSourcePath);
+  const progress = inFlight.get(getCanonicalProxyCachePath(source, variant, box))?.job.lastProgress;
+  return progress?.totalSeconds
+    ? Math.min(1, progress.doneSeconds / progress.totalSeconds)
+    : undefined;
+}
+
+export function retryProxyCopy(
+  projectDir: string,
+  absoluteSourcePath: string,
+  variant: ProxyVariant,
+  box?: PreviewProxyBox,
+): void {
+  const source = canonicalizeProxySource(projectDir, absoluteSourcePath);
+  failedTranscodes.delete(getCanonicalProxyCachePath(source, variant, box));
 }
 
 let proxyActivity = 0;

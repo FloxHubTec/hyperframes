@@ -1452,8 +1452,7 @@ jobs:
           test -s /tmp/hf-cli-input.mp4
 
       - name: Smoke-test CLI from monorepo source
-        # init's --skip-skills flag is neutered (see init.ts); opt out of the
-        # GitHub skills check via this env so the smoke test stays offline/fast.
+        # Skip skill installation and GitHub checks to keep the smoke test offline.
         env:
           HYPERFRAMES_SKIP_SKILLS: "1"
         run: |
@@ -1466,6 +1465,9 @@ jobs:
             --skip-transcribe \
             --non-interactive \
             --skip-skills
+
+          # No smoke page waits on a CDN for GSAP.
+          node scripts/ci/inline-gsap.mjs /tmp/hf-cli-inside
 
           bun run --filter @hyperframes/cli dev -- lint /tmp/hf-cli-inside
           bun run --filter @hyperframes/cli dev -- validate /tmp/hf-cli-inside --timeout 3000
@@ -1516,8 +1518,7 @@ jobs:
           npm install -g --prefix /tmp/hf-cli-global "$HF_CLI_TARBALL"
 
       - name: Smoke-test packed CLI outside monorepo
-        # init's --skip-skills flag is neutered (see init.ts); opt out of the
-        # GitHub skills check via this env so the smoke test stays offline/fast.
+        # Skip skill installation and GitHub checks to keep the smoke test offline.
         env:
           HYPERFRAMES_SKIP_SKILLS: "1"
         run: |
@@ -1531,6 +1532,9 @@ jobs:
             --skip-transcribe \
             --non-interactive \
             --skip-skills
+
+          # No smoke page waits on a CDN for GSAP.
+          node scripts/ci/inline-gsap.mjs /tmp/hf-cli-outside
 
           hyperframes lint /tmp/hf-cli-outside
           hyperframes validate /tmp/hf-cli-outside --timeout 3000

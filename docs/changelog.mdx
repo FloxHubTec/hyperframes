@@ -9,6 +9,127 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.8.205"
+  description="Released - 2026-10-26"
+  tags={["Release", "CLI", "Engine", "Producer"]}
+>
+On Windows, hyperframes now offers to download the HyperFrames app, and hyperframes followed by a folder opens that project in it. Studio can also export a GIF with a loop count.
+
+## Features
+
+- **CLI:** Offer the HyperFrames app download on Windows ([b76b529372480](https://github.com/heygen-com/hyperframes/commit/b76b529372480833a851101c24852054589ec8a4)).
+- **CLI:** Hyperframes \<dir\> opens the project in the app ([324671829f40f](https://github.com/heygen-com/hyperframes/commit/324671829f40f719b445290594597086e1cd7798), [#6426](https://github.com/heygen-com/hyperframes/pull/6426)).
+- **Studio:** Support GIF export with loop count ([2d695a8436e27](https://github.com/heygen-com/hyperframes/commit/2d695a8436e27a9bba0a989eb83e41efeb779e7c), [#5593](https://github.com/heygen-com/hyperframes/pull/5593)).
+
+## Fixes
+
+- **Engine:** A video held past its media end keeps following its animation ([d8398c9da77e4](https://github.com/heygen-com/hyperframes/commit/d8398c9da77e4bb2d81e2fe17c7f3da97cb0760f), [#6424](https://github.com/heygen-com/hyperframes/pull/6424)).
+- **Producer:** Deduplicate scene font faces before embedding ([9ecb13ed6980d](https://github.com/heygen-com/hyperframes/commit/9ecb13ed6980d6eda83e33feea88275f29b63979), [#6395](https://github.com/heygen-com/hyperframes/pull/6395)).
+- **Examples:** Align K8s Chrome pin with managed version ([a07ab50879029](https://github.com/heygen-com/hyperframes/commit/a07ab5087902942824c6a5753535b8ac943c1e58), [#6363](https://github.com/heygen-com/hyperframes/pull/6363)).
+- **CLI:** Isolate benchmark render files ([803655a67e59c](https://github.com/heygen-com/hyperframes/commit/803655a67e59c70bc967a7890184aff3d7f8aad1), [#6403](https://github.com/heygen-com/hyperframes/pull/6403)).
+- **Producer:** Honor disabled looping for finite-loop GIF inputs ([acd0bc361ffa2](https://github.com/heygen-com/hyperframes/commit/acd0bc361ffa238bda6d8cadbb97360b7fb9b1ab), [#3943](https://github.com/heygen-com/hyperframes/pull/3943)).
+- **Media Use:** Serialize concurrent preference records ([dfb7e5a4de549](https://github.com/heygen-com/hyperframes/commit/dfb7e5a4de549da38792641f0c962c9610bc06ca), [#5366](https://github.com/heygen-com/hyperframes/pull/5366)).
+- **CLI:** Preserve UTF-8 across subprocess output chunks ([2be8bc2b9e8d6](https://github.com/heygen-com/hyperframes/commit/2be8bc2b9e8d6f9306a55b1c6af64c0049ce7c70), [#5273](https://github.com/heygen-com/hyperframes/pull/5273)).
+- **CLI:** Describe the restored skip-skills option ([d1b3471325bc7](https://github.com/heygen-com/hyperframes/commit/d1b3471325bc7a9b080ef317afe7c462e54613c3), [#6245](https://github.com/heygen-com/hyperframes/pull/6245)).
+- **Lint:** Add fix hints to the variables-entry and CSS parse findings ([64cb6556efa5c](https://github.com/heygen-com/hyperframes/commit/64cb6556efa5cdef3292b0c691a184c1ba291eeb), [#5447](https://github.com/heygen-com/hyperframes/pull/5447)).
+- **Core:** The fonts gate starts loading declared faces no laid-out text uses yet ([36a24aeb851e5](https://github.com/heygen-com/hyperframes/commit/36a24aeb851e57cb4ba177ebd2d5a3a22e06fec0), [#6415](https://github.com/heygen-com/hyperframes/pull/6415)).
+- **Player:** Keep new controls in sync with playback ([d507323ef9c18](https://github.com/heygen-com/hyperframes/commit/d507323ef9c180a956cf538142e531ed6a4c8751), [#6373](https://github.com/heygen-com/hyperframes/pull/6373)).
+- **CLI:** Keep audio timings when trimming long recordings ([ec866ed1c5b9f](https://github.com/heygen-com/hyperframes/commit/ec866ed1c5b9f1f1f28b21dcbc554172c7f34776), [#6375](https://github.com/heygen-com/hyperframes/pull/6375)).
+- **CLI:** List the examples init --example accepts in docs examples ([85dcc193d5605](https://github.com/heygen-com/hyperframes/commit/85dcc193d560567c8d08e7f09c0f7fc9f2197c56), [#5446](https://github.com/heygen-com/hyperframes/pull/5446)).
+
+## Docs & Examples
+
+- Connect product-film close-ups to the full workspace ([ecc2396e89ba9](https://github.com/heygen-com/hyperframes/commit/ecc2396e89ba9502f4fc5129bb655dec93406f66), [#6209](https://github.com/heygen-com/hyperframes/pull/6209)).
+
+## Internal
+
+- **Player:** Playbench measures first play, audio joins, automation, cuts and the autoplay fallback ([7d6c02f85ae59](https://github.com/heygen-com/hyperframes/commit/7d6c02f85ae59b5b1ebd647faf90a1b04c8e0017), [#6418](https://github.com/heygen-com/hyperframes/pull/6418)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.204...v0.8.205).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.204"
+  description="Released - 2026-10-26"
+  tags={["Release", "Studio", "Producer"]}
+>
+Scrubbing a long film in Studio stays smooth, because the layer walk now skips clips the runtime hid. A render whose capture stops advancing also fails within minutes.
+
+## Fixes
+
+- **Producer:** A render whose capture stops advancing fails within minutes ([575f68cf5bc47](https://github.com/heygen-com/hyperframes/commit/575f68cf5bc4789e0f2b71c16333f5ef79586156), [#6413](https://github.com/heygen-com/hyperframes/pull/6413)).
+
+## Performance
+
+- **Studio:** The layer walk skips clips the runtime hid, so scrubbing a long film stays smooth ([dc56b3d20af2d](https://github.com/heygen-com/hyperframes/commit/dc56b3d20af2dbb550ac749b7618ea976542e257), [#6416](https://github.com/heygen-com/hyperframes/pull/6416)).
+
+## Docs & Examples
+
+- Studio app light palette, plus movable film rows and stacked remix shelves on Inspiration ([9652a6324ada6](https://github.com/heygen-com/hyperframes/commit/9652a6324ada60b27f91c413155740399a6c2d5d), [#6414](https://github.com/heygen-com/hyperframes/pull/6414)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.203...v0.8.204).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.203"
+  description="Released - 2026-10-26"
+  tags={["Release", "Producer", "CLI", "Studio"]}
+>
+Cloud workers no longer pay extra CPU for overlapped capture. Studio preview copies also show progress, can retry, and remember their quality.
+
+## Features
+
+- **CLI:** Check-review inspect attaches the inspector's report to each framed finding ([a39f7b37d9bf1](https://github.com/heygen-com/hyperframes/commit/a39f7b37d9bf1d05492886756ae838109c502815), [#6409](https://github.com/heygen-com/hyperframes/pull/6409)).
+- **Studio:** Preview copy progress, retry and a remembered quality ([84fd701daaac9](https://github.com/heygen-com/hyperframes/commit/84fd701daaac9593e6b4a5b94116b6cc039a154a), [#6366](https://github.com/heygen-com/hyperframes/pull/6366)).
+- **CLI:** Check-review findingFrames saves one plain frame per finding time ([12ae82aa8ab5c](https://github.com/heygen-com/hyperframes/commit/12ae82aa8ab5cef317dc28a6bfbf6913dc188ca4), [#6401](https://github.com/heygen-com/hyperframes/pull/6401)).
+
+## Fixes
+
+- **Producer:** Chunk capture round-robins only for callers that bill wall time ([6a977e8db19ae](https://github.com/heygen-com/hyperframes/commit/6a977e8db19aee82bf7bc303f51ec287f1a450f8), [#6405](https://github.com/heygen-com/hyperframes/pull/6405)).
+
+## Docs & Examples
+
+- **Examples:** The inspiration page, with films and remixes to start from ([3f1950b806e72](https://github.com/heygen-com/hyperframes/commit/3f1950b806e72fece41552077b491f1c8c6e8b28), [#6383](https://github.com/heygen-com/hyperframes/pull/6383)).
+- An FAQ, a free-agents page, and 30 Days as a numbered list ([a183125e97e17](https://github.com/heygen-com/hyperframes/commit/a183125e97e176af628ed36826758332ad8e9d6d), [#6382](https://github.com/heygen-com/hyperframes/pull/6382)).
+
+## Internal
+
+- Real-Chrome and CI smoke pages inline GSAP so they wait on no CDN ([1819276fc3047](https://github.com/heygen-com/hyperframes/commit/1819276fc3047b6fabfe074aa3ec0b75de2a7df6), [#6406](https://github.com/heygen-com/hyperframes/pull/6406)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.202...v0.8.203).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.202"
+  description="Released - 2026-10-26"
+  tags={["Release", "Core", "Studio", "CLI"]}
+>
+Cuts in the preview no longer click: audio fades now play as smooth ramps. Studio finds and makes video copies by their content, one process at a time.
+
+## Features
+
+- **CLI:** Opt-in check flag that leaves out contrast measured mid-animation ([afdad4ea3](https://github.com/heygen-com/hyperframes/commit/afdad4ea382d10dacd428e72d60e4ab70c80d58a), [#6396](https://github.com/heygen-com/hyperframes/pull/6396)).
+- **CLI:** Lambda render --width/--height at a whole-number multiple renders at that scale ([8d773fc68](https://github.com/heygen-com/hyperframes/commit/8d773fc68a146b6b2caecce61f6d904d3a46454d), [#6390](https://github.com/heygen-com/hyperframes/pull/6390)).
+
+## Fixes
+
+- **Core:** Preview audio fades play as ramps on the audio clock, so cuts no longer click ([07a126d80](https://github.com/heygen-com/hyperframes/commit/07a126d80fd6c0077dcce1c0a063709a1f9d1b75), [#6397](https://github.com/heygen-com/hyperframes/pull/6397)).
+- **Studio Server:** Copies are found by content and made by one process at a time ([2e23b7e43](https://github.com/heygen-com/hyperframes/commit/2e23b7e434aa9aee28d19cc0755794b62c3b2c2e), [#6358](https://github.com/heygen-com/hyperframes/pull/6358)).
+
+## Performance
+
+- **CLI:** Lambda deploy warms the video function so the first render does not wait for its image ([a11280eef](https://github.com/heygen-com/hyperframes/commit/a11280eef09305ed6517ca6c08bdc5929f38a5a2), [#6376](https://github.com/heygen-com/hyperframes/pull/6376)).
+
+## Docs & Examples
+
+- The docs in hyperframes.dev's and the Studio app's colours ([5472d9eac](https://github.com/heygen-com/hyperframes/commit/5472d9eac0cf47ee89bd38495a09efad9984d5ab), [#6393](https://github.com/heygen-com/hyperframes/pull/6393)).
+- **Studio:** The browser editor in six pages, named the browser editor ([0390f3f90](https://github.com/heygen-com/hyperframes/commit/0390f3f908d1caa24ce609f402468eb52bf0c75c), [#6379](https://github.com/heygen-com/hyperframes/pull/6379)).
+- **Prompting:** The Prompt Guide as six topic pages ([12030b0ee](https://github.com/heygen-com/hyperframes/commit/12030b0ee8bcb8dc8ba8215c13ddf9cf4030961f), [#6378](https://github.com/heygen-com/hyperframes/pull/6378)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.201...v0.8.202).
+</Update>
+
+<Update
   label="HyperFrames v0.8.201"
   description="Released - 2026-10-26"
   tags={["Release", "Studio Server", "CLI", "Core"]}
@@ -5174,9 +5295,9 @@ what people hit first when they used it, and documents the whole system.
 
 - **Audio:** The audio effects system is documented. There are new pages for
   [mixing and presets](/studio/audio-effects), the [voiceover
-  carve](/studio/voiceover-carve), [groups, mute and
-  solo](/studio/audio-groups), and [automation
-  lanes](/studio/audio-automation), plus a [full
+  carve](/studio/audio-effects#make-music-sit-under-narration), [groups, mute and
+  solo](/studio/audio-effects#group-tracks), and [automation
+  lanes](/studio/audio-effects#automate-over-time), plus a [full
   reference](/reference/audio-effects) covering every effect, parameter range,
   preset, and attribute ([0eca7b1e0](https://github.com/heygen-com/hyperframes/commit/0eca7b1e0aef831bbab1265395f942378468afc0), [#3420](https://github.com/heygen-com/hyperframes/pull/3420)).
 

@@ -3,14 +3,14 @@
   "name": "HyperFrames",
   "theme": "aspen",
   "colors": {
-    "primary": "#16785B",
+    "primary": "#181716",
     "light": "#3CE6AC",
-    "dark": "#16785B"
+    "dark": "#181716"
   },
   "background": {
     "color": {
-      "light": "#f6f5f1",
-      "dark": "#0a0a0a"
+      "light": "#f2f0ed",
+      "dark": "#201e1c"
     }
   },
   "fonts": {
@@ -48,7 +48,7 @@
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Make a video",
         "icon": "book-open",
         "groups": [
           {
@@ -56,38 +56,48 @@
             "pages": [
               "introduction",
               "quickstart",
-              "go-further",
-              "developers/index"
-            ]
-          },
-          {
-            "group": "Explore",
-            "pages": [
               "examples",
-              "thirty-days",
-              "product-updates",
-              "weekly-updates",
-              "changelog"
+              "faq"
             ]
           },
           {
-            "group": "Choose where to create",
+            "group": "Make a video",
             "pages": [
-              "guides/choose-creation-path",
-              {
-                "group": "With your agent",
-                "pages": [
-                  "guides/with-claude-code",
-                  "guides/with-codex",
-                  "guides/with-cursor"
-                ]
-              },
+              "workflows",
+              "guides/product-launch-video",
+              "guides/faceless-explainer",
+              "guides/motion-graphics",
+              "guides/captions-and-recuts",
+              "guides/music-to-video",
+              "prompting/data-and-maps",
+              "guides/avatar-presenter",
+              "guides/pr-to-video",
+              "guides/slideshow",
+              "guides/general-video"
+            ]
+          },
+          {
+            "group": "Use it with your agent",
+            "pages": [
+              "guides/with-claude-code",
+              "guides/with-codex",
+              "guides/with-cursor",
               "guides/mcp",
+              "guides/free-agents",
+              "guides/skills",
+              "guides/plugins",
               "guides/design-tools"
             ]
           },
           {
-            "group": "Prompt Guide",
+            "group": "Compare",
+            "pages": [
+              "guides/hyperframes-vs-remotion",
+              "prompting/remotion-migration"
+            ]
+          },
+          {
+            "group": "Tips for better videos",
             "pages": [
               "prompting/overview",
               "prompting/motion",
@@ -107,29 +117,10 @@
             ]
           },
           {
-            "group": "Make a video",
+            "group": "Images, sound and footage",
             "pages": [
-              "workflows",
-              "guides/product-launch-video",
-              "guides/faceless-explainer",
-              "guides/pr-to-video",
-              "guides/captions-and-recuts",
-              "guides/motion-graphics",
-              "guides/music-to-video",
-              "prompting/data-and-maps",
-              "guides/slideshow",
-              "guides/general-video",
-              "guides/hyperframes-vs-remotion",
-              "prompting/remotion-migration"
-            ]
-          },
-          {
-            "group": "Build the project",
-            "pages": [
-              "concepts/index",
               "guides/media",
               "guides/video-components",
-              "guides/avatar-presenter",
               "guides/voice-and-audio",
               "guides/remove-background",
               "guides/media-effects",
@@ -137,63 +128,24 @@
             ]
           },
           {
-            "group": "Help",
+            "group": "Browser editor",
             "pages": [
-              "help",
-              "guides/troubleshooting",
-              "guides/feedback"
-            ]
-          }
-        ]
-      },
-      {
-        "tab": "Studio",
-        "icon": "palette",
-        "groups": [
-          {
-            "group": "Start in Studio",
-            "pages": [
-              "studio/index"
-            ]
-          },
-          {
-            "group": "Edit",
-            "pages": [
+              "studio/index",
               "studio/canvas",
               "studio/timeline",
-              "studio/animation",
-              "studio/captions"
-            ]
-          },
-          {
-            "group": "Audio",
-            "pages": [
               "studio/audio-effects",
-              "studio/voiceover-carve",
-              "studio/audio-groups",
-              "studio/audio-automation"
-            ]
-          },
-          {
-            "group": "Build and reuse",
-            "pages": [
               "studio/assets-and-blocks",
-              "studio/variables",
-              "studio/slideshows"
+              "studio/export"
             ]
           },
           {
-            "group": "Finish and recover",
+            "group": "Help and updates",
             "pages": [
-              "studio/export",
-              "studio/troubleshooting"
-            ]
-          },
-          {
-            "group": "Reference",
-            "pages": [
-              "studio/source",
-              "studio/shortcuts"
+              "help",
+              "thirty-days",
+              "product-updates",
+              "weekly-updates",
+              "changelog"
             ]
           }
         ]
@@ -215,8 +167,7 @@
               "studio-app/workspace",
               "studio-app/connect-your-agent",
               "studio-app/export",
-              "studio-app/share",
-              "studio-app/troubleshooting"
+              "studio-app/share"
             ]
           }
         ]
@@ -898,7 +849,9 @@
           {
             "group": "Start here",
             "pages": [
-              "developers/overview"
+              "developers/overview",
+              "developers/index",
+              "concepts/index"
             ]
           },
           {
@@ -1008,8 +961,6 @@
             "group": "Agent setup",
             "pages": [
               "guides/authentication",
-              "guides/plugins",
-              "guides/skills",
               "guides/webmcp"
             ]
           },
@@ -1058,7 +1009,7 @@
         "header": "Build",
         "items": [
           {
-            "label": "Studio",
+            "label": "Browser editor",
             "href": "/studio"
           },
           {
@@ -1126,7 +1077,7 @@
     },
     {
       "source": "/guides/common-mistakes",
-      "destination": "/guides/troubleshooting"
+      "destination": "/help"
     },
     {
       "source": "/guides/create-with-agent",
@@ -1158,7 +1109,7 @@
     },
     {
       "source": "/guides/video-editor-cheatsheet",
-      "destination": "/studio/shortcuts"
+      "destination": "/studio/index#keyboard-shortcuts"
     },
     {
       "source": "/guides/timeline-editing",
@@ -1215,12 +1166,12 @@
     },
     {
       "source": "/guides/keyframes",
-      "destination": "/studio/animation",
+      "destination": "/studio/canvas#animate-with-keyframes",
       "permanent": true
     },
     {
       "source": "/studio/lint-and-agent",
-      "destination": "/studio/source",
+      "destination": "/studio/canvas#edit-the-source",
       "permanent": true
     },
     {
@@ -1346,6 +1297,81 @@
     {
       "source": "/prompting/overlays-and-lower-thirds",
       "destination": "/prompting/captions-catalog#overlays-and-lower-thirds",
+      "permanent": true
+    },
+    {
+      "source": "/studio/animation",
+      "destination": "/studio/canvas#animate-with-keyframes",
+      "permanent": true
+    },
+    {
+      "source": "/studio/audio-automation",
+      "destination": "/studio/audio-effects#automate-over-time",
+      "permanent": true
+    },
+    {
+      "source": "/studio/audio-groups",
+      "destination": "/studio/audio-effects#group-tracks",
+      "permanent": true
+    },
+    {
+      "source": "/studio/captions",
+      "destination": "/studio/assets-and-blocks#edit-captions",
+      "permanent": true
+    },
+    {
+      "source": "/studio/shortcuts",
+      "destination": "/studio/index#keyboard-shortcuts",
+      "permanent": true
+    },
+    {
+      "source": "/studio/slideshows",
+      "destination": "/studio/export#build-a-slideshow",
+      "permanent": true
+    },
+    {
+      "source": "/studio/source",
+      "destination": "/studio/canvas#edit-the-source",
+      "permanent": true
+    },
+    {
+      "source": "/studio/variables",
+      "destination": "/studio/assets-and-blocks#use-variables",
+      "permanent": true
+    },
+    {
+      "source": "/studio/voiceover-carve",
+      "destination": "/studio/audio-effects#make-music-sit-under-narration",
+      "permanent": true
+    },
+    {
+      "source": "/guides/troubleshooting",
+      "destination": "/help",
+      "permanent": true
+    },
+    {
+      "source": "/studio/troubleshooting",
+      "destination": "/help#in-the-preview-and-browser-editor",
+      "permanent": true
+    },
+    {
+      "source": "/studio-app/troubleshooting",
+      "destination": "/help#in-the-studio-app",
+      "permanent": true
+    },
+    {
+      "source": "/guides/feedback",
+      "destination": "/help#share-feedback",
+      "permanent": true
+    },
+    {
+      "source": "/go-further",
+      "destination": "/studio-app/edit-with-the-agent",
+      "permanent": true
+    },
+    {
+      "source": "/guides/choose-creation-path",
+      "destination": "/quickstart",
       "permanent": true
     }
   ],
