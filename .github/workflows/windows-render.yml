@@ -225,7 +225,7 @@ jobs:
         run: bun install --frozen-lockfile --linker=hoisted
 
       # The CLI bundle consumes Engine and Producer from source, but copies the
-      # built Studio and Player artifacts. Build only that dependency chain;
+      # built Studio, Player and Inspector artifacts. Build only that dependency chain;
       # cloud adapters, SDK playground, and other publish-only packages are not
       # exercised by this Windows render smoke test.
       - name: Build render prerequisites
@@ -235,6 +235,7 @@ jobs:
           bun run --cwd packages/core build
           bun run --filter @hyperframes/player build
           bun run --filter @hyperframes/studio build
+          bun run --filter @hyperframes/inspector build
           bun run --filter @hyperframes/cli build
 
       # -----------------------------------------------------------------
@@ -247,8 +248,7 @@ jobs:
 
       - name: Scaffold canary composition
         shell: pwsh
-        # init's --skip-skills flag is neutered (see init.ts); opt out of the
-        # GitHub skills check via this env so the canary scaffold stays offline.
+        # Skip skill installation and GitHub checks to keep the canary scaffold offline.
         env:
           HYPERFRAMES_SKIP_SKILLS: "1"
         run: |
@@ -518,10 +518,11 @@ jobs:
       - name: Run ${{ matrix.lane }} package tests
         if: matrix.packages
         shell: pwsh
-        timeout-minutes: 16
+        timeout-minutes: 20
         # Each package starts its own Vitest pool. Bound every pool so concurrent
         # package scripts cannot oversubscribe the hosted Windows runner.
-        run: bun run ${{ matrix.packages }} test -- --maxWorkers=2 --reporter=verbose
+        # timeout-minutes did not fire on a hung run, so the script enforces the 16 minutes itself.
+        run: ./scripts/ci/run-with-deadline.ps1 -Minutes 16 -Command 'bun run ${{ matrix.packages }} test -- --maxWorkers=2 --reporter=verbose'
 
       - name: Verify waveform cache writes on Windows
         if: matrix.lane == 'engine-cli'
@@ -542,6 +543,15 @@ jobs:
         if: matrix.lane == 'engine-cli'
         shell: pwsh
         run: bunx vitest run scripts/catalog/catalog-payload-assets.file-race.test.ts scripts/catalog/catalog-payload-assets.cache-race.test.ts --maxWorkers=2
+
+      - name: Upload test step log
+        if: always() && matrix.packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-step-log-${{ matrix.lane }}
+          path: ${{ runner.temp }}/deadline-step.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Run runtime contract test
         if: matrix.runtime_contract

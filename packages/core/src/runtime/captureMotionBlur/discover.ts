@@ -8,7 +8,8 @@
  */
 
 import { isHtmlElement } from "../domRealm";
-import { individualIs3d } from "./pose";
+import { inkPad } from "./ink";
+import { individualIs3d, parseTransform } from "./pose";
 
 /** Under this peak speed (px per frame) a smear is invisible, so the element stays sharp. */
 const MIN_SPEED = 2;
@@ -43,6 +44,9 @@ export interface Discovery {
   movers: HTMLElement[];
   /** Every element whose pose changes at all; their transforms are never cached. */
   dynamic: Set<Element>;
+  /** Px each mover's ink reaches past its box (shadows, glows), the largest seen. */
+  pads: Map<HTMLElement, number>;
+  translationOnly: boolean;
 }
 
 // The whole inline style in one read; opacity or colour tweens only cost a rect check.
@@ -69,6 +73,22 @@ function in3d(el: Element, scene: Element): boolean {
     }
   }
   return false;
+}
+
+function linearSignature(el: Element, scene: Element): string {
+  const parts: string[] = [];
+  for (let n: Element | null = el; n && n !== scene; n = n.parentElement) {
+    const cs = getComputedStyle(n);
+    const m = parseTransform(cs.transform);
+    parts.push(m ? [m.a, m.b, m.c, m.d].map((v) => v.toFixed(3)).join(",") : "1,0,0,1");
+    parts.push(cs.rotate ?? "none", cs.scale ?? "none");
+  }
+  return parts.join("|");
+}
+
+function hasOwnContext(el: Element): boolean {
+  const cs = getComputedStyle(el);
+  return cs.transform !== "none" || (cs.translate ?? "none") !== "none";
 }
 
 /** Elements a CSS animation or WAAPI animation moves (no inline style to diff). */
@@ -180,6 +200,17 @@ export function discoverMovers({
   const framesPerStep = frames / steps;
   const fast = new Set<HTMLElement>();
   const threeD = new Set<HTMLElement>();
+  const pads = new Map<HTMLElement, number>();
+  const signatures = new Map<HTMLElement, string>();
+  const notPlain = new Set<HTMLElement>();
+  const measure = (el: HTMLElement): void => {
+    pads.set(el, Math.max(pads.get(el) ?? 0, inkPad(el)));
+    const sig = linearSignature(el, scene);
+    const first = signatures.get(el);
+    if (first === undefined) signatures.set(el, sig);
+    else if (first !== sig) notPlain.add(el);
+    if (!hasOwnContext(el)) notPlain.add(el);
+  };
   const seeThrough = new Set<HTMLElement>();
   const alphaCache = new Map<Bitmap, boolean>();
   const sceneRect = scene.getBoundingClientRect();
@@ -212,6 +243,7 @@ export function discoverMovers({
     rects.forEach((box, j) => {
       const el = all[j];
       if (!el || edgeShift(prev[j], box) / framesPerStep < MIN_SPEED) return;
+      if (!fast.has(el)) measure(el);
       fast.add(el);
       if (
         box &&
@@ -222,7 +254,12 @@ export function discoverMovers({
         seeThrough.add(el);
     });
     // Style reads up the chain are the costly part; every 10th step is enough to see a 3D turn.
-    if (i % 10 === 0 || i === steps) for (const el of fast) if (in3d(el, scene)) threeD.add(el);
+    if (i % 10 === 0 || i === steps) {
+      for (const el of fast) {
+        if (in3d(el, scene)) threeD.add(el);
+        measure(el);
+      }
+    }
     prev = rects;
   }
 
@@ -230,5 +267,6 @@ export function discoverMovers({
     (el) => fast.has(el) && !threeD.has(el) && !seeThrough.has(el) && !optedOut(el, scene),
   );
   const movers = candidates.filter((el) => !candidates.some((o) => o !== el && o.contains(el)));
-  return { movers, dynamic };
+  const translationOnly = movers.length > 0 && movers.every((el) => !notPlain.has(el));
+  return { movers, dynamic, pads, translationOnly };
 }

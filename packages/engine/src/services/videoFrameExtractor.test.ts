@@ -77,6 +77,13 @@ const HAS_FFMPEG = spawnSync("ffmpeg", ["-version"]).status === 0;
 const HAS_ZSCALE =
   HAS_FFMPEG &&
   /\szscale\s/.test(spawnSync("ffmpeg", ["-hide_banner", "-filters"]).stdout.toString());
+const FFMPEG_ENCODERS = HAS_FFMPEG
+  ? spawnSync("ffmpeg", ["-hide_banner", "-encoders"]).stdout.toString()
+  : "";
+// Homebrew's ffmpeg has libsvtav1 but not libaom-av1. Either one writes an untagged AV1 stream.
+const AV1_ENCODER = ["libaom-av1", "libsvtav1"].find((name) =>
+  new RegExp(`\\s${name}\\s`).test(FFMPEG_ENCODERS),
+);
 
 describe("resolveVideoExtractionDuration", () => {
   const metadata = (
@@ -686,6 +693,48 @@ describe("resolveFrameFormat", () => {
     expect(resolveFrameFormat(metadata({ hasAlpha: true }), "jpg")).toBe("png");
     expect(resolveFrameFormat(metadata({ videoCodec: "vp9" }), "jpg")).toBe("png");
   });
+
+  it("keeps ProRes without an alpha plane on jpg and ProRes with one on png", () => {
+    expect(resolveFrameFormat(metadata({ videoCodec: "prores" }), undefined)).toBe("jpg");
+    expect(resolveFrameFormat(metadata({ videoCodec: "prores", hasAlpha: true }), "jpg")).toBe(
+      "png",
+    );
+  });
+
+  type FormatCase = Pick<VideoMetadata, "videoCodec" | "hasAlpha" | "alphaPlaneDecoded"> & {
+    requested: "auto" | "jpg" | "png";
+  };
+  const formatCases: FormatCase[] = ["vp9", "vp8", "h264", "prores"].flatMap((videoCodec) =>
+    [true, false].flatMap((hasAlpha) =>
+      [true, false, undefined].flatMap((alphaPlaneDecoded) =>
+        (["auto", "jpg", "png"] as const).map((requested) => ({
+          videoCodec,
+          hasAlpha,
+          alphaPlaneDecoded,
+          requested,
+        })),
+      ),
+    ),
+  );
+  function expectedFormat({ videoCodec, hasAlpha, alphaPlaneDecoded, requested }: FormatCase) {
+    const sidecar = videoCodec === "vp9" || videoCodec === "vp8";
+    const keepsPng = hasAlpha || (sidecar && alphaPlaneDecoded !== false);
+    return keepsPng || requested === "png" ? "png" : "jpg";
+  }
+
+  it("lets VP8/VP9 leave png only when a decode probe found no alpha plane", () => {
+    expect(formatCases).toHaveLength(72);
+    for (const { requested, ...fields } of formatCases) {
+      const actual = resolveFrameFormat(metadata(fields), requested);
+      expect(actual, JSON.stringify(fields)).toBe(expectedFormat({ requested, ...fields }));
+    }
+    expect(resolveFrameFormat(metadata({ videoCodec: "vp9", alphaPlaneDecoded: false }))).toBe(
+      "jpg",
+    );
+    expect(resolveFrameFormat(metadata({ videoCodec: "vp8", alphaPlaneDecoded: false }))).toBe(
+      "jpg",
+    );
+  });
 });
 
 describe("parseVideoElements", () => {
@@ -870,6 +919,21 @@ describe("parseVideoElements", () => {
     );
     // intro: start 2, end 9 -> duration 7 -> main starts at 9.
     expect(videos.find((v) => v.id === "main")?.start).toBe(9);
+  });
+
+  it("resolves a reference inside its own composition when another composition reuses the id", () => {
+    const videos = parseVideoElements(
+      '<div data-composition-id="main">' +
+        '<div data-composition-id="scene-a" data-start="0" data-duration="4">' +
+        '<div id="intro" data-start="0" data-duration="2"></div>' +
+        "</div>" +
+        '<div data-composition-id="scene-b" data-start="4" data-duration="4">' +
+        '<div id="intro" data-start="0" data-duration="3"></div>' +
+        '<video id="clip" src="b.mp4" data-start="intro" data-duration="1"></video>' +
+        "</div>" +
+        "</div>",
+    );
+    expect(videos.find((v) => v.id === "clip")?.start).toBe(3);
   });
 
   it("falls back to 0 (never NaN) for an unknown reference target", () => {
@@ -1388,6 +1452,19 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
     };
   }
 
+  it("extracts into a work directory whose name holds a printf code", async () => {
+    const outDir = join(FIXTURE_DIR, "x 12% Up");
+    mkdirSync(outDir, { recursive: true });
+    const result = await extractAllVideoFrames([fixtureVideo()], FIXTURE_DIR, {
+      fps: 1,
+      outputDir: outDir,
+    });
+    expect(result.errors).toEqual([]);
+    const frame = result.extracted[0]!.framePaths.get(0)!;
+    expect(frame.startsWith(outDir)).toBe(true);
+    expect(existsSync(frame)).toBe(true);
+  });
+
   it("keeps the rightmost 8 columns of a 1080-wide (16n + 8) jpg extraction", async () => {
     const source = join(FIXTURE_DIR, "white-1080.mp4");
     const synth = await runFfmpeg([
@@ -1440,6 +1517,58 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
     expect(delivered).toHaveLength(8);
     for (const [i, v] of delivered.entries())
       expect(Math.abs(v - expected[i]!)).toBeLessThanOrEqual(5);
+  }, 60_000);
+
+  async function proresFrame(name: string, pixFmt: string, profile: string, source: string) {
+    const clip = join(FIXTURE_DIR, `${name}.mov`);
+    const synth = await runFfmpeg(
+      ["-y", "-loglevel", "error", "-f", "lavfi", "-i", source].concat([
+        "-c:v",
+        "prores_ks",
+        "-profile:v",
+        profile,
+        "-pix_fmt",
+        pixFmt,
+        clip,
+      ]),
+    );
+    expect(synth.success).toBe(true);
+    const outDir = join(FIXTURE_DIR, `out-${name}`);
+    mkdirSync(outDir, { recursive: true });
+    const result = await extractAllVideoFrames(
+      [{ ...fixtureVideo(), id: name, src: clip }],
+      FIXTURE_DIR,
+      { fps: 1, outputDir: outDir },
+    );
+    expect(result.errors).toEqual([]);
+    return result.extracted[0]!.framePaths.get(0)!;
+  }
+
+  it("extracts ProRes without an alpha plane to jpg", async () => {
+    const frame = await proresFrame("prores422", "yuv422p10le", "2", "testsrc2=s=320x180:d=1:r=1");
+    expect(frame.endsWith(".jpg")).toBe(true);
+  }, 60_000);
+
+  it("keeps the alpha of ProRes 4444 exact in png frames", async () => {
+    const frame = await proresFrame(
+      "prores4444",
+      "yuva444p10le",
+      "4",
+      "color=c=0x00ff00@0.5:s=320x180:d=1:r=1,format=yuva444p10le",
+    );
+    expect(frame.endsWith(".png")).toBe(true);
+    const alpha = spawnSync("ffmpeg", [
+      "-v",
+      "error",
+      "-i",
+      frame,
+      "-vf",
+      "alphaextract,crop=1:1:10:10",
+      "-f",
+      "rawvideo",
+      "-",
+    ]);
+    expect(Math.abs(alpha.stdout[0]! - 128)).toBeLessThanOrEqual(1);
   }, 60_000);
 
   it("keeps color-sensitive UI reds closer to source when extraction is forced to png", async () => {
@@ -1588,7 +1717,9 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
     { codec: "libx264", height: 720, matrix: "bt709", format: "png" },
     { codec: "libx264", height: 720, matrix: "bt709", format: "jpg" },
     { codec: "libvpx-vp9", height: 720, matrix: "bt601", format: "png" },
-    { codec: "libaom-av1", height: 720, matrix: "bt601", format: "png" },
+    ...(AV1_ENCODER
+      ? [{ codec: AV1_ENCODER, height: 720, matrix: "bt601", format: "png" } as const]
+      : []),
   ] as const)(
     "reads an untagged $height-line $codec source as $matrix like Chrome's own playback ($format)",
     async ({ codec, height, matrix, format }) => {
@@ -2102,7 +2233,7 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling at the output frame rate", () => {
       requested = opts;
       return real(["-stats_period", "0.1", "-re", ...args], {
         ...opts,
-        stallTimeout: 60_000,
+        timeout: 60_000,
         onStderr: readStats,
       });
     });
@@ -2117,8 +2248,7 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling at the output frame rate", () => {
         { ffmpegProcessTimeout: 2000 },
       );
       expect(extracted.totalFrames).toBe(20);
-      expect(requested).toMatchObject({ stallTimeout: 2000 });
-      expect(requested).not.toHaveProperty("timeout");
+      expect(requested).toMatchObject({ timeout: 2000 });
       expect(new Set(reported).size).toBeGreaterThan(1);
     } finally {
       vi.mocked(runFfmpeg).mockImplementation(real);
@@ -2129,7 +2259,7 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling at the output frame rate", () => {
     // stdin stays open and empty, so ffmpeg waits for its first frame forever.
     const stalled = await runFfmpeg(
       ["-f", "rawvideo", "-pix_fmt", "gray", "-s", "2x2", "-i", "pipe:0", "-f", "null", "-"],
-      { stallTimeout: 500 },
+      { timeout: 500 },
     );
     expect(stalled.terminationReason).toBe("inactivity");
   }, 30_000);
@@ -2290,7 +2420,7 @@ describe.skipIf(!HAS_FFMPEG)("held tails on sparse-timestamp sources", () => {
       {
         path: vfrFixture,
         input: "testsrc2=s=64x64:d=10:rate=1/2",
-        filters: ["-vf", "select='eq(n,0)+eq(n,2)'", "-vsync", "vfr"],
+        filters: ["-vf", "select='eq(n,0)+eq(n,2)'", "-fps_mode", "vfr"],
       },
       {
         path: nonZeroStartFixture,
@@ -2462,7 +2592,7 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
 
   beforeAll(async () => {
     // 10s testsrc2 at 60fps, ~40% of frames dropped via select filter and
-    // encoded with -vsync vfr so timestamps are irregular. Declared fps 60,
+    // encoded with -fps_mode vfr so timestamps are irregular. Declared fps 60,
     // actual average ~36 — well over the 10% threshold used by isVFR.
     // The select expression drops four 1-second windows (frames 30-89,
     // 180-239, 330-389, 480-539) to simulate static segments in a screen
@@ -2480,7 +2610,7 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
       "testsrc2=s=320x180:d=10:rate=60",
       "-vf",
       "select='not(between(n\\,30\\,89))*not(between(n\\,180\\,239))*not(between(n\\,330\\,389))*not(between(n\\,480\\,539))'",
-      "-vsync",
+      "-fps_mode",
       "vfr",
       "-c:v",
       "libx264",

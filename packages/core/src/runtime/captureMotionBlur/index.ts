@@ -1,7 +1,7 @@
 /**
  * Capture motion blur, in preview and render. Root attributes: data-motion-blur="on"|"off",
- * -shutter (0–720°, default 180), -samples (2–64, default 16), -events="on" (run timeline
- * callbacks at sub-frame samples). PAGE_MOTION_BLUR_OFF_GLOBAL (engine blur, or a preview that
+ * -shutter (0–720°, default 240), -samples (2–64; unset: at least 32, more for a long smear),
+ * -events="on" (run timeline callbacks at sub-frame samples). PAGE_MOTION_BLUR_OFF_GLOBAL (engine blur, or a preview that
  * could not blur) turns all off.
  *
  * Per frame: read movers' poses across the shutter (seeks, no paint), capture the root and crop
@@ -35,42 +35,20 @@ import {
 } from "../../pageMotionBlur";
 import { swallow } from "../diagnostics";
 import { createCompositor, type MoverFrame } from "./composite";
+import { readMotionBlurSettings } from "../../motionBlurSettings";
 import { discoverMovers } from "./discover";
-import { type Affine, createPoseReader, IDENTITY, tapsFromReads } from "./pose";
+import { createFilterTier } from "./filterTier";
+import { readMoverFrames } from "./frames";
+import { createPoseReader } from "./pose";
+import {
+  type CaptureMotionBlurHost,
+  type Config,
+  type Report,
+  type Tier,
+  chooseTier,
+} from "./tier";
 
-export interface CaptureMotionBlurHost {
-  root: HTMLElement;
-  fps: number;
-  durationSeconds: () => number;
-  /** The bound root timeline; movers are re-scanned when it changes. */
-  timeline: () => unknown;
-  now: () => number;
-  /** Seek the timeline and adapters (not media) for a pose read. */
-  seek: (t: number, suppressEvents: boolean) => void;
-  ignoreMutations?: (write: () => void) => void;
-}
-
-interface Config {
-  shutterDeg: number;
-  samples: number;
-  events: boolean;
-}
-
-interface Report {
-  state: "on" | "off";
-  reason: string | null;
-  reasonCode: string | null;
-  movers: number;
-  /** The blurred elements, as `tag#id.class`, for diagnosing what was (not) picked. */
-  moverNames: string[];
-  /** One-time cost of finding the movers, in ms. */
-  scanMs: number;
-  shutterDeg: number;
-  frames: number;
-  meanMs: number;
-  failures: number;
-  failedFrames: number;
-}
+export type { CaptureMotionBlurHost };
 
 type DrawElementContext = CanvasRenderingContext2D & {
   drawElementImage: (el: Element, x: number, y: number) => unknown;
@@ -82,15 +60,19 @@ type CompositeWindow = Window & {
   __hf_page_composite_resolve?: () => boolean;
 };
 
-/** Marks a mover hidden for the background capture; set only between a frame's two paints. */
+/** Marks a mover hidden for the background capture. */
 const HIDE_ATTR = "data-hf-motion-blur-hide";
+/** On the root while the movers alone are captured; the movers carry MOVER_ATTR. */
+const ONLY_ATTR = "data-hf-motion-blur-only";
+const MOVER_ATTR = "data-hf-motion-blur-mover";
 
 interface Job {
   seq: number;
   els: HTMLElement[];
   frames: MoverFrame[];
-  /** Which movers were cropped (null until the first capture of this frame). */
-  kept: boolean[] | null;
+  kept: boolean[];
+  /** What the next paint captures: the sharp frame, the movers alone, or the background. */
+  phase: "sharp" | "movers" | "background";
   /** Engine frames wait for a release: video frames are injected after the seek. */
   armed: boolean;
   /** The paint wait starts on arming, so slow video injection cannot time a frame out unseen. */
@@ -108,19 +90,11 @@ const PAINT_TIMEOUT_MS = 2000;
 const MAX_FAILURES = 3;
 const LOG_EVERY = 25;
 
-const clamp = (x: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, x));
-
 function readConfig(root: HTMLElement): Config | null {
-  if (root.getAttribute("data-motion-blur") !== "on") return null;
-  const num = (name: string, fallback: number): number => {
-    const v = Number(root.getAttribute(name));
-    return root.hasAttribute(name) && Number.isFinite(v) ? v : fallback;
-  };
-  return {
-    shutterDeg: clamp(num("data-motion-blur-shutter", 180), 0, 720),
-    samples: Math.round(clamp(num("data-motion-blur-samples", 16), 2, 64)),
-    events: root.getAttribute("data-motion-blur-events") === "on",
-  };
+  const settings = readMotionBlurSettings((name) => root.getAttribute(name));
+  if (!settings.enabled) return null;
+  const { shutterDeg, samples, events, tier } = settings;
+  return { shutterDeg, samples, events, tier };
 }
 
 /** Must run before composition scripts: see `installAcceleratedCanvasTracker`. */
@@ -190,9 +164,16 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
   // Hides movers for the background capture without touching author or GSAP opacity.
   const hideRule = document.createElement("style");
   hideRule.setAttribute("data-hf-ignore", "");
-  hideRule.textContent = `[${HIDE_ATTR}] { opacity: 0 !important; }`;
+  hideRule.textContent = [
+    `[${HIDE_ATTR}] { opacity: 0 !important; }`,
+    // The root stays visible: a rotated or scaled mover under a hidden root is captured at the origin, untransformed.
+    `[${ONLY_ATTR}] { background: none !important; border-color: transparent !important; box-shadow: none !important; outline-color: transparent !important; }`,
+    `[${ONLY_ATTR}]::before, [${ONLY_ATTR}]::after, [${ONLY_ATTR}] *:not([${MOVER_ATTR}], [${MOVER_ATTR}] *) { visibility: hidden !important; }`,
+    `[${ONLY_ATTR}] [${MOVER_ATTR}] { visibility: visible !important; }`,
+  ].join("\n");
 
   let movers: HTMLElement[] = [];
+  let pads = new Map<HTMLElement, number>();
   let reader: ReturnType<typeof createPoseReader> | null = null;
   let pending: Job | null = null;
   // While a frame is in flight (two paints), newer requests collapse into the latest one.
@@ -210,10 +191,9 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
   let scannedTimeline: unknown = undefined;
   let scanDefect: CaptureDefect | null = null;
   let faceNow: () => boolean = () => false;
+  let translationOnly = false;
   const loggedBackstops = new Set<string>();
   let wrapped = false;
-  // The output still shows the last frame of the previous wrap until this one draws.
-  let staleOutput = false;
   // Once the engine drives frames, paused-style requests come from the transport, not a user.
   let rendering = false;
 
@@ -231,8 +211,10 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
       src.after(out);
       document.head.append(hideRule);
     });
+    // The output holds the last frame of the previous wrap: blank until this wrap draws its own.
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, out.width, out.height);
     wrapped = true;
-    staleOutput = true;
   }
 
   /** Back to plain DOM: drop any frame in flight, put the root where it was. */
@@ -256,8 +238,6 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
   }
 
   const seek = (t: number): void => host.seek(t, !config.events);
-  // The scan walks the whole timeline: callbacks must not fire (or leave their effects) there.
-  const scanSeek = (t: number): void => host.seek(t, true);
 
   function discover(restoreTo: number): void {
     scannedTimeline = host.timeline();
@@ -268,44 +248,33 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
       scene: root,
       durationSeconds: duration,
       fps: host.fps,
-      seek: scanSeek,
+      seek,
       onStep: (i, steps) => defects.sample(i, steps, (i / steps) * duration),
     });
-    scanSeek(restoreTo);
+    seek(restoreTo);
     scanDefect = defects.result();
     faceNow = defects.facesNow;
     movers = found.movers;
+    pads = found.pads;
+    translationOnly = found.translationOnly;
     reader = createPoseReader(root, found.dynamic);
     scanMs = Math.round(performance.now() - s0);
   }
 
   function frames(t: number, reads: number): { els: HTMLElement[]; frames: MoverFrame[] } {
-    const r = reader;
-    if (!r) return { els: [], frames: [] };
-    const visible = movers.filter(
-      (el) =>
-        typeof el.checkVisibility !== "function" ||
-        el.checkVisibility({ visibilityProperty: true }),
-    );
-    const shutter = config.shutterDeg / 360 / host.fps;
-    if (visible.length === 0 || shutter <= 0) return { els: [], frames: [] };
-    const start = t - shutter / 2;
-    const poses = visible.map((): Affine[] => []);
-    for (let j = 0; j < reads; j++) {
-      seek(Math.max(0, start + (j / (reads - 1)) * shutter));
-      r.reset();
-      visible.forEach((el, i) => poses[i]?.push(r.pose(el)));
-    }
-    seek(t);
-    r.reset();
-    const result = visible.map((el, i) => ({
-      w: el.offsetWidth,
-      h: el.offsetHeight,
-      now: r.pose(el),
-      taps: tapsFromReads(poses[i] ?? [IDENTITY], config.samples),
-    }));
-    r.reset();
-    return { els: visible, frames: result };
+    if (!reader) return { els: [], frames: [] };
+    return readMoverFrames({
+      movers,
+      reader,
+      seek,
+      t,
+      reads,
+      shutterSeconds: config.shutterDeg / 360 / host.fps,
+      taps: config.samples,
+      pads,
+      frameW: width,
+      frameH: height,
+    });
   }
 
   const capture = (): void => {
@@ -313,7 +282,24 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
     sctx.drawElementImage(root, 0, 0);
   };
   const reveal = (job: Job): void => {
-    for (const el of job.els) el.removeAttribute(HIDE_ATTR);
+    root.removeAttribute(ONLY_ATTR);
+    for (const el of job.els) {
+      el.removeAttribute(HIDE_ATTR);
+      el.removeAttribute(MOVER_ATTR);
+    }
+  };
+  /** Show the kept movers alone, on a transparent background, for the next paint. */
+  const isolate = (job: Job): void => {
+    root.setAttribute(ONLY_ATTR, "");
+    job.els.forEach((el, i) => job.kept[i] && el.setAttribute(MOVER_ATTR, ""));
+  };
+  /** Swap to the background capture: kept movers hidden, the rest shown as usual. */
+  const hideMovers = (job: Job): void => {
+    root.removeAttribute(ONLY_ATTR);
+    job.els.forEach((el, i) => {
+      el.removeAttribute(MOVER_ATTR);
+      if (job.kept[i]) el.setAttribute(HIDE_ATTR, "");
+    });
   };
 
   /**
@@ -354,24 +340,20 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
       disable(`capture failed ${failures} times in a row`, "capture-failures", true);
   }
 
-  /** This paint's half of the frame; false when the background capture is still to come. */
+  /** This paint's capture; false when another paint is still to come for this frame. */
   function captureAndDraw(job: Job, finalStep: boolean): boolean {
     capture();
     try {
-      if (!job.kept) {
-        job.kept = compositor.crop(src, job.frames);
-        if (staleOutput) {
-          // First paint since wrapping: show this frame sharp until its trails are drawn.
-          octx.setTransform(1, 0, 0, 1, 0, 0);
-          octx.globalAlpha = 1;
-          octx.globalCompositeOperation = "copy";
-          octx.drawImage(src, 0, 0);
-          staleOutput = false;
-        }
-        if (job.kept.some(Boolean) && !finalStep) {
-          job.els.forEach((el, i) => job.kept?.[i] && el.setAttribute(HIDE_ATTR, ""));
-          return false;
-        }
+      if (job.phase === "sharp") {
+        compositor.draw(src, octx, job.frames, job.kept);
+        return true;
+      }
+      if (finalStep) throw new Error(`the ${job.phase} capture did not arrive`);
+      if (job.phase === "movers") {
+        compositor.crop(src, job.frames, job.kept);
+        hideMovers(job);
+        job.phase = "background";
+        return false;
       }
       compositor.draw(src, octx, job.frames, job.kept);
       return true;
@@ -474,7 +456,18 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
       canvas.height = Math.max(1, Math.round(height * dpr));
     }
     compositor = createCompositor(width, height, dpr);
-    staleOutput = true;
+  }
+
+  /** Who should draw instead of capture: it turned itself off, or the filter tier does as well for less. */
+  function handOff(): CaptureDefect | null {
+    if (disabled) return { code: disabledCode ?? "capture-failures", reason: disabled };
+    if (config.tier === "auto" && reader && translationOnly && filterTierAllowed()) {
+      return {
+        code: "translation-only",
+        reason: "every mover only translates, which the filter tier draws as well and far cheaper",
+      };
+    }
+    return null;
   }
 
   /** Scan when the timeline is new; true when the scan found a defect (blur is then off). */
@@ -498,7 +491,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
   function start(t: number, engineMode: boolean): Promise<void> {
     try {
       syncDensity();
-      if (blockedByScan(t)) return Promise.resolve();
+      if (blockedByScan(t) || handOff()) return Promise.resolve();
       if (movers.length === 0) {
         unwrap();
         return Promise.resolve();
@@ -508,6 +501,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
       wrap();
       const s0 = performance.now();
       const next = frames(t, engineMode ? RENDER_READS : PREVIEW_READS);
+      const kept = compositor.plan(next.frames);
       sampleMs = performance.now() - s0;
       if (pending) finishJob(pending);
       return new Promise<void>((resolve) => {
@@ -523,7 +517,8 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
           seq: mine,
           els: next.els,
           frames: next.frames,
-          kept: null,
+          kept,
+          phase: kept.some(Boolean) ? "movers" : "sharp",
           armed: !engineMode,
           startTimer,
           ms: 0,
@@ -532,6 +527,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
             resolve();
           },
         };
+        if (pending.phase === "movers" && !engineMode) isolate(pending);
         if (engineMode) return;
         startTimer();
         src.requestPaint();
@@ -547,6 +543,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
     const mean = timings.length ? timings.reduce((s, x) => s + x, 0) / timings.length : 0;
     return {
       state: disabled ? "off" : "on",
+      tier: disabled ? null : "capture",
       reason: disabled,
       reasonCode: disabledCode,
       movers: movers.length,
@@ -579,6 +576,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
     arm: () => {
       if (!pending || pending.armed) return;
       pending.armed = true;
+      if (pending.phase === "movers") isolate(pending);
       pending.startTimer();
       src.requestPaint();
     },
@@ -589,6 +587,7 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
     },
     teardown,
     suspend: unwrap,
+    handOff,
     report,
     busy: (): boolean => pending !== null,
     rediscover: () => {
@@ -598,8 +597,14 @@ function createInstance(host: CaptureMotionBlurHost, config: Config, form: HtmlI
   };
 }
 
-type Instance = ReturnType<typeof createInstance>;
-let instance: Instance | null = null;
+type Active = Tier & { handOff?: () => CaptureDefect | null };
+let instance: Active | null = null;
+let activeHost: CaptureMotionBlurHost | null = null;
+let activeConfig: Config | null = null;
+/** The filter tier stands in for capture; a scene re-init tries capture again. */
+let onFallback = false;
+let fallbackEnabled = true;
+const filterTierAllowed = (): boolean => fallbackEnabled;
 let suspended = false;
 let priorResolver: (() => boolean) | null = null;
 let ourResolver: (() => boolean) | null = null;
@@ -617,38 +622,102 @@ export function initCaptureMotionBlur(host: CaptureMotionBlurHost): void {
     delete w.__hfMotionBlur;
   }
   if (!config) return;
+  if (instance && onFallback) {
+    instance.teardown();
+    instance = null;
+    onFallback = false;
+  }
   if (instance) {
     instance.rediscover();
     return;
   }
+  activeHost = host;
+  activeConfig = config;
+  selectTier(host, config, w);
+  bindApi(w, config);
+}
+
+const TIER_ATTRIBUTE: CaptureDefect = {
+  code: "tier-attribute",
+  reason: 'data-motion-blur-tier="filter"',
+};
+
+function selectTier(host: CaptureMotionBlurHost, config: Config, w: CompositeWindow): void {
   const form = htmlInCanvasForm();
   const why = unsupported(host.root);
-  if (!form || why) {
-    const reason = why?.reason ?? null;
-    console.info(`[motion-blur] off: ${reason} (Chrome ${chromeMajor() ?? "unknown"})`);
-    const report = (): Report => ({
-      state: "off",
-      reason,
-      reasonCode: why?.code ?? null,
-      movers: 0,
-      moverNames: [],
-      scanMs: 0,
-      shutterDeg: config.shutterDeg,
-      frames: 0,
-      meanMs: 0,
-      failures: 0,
-      failedFrames: 0,
-    });
-    w.__hfMotionBlur = { report, probe: report, suspend: suspendCaptureMotionBlur };
-    return;
-  }
-  instance = createInstance(host, config, form);
-  const current = instance;
+  const choice = chooseTier({
+    tier: config.tier,
+    form: form !== null,
+    defect: why,
+    fallback: fallbackEnabled,
+  });
+  if (choice === "filter")
+    startFallback(host, config, config.tier === "filter" ? TIER_ATTRIBUTE : why);
+  else if (choice === "capture" && form) instance = createInstance(host, config, form);
+  else standDown(w, config, why);
+}
+
+function startFallback(
+  host: CaptureMotionBlurHost,
+  config: Config,
+  why: CaptureDefect | null,
+): void {
+  const reason = why ?? {
+    code: "unsupported-browser",
+    reason: "html-in-canvas (drawElementImage) is unavailable in this browser",
+  };
+  instance = createFilterTier(host, config, reason);
+  onFallback = true;
+  console.info(
+    `[motion-blur] filter fallback: ${reason.reason} (Chrome ${chromeMajor() ?? "unknown"})`,
+  );
+}
+
+/** Blur is off for good on this page (the renderer said so): report why, draw nothing. */
+function standDown(w: CompositeWindow, config: Config, why: CaptureDefect | null): void {
+  console.info(`[motion-blur] off: ${why?.reason ?? null} (Chrome ${chromeMajor() ?? "unknown"})`);
+  const report = (): Report => offReport(config, why);
+  w.__hfMotionBlur = { report, probe: report, suspend: suspendCaptureMotionBlur };
+}
+
+function offReport(config: Config, why: CaptureDefect | null): Report {
+  return {
+    state: "off",
+    tier: null,
+    reason: why?.reason ?? null,
+    reasonCode: why?.code ?? null,
+    movers: 0,
+    moverNames: [],
+    scanMs: 0,
+    shutterDeg: config.shutterDeg,
+    frames: 0,
+    meanMs: 0,
+    failures: 0,
+    failedFrames: 0,
+  };
+}
+
+function bindApi(w: CompositeWindow, config: Config): void {
+  if (!instance) return;
   w.__hfMotionBlur = {
-    report: () => current.report(),
-    probe: () => current.probe(),
+    report: () => instance?.report() ?? offReport(config, null),
+    probe: () => {
+      instance?.probe();
+      settleTier();
+      return instance?.probe() ?? offReport(config, null);
+    },
     suspend: suspendCaptureMotionBlur,
   };
+}
+
+/** A scan that found a defect turned capture off for this timeline: draw with filters instead. */
+function settleTier(): void {
+  const defect = instance?.handOff?.();
+  if (!fallbackEnabled || !instance || !defect || !activeHost || !activeConfig) return;
+  instance.teardown();
+  instance = createFilterTier(activeHost, activeConfig, defect);
+  onFallback = true;
+  console.info(`[motion-blur] filter fallback: ${defect.reason}`);
 }
 
 /**
@@ -665,7 +734,12 @@ export function paintCaptureMotionBlur(
   if (!instance || suspended) return null;
   const engineMode = options?.engineMode === true;
   if (!engineMode && !options?.playing && instance.rest()) return null;
-  const done = instance.paint(t, engineMode);
+  let done = instance.paint(t, engineMode);
+  if (instance.handOff?.()) {
+    settleTier();
+    if (!engineMode && !options?.playing && instance.rest()) return null;
+    done = instance.paint(t, engineMode);
+  }
   // Nothing in flight (nothing moves, or blur turned off): leave the engine's composite step idle.
   if (engineMode && instance.busy()) armPageComposite();
   return done;
@@ -709,7 +783,15 @@ function suspendCaptureMotionBlur(): void {
 export function resetCaptureMotionBlurForTests(): void {
   instance?.teardown();
   instance = null;
+  activeHost = null;
+  activeConfig = null;
+  onFallback = false;
   suspended = false;
   priorResolver = null;
   ourResolver = null;
+}
+
+/** Test-only: judge the capture tier alone, without the filter fallback taking over. */
+export function setFilterFallbackForTests(on: boolean): void {
+  fallbackEnabled = on;
 }

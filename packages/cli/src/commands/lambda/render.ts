@@ -18,8 +18,8 @@ import {
   resolveVariablesArg,
   validateVariablesAgainstProject,
 } from "../../utils/variables.js";
-import { warnOnDimensionMismatch } from "./_dimensions.js";
-import { requireStack, stateFilePath } from "./state.js";
+import { resolveOutputResolutionFromSize } from "./_dimensions.js";
+import { videoArchitecture, requireStack, type StackOutputs, stateFilePath } from "./state.js";
 
 // Dynamic-import the SDK so tsup keeps it out of the static-import head of
 // the CLI bundle. See sites.ts loadSDK() for the full rationale.
@@ -84,13 +84,15 @@ export async function runRender(args: RenderArgs): Promise<void> {
   const stack = requireStack(args.stackName);
   const projectDir = resolvePath(args.projectDir);
 
-  warnOnDimensionMismatch({
-    projectDir,
-    cliWidth: args.width,
-    cliHeight: args.height,
-    outputResolution: args.outputResolution,
-    quiet: args.json,
-  });
+  args = {
+    ...args,
+    outputResolution: resolveOutputResolutionFromSize({
+      projectDir,
+      cliWidth: args.width,
+      cliHeight: args.height,
+      outputResolution: args.outputResolution,
+    }),
+  };
 
   // Resolve --variables / --variables-file using the same parser the local
   // `hyperframes render` uses. `resolveVariablesArg` exits(1) with a friendly
@@ -143,6 +145,7 @@ export async function runRender(args: RenderArgs): Promise<void> {
     config,
     executionName: args.executionName,
     outputKey: args.outputKey,
+    onNotice: (message) => console.error(c.dim(message)),
   });
 
   if (args.json) {
@@ -175,7 +178,7 @@ export async function runRender(args: RenderArgs): Promise<void> {
 
 async function waitForCompletion(
   executionArn: string,
-  stack: { region: string; functionName: string; lambdaMemoryMb: number },
+  stack: StackOutputs,
   intervalMs: number,
   json: boolean,
 ): Promise<void> {
@@ -188,6 +191,7 @@ async function waitForCompletion(
       executionArn,
       region: stack.region,
       defaultMemorySizeMb: stack.lambdaMemoryMb,
+      videoArchitecture: videoArchitecture(stack),
     });
     for (const warning of progress.warnings) {
       if (!warned.has(warning)) console.warn(c.warn(warning));

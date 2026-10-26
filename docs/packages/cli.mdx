@@ -23,14 +23,14 @@ npm install -g hyperframes
 | You want to              | Use                                                                                                                                                                                                                              |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Start a project          | [`init`](#init), [`add`](#add), [`catalog`](#catalog)                                                                                                                                                                            |
-| Bring in source material | [`capture`](#capture), [`transcribe`](#transcribe), [`tts`](#tts), [`remove-background`](#remove-background), [`media-treatment`](#media-treatment), [`beats`](#beats), [`audio`](#audio), [`normalize-audio`](#normalize-audio) |
+| Bring in source material | [`capture`](#capture), [`media-use`](#media-use), [`transcribe`](#transcribe), [`tts`](#tts), [`remove-background`](#remove-background), [`media-treatment`](#media-treatment), [`beats`](#beats), [`audio`](#audio), [`normalize-audio`](#normalize-audio), [`models`](#models) |
 | Look at it, or share it  | [`preview`](#preview), [`present`](#present-and-play), [`play`](#present-and-play), [`publish`](#publish), [`open`](#open-and-catch-up), [`catch-up`](#open-and-catch-up)                                                        |
 | Find problems            | [`lint`](#lint), [`check`](#check), [`snapshot`](#snapshot), [`keyframes`](#keyframes), [`compare`](#compare-and-grade-compare), [`grade-compare`](#compare-and-grade-compare)                                                   |
 | Edit from the terminal   | [`timeline`](#timeline), [`history`](#history)                                                                                                                                                                                   |
 | Make a file              | [`render`](#render), [`benchmark`](#benchmark)                                                                                                                                                                                   |
 | Render somewhere else    | [`cloud`](#hyperframes-cloud), [`lambda`](#hyperframes-lambda), [`cloudrun`](#hyperframes-cloudrun)                                                                                                                              |
-| Fix your setup           | [`doctor`](#doctor), [`browser`](#browser), [`upgrade`](#upgrade), [`docs`](#docs), [`info`](#info-and-compositions), [`compositions`](#info-and-compositions)                                                                   |
-| Connect other tools      | [`auth`](#hyperframes-auth), [`skills`](#skills), [`figma`](#figma-and-events), [`telemetry`](#telemetry), [`feedback`](#feedback)                                                                                               |
+| Fix your setup           | [`doctor`](#doctor), [`browser`](#browser), [`upgrade`](#upgrade), [`docs`](#docs), [`info`](#info-and-compositions), [`compositions`](#info-and-compositions), [`clean`](#clean)                                                                   |
+| Connect other tools      | [`auth`](#hyperframes-auth), [`skills`](#skills), [`usage`](#usage), [`figma`](#figma-and-events), [`events`](#figma-and-events), [`telemetry`](#telemetry), [`feedback`](#feedback)                                                                            |
 
 `validate`, `inspect`, and `layout` still work but are
 [deprecated](#deprecated-validate-inspect-and-layout). Use `check` instead.
@@ -113,7 +113,7 @@ npx hyperframes init my-video --tailwind
 | `--keep-original`   | Copy the `--video` file as is instead of converting a non-web codec to H.264 MP4                                                                                                                                                                                                     |
 | `--model`           | Whisper model for that transcription (for example `small.en`, `medium.en`, `large`)                                                                                                                                                                                                   |
 | `--language`        | Language code for transcription (`en`, `es`, `ja`, …). Filters out speech in other languages.                                                                                                                                                                                         |
-| `--skip-skills`     | Currently ignored. Set `HYPERFRAMES_SKIP_SKILLS=1` to opt out in CI or tests.                                                                                                                                                                                                         |
+| `--skip-skills`     | Leave AI coding skills alone: `init` does not install the core set. `HYPERFRAMES_SKIP_SKILLS=1` does the same.
 
 Pass `--video` or `--audio` and the CLI transcribes the audio with Whisper and
 patches the captions into the composition for you. `--skip-transcribe` turns
@@ -127,8 +127,10 @@ of v3 `tailwind.config.js` patterns. The browser
 runtime is meant for scaffolded projects and quick iteration — for offline or
 locked-down production renders, compile Tailwind to CSS and link the stylesheet.
 
-After scaffolding, `init` checks and installs the core AI skills from the
-current GitHub source. See [`skills`](#skills).
+Every new project gets an `AGENTS.md` and an identical `CLAUDE.md`: they tell a
+coding agent what HyperFrames is and which commands preview, check, snapshot and
+render the video. After scaffolding, `init` checks and installs the core AI
+skills from the current GitHub source. See [`skills`](#skills).
 
 ### `add`
 
@@ -147,6 +149,10 @@ npx hyperframes add shader-wipe --no-clipboard --json   # headless / CI
 The positional name is a registry item, or a tag — a tag installs every block
 carrying it. `--dir` picks the project directory, `--json` prints the written
 files and paste snippet, and `--no-clipboard` skips the clipboard copy for CI.
+
+If any block in a tag fails to install, `add` keeps the successful installs and
+exits with code 1. With `--json`, `ok` is `false` and `errors` lists each failed
+block's `name` and `error`; `installed` lists the blocks that succeeded.
 
 Every install produces files plus a **paste snippet**: the `<iframe>` tag for a
 block, or the fragment path for a component. It goes to your clipboard by
@@ -276,6 +282,11 @@ the `/hyperframes` skill uses it when a real product has to appear on screen. Dy
 partial results, so read `dropped`, the warnings, and the contact sheets before
 you build.
 
+Downloaded fonts are saved under `assets/fonts/`, and their CSS references point
+to those local files. Distinct URLs such as `demo.woff2?v=1` and
+`demo.woff2?v=10` keep separate files. A failed font download leaves its original
+URL unchanged.
+
 For AI image descriptions, set `GEMINI_API_KEY` in a `.env` file
 (~$0.001/image), or `OPENROUTER_API_KEY` to route any vision model through
 [OpenRouter](https://openrouter.ai) — it wins if both are set, and
@@ -304,7 +315,7 @@ npx hyperframes transcribe video.mp4 --to vtt
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--dir, -d`       | Project directory (default: current directory)                                                                                                                                                     |
 | `--engine, -e`    | ASR engine: `auto` (default — Parakeet if installed and the language is one of its 25, else whisper), `parakeet` (fails if Parakeet is missing, broken, or lacks the `--language`), or `whisper`. Under `auto` or `parakeet`, a `--language` other than English runs whisper when it is installed, with a note, because Parakeet detects the language itself |
-| `--model, -m`     | Whisper model (default `small.en`): `tiny.en`, `base.en`, `small.en`, `medium.en`, `large-v3`                                                                                                       |
+| `--model, -m`     | Whisper model (default `small.en`): `tiny.en`, `base.en`, `small.en`, `medium.en`, `small`, `medium`, `large-v3`                                                                                                       |
 | `--language, -l`  | Language code (`en`, `es`, `ja`, …). Whisper transcribes as this language; Parakeet detects the language itself, so it only takes a non-English `--language` when whisper is not installed. |
 | `--to`            | Write an `srt` or `vtt` sidecar: from a transcript file it exports instead of importing; from audio or video it is written beside `transcript.json`, with cues for languages without spaces grouped, which exporting that `transcript.json` later may split differently |
 | `--output, -o`    | Where the exported SRT/VTT goes                                                                                                                                                                    |
@@ -498,6 +509,106 @@ npx hyperframes media-treatment --selector '#hero' --clear
 The command writes `data-color-grading` — the same contract Studio, preview, and
 render all read, so the two can never disagree. It does not recognise subjects
 or isolate part of an image; the effect covers the whole media layer.
+
+### `media-use`
+
+Get the music, sound effects, images, icons, logos, voiceover, and color grades
+a video needs, saved as files inside the project. Every asset is recorded, so
+asking for the same thing again reuses the file instead of fetching it twice.
+The `media-use` skill drives this command; you can also run it yourself.
+
+```bash
+# Find or make one asset and save it in the project
+npx hyperframes media-use resolve --type sfx --intent "whoosh"
+npx hyperframes media-use resolve --type logo --entity linkedin --intent "LinkedIn logo"
+npx hyperframes media-use resolve --type grade --intent "warm daylight" --json
+
+# Look at what you already have before fetching more
+npx hyperframes media-use candidates --type bgm --intent "upbeat tech launch"
+npx hyperframes media-use resolve --type bgm --reuse 06e052c0
+
+# Bring in a file you already have
+npx hyperframes media-use resolve --type image --from ./photo.jpg
+
+# Check the setup, and see what has been used
+npx hyperframes media-use doctor
+npx hyperframes media-use stats --days 7
+```
+
+`resolve` prints one line, such as
+`resolved sfx_001 → .media/audio/sfx/sfx_001.mp3 (sfx, 0.6s)`, or the whole
+record with `--json`. It never edits your composition HTML; you reference the
+file yourself.
+
+| Subcommand   | What it does                                                                                                                                                              |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resolve`    | Find, make, or import one asset. Takes every flag below                                                                                                                   |
+| `candidates` | List assets already in the project and the global cache for `--type`, best match for `--intent` first. Downloads nothing and changes nothing. Same as `resolve --candidates` |
+| `adopt`      | Record the files already in `assets/` so later requests find them, with duration and size read by `ffprobe`                                                               |
+| `analyze`    | Measure an image or video and print suggested exposure and color corrections, saving nothing. Needs `--type grade --for <file>`                                           |
+| `doctor`     | Check ffmpeg, ffprobe, Node.js, the bundled sound library, and the `heygen` CLI (installed, v0.3.0 or newer, signed in). Changes nothing                                  |
+| `stats`      | Count requests, misses, and reuse from the project's `.media/` and the global `~/.media/`                                                                                 |
+
+| Flag                | Description                                                                                                                         |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `--type`            | Media type, from the table below. Required for every subcommand except `doctor`, `stats`, and `adopt`                               |
+| `--intent`          | What you need, in plain words. For `voice` and `video` it is the text to speak                                                      |
+| `--entity`          | A name such as a brand (`linkedin`), so a later request for the same thing reuses the file                                          |
+| `--project, -p`     | Project directory (default: current directory)                                                                                      |
+| `--candidates`      | List reusable assets instead of resolving. `--dry-run` does the same                                                                |
+| `--reuse <sha>`     | Copy one global-cache asset into this project, by the content hash or prefix that `candidates` prints                               |
+| `--from <file>`     | Import a local file or a direct public media URL. Pages such as YouTube links are refused                                           |
+| `--params <json>`   | Build a LUT from explicit values, such as `'{"contrast":0.2}'`. `lut` and `grade` only                                              |
+| `--for <media>`     | Measure this image or video and add the suggested corrections to the grade. `grade` only                                            |
+| `--analyze`         | With `--type grade --for`, print the measurement and stop                                                                           |
+| `--local-only`      | Skip every network provider. Only the caches and tools installed on this machine are used                                           |
+| `--provider <name>` | Use only this provider and skip reuse: for example `heygen`, `codex`, `mflux`, `kokoro`. An unknown name fails and lists valid ones |
+| `--voice-id`        | HeyGen voice for `voice` and `video` (default: the first voice the catalog lists)                                                   |
+| `--avatar-id`       | HeyGen avatar for `video` (default: the first public avatar)                                                                        |
+| `--days <n>`        | With `stats`, count only the last `n` days                                                                                          |
+| `--json`            | Print JSON instead of one line                                                                                                      |
+
+Where each type comes from, tried in order until one succeeds:
+
+| `--type` | You get                                         | Sources                                                                                        |
+| -------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `bgm`    | Background music                                | HeyGen music catalog                                                                           |
+| `sfx`    | Sound effects                                   | Openverse (CC0 or CC BY, no account), then a bundled library that works offline                |
+| `image`  | Photos and backgrounds                          | HeyGen asset search, then generated by mflux on this machine, then by the `codex` CLI          |
+| `icon`   | Icons                                           | HeyGen asset search                                                                            |
+| `logo`   | Official brand marks                            | theSVG, then the GitHub organization avatar, then the site's favicon                           |
+| `voice`  | Spoken audio of the `--intent` text             | HeyGen text to speech, then Kokoro on this machine                                             |
+| `video`  | An avatar speaking the `--intent` text          | HeyGen avatar video, then LTX on this machine when it is enabled                               |
+| `brand`  | Brand colors, font, and logo                    | The project's own `frame.md` or `design.md`. Never the network                                 |
+| `grade`  | A color-grading block for `data-color-grading`  | A built-in preset, a look-library LUT, or a LUT built from the words in `--intent`             |
+| `lut`    | A `.cube` LUT file                              | A look-library LUT, or one built from the words in `--intent`                                  |
+
+Before it fetches anything, `resolve` reuses an exact earlier match: the same
+`--type` and `--intent` (or `--entity`) in this project, a file in `assets/`
+whose name shares a word with the intent, then the same request in the global
+cache at `~/.media/`. `--provider` skips this. New files land in
+`.media/<kind>/`, are listed in `.media/manifest.jsonl` and `.media/index.md`,
+and are copied to `~/.media/` so other projects can reuse them. Sound effects
+under CC BY get their credit written to `.media/audio/sfx/CREDITS.md`.
+
+**What needs an account, and what can cost money.** The HeyGen sources run
+through the separate `heygen` CLI, signed in with `heygen auth login --oauth`.
+Searching the music, image, and icon catalogs is free. Text to speech and avatar
+video draw on a free allowance when you are signed in with OAuth, then on your
+HeyGen billing, so an agent should ask before generating them. When a
+host app sets `HEYGEN_API_BASE` and `HEYGEN_API_KEY`, HeyGen calls go through that
+host instead and are charged to its key. The `codex` image fallback uses your
+ChatGPT subscription. Openverse, theSVG, GitHub, favicons, color grades, and the
+local generators cost nothing. `doctor` exits 1 only when ffmpeg, ffprobe, or the
+bundled sounds are missing; HeyGen problems are listed with a fix but do not fail it.
+
+`media-use` sends anonymous usage events — the media type, which source won, and
+whether it reused a file, never your intent text or paths — and honors the same
+opt-outs as [`telemetry`](#telemetry).
+
+See [Voice, sound, and captions](/guides/voice-and-audio) and
+[Color grading](/guides/media-effects#fix-and-grade-the-color) for the workflows around these assets, and
+[Authentication](/guides/authentication) for HeyGen credentials.
 
 ### `beats`
 
@@ -768,6 +879,13 @@ The server picks one of three modes by itself: **embedded** (the default for
 **monorepo** (the studio dev server, when you run from the source repo).
 `--background` works with the embedded server only.
 
+The CLI ships GSAP, CustomEase, and MotionPathPlugin, so the GSAP scripts
+Studio adds to previews load from the preview server itself, not from jsDelivr.
+To use your own mirror instead, set `HYPERFRAMES_GSAP_BASE_URL` before starting
+the server. See
+[Where Studio loads GSAP from](/packages/studio-server#where-studio-loads-gsap-from)
+for the lookup order, the mirror layout, and what the setting does not cover.
+
 <Note>
   Preview plays in real time, so paint-heavy compositions can stutter on your
   machine. Render seeks and captures one frame at a time, so the same work usually
@@ -843,7 +961,8 @@ npx hyperframes open --json     # for agents
 When it runs under Claude Code, Codex, or Grok, the app's chat picks up that
 conversation. When it cannot open the app, for example because the app is not
 installed, `open` exits 1 and prints a download link. With `--json`, the result
-names the `reason` and the `downloadUrl`.
+names the `reason` and the `downloadUrl`. The hand-off works on macOS only for
+now: on Windows and Linux, `open` always exits 1 with the download link.
 
 `catch-up` is the other half of that hand-off. Run it when the person is back
 from the desktop app, before you change anything: it lists what they asked and
@@ -892,7 +1011,7 @@ unless you pass `--verbose`, which keeps output clean for agents and CI.
 `--json` adds `errorCount`, `warningCount`, `infoCount`, and a `findings` array.
 
 The linter catches missing attributes, missing adapter libraries (GSAP, Lottie,
-Three.js), and structural problems. [Troubleshooting](/guides/troubleshooting)
+Three.js), and structural problems. [Troubleshooting](/help)
 explains each rule.
 
 ### `check`
@@ -945,6 +1064,15 @@ cover every finding from the full check.
 | `--layout`                                   | Layout knobs, currently `proseCoverageFloor=0.05` (0–1, default 0.15)                                                       |
 | `--browser-gpu` / `--no-browser-gpu`         | Hardware GPU capture, or deterministic SwiftShader (default: auto-detect)                                                   |
 | `--proxy` / `--no-proxy`                     | Auto-transcode browser-hostile codecs before checking (default: on)                                                        |
+| `--prepare-media`                            | Only make the browser-playable video copies, then exit: no browser, no report. `--json` lists each file as `ready`, `cached` or `failed`; exit 1 if any failed |
+
+A video Chrome cannot decode (HEVC, ProRes) is copied once, and the first check waits
+for it. A source longer than 22 seconds is copied in 15-second pieces that are kept, so a
+copy that is stopped continues from its finished pieces on the next run. While it works, the
+check prints each copy's progress to stderr every 10 seconds (stdout stays clean for `--json`),
+and ends a copy only when it makes no progress for 3 minutes (`HYPERFRAMES_PROXY_STALL_MS`).
+For a long project, run `hyperframes check --prepare-media` first, then the check itself finds
+every copy ready.
 
 `--caption-zone` and `--frame-check` refuse a ranged check when none of their
 configured seek samples falls inside `--range`; a requested gate never silently
@@ -968,6 +1096,19 @@ enters with `data-layout-allow-occlusion`.
 Contrast failures are errors, and each one reports the sampled foreground and
 background colours, the measured ratio against the required one, and a
 compliant colour you could use instead.
+
+An agent harness can turn on `skipContrastInMotion` in the `check-review`
+capability of [`HF_TOOL_CONTEXT`](/developers/harness-tool-context). It leaves
+out a contrast failure measured while a GSAP tween on the text or an ancestor
+is running, or while the text's opacity multiplied up its ancestors
+is below 1. The failure is not reported, and the counts and `ok` leave it out.
+Repeating tweens, tweens inside infinitely repeating timelines, and tweens of
+4s or longer, such as a slow camera drift, do not count as motion. The opacity
+rule also applies at rest, including deliberately translucent text, when a tween
+targets the text or an ancestor. Text no GSAP tween targets is reported as usual.
+Dropped samples do not contribute to persistence: a retained failure can become
+a warning when only one failing sample remains among multiple measured times.
+Off by default.
 
 Severity is persistence-aware: a finding at a single sample demotes to info, a
 finding that persists gates the exit code, and a composition of 3s or more
@@ -1071,6 +1212,9 @@ nothing reports `motion_selector_missing` rather than quietly passing.
 
 Capture specific frames as PNGs, without waiting for a full render.
 
+Each sub-composition may reuse a local video ID such as `clip`. Snapshots keep each
+scene's footage separate without requiring you to rename those IDs across files.
+
 ```bash
 npx hyperframes snapshot my-project --at 2.9,10.4,18.7
 npx hyperframes snapshot my-project --frames 10
@@ -1103,7 +1247,7 @@ npx hyperframes snapshot my-project --review --json
 | `--angle`               | Orthogonal 3D camera for depth and occlusion checks: `front`, `iso`, `top`, `side`, or `yaw,pitch` in degrees. Tilts the whole stage, so you get real pixels.        |
 | `--review`              | Capture the frames that show the film over time instead of evenly spaced ones: `review-beats.jpg` (each scene at its start + 0.3 s and at its middle, and each timed `data-beat="name"` element at its start + 0.3 s), `review-seam-NN.jpg` (−0.2 to +0.2 s around every cut) and `review-phone.jpg` (the beat frames 360 px wide). Scenes are the top-level timed clips and sub-composition hosts; `--composition` scopes to one. |
 | `--json`                | Print one envelope: `frames` with path, time and (under `--review`) role and label, the contact sheets, and under `--review` the scenes, beats and seams behind them. Progress goes to stderr. |
-| `--describe`            | Gemini vision analysis of each frame. Runs by default when `GEMINI_API_KEY` is set. Pass a question to override the prompt, or `--describe false` to opt out.        |
+| `--describe`            | Off by default. Sends each frame to Gemini and writes `descriptions.md`. Needs `GEMINI_API_KEY` or `GOOGLE_API_KEY`. A bare `--describe` uses the default prompt; `--describe "<question>"` asks your own. Put the project directory before a bare `--describe`. |
 | `--timeout`             | Ms to wait for the runtime (default 5000)                                                                                                                           |
 | `--browser-gpu`, `--proxy` | Same meaning as on [`check`](#check)                                                                                                                             |
 
@@ -1233,6 +1377,12 @@ npx hyperframes timeline delete '#outro' --start 6 --end 7   # cut one second ou
 | `undo <receipt>`            | Restore the files an edit changed, from its receipt (the JSON or its file)                                                                |
 | `ids`                       | Stamp stable ids on the timeline's clips                                                                                                  |
 
+`duplicate` shifts clips at or after the insertion time on the same track by
+the copied clip's length. Video and audio clips can use their source length
+without `data-duration`, including clips shifted by the insertion.
+For clips with `data-end`, the copy and any shifted clips keep their length by
+moving their end with their start.
+
 A time is seconds (`4.5`), an offset from the clip's start (`+1`, `-0.5`),
 frames (`30f`), `end`, or an anchor on another clip: `after:#intro`,
 `before:#intro`, `start-of:#intro` or `end-of:#intro`. A flag an edit command does not
@@ -1240,7 +1390,7 @@ use is refused before anything is written.
 
 | Flag          | Applies to                                                     | Description                                                   |
 | ------------- | -------------------------------------------------------------- | ------------------------------------------------------------- |
-| `--plan`      | `move`, `trim`, `split`, `delete`, `set`, `duplicate`, `apply` | Print the result and the diff without writing                 |
+| `--plan`      | `move`, `trim`, `split`, `delete`, `set`, `duplicate`, `apply` | Print the result and the diff without writing. `apply --plan` prints only a count (`planned 1 file`); add `--json` for the result and diff. |
 | `--overwrite` | `move`, `trim`                                                 | Allow the clip to overlap a neighbour on its track            |
 | `--snap`      | `move`, `trim`, `split`, `delete`, `duplicate`                 | Round times to whole frames. Needs `data-fps` on the project. |
 | `--at`        | `duplicate`                                                    | Where the copy starts                                         |
@@ -1274,7 +1424,7 @@ npx hyperframes history undo --who claude            # undo your newest turn
 | Command                 | What it does                                                                                           |
 | ----------------------- | ------------------------------------------------------------------------------------------------------ |
 | `show <ref> [--diff]`   | One entry's files, before and after. `--diff` prints a text diff (needs `git`).                        |
-| `undo [ref]`            | Undo an entry, or with `--who <name>` and no ref, that name's newest turn still in effect              |
+| `undo [ref]`            | Undo an entry, or with `--who <name>` and no ref, whatever is still in effect from that name's last turn (its newest entry if it never used `begin`). If nothing from that turn is still in effect, it refuses rather than undoing an older turn. |
 | `restore <ref> [--who]` | Make the files what they were right after an entry, a time, or `start`                                 |
 | `peek <ref> [path]`     | List the files at an entry, a time, or `start` without changing anything; with a path, print that file |
 | `pin <ref> [--off]`     | Keep an entry, and what it needs, when old history is trimmed. `--off` unpins it.                      |
@@ -1322,7 +1472,7 @@ The flags that come up most:
 
 | Flag                | Default                       | Description                                                                                                                                       |
 | ------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--output, -o`      | `renders/<name>.mp4`          | Output file path                                                                                                                                  |
+| `--output, -o`      | `renders/<project>_<YYYY-MM-DD>_<HH-MM-SS>.<ext>` | Output file path                                                                                                                                  |
 | `--composition, -c` | `index.html`                  | Render a different composition file. Sub-compositions using `<template>` wrappers must be referenced from `index.html` via `data-composition-src`. |
 | `--format`          | `mp4`                         | `mp4`, `webm`, `mov`, `gif`, `png-sequence`, or `hls`. WebM and MOV carry transparency; `png-sequence` writes RGBA frames to a directory; `hls` writes a VOD playlist directory. |
 | `--fps, -f`         | root `data-fps`, otherwise 30 | 1–240, or an ffmpeg rational like `30000/1001` for 29.97                                                                                            |
@@ -1346,12 +1496,13 @@ Quality and file size:
 | `--video-frame-format` | `auto`          | How source video frames are extracted: `auto`, `jpg`, `png`. Use `png` for UI recordings, screen captures, and other colour-sensitive footage. |
 | `--hdr`                | off             | Force HDR even with no HDR sources. MP4 only. See [HDR rendering](/guides/hdr).                           |
 | `--sdr`                | off             | Force SDR even when HDR sources are detected                                                              |
+| `--page-motion-blur`   | authored setting | Pass `off` to disable page motion blur without editing the composition. Applies to local, batch and Docker renders. Omit to preserve authored behavior. |
 
 How it uses the machine, and when it gives up:
 
 | Flag                                                     | Default                                    | Description                                                                                                       |
 | -------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `--workers, -w`                                          | auto                                       | 1–24 workers. Each is a separate Chrome, roughly 256 MB. Auto weighs cores, memory, frame count, and cost.          |
+| `--workers, -w`                                          | auto                                       | 1–24 workers. Each is a separate Chrome, roughly 256 MB. Auto weighs cores, memory, frame count, and cost. N is a ceiling: a render drawElement can capture still uses one worker. |
 | `--low-memory-mode` / `--no-low-memory-mode`             | auto at 8 GB RAM or less                   | Safe profile: one worker, screenshot capture, no calibration. See the note below.                                   |
 | `--gpu`                                                  | off                                        | Hardware FFmpeg encoding (NVENC, VideoToolbox, AMF, VAAPI, QSV)                                                    |
 | `--browser-gpu` / `--no-browser-gpu`                     | auto locally, off in Docker                | Host GPU for Chrome and WebGL capture, or software rendering. Auto probes WebGL once and falls back.                |
@@ -1675,10 +1826,10 @@ scripts.
 With `--file-issue`, the CLI publishes a minimal repro to a public URL — with
 your consent — and opens a pre-filled `bug` issue draft that you review and
 submit yourself. No token, no backend. See
-[Share feedback](/guides/feedback#report-a-reproducible-bug).
+[Share feedback](/help#report-a-reproducible-bug).
 
 Agents can call this after a render;
-[About feedback data](/guides/feedback#about-feedback-data) covers what the
+[About feedback data](/help#about-feedback-data) covers what the
 surface includes. An app that launches the CLI can attach its signed-in
 person's email with the `HYPERFRAMES_FEEDBACK_EMAIL` environment variable. It
 is never a flag and never read from a project `.env`, and it goes only into
@@ -1716,7 +1867,7 @@ account has no email — is linked to your usage, and your prior anonymous usage
 is stitched to it. Nothing else personal, and only once you choose to sign in.
 
 Turn it all off with `HYPERFRAMES_NO_TELEMETRY=1` or the command above.
-[Feedback collection](/guides/feedback) explains the post-render prompt and the
+[Feedback collection](/help#share-feedback) explains the post-render prompt and the
 Studio feedback bar.
 
 One consequence worth knowing: turning telemetry off also opts the install out
@@ -1748,9 +1899,10 @@ npx hyperframes skills update slideshow
 Bare `skills` installs everything. `skills update` keeps a deliberate partial
 installation partial: it refreshes the core set plus whatever is already
 installed, and never expands beyond that unless you name a skill. Naming one
-adds it. `check` and `update` both accept `--json`, plus `--dir` and `--source`
-to point removed-detection at a different skills directory or source — those two
-scope the prune, not the install.
+adds it. `check` and `update` both accept `--json`, and `check` also accepts
+`--dir` and `--source`. `update` never removes a skill, and it leaves a skill the
+install record attributes to another publisher alone, even when the name matches
+one of ours.
 
 Set `HYPERFRAMES_SKIP_SKILLS=1` when something else manages the skills (CI, tests,
 or an install pinned to one commit). `skills update` and bare `skills` then exit 0
@@ -1758,7 +1910,7 @@ with a one-line notice and leave the installed skills unchanged.
 
 The CLI installs from the current HyperFrames GitHub source and links the global
 bundles into whichever compatible agents it finds. After scaffolding, `init`
-also refreshes the core set plus any HyperFrames skills you already have.
+installs the core set if it is missing. It never refreshes or removes a skill you already have; run `skills update` for that.
 
 #### `fatal: active post-checkout hook found during git clone`
 
@@ -1780,6 +1932,56 @@ If you called the upstream command directly instead, set it yourself:
 ```bash
 GIT_CLONE_PROTECTION_ACTIVE=0 npx skills add heygen-com/hyperframes
 ```
+
+### `usage`
+
+See how much of your AI coding subscription is left — Claude Code, Codex, or
+Grok — so an agent can size a video to the allowance before it starts. The
+HyperFrames skills run it at the start of a video and again before rendering.
+
+```bash
+npx hyperframes usage
+npx hyperframes usage --json
+npx hyperframes usage --harness codex --json
+```
+
+| Flag        | Description                                                                                                                           |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `--harness` | `claude-code`, `codex`, or `grok`. Default: the agent running the command, detected from `CLAUDECODE`, `CODEX_THREAD_ID`, or `GROK_AGENT=1` |
+| `--json`    | Print the result as one line of JSON                                                                                                  |
+
+```json
+{
+  "status": "known",
+  "harness": "claude-code",
+  "session": { "usedPercent": 42, "remainingPercent": 58, "resetsAt": "2026-10-20T18:00:00Z" },
+  "weekly": { "usedPercent": 20, "remainingPercent": 80, "resetsAt": "2026-10-24T09:00:00Z" },
+  "spend": null,
+  "planTier": "max"
+}
+```
+
+`session` is the short window (five hours on Claude Code and Codex) and `weekly`
+the weekly one; a window the plan does not have is `null`. Grok reports only
+`weekly`. `spend` appears only for spend-metered Claude Code plans, such as
+Enterprise: the share of the billing period's spend limit already used.
+`planTier` is the subscription name when the provider gives one.
+
+Without `--json`, a known result prints this object indented. When it cannot
+tell, it says so rather than guessing: `Usage unknown (no_subscription_login).`,
+or `{"status":"unknown","reason":"no_subscription_login"}` with `--json`. Other reasons include
+`expired_login`, `unsupported_auth` (for example Claude Code on an API key),
+`unsupported_harness`, `usage_request_failed`, and `http_<status>`. The command
+exits 0 either way, so check `status`.
+
+It reads the login your agent already has: for Claude Code the macOS keychain or
+`~/.claude/.credentials.json`, for Codex `~/.codex/auth.json`, for Grok
+`~/.grok/auth.json` (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`, and
+`GROK_AUTH_PATH` move them).
+It never refreshes or rewrites that login and never prints the token. The token
+goes only to that provider's own usage endpoint. The command sends no telemetry
+and skips the update check. The numbers are a snapshot: they do not reserve
+allowance or estimate what the next video will cost.
 
 ### `figma` and `events`
 
@@ -1923,6 +2125,7 @@ Render parameters mirror local `hyperframes render` where they overlap:
 | `--fps`                | `30`                        | Integer, 1–240                                                                                                                                  |
 | `--quality`            | `standard`                  | `draft`, `standard`, or `high`                                                                                                                  |
 | `--format`             | `mp4`                       | `mp4`, `webm`, or `mov`                                                                                                                         |
+| `--page-motion-blur`   | current cloud behavior      | Pass `off` to disable authored page motion blur. Omit to preserve current behavior. Sends the public API field `page_motion_blur: "off"`. |
 | `--resolution`         | `1080p`                     | `1080p` or `4k`. 4k bills at 1.5×.                                                                       |
 | `--aspect-ratio`       | auto                        | `16:9`, `9:16`, or `1:1`. Auto-detected from a local project's `data-width` and `data-height`, so you rarely need it. The renderer cannot reshape a composition — a value that disagrees with the authored ratio is an error. With `--asset-id` or `--url` the server defaults to `16:9`. |
 | `--composition` / `-c` | `index.html`                | Entry HTML file inside the zip                                                                                                                   |
@@ -2050,7 +2253,9 @@ deploy:
 | `--concurrency`   | none                                 | Lambda reserved concurrency. Without it, a new stack reserves none and each render runs up to 90% of the account's unreserved concurrency; a redeploy keeps the stack's current reservation; `none` removes it |
 | `--memory`        | `10240`                              | Lambda memory in MB                                      |
 | `--chrome-source` | `sparticuz`                          | `sparticuz` or `chrome-headless-shell`                   |
+| `--video-arch`    | `arm64`                              | `arm64` runs the plan and the chunks on an arm64 container-image function, pushed to an ECR repository named `<stack>-video`; audio and assemble stay on x86. Needs `sparticuz`. `x86_64` runs everything on the x86 function |
 | `--skip-build`    | off                                  | Reuse the existing `handler.zip`                         |
+| `--no-warm`       | warm                                 | Skip the one warm-up call to the video function after deploy, which loads its container image so the first render is not the one that waits for it |
 
 And these drive `render` and `render-batch`:
 

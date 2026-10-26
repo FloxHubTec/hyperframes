@@ -121,6 +121,11 @@ export interface HandlerDeps {
  * shape; unwrap until we hit a discriminated event.
  */
 export async function handler(event: LambdaEvent, deps?: HandlerDeps): Promise<LambdaResult> {
+  if ((event as { Action?: unknown }).Action === "warm") {
+    primeRuntimeEnv();
+    await ensureChromePath(deps);
+    return { Action: "warm" };
+  }
   const unwrapped = unwrapEvent(event);
   validatePlanProtocolShape(unwrapped);
   validateEventS3Uris(unwrapped);
@@ -566,7 +571,7 @@ async function handleAudio(event: AudioEvent, deps?: HandlerDeps): Promise<Audio
     AudioS3Uri: null,
     DurationMs: Date.now() - started,
   });
-  // The plan mixed it (non-mp4, cfr): the assembler reads it from the manifest.
+  // The plan mixed it (png-sequence, cfr): the assembler reads it from the manifest.
   if (!plansSeparateAudio(event.Config, { deferAudio: true })) return none();
   const s3 = deps?.s3 ?? getS3Client();
   await ensureChromePath(deps);
@@ -642,6 +647,7 @@ async function handleRenderChunk(
 
     const result: ChunkResult = await primitive(planDir, event.ChunkIndex, chunkOutputBase, {
       maxCaptureWorkers: lambdaMaxCaptureWorkers(),
+      interleaveCapture: true,
     });
     logEvent({
       event: "chunk_capture",
@@ -698,6 +704,7 @@ async function handleRenderChunkV2(
     );
     const result = await primitive(planDir, event.ChunkIndex, chunkOutputBase, {
       maxCaptureWorkers: lambdaMaxCaptureWorkers(),
+      interleaveCapture: true,
     });
     logEvent({
       event: "chunk_capture",
@@ -835,7 +842,11 @@ async function handleAssembleV2(
     }
     // `downloadAndMaterializePlanV2` materializes atomically. Audio is
     // assembler-only and lives at the familiar v1-compatible location.
-    const audioPath = resolvePlanAudioPath(planDir);
+    let audioPath = resolvePlanAudioPath(planDir);
+    if (event.AudioS3Uri !== null) {
+      audioPath = join(planDir, PLAN_AUDIO_RELATIVE_PATH);
+      await downloadS3ObjectToFile(s3, event.AudioS3Uri, audioPath);
+    }
     const chunksStarted = Date.now();
     const chunkPaths = await downloadChunkObjects(s3, event.ChunkS3Uris, work, event.Format);
     const chunksMs = Date.now() - chunksStarted;

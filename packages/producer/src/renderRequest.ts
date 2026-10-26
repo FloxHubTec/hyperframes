@@ -45,6 +45,7 @@ export interface RenderRequestOptions {
   gifLoop?: number;
   hlsSegmentSeconds?: number;
   workers?: number;
+  maxRenderMs?: number;
   useGpu?: boolean;
   debug?: boolean;
   /** Segmented capture: reuse segments recorded in a matching manifest. */
@@ -172,6 +173,7 @@ function assertRequestOptionScalars(options: Record<string, unknown>): void {
   assertOptionalInteger(options, "gifLoop");
   assertOptionalInteger(options, "hlsSegmentSeconds", 1);
   assertOptionalInteger(options, "workers", 1);
+  assertOptionalInteger(options, "maxRenderMs");
   assertOptionalInteger(options, "crf");
   for (const field of ["useGpu", "debug", "outputResolutionAspectAgnostic"] as const) {
     assertOptionalBoolean(options, field);
@@ -299,6 +301,7 @@ export function distributedConfigFromRequest(
     codec: distributed.codec,
     quality: options.quality,
     crf: options.crf,
+    pageMotionBlur: options.pageMotionBlur,
     bitrate: options.videoBitrate,
     videoFrameFormat: options.videoFrameFormat,
     outputResolution: options.outputResolution,
@@ -354,6 +357,7 @@ export function renderRequestFromDistributedConfig(input: {
     format: config.format,
     distributed,
     ...optionalProperty("crf", config.crf),
+    ...optionalProperty("pageMotionBlur", config.pageMotionBlur),
     ...optionalProperty("videoBitrate", config.bitrate),
     ...optionalProperty("videoFrameFormat", config.videoFrameFormat),
     ...optionalProperty("outputResolution", config.outputResolution),

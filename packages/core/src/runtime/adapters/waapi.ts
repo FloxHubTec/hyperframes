@@ -179,6 +179,22 @@ export function createWaapiAdapter(params?: {
     return { endSeconds: compositionStartSeconds + endTimeMs / 1000 };
   };
 
+  const seekAnimation = (animation: Animation, timeMs: number) => {
+    if (animation.playState === "idle" && isBrowserCreatedCss(animation)) {
+      animations.delete(animation);
+      return;
+    }
+    if (params?.authored?.drivenByCssAdapter(animation)) return;
+    const baseline = anchorOf(ensureBaseline(animation, didDiscover ? timeMs : 0));
+    const localTimeMs = baseline.animationTimeMs + Math.max(0, timeMs - baseline.compositionTimeMs);
+    holdAnimationAt(
+      animation,
+      localTimeMs,
+      "runtime.adapters.waapi.site1",
+      "runtime.adapters.waapi.site2",
+    );
+  };
+
   return {
     name: "waapi",
     discover: () => {
@@ -195,22 +211,7 @@ export function createWaapiAdapter(params?: {
       if (!didDiscover || animations.size > 0 || params?.authored?.hasAny()) {
         trackAnimations(snapshotAnimations(ctx.pageAnimations), didDiscover ? timeMs : 0);
       }
-      for (const animation of animations) {
-        if (animation.playState === "idle" && isBrowserCreatedCss(animation)) {
-          animations.delete(animation);
-          continue;
-        }
-        if (params?.authored?.drivenByCssAdapter(animation)) continue;
-        const baseline = anchorOf(ensureBaseline(animation, didDiscover ? timeMs : 0));
-        const localTimeMs =
-          baseline.animationTimeMs + Math.max(0, timeMs - baseline.compositionTimeMs);
-        holdAnimationAt(
-          animation,
-          localTimeMs,
-          "runtime.adapters.waapi.site1",
-          "runtime.adapters.waapi.site2",
-        );
-      }
+      for (const animation of animations) seekAnimation(animation, timeMs);
     },
     pause: (ctx) => {
       if (!didDiscover) {

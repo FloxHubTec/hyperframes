@@ -161,6 +161,24 @@ describe("HyperframesRenderStack — snapshot", () => {
     expect(actualStates.sort()).toEqual([...EXPECTED_STATE_NAMES].sort());
   });
 
+  it("warms the render function before a v2 plan only on a stack with a video function, and a failed warm-up is caught", () => {
+    const states = readSamDefinition().States;
+    const warm = requireRecord(states.WarmRender, "WarmRender state");
+    expect(sentPayload(warm)).toEqual({ Action: "warm" });
+    expect(requireRecordProperty(warm, "Parameters", "parameters").InvocationType).toBe("Event");
+    expect(warm.Next).toBe("PlanV2");
+    expect(JSON.stringify(warm.Catch)).toContain('"Next":"PlanV2"');
+    const choices = requireRecord(states.SelectPlanProtocol, "SelectPlanProtocol")
+      .Choices as Record<string, unknown>[];
+    const toWarm = choices.filter((choice) => choice.Next === "WarmRender");
+    expect(toWarm).toHaveLength(1);
+    expect(toWarm[0]).toEqual({
+      Variable: "$.PlanProtocol",
+      StringEquals: ["HasVideoFunction", "v2", "v2-without-video-function"],
+      Next: "WarmRender",
+    });
+  });
+
   it("defaults omitted plan protocol to v2 and preserves the explicit v1 branch", () => {
     for (const definition of [SYNTHED.definition, readSamDefinition()]) {
       const selection = requireRecord(
@@ -334,7 +352,7 @@ describe("HyperframesRenderStack — snapshot", () => {
     // CDK drops null-valued payload fields when it renders the definition (#5259), so compare
     // what each deployed task sends rather than the construct source.
     const cdkTasks = lambdaTasks(SYNTHED.definition.States);
-    const samTasks = lambdaTasks(readSamDefinition().States);
+    const { WarmRender: _warm, ...samTasks } = lambdaTasks(readSamDefinition().States);
     expect(Object.keys(cdkTasks).sort()).toEqual(Object.keys(samTasks).sort());
     expect(Object.keys(cdkTasks).length).toBeGreaterThanOrEqual(6);
     for (const [taskName, cdkTask] of Object.entries(cdkTasks)) {
@@ -343,6 +361,46 @@ describe("HyperframesRenderStack — snapshot", () => {
         payload: sentPayload(samTasks[taskName]),
       });
     }
+  });
+
+  it("runs plan and renderChunk on the SAM template's optional arm64 video function", () => {
+    // A chunk refuses a plan made with another ffmpeg build; warm-up, audio and assemble stay on x86.
+    const targets = Object.values(lambdaTasks(readSamDefinition().States)).map((task) => ({
+      action: sentPayload(task).Action,
+      functionName: requireRecordProperty(requireRecord(task, "task"), "Parameters", "task params")
+        .FunctionName,
+    }));
+    expect(new Set(targets.map((target) => target.action))).toEqual(
+      new Set(["warm", "plan", "renderChunk", "audio", "assemble"]),
+    );
+    for (const { action, functionName } of targets) {
+      expect({ action, functionName }).toEqual({
+        action,
+        functionName:
+          action === "plan" || action === "renderChunk"
+            ? ["HasVideoFunction", "VideoFunctionStack.Outputs.FunctionArn", "RenderFunction.Arn"]
+            : "RenderFunction.Arn",
+      });
+    }
+    const samRole = requireRecord(readSamResources().RenderStateMachineRole, "SAM role");
+    const invoke = JSON.stringify(
+      requireRecordProperty(samRole, "Properties", "SAM role properties").Policies,
+    );
+    expect(invoke).toContain(
+      '["RenderFunction.Arn",["HasVideoFunction","VideoFunctionStack.Outputs.FunctionArn"',
+    );
+  });
+
+  it("gives the nested arm64 video function every environment variable the render function gets", () => {
+    const sam = readExampleTemplate("template.yaml");
+    const render = [
+      ...envNames(sam, "Globals", "Function", "Environment", "Variables"),
+      ...envNames(sam, "Resources", "RenderFunction", "Properties", "Environment", "Variables"),
+    ];
+    const video = readExampleTemplate("video-function.yaml");
+    expect(
+      envNames(video, "Resources", "Function", "Properties", "Environment", "Variables").sort(),
+    ).toEqual([...new Set(render)].sort());
   });
 
   it("lets the render function abort the multipart uploads its S3 stitch starts", () => {
@@ -451,6 +509,7 @@ describe("HyperframesRenderStack — snapshot", () => {
   it("gives Lambda throttles a minutes-long backoff ahead of the catch-all, in CDK and SAM", () => {
     for (const definition of [SYNTHED.definition, readSamDefinition()]) {
       for (const [taskName, task] of Object.entries(lambdaTasks(definition.States))) {
+        if (taskName === "WarmRender") continue;
         expect({ taskName, ...throttleRetry(task) }).toEqual({
           taskName,
           beforeCatchAll: true,
@@ -663,17 +722,28 @@ function policyStatements(policy: unknown): Record<string, unknown>[] {
   return document.Statement as Record<string, unknown>[];
 }
 
-function readSamResources(): Record<string, unknown> {
+function readExampleTemplate(file: string): Record<string, unknown> {
   const source = readFileSync(
-    new URL("../../../../examples/aws-lambda/template.yaml", import.meta.url),
+    new URL(`../../../../examples/aws-lambda/${file}`, import.meta.url),
     "utf8",
   );
   // CloudFormation intrinsic tags are irrelevant to classifier parity. The
   // YAML parser preserves their scalar values while this option suppresses
   // warnings for the intentionally unresolved `!Ref`/`!GetAtt` tags.
   const parsed: unknown = parseYaml(source, { logLevel: "silent" });
-  const root = requireRecord(parsed, "SAM template");
-  return requireRecordProperty(root, "Resources", "SAM resources");
+  return requireRecord(parsed, file);
+}
+
+function readSamResources(): Record<string, unknown> {
+  return requireRecordProperty(readExampleTemplate("template.yaml"), "Resources", "SAM resources");
+}
+
+function envNames(root: Record<string, unknown>, ...path: string[]): string[] {
+  const variables = path.reduce<Record<string, unknown>>(
+    (node, key) => requireRecordProperty(node, key, key),
+    root,
+  );
+  return Object.keys(variables);
 }
 
 function readSamDefinition(): { States: Record<string, unknown> } {

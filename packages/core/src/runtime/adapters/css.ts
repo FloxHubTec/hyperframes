@@ -35,16 +35,23 @@ export function createCssAdapter(params?: {
     }
   };
 
+  const liveAnimationTarget = (animation: Animation, canTellCss: boolean): Element | null => {
+    if (canTellCss && !isCssAnimation(animation)) return null;
+    const effect = animation.effect;
+    return isKeyframeEffect(effect) && effect.target && !effect.pseudoElement
+      ? effect.target
+      : null;
+  };
+
   const readLiveAnimations = (pageAnimations?: () => Animation[]): Map<Element, Animation[]> => {
     const byElement = new Map<Element, Animation[]>();
     if (entries.length === 0) return byElement;
     const canTellCss = typeof CSSAnimation !== "undefined";
     for (const animation of safeGetAnimations(document, pageAnimations)) {
-      if (canTellCss && !isCssAnimation(animation)) continue;
-      const effect = animation.effect;
-      if (!isKeyframeEffect(effect) || !effect.target || effect.pseudoElement) continue;
-      const list = byElement.get(effect.target) ?? [];
-      byElement.set(effect.target, list);
+      const target = liveAnimationTarget(animation, canTellCss);
+      if (!target) continue;
+      const list = byElement.get(target) ?? [];
+      byElement.set(target, list);
       if (!canTellCss || authored.drivenByCssAdapter(animation)) list.push(animation);
     }
     return byElement;
@@ -151,6 +158,27 @@ export function createCssAdapter(params?: {
     }
   };
 
+  const seekEntry = (
+    entry: (typeof entries)[number],
+    live: Map<Element, Animation[]>,
+    time: number,
+  ) => {
+    if (!entry.el.isConnected) return;
+    const start = resolveEntryStartSeconds(entry.el);
+    const localTimeMs = Math.max(0, time - start) * 1000;
+    if (entry.handles?.length || live.has(entry.el)) {
+      if (entry.el.style.animationDelay !== entry.baseDelay) restoreInlineStyles(entry);
+      seekAnimations(entry.handles ?? [], localTimeMs);
+      return;
+    }
+
+    // No live CSSAnimation (no WAAPI, a hidden clip): pause keeps this pose for the next one.
+    entry.el.style.animationPlayState = "paused";
+    entry.el.style.animationDelay = entry.delays
+      .map((delay) => `${Number((delay - localTimeMs / 1000).toFixed(3))}s`)
+      .join(", ");
+  };
+
   return {
     name: "css",
     discover: () => {
@@ -197,22 +225,7 @@ export function createCssAdapter(params?: {
       const live = readLiveAnimations(ctx.pageAnimations);
       // All playState reads before any write: each read flushes the style a write dirties.
       for (const entry of entries) entry.handles = keepHandles(entry.handles, live.get(entry.el));
-      for (const entry of entries) {
-        if (!entry.el.isConnected) continue;
-        const start = resolveEntryStartSeconds(entry.el);
-        const localTimeMs = Math.max(0, time - start) * 1000;
-        if (entry.handles?.length || live.has(entry.el)) {
-          if (entry.el.style.animationDelay !== entry.baseDelay) restoreInlineStyles(entry);
-          seekAnimations(entry.handles ?? [], localTimeMs);
-          continue;
-        }
-
-        // No live CSSAnimation (no WAAPI, a hidden clip): pause keeps this pose for the next one.
-        entry.el.style.animationPlayState = "paused";
-        entry.el.style.animationDelay = entry.delays
-          .map((delay) => `${Number((delay - localTimeMs / 1000).toFixed(3))}s`)
-          .join(", ");
-      }
+      for (const entry of entries) seekEntry(entry, live, time);
     },
     pause: (ctx) => {
       const live = readLiveAnimations(ctx?.pageAnimations);
