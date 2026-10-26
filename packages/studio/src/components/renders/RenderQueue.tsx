@@ -1,6 +1,7 @@
 import { memo, useState, useRef, useEffect, useLayoutEffect, useId } from "react";
 import { createPortal } from "react-dom";
 import { CANVAS_DIMENSIONS } from "@hyperframes/parsers";
+import { RenderDurationNote } from "./RenderDurationNote";
 import { RenderQueueItem } from "./RenderQueueItem";
 import { FfmpegRequiredNotice } from "./FfmpegRequiredNotice";
 import type { FfmpegStatus } from "./useFfmpegStatus";
@@ -272,11 +273,6 @@ const QUALITY_OPTIONS: SelectOption[] = [
   { value: "high", label: "High Quality" },
 ];
 
-function formatEta(ms: number): string {
-  const s = Math.round(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-}
-
 function FormatExportButton({
   onStartRender,
   isRendering,
@@ -432,11 +428,7 @@ function FormatExportButton({
       >
         {isRendering ? "Rendering…" : "Export"}
       </Button>
-      {lastRenderDurationMs !== undefined && !isRendering && (
-        <p className="text-step-9 text-text-5 text-center -mt-1.5">
-          Last render took {formatEta(lastRenderDurationMs)}
-        </p>
-      )}
+      <RenderDurationNote durationMs={lastRenderDurationMs} isRendering={isRendering} />
     </div>
   );
 }
