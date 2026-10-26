@@ -37,6 +37,30 @@ describe("preview quality in the player store", () => {
     usePlayerStore.getState().setPreviewQuality(1);
   });
 
+  it("drops the health reading measured at the old level when the level changes", () => {
+    const choppy = {
+      droppedShare: 0.5,
+      seconds: 3,
+      choppy: true,
+      fps: 14,
+      worstFrameMs: 180,
+      mode: "play",
+    } as const;
+    usePlayerStore.setState({ previewQuality: 1, previewQualityChosenBy: null });
+    usePlayerStore.getState().setPlaybackHealth(choppy);
+    usePlayerStore.getState().setPreviewQuality(1);
+    expect(usePlayerStore.getState().playbackHealth).toEqual(choppy);
+
+    usePlayerStore.getState().setPreviewQuality(0.5);
+    expect(usePlayerStore.getState().playbackHealth).toBeNull();
+
+    usePlayerStore.setState({ previewQualityChosenBy: null });
+    usePlayerStore.getState().setPlaybackHealth(choppy);
+    usePlayerStore.getState().setPreviewQuality(0.25, { by: "app" });
+    expect(usePlayerStore.getState().playbackHealth).toBeNull();
+    usePlayerStore.getState().setPreviewQuality(1);
+  });
+
   it("reads a report of the copies only when it has the shape of one", () => {
     expect(
       parsePreviewCopies({ total: 2, ready: 1, failed: 1, progress: 0.75, error: "failed" }),

@@ -63,14 +63,16 @@ export function createPreviewQualitySlice(
     previewQuality: saved ?? 1,
     previewQualityChosenBy: saved === undefined ? null : "person",
     setPreviewQuality: (previewQuality, options) => {
+      // A health reading belongs to the level it was measured at; drop it in the same update as the level.
+      const stale = previewQuality === get().previewQuality ? {} : { playbackHealth: null };
       if (options?.by === "app") {
         if (get().previewQualityChosenBy !== "person") {
-          set({ previewQuality, previewQualityChosenBy: "app" });
+          set({ previewQuality, previewQualityChosenBy: "app", ...stale });
         }
         return;
       }
       writeStudioUiPreferences({ previewQuality });
-      set({ previewQuality, previewQualityChosenBy: "person" });
+      set({ previewQuality, previewQualityChosenBy: "person", ...stale });
     },
     previewCopies: null,
     setPreviewCopies: (previewCopies) => set({ previewCopies }),
