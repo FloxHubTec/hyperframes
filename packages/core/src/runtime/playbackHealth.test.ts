@@ -5,6 +5,7 @@ vi.mock("./bridge", () => ({ postRuntimeMessage: vi.fn() }));
 import { postRuntimeMessage } from "./bridge";
 import {
   notePlaybackFrame,
+  noteDisplayScale,
   PLAYBACK_HEALTH,
   restartPlaybackHealth,
   type PlaybackHealthInput,
@@ -120,6 +121,17 @@ describe("playback health", () => {
       waiting: false,
       layoutKey: "a",
     });
+    expect(healths()).toEqual([null]);
+  });
+
+  it("keeps measuring when the host repeats the display scale it already sent", () => {
+    noteDisplayScale(1);
+    play(1000, 5);
+    posted.mockClear();
+    noteDisplayScale(1);
+    expect(healths()).toEqual([]);
+
+    noteDisplayScale(0.5);
     expect(healths()).toEqual([null]);
   });
 

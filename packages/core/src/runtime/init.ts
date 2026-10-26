@@ -24,7 +24,7 @@ import {
   lengthIsAuthored,
   stopMediaDownload,
 } from "./preloadMedia";
-import { notePlaybackFrame, restartPlaybackHealth } from "./playbackHealth";
+import { notePlaybackFrame, noteDisplayScale } from "./playbackHealth";
 import { copiesReady } from "./previewCopies";
 import { installRuntimeControlBridge, postRuntimeMessage, setRuntimeProtocolFps } from "./bridge";
 import { instantTolerance } from "../clipFacts";
@@ -5533,7 +5533,6 @@ export function initSandboxRuntimeModular(): void {
     }
   }
 
-  let lastDisplayScale: number | null = null;
   const transportTick = () => {
     if (state.tornDown || inTransportTick) return;
     inTransportTick = true;
@@ -5994,8 +5993,7 @@ export function initSandboxRuntimeModular(): void {
     onSetDisplayScale: (scale) => {
       setProxyDisplayScale(scale);
       setPreviewRasterScale(scale);
-      if (scale !== lastDisplayScale) restartPlaybackHealth();
-      lastDisplayScale = scale;
+      noteDisplayScale(scale);
     },
     onRequestPreviewFacts: () =>
       postRuntimeMessage({

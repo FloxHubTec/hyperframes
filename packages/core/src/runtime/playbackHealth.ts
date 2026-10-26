@@ -45,6 +45,15 @@ function clear(): void {
   postedAtMs = 0;
 }
 
+let displayScale: number | null = null;
+
+/** The host re-sends its scale on every resize; only a different scale restarts the window. */
+export function noteDisplayScale(scale: number): void {
+  if (scale === displayScale) return;
+  displayScale = scale;
+  clear();
+}
+
 /** Restarts the window after something that stalls playback for reasons unrelated to the level. */
 export function restartPlaybackHealth(): void {
   clear();
