@@ -2657,7 +2657,7 @@ function isOwnedScriptUrl(url: string | undefined, projectScripts: ReadonlySet<s
 const LOOKUP_CALL =
   /\b(?:getElementById|querySelectorAll|querySelector|getElementsByClassName|getElementsByTagName)\(\s*(["'`])((?:(?!\1).)*)\1/g;
 
-/** ` [thrown at: <url>:<line>:<col>, <lookup>]` for the authored frame of a throw, so the author can find the element. */
+/** ` [thrown at: <url>:<line>:<col>, <lookup>]` for a throw's authored frame, so the author can find the element. */
 export async function describeThrowSite(
   client: CDPSession,
   details: Protocol.Runtime.ExceptionDetails,
