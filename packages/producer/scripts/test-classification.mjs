@@ -34,6 +34,7 @@ const INTEGRATION_TEST_FILES = new Set([
   "src/services/assetMediaType.test.ts",
   "src/services/htmlCompiler.mediaType.test.ts",
   "src/services/htmlCompiler.naturalDuration.test.ts",
+  "src/services/render/deliveryRender.integration.test.ts",
   "src/services/render/firstFrameStartingState.integration.test.ts",
   "src/services/render/hlsRender.integration.test.ts",
   "src/services/render/motionBlurVideo.integration.test.ts",

@@ -40,4 +40,31 @@ describe("parseEncoderOptions", () => {
     expect(parseEncoderOptions({ videoFrameFormat: "webp" }, "mp4").ok).toBe(false);
     expect(parseEncoderOptions({ hdrMode: "on" }, "mp4").ok).toBe(false);
   });
+
+  it("accepts a keyframe interval and a rate cap for mp4", () => {
+    expect(
+      parseEncoderOptions(
+        { keyframeIntervalSeconds: 2, maxBitrate: "8M", bufferSize: "12M", crf: 20 },
+        "mp4",
+      ),
+    ).toEqual({
+      ok: true,
+      options: { crf: 20, keyframeIntervalSeconds: 2, maxBitrate: "8M", bufferSize: "12M" },
+    });
+  });
+
+  it("rejects delivery options on other formats, bad values and a buffer without a cap", () => {
+    for (const format of ["webm", "mov", "gif", "hls"]) {
+      expect(parseEncoderOptions({ maxBitrate: "8M" }, format).ok).toBe(false);
+      expect(parseEncoderOptions({ keyframeIntervalSeconds: 2 }, format).ok).toBe(false);
+    }
+    for (const bad of [0, -1, "2", Number.NaN]) {
+      expect(parseEncoderOptions({ keyframeIntervalSeconds: bad }, "mp4").ok).toBe(false);
+    }
+    expect(parseEncoderOptions({ maxBitrate: "fast" }, "mp4").ok).toBe(false);
+    expect(parseEncoderOptions({ bufferSize: "2M" }, "mp4")).toEqual({
+      ok: false,
+      error: "bufferSize requires maxBitrate",
+    });
+  });
 });
