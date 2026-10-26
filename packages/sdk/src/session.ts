@@ -865,12 +865,12 @@ class CompositionImpl implements Composition {
     // maintaining an external inverse log must compute inverses from their own
     // state; applyPatches events never enter history (origin-guarded).
     // Emit a patch event so subscribers stay in sync.
-    applyPatchesToDocument(this.parsed, patches);
+    const appliedPatches = applyPatchesToDocument(this.parsed, patches);
     this.elementsCache = null;
     this.rootsCache = null;
 
     // Update override-set
-    for (const p of patches) {
+    for (const p of appliedPatches) {
       const key = pathToKey(p.path);
       if (key !== null) {
         delete this.overrides[key];
@@ -882,7 +882,7 @@ class CompositionImpl implements Composition {
     }
 
     const opTypes = ["applyPatches"];
-    const event = buildPatchEvent(patches, [], origin, opTypes);
+    const event = buildPatchEvent(appliedPatches, [], origin, opTypes);
     this.patchHandlers.forEach((h) => h(event));
     this.changeHandlers.forEach((h) => h());
   }

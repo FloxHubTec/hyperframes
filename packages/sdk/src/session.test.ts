@@ -1031,6 +1031,46 @@ describe("editing duplicate inline declarations", () => {
   });
 
   it.each(["flex", null])(
+    "keeps untracked style changes when undoing display=%s",
+    async (display) => {
+      const source =
+        '<span data-hf-id="hf-title" style="display:-moz-box !important;display:block;color:red">hello</span>';
+      const comp = await openComposition(source, {
+        trackedOrigins: ["local"],
+        coalesceMs: 0,
+      });
+      comp.setStyle("hf-title", { display });
+      comp.dispatch(
+        { type: "setStyle", target: "hf-title", styles: { color: "blue", opacity: "0.5" } },
+        { origin: "remote" },
+      );
+      comp.undo();
+      expect(comp.getElement("hf-title")?.inlineStyles).toEqual({
+        display: "-moz-box !important",
+        color: "blue",
+        opacity: "0.5",
+      });
+      expect(comp.serialize()).toContain("display: block");
+      const reopened = await openComposition(source, { overrides: comp.getOverrides() });
+      expect(reopened.serialize()).toBe(comp.serialize());
+      reopened.dispose();
+
+      comp.redo();
+      comp.applyPatches([{ op: "remove", path: "/elements/hf-title/inlineStyles/color" }]);
+      comp.undo();
+      expect(comp.getElement("hf-title")?.inlineStyles).toEqual({
+        display: "-moz-box !important",
+        opacity: "0.5",
+      });
+      expect(comp.serialize()).toContain("display: block");
+      const removed = await openComposition(source, { overrides: comp.getOverrides() });
+      expect(removed.serialize()).toBe(comp.serialize());
+      removed.dispose();
+      comp.dispose();
+    },
+  );
+
+  it.each(["flex", null])(
     "restores fallback declarations after undoing or rolling back display=%s",
     async (display) => {
       const source =

@@ -460,7 +460,12 @@ function handleSetStyle(
     });
     if (restoresDuplicates) {
       // Scalar inverses cannot restore fallback order; replay this last after reversal.
-      result.inverse.push({ op: "replace", path: attrPath(id, "style"), value: originalStyle });
+      result.inverse.push({
+        op: "replace",
+        path: attrPath(id, "style"),
+        value: originalStyle,
+        restoreStyleProperties: [...editedProps],
+      });
     }
     const old = getElementStyles(el);
     setElementStyles(el, styles);

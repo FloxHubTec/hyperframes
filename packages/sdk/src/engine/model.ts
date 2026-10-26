@@ -390,6 +390,43 @@ export function setElementStyles(el: Element, updates: Record<string, string | n
   }
 }
 
+export function restoreElementStyleProperties(
+  el: Element,
+  originalStyle: string,
+  properties: readonly string[],
+): string {
+  const selected = new Set(properties);
+  const original = parseStyleDeclarations(originalStyle);
+  const originalUntouched = original.filter(([prop]) => !selected.has(prop));
+  const untouched = parseStyleDeclarations(el.getAttribute("style") ?? "").filter(
+    ([prop]) => !selected.has(prop),
+  );
+  if (
+    untouched.length === originalUntouched.length &&
+    untouched.every(
+      ([prop, value], index) =>
+        prop === originalUntouched[index]?.[0] && value === originalUntouched[index]?.[1],
+    )
+  ) {
+    el.setAttribute("style", originalStyle);
+    return originalStyle;
+  }
+
+  const restored: [string, string][] = [];
+  let index = 0;
+  for (const declaration of original) {
+    if (selected.has(declaration[0])) {
+      restored.push(declaration);
+      continue;
+    }
+    const current = untouched[index++];
+    if (current) restored.push(current);
+  }
+  const serialized = serializeStyleAttr(restored.concat(untouched.slice(index)));
+  el.setAttribute("style", serialized);
+  return serialized;
+}
+
 // ─── Text helpers ─────────────────────────────────────────────────────────────
 
 function isHTMLElementTarget(el: Element): boolean {
