@@ -1,7 +1,7 @@
 ---
 title: "Mix audio"
 sidebarTitle: "Audio"
-description: "In the browser editor: effects and presets on a track, music that sits under narration, groups with mute, and automation over time."
+description: "In the browser editor: effects and presets on a track, music that sits under narration, groups, muting, and automation over time."
 ---
 
 The browser editor carries a full mixer. Every audio track has an effect rack: filters that
@@ -280,7 +280,7 @@ be the voice. Name the voice explicitly.
 
 ## Group tracks
 
-Five narration clips usually want one set of effects, one fader, and one mute —
+Five narration clips usually want one set of effects and one fader —
 not five copies that drift apart as you edit. A group gives them that: its members
 sum through a single bus, and the bus carries the group's own volume, effects, and
 automation.
@@ -291,7 +291,7 @@ automation.
   a [carve](/studio/audio-effects#make-music-sit-under-narration) to point at.
 - **More than a couple of sound effects.** One place to turn all of them down is
   worth more than precise individual levels you will never revisit.
-- **Anything you want to mute as a unit** — an ambience layer, a music stem.
+- **Anything you want to turn up or down as a unit** — an ambience layer, a music stem.
 
 A single clip does not need a group. Its own rack is already one place.
 
@@ -313,7 +313,6 @@ A group gets its own timeline row, carrying:
 | Caret | Shows or hides the member rows beneath it |
 | `▤` and name | The group glyph and its label |
 | Count | How many members it holds |
-| Mute | Silences every member at once |
 | **FX** | Opens the group's own rack, applying to the summed bus |
 | `∿` | Shows or hides [the group's own automation lanes](/studio/audio-effects#automate-over-time) |
 
@@ -325,20 +324,15 @@ A group-level effect hears the **sum** of its members, not each one separately.
 That is the point of a bus — one compressor across a whole voiceover behaves
 differently from five compressors on five clips, and usually better.
 
-### Mute and solo are not symmetric
+### Mute a track or a clip
 
-This is the part worth remembering:
+On an audio track, the speaker button where a visual track has its eye mutes the
+track: **Mute track** and **Unmute track**. For a selected clip, the same toggle sits
+at the top of its properties, and the media section has a **Muted** switch.
 
-| Control | What it does | In the export |
-| --- | --- | --- |
-| Mute | Silences a clip or a whole group | **Included** — muted audio is dropped from the render |
-
-So **mute is a mix decision and solo is a listening tool**. You can leave a solo
-active, render, and get the full mix — which is deliberate, because a forgotten
-solo silently shipping a one-track export would be much worse.
-
-A group that is not soloed while one of its members is appears **half-lit**: the
-display-only signal that some of what is under it still plays.
+A group row has no mute of its own; to silence a whole group, mute its members'
+tracks. Muted audio is left out of the render, so unmute anything you want in the
+export.
 
 ### Membership lives on the member
 
@@ -369,8 +363,8 @@ live inside a nested composition, expand it and try again.
 separate rows rather than as one track holding several clips, so the grouping
 offer does not appear. Group them in the composition that owns them.
 
-**A soloed track was missing from the export.** It was not — solo cannot affect a
-render. Look for a mute.
+**A track was missing from the export.** Check whether it is muted: muted audio is
+left out of the render.
 
 ## Automate over time
 

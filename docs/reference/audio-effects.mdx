@@ -491,24 +491,16 @@ the two cannot disagree: an id or filename that looks like music (`music`, `bgm`
 SFX-shaped is a voice. Needs `ffmpeg` on `PATH` and `@hyperframes/core`
 installed in the project.
 
-## Groups, mute, and solo
+## Groups and mute
 
 A group sums its members through one bus, and the bus carries the group's own
 volume, FX chain, and automation. In the render each group is sub-mixed into a
 single track at full composition length before entering the main mix, so a
 group-level effect hears the sum rather than each member separately.
 
-**Mute and solo are not symmetric, on purpose.**
-
 | Control | Where it lives | Reaches the export |
 | --- | --- | --- |
 | Mute | `data-hidden` on the group element or the clip | **Yes** — muted members are dropped from the rendered mix |
-
-Solo is a listening tool. An element is audible while any solo is active only if
-it is itself soloed or its own group is soloed; a group bus is never itself
-attenuated by solo, so a soloed member's path out stays open. A group that is not
-soloed while one of its members is shows as half-lit — the display-only signal
-that some of what is under it still plays.
 
 ## Preview and render
 
