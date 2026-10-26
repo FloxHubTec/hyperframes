@@ -22,6 +22,7 @@ import {
   fastCopyKey,
   fastIndexPath,
   readCopyIndex,
+  sourceSizeBytes,
   writeCopyIndex,
 } from "./proxyCacheKey.js";
 import { acquireCopyLock } from "./proxyLock.js";
@@ -457,7 +458,7 @@ function describeSource(
   metadata: Awaited<ReturnType<typeof probeMediaMetadata>>,
 ): string {
   const { codecName, pixelFormat, colorTransfer } = metadata.color;
-  const megabytes = statSync(sourcePath, { throwIfNoEntry: false })?.size;
+  const megabytes = sourceSizeBytes(sourcePath);
   return [
     metadata.kind,
     codecName,
