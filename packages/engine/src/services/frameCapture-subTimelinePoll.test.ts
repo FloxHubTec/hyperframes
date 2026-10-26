@@ -206,6 +206,19 @@ describe("authorScriptsMayRegisterTimelines", () => {
     ).toBe(true);
   });
 
+  it("answers true for a module script or any code that imports another file", async () => {
+    expect(await scan(`<body><script type="module">draw()</script></body>`)).toBe(true);
+    expect(await scan(`<body><script>import("./scene.js").then(run)</script></body>`)).toBe(true);
+    expect(
+      await scan(`<body><script src="/a.js"></script></body>`, {
+        "/a.js": 'import { x } from "./b.js"',
+      }),
+    ).toBe(true);
+    expect(await scan(`<body><script>const important = 1; draw(important)</script></body>`)).toBe(
+      false,
+    );
+  });
+
   it("reads same-origin scripts and answers true for ones it cannot read", async () => {
     expect(await scan(`<body><script src="/a.js"></script></body>`, { "/a.js": "draw()" })).toBe(
       false,

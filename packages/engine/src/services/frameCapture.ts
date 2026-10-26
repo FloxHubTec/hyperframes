@@ -2065,7 +2065,7 @@ export interface IsolatedComposition {
 }
 
 // Runs in the page. False once every inline, template and same-origin script is read and none
-// mentions __timelines; an unreadable script or a page still loading answers true.
+// mentions __timelines or imports code; an unreadable or module script, or a page still loading, answers true.
 export async function authorScriptsMayRegisterTimelines(
   runtimeAttr: string,
   authoredBegin: string,
@@ -2078,7 +2078,11 @@ export async function authorScriptsMayRegisterTimelines(
       Array.from(t.content.querySelectorAll("script")),
     ),
   ].filter((script) => !script.hasAttribute(runtimeAttr));
+  // Code that imports another file may register through it, which is not read here.
+  const mayRegister = (code: string) =>
+    code.includes("__timelines") || /\bimport\s*\(|^\s*import\s*[\w{*"']/m.test(code);
   for (const script of scripts) {
+    if (script.type === "module") return true;
     if (!script.src) {
       const text = script.textContent ?? "";
       const authored = text.includes(authoredBegin)
@@ -2088,13 +2092,13 @@ export async function authorScriptsMayRegisterTimelines(
             .map((region) => region.split(authoredEnd)[0])
             .join("\n")
         : text;
-      if (authored.includes("__timelines")) return true;
+      if (mayRegister(authored)) return true;
       continue;
     }
     const url = new URL(script.src, location.href);
     if (url.origin !== location.origin) return true;
     try {
-      if ((await (await fetch(url)).text()).includes("__timelines")) return true;
+      if (mayRegister(await (await fetch(url)).text())) return true;
     } catch {
       return true;
     }
