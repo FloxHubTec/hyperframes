@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { killWithThisProcess } from "./childReaper.js";
 import { terminateProcessTree } from "./processTree.js";
 import { renderSetupFailureFrom, renderSetupResultFrom } from "../renderSetupWorkerLifecycle.js";
 
@@ -75,6 +76,7 @@ export function runCancellableProcess(
       return;
     }
 
+    const release = child.pid ? killWithThisProcess(child.pid, detached) : undefined;
     if (child.pid) options.onSpawn?.(child.pid);
     let stdout = "";
     let stderr = "";
@@ -127,6 +129,7 @@ export function runCancellableProcess(
     child.once("error", (error) => void finishReject(error));
     // fallow-ignore-next-line complexity
     child.once("close", async (status, closeSignal) => {
+      release?.();
       if (settled) return;
       if (terminationTask) terminationSignal = await terminationTask.catch(() => terminationSignal);
       if (settled) return;
