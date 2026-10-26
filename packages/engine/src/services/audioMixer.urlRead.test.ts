@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
-import { availableParallelism, tmpdir } from "node:os";
+import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getFfmpegBinary } from "../utils/ffmpegBinaries.js";
@@ -280,6 +280,6 @@ describe.skipIf(!HAS_FFMPEG)("audio cut from a cloud-held file's URL", { timeout
     );
 
     expect(result.success).toBe(true);
-    expect(peak).toBeGreaterThan(Math.max(2, Math.floor(availableParallelism() / 2)));
+    expect(peak).toBeGreaterThan(Math.max(2, Math.floor(cpus().length / 2)));
   });
 });

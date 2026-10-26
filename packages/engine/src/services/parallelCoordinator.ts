@@ -5,7 +5,7 @@
  * Auto-detects optimal worker count based on CPU/memory.
  */
 
-import { availableParallelism, freemem } from "os";
+import { cpus, freemem } from "os";
 import { existsSync, mkdirSync, readdirSync } from "fs";
 import { copyFile, readFile } from "fs/promises";
 import { renameWithRetryAsync } from "../utils/renameWithRetry.js";
@@ -167,7 +167,7 @@ const ABSOLUTE_MAX_WORKERS = 24;
 // worker's SwiftShader compositor + the shader-blend thread pool, both of
 // which are themselves CPU-heavy.
 function defaultSafeMaxWorkers(): number {
-  return Math.max(6, Math.min(16, Math.floor(availableParallelism() / 8)));
+  return Math.max(6, Math.min(16, Math.floor(cpus().length / 8)));
 }
 const MIN_FRAMES_PER_WORKER = 30;
 
@@ -314,7 +314,7 @@ export function computeWorkerSizing(
   requested?: number,
   config?: WorkerSizingConfig,
 ): WorkerSizing {
-  const cpuCount = availableParallelism();
+  const cpuCount = cpus().length;
   // Use total memory instead of free memory — macOS reports misleadingly low
   // freemem() because it aggressively caches files in "inactive" memory that
   // is immediately reclaimable.
@@ -1217,7 +1217,7 @@ export function getSystemResources(): {
   recommendedWorkers: number;
 } {
   return {
-    cpuCores: availableParallelism(),
+    cpuCores: cpus().length,
     totalMemoryMB: getSystemTotalMb(),
     freeMemoryMB: Math.round(freemem() / (1024 * 1024)),
     recommendedWorkers: calculateOptimalWorkers(1000),
