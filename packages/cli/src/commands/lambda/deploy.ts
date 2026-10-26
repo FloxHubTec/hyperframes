@@ -99,25 +99,8 @@ export async function runDeploy(args: Partial<DeployArgs> = {}): Promise<void> {
     deployedAt: new Date().toISOString(),
   });
 
-  if (resolved.warm && outputs.videoFunctionName)
-    warmVideoFunction(outputs.videoFunctionName, resolved);
-
-  if (resolved.reservedConcurrency === -1) {
-    console.log(
-      c.warn(
-        "Removed the stack's reserved concurrency; each render now sizes itself to the account.",
-      ),
-    );
-  } else if (
-    resolved.reservedConcurrency === undefined &&
-    outputs.reservedConcurrency !== undefined
-  ) {
-    console.log(
-      c.warn(
-        `Kept the stack's reserved concurrency of ${outputs.reservedConcurrency}. Pass --concurrency=N to change it.`,
-      ),
-    );
-  }
+  warmVideoFunction(outputs.videoFunctionName, resolved);
+  reportReservedConcurrency(outputs.reservedConcurrency, resolved);
 
   console.log();
   console.log(c.success("Stack deployed."));
@@ -132,7 +115,24 @@ export async function runDeploy(args: Partial<DeployArgs> = {}): Promise<void> {
   console.log(c.dim(`Render with: hyperframes lambda render <project-dir>`));
 }
 
-function warmVideoFunction(functionName: string, args: DeployArgs): void {
+function reportReservedConcurrency(kept: number | undefined, args: DeployArgs): void {
+  if (args.reservedConcurrency === -1) {
+    console.log(
+      c.warn(
+        "Removed the stack's reserved concurrency; each render now sizes itself to the account.",
+      ),
+    );
+  } else if (args.reservedConcurrency === undefined && kept !== undefined) {
+    console.log(
+      c.warn(
+        `Kept the stack's reserved concurrency of ${kept}. Pass --concurrency=N to change it.`,
+      ),
+    );
+  }
+}
+
+function warmVideoFunction(functionName: string | undefined, args: DeployArgs): void {
+  if (!args.warm || !functionName) return;
   console.log(c.dim("→ Warming up the video function"));
   try {
     warmFunction({ functionName, region: args.region, awsProfile: args.awsProfile });
