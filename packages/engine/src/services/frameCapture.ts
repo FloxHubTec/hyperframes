@@ -2676,8 +2676,8 @@ export async function describeThrowSite(
     });
     const line = scriptSource.split("\n")[frame.lineNumber] ?? "";
     const lookups = [...line.matchAll(LOOKUP_CALL)];
-    const nearest = lookups.filter((m) => m.index <= frame.columnNumber).pop() ?? lookups[0];
-    if (nearest) where += `, ${nearest[0]})`;
+    // Only a lone lookup is certain to be the one that returned null; with several the position alone is given.
+    if (lookups.length === 1) where += `, ${lookups[0]?.[0]})`;
   } catch {
     // Source unavailable: line:col alone still locates the throw.
   } finally {
