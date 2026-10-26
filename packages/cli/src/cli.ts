@@ -48,7 +48,7 @@ import { existsSync } from "node:fs";
 // `hyperframes --version` near-instant (~10ms vs ~80ms).
 import { VERSION } from "./version.js";
 
-const argv = process.argv.slice(2);
+let argv = process.argv.slice(2);
 const commandArg = argv[0];
 const rootVersionRequested =
   commandArg === "--version" ||
@@ -104,6 +104,7 @@ import {
   type CommandResult,
 } from "./utils/commandResult.js";
 import { registerRunningCli } from "./utils/runningCli.js";
+import { openShortcutArgv } from "./utils/projectShortcut.js";
 
 registerRunningCli();
 
@@ -182,6 +183,13 @@ const commandLoaders = {
   auth: () => import("./commands/auth.js").then((m) => m.default),
   figma: () => import("./commands/figma.js").then((m) => m.default),
 };
+
+// `hyperframes <dir>` is `hyperframes open <dir>`; every later read of the command sees `open`.
+const shortcutArgv = openShortcutArgv(argv, new Set(Object.keys(commandLoaders)));
+if (shortcutArgv !== argv) {
+  argv = [...shortcutArgv];
+  process.argv.splice(2, 0, "open");
+}
 
 const subCommands = Object.fromEntries(
   Object.entries(commandLoaders).map(([name, load]) => [name, trackCommandFailures(load)]),
