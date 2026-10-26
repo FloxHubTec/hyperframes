@@ -5,16 +5,20 @@ import { silence } from "@hyperframes/core/audio-analysis";
 import {
   extractAudioMetadata,
   extractMediaMetadata,
+  probeMediaProfile,
   type AudioElement,
   type AudioMetadata,
 } from "@hyperframes/engine";
 import { decodeAudio } from "../audio/analysis/decode.js";
 import { createProbeGate } from "../timeline/describeProject.js";
 import { findingAtRoot } from "./checkFindings.js";
+import { loadProducer } from "./producer.js";
 import type { CheckFinding } from "./checkTypes.js";
 import { mediaPath, type ProjectMedia } from "./projectMedia.js";
 
 export interface AudioCheckDependencies {
+  /** Render's own media-type rule for a mixed clip; `null` when the file does not probe. */
+  renderAccepts(path: string): Promise<boolean | null>;
   probeAudio(path: string): Promise<AudioMetadata>;
   videoHasAudio(path: string): Promise<boolean>;
   /** Whether `seconds` of the file from `from` are silent all through. */
@@ -28,6 +32,12 @@ const EDGE_SECONDS = 0.02;
 const PROBE_CONCURRENCY = 4;
 
 const DEFAULT_DEPENDENCIES: AudioCheckDependencies = {
+  async renderAccepts(path) {
+    const profile = await probeMediaProfile(path).catch(() => null);
+    if (!profile) return null;
+    const { mediaProfileMatchesElementType } = await loadProducer();
+    return mediaProfileMatchesElementType("audio", profile);
+  },
   probeAudio: (path) => extractAudioMetadata(path),
   videoHasAudio: async (path) => (await extractMediaMetadata(path)).hasAudio,
   async isSilent(path, from, seconds, probed) {
@@ -133,6 +143,7 @@ async function clipProblem(
   clip: AudioElement,
   dependencies: AudioCheckDependencies,
 ): Promise<ClipProblem | null> {
+  if ((await dependencies.renderAccepts(path)) === false) return rejected(clip);
   let probed: AudioMetadata;
   try {
     probed = await dependencies.probeAudio(path);
@@ -159,16 +170,28 @@ async function clipProblem(
   };
 }
 
+function rejected(clip: AudioElement): ClipProblem {
+  return {
+    code: "audio_source_rejected",
+    severity: "error",
+    message: `${clip.src} has no audio track, so render stops before it starts.`,
+    fixHint: fixSource(clip),
+  };
+}
+
 function unreadable(clip: AudioElement, error: unknown): ClipProblem {
   return {
     code: "audio_source_unreadable",
     severity: "error",
-    message: `${clip.src} has no audio the render can read (${error instanceof Error ? error.message : String(error)}). The render's audio mix fails and the film ships without sound.`,
-    fixHint:
-      clip.type === "video"
-        ? 'Remove data-has-audio="true" from the video, or point it at a file with an audio track.'
-        : "Point src at an audio file, or re-export this one.",
+    message: `${clip.src} cannot be read as audio (${error instanceof Error ? error.message : String(error)}), so the render's audio mix fails and the render stops.`,
+    fixHint: fixSource(clip),
   };
+}
+
+function fixSource(clip: AudioElement): string {
+  return clip.type === "video"
+    ? 'Remove data-has-audio="true" from the video, or point it at a file with an audio track.'
+    : "Point src at a file with an audio track, or re-export this one.";
 }
 
 /** Seconds of its file a clip plays; unbounded clips play to the end of the file. */

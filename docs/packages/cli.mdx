@@ -1035,9 +1035,9 @@ drift), `*.motion.json` assertions, WCAG AA contrast, and craft warnings
 (see [Craft warnings](#craft-warnings)).
 
 The `audio` section reads every clip the render mixes, while the browser runs:
-a source the render cannot read as audio (error: the mix fails and the film
-ships silent), a clip that starts past the end of its file, a clip whose played
-part is silent (warnings), and a film with no sound at all (info).
+a source with no audio track or that cannot be read as audio (error: render
+stops), a clip that starts past the end of its file, a clip whose played part is
+silent (warnings), and a film with no sound at all (info).
 
 When the browser never ran (lint errors, a linter crash, or a browser launch
 failure), `browserSkipped` is `true` and the `layout`, `motion` and `contrast`

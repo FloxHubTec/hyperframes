@@ -71,6 +71,14 @@ describe.skipIf(!ffmpeg)("inspectAudio", () => {
   wav("late.wav", 4, lateTone(2.5));
   // Not audio at all: the render's audio probe rejects it and the whole mix fails.
   writeFileSync(join(dir, "notes.wav"), "RIFF but not really a wave file");
+  // A 1x1 PNG: it probes, but as a still image, so render refuses it as an <audio> source.
+  writeFileSync(
+    join(dir, "cover.png"),
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "base64",
+    ),
+  );
 
   it("passes a clip that plays sound", async () => {
     expect(await codes(media([clip("tone.wav")]))).toEqual([]);
@@ -94,6 +102,7 @@ describe.skipIf(!ffmpeg)("inspectAudio", () => {
         ],
       ),
       {
+        renderAccepts: () => Promise.reject(new Error("no audio clips to probe")),
         probeAudio: () => Promise.reject(new Error("no audio clips to probe")),
         isSilent: () => Promise.reject(new Error("no audio clips to decode")),
         videoHasAudio: async (path) => {
@@ -117,6 +126,14 @@ describe.skipIf(!ffmpeg)("inspectAudio", () => {
     });
   });
 
+  it("errors when render's media-type check refuses the source, naming the video for its track", async () => {
+    expect(
+      await codes(
+        media([clip("cover.png"), clip("cover.png", { id: "camera-audio", type: "video" })]),
+      ),
+    ).toEqual(["audio_source_rejected:#cover-png", "audio_source_rejected:#camera"]);
+  });
+
   it("warns when a clip starts past the end of its file", async () => {
     expect(await codes(media([clip("tone.wav", { mediaStart: 3.5 })]))).toEqual([
       "audio_starts_past_source_end:#tone-wav",
@@ -125,9 +142,7 @@ describe.skipIf(!ffmpeg)("inspectAudio", () => {
 
   it("warns on a clip whose played part is silent, and only that clip", async () => {
     expect(
-      await codes(
-        media([clip("tone.wav"), clip("silent.wav", { id: "narration-2-audio", type: "video" })]),
-      ),
+      await codes(media([clip("tone.wav"), clip("silent.wav", { id: "narration-2" })])),
     ).toEqual(["audio_clip_silent:#narration-2"]);
   });
 
