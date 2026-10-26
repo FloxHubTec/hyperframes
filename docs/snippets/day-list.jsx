@@ -56,10 +56,28 @@ export const DayList = ({ part }) => {
     query.addEventListener("change", follow);
     return () => query.removeEventListener("change", follow);
   }, []);
+  // One film at a time across the whole page, though each list (and every other player) is its own component: a film
+  // started with sound is a deliberate choice, so when any video on the page starts playing unmuted, this list stops
+  // its own films and lets go of its choice. Previews are muted and never evict anything.
+  useEffect(() => {
+    const onPlay = (event) => {
+      const v = event.target;
+      if (!(v instanceof HTMLVideoElement) || v.muted) return;
+      for (const own of listRef.current?.querySelectorAll("video") ?? []) {
+        if (own === v) continue;
+        own.pause();
+        own.muted = true;
+      }
+      setChosen((c) => (listRef.current?.querySelector(`[data-day="${c}"] video`) === v ? c : null));
+    };
+    document.addEventListener("play", onPlay, true);
+    return () => document.removeEventListener("play", onPlay, true);
+  }, []);
+  const filmWithSound = () => [...document.querySelectorAll("video")].some((v) => !v.paused && !v.muted);
   const hover = (event, on) => {
     const video = event.currentTarget.querySelector("video");
-    // While a film is chosen, other rows don't preview: one film plays at a time.
-    if (!video || chosen !== null) return;
+    // While a film plays with sound anywhere on the page, rows don't preview.
+    if (!video || chosen !== null || (on && filmWithSound())) return;
     if (on && !reduced) {
       video.dataset.hover = "1";
       video.play().catch(() => {});
@@ -74,19 +92,20 @@ export const DayList = ({ part }) => {
     if (!video) return;
     if (chosen === n && !video.paused) {
       video.pause();
+      video.muted = true;
       setChosen(null);
       return;
     }
-    // Choosing a film stops the one chosen before, so each button always matches its film.
-    for (const v of listRef.current?.querySelectorAll("video") ?? []) if (v !== video) v.pause();
+    // A chosen film plays with its sound; its unmuted start stops every other film on the page (see onPlay).
     delete video.dataset.hover;
+    video.muted = false;
     video.play().catch(() => {});
     setChosen(n);
   };
   return (
     <ol className="hf-days not-prose" ref={listRef}>
       {days.filter((d) => d[0] === part).map(([, n, title, post, account, file, line]) => (
-        <li key={n} className="hf-day" onMouseEnter={(e) => hover(e, true)} onMouseLeave={(e) => hover(e, false)}>
+        <li key={n} data-day={n} className="hf-day" onMouseEnter={(e) => hover(e, true)} onMouseLeave={(e) => hover(e, false)}>
           <span className="hf-day-n">{String(n).padStart(2, "0")}</span>
           <div className="hf-day-text">
             <a className="hf-day-title" href={`https://x.com/${account}/status/${post}`} target="_blank" rel="noopener">{title}</a>
@@ -95,7 +114,7 @@ export const DayList = ({ part }) => {
           <button
             type="button"
             className="hf-day-play"
-            aria-label={`${chosen === n ? "Pause" : "Play"} the day ${n} film`}
+            aria-label={`${chosen === n ? "Pause" : "Play with sound:"} the day ${n} film`}
             aria-pressed={chosen === n}
             onClick={(e) => toggle(e, n)}
           >
