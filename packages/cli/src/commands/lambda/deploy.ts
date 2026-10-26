@@ -13,10 +13,11 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { c } from "../../ui/colors.js";
 import { stagePrebuiltHandler } from "./prebuiltHandler.js";
-import { fetchStackOutputs, locateSamTemplate, samDeploy, warmFunction } from "./sam.js";
+import { fetchStackOutputs, locateSamTemplate, samDeploy } from "./sam.js";
 import { repoRoot } from "./repoRoot.js";
 import { DEFAULT_STACK_NAME, readStackOutputs, writeStackOutputs } from "./state.js";
 import { pushVideoImage, type VideoArch } from "./videoImage.js";
+import { warmFunction } from "./warm.js";
 
 export interface DeployArgs {
   stackName: string;
@@ -98,18 +99,8 @@ export async function runDeploy(args: Partial<DeployArgs> = {}): Promise<void> {
     deployedAt: new Date().toISOString(),
   });
 
-  if (resolved.warm && outputs.videoFunctionName) {
-    console.log(c.dim("→ Warming up the video function"));
-    try {
-      warmFunction({
-        functionName: outputs.videoFunctionName,
-        region: resolved.region,
-        awsProfile: resolved.awsProfile,
-      });
-    } catch (error) {
-      console.log(c.warn(`Warm-up skipped, the deploy is fine: ${(error as Error).message}`));
-    }
-  }
+  if (resolved.warm && outputs.videoFunctionName)
+    warmVideoFunction(outputs.videoFunctionName, resolved);
 
   if (resolved.reservedConcurrency === -1) {
     console.log(
@@ -139,6 +130,15 @@ export async function runDeploy(args: Partial<DeployArgs> = {}): Promise<void> {
   console.log(`  ${c.dim("State file:")}     ${resolve(statePath)}`);
   console.log();
   console.log(c.dim(`Render with: hyperframes lambda render <project-dir>`));
+}
+
+function warmVideoFunction(functionName: string, args: DeployArgs): void {
+  console.log(c.dim("→ Warming up the video function"));
+  try {
+    warmFunction({ functionName, region: args.region, awsProfile: args.awsProfile });
+  } catch (error) {
+    console.log(c.warn(`Warm-up skipped, the deploy is fine: ${(error as Error).message}`));
+  }
 }
 
 /** Checkout: build the ZIP from source. Otherwise: stage the adapter's pinned prebuilt ZIP. */

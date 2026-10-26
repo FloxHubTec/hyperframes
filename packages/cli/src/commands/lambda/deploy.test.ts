@@ -10,8 +10,8 @@ vi.mock("./sam.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./sam.js")>()),
   samDeploy: vi.fn(),
   fetchStackOutputs: vi.fn(() => ({ bucketName: "b", functionName: "f", stateMachineArn: "s" })),
-  warmFunction: vi.fn(),
 }));
+vi.mock("./warm.js", () => ({ warmFunction: vi.fn() }));
 const written = vi.hoisted(() => [] as Record<string, unknown>[]);
 vi.mock("./state.js", () => ({
   DEFAULT_STACK_NAME: "hf",
@@ -23,7 +23,8 @@ vi.mock("./videoImage.js", () => ({
 }));
 
 const { runDeploy } = await import("./deploy.js");
-const { fetchStackOutputs, samDeploy, warmFunction } = await import("./sam.js");
+const { fetchStackOutputs, samDeploy } = await import("./sam.js");
+const { warmFunction } = await import("./warm.js");
 const { pushVideoImage } = await import("./videoImage.js");
 
 let dir: string | undefined;
