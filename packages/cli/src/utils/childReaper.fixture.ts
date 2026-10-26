@@ -5,8 +5,7 @@ import { runCancellableProcess } from "./cancellableProcess.js";
 const [readyPath] = process.argv.slice(2);
 if (!readyPath) throw new Error("Missing fixture arguments");
 
-// Like a synchronous lint with the setup worker's signal handlers: its event loop never turns again, so SIGTERM is
-// queued for a handler that never runs, and nothing inside it can notice the parent go.
+// Acts like a synchronous lint: its event loop never turns, so no handler in it can notice the parent go.
 const childSource = [
   'import { spawn } from "node:child_process";',
   'import { writeFileSync } from "node:fs";',
