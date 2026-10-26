@@ -39,22 +39,65 @@ export const DayList = ({ part }) => {
       const link = bit.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       return link ? <a key={i} href={link[2]}>{link[1]}</a> : bit;
     });
-  const play = (event, on) => {
+  // Hover previews follow the visitor's reduced-motion setting, known on the first render. The film itself is a
+  // button, so a keyboard or touch visitor can play and pause it on purpose; that is allowed under reduced motion.
+  const listRef = useRef(null);
+  const [reduced, setReduced] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+  const [chosen, setChosen] = useState(null);
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const follow = (event) => {
+      setReduced(event.matches);
+      // Turned on mid-visit: stop any hover preview that is running.
+      if (event.matches) for (const v of listRef.current?.querySelectorAll("video") ?? []) if (v.dataset.hover) v.pause();
+    };
+    query.addEventListener("change", follow);
+    return () => query.removeEventListener("change", follow);
+  }, []);
+  const hover = (event, on, n) => {
+    const video = event.currentTarget.querySelector("video");
+    if (!video || chosen === n) return;
+    if (on && !reduced) {
+      video.dataset.hover = "1";
+      video.play().catch(() => {});
+    } else if (!on) {
+      delete video.dataset.hover;
+      video.pause();
+      video.currentTime = 0;
+    }
+  };
+  const toggle = (event, n) => {
     const video = event.currentTarget.querySelector("video");
     if (!video) return;
-    if (on) video.play().catch(() => {});
-    else { video.pause(); video.currentTime = 0; }
+    if (chosen === n && !video.paused) {
+      video.pause();
+      setChosen(null);
+    } else {
+      delete video.dataset.hover;
+      video.play().catch(() => {});
+      setChosen(n);
+    }
   };
   return (
-    <ol className="hf-days not-prose">
+    <ol className="hf-days not-prose" ref={listRef}>
       {days.filter((d) => d[0] === part).map(([, n, title, post, account, file, line]) => (
-        <li key={n} className="hf-day" onMouseEnter={(e) => play(e, true)} onMouseLeave={(e) => play(e, false)}>
+        <li key={n} className="hf-day" onMouseEnter={(e) => hover(e, true, n)} onMouseLeave={(e) => hover(e, false, n)}>
           <span className="hf-day-n">{String(n).padStart(2, "0")}</span>
           <div className="hf-day-text">
             <a className="hf-day-title" href={`https://x.com/${account}/status/${post}`} target="_blank" rel="noopener">{title}</a>
             <p>{rich(line)}</p>
           </div>
-          <video className="hf-day-film" src={`${CDN}${file}.mp4`} poster={`${CDN}${file.replace(/-s$/, "")}.jpg`} muted loop playsInline preload="none" />
+          <button
+            type="button"
+            className="hf-day-play"
+            aria-label={`${chosen === n ? "Pause" : "Play"} the day ${n} film`}
+            aria-pressed={chosen === n}
+            onClick={(e) => toggle(e, n)}
+          >
+            <video className="hf-day-film" src={`${CDN}${file}.mp4`} poster={`${CDN}${file.replace(/-s$/, "")}.jpg`} muted loop playsInline preload="none" />
+          </button>
         </li>
       ))}
     </ol>

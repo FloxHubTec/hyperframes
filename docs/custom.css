@@ -1689,3 +1689,5 @@ pre.shiki {
   .hf-day-n { font-size: 1.25rem; }
 }
 
+.hf-day-play { display: block; width: 100%; padding: 0; border: 0; background: none; cursor: pointer; border-radius: 0.5rem; }
+.hf-day-play:focus-visible { outline: 2px solid var(--hf-brand); outline-offset: 2px; }
