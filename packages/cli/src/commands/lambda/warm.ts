@@ -18,6 +18,8 @@ export function warmFunction(opts: {
       opts.functionName,
       "--region",
       opts.region,
+      "--output",
+      "json",
       "--cli-binary-format",
       "raw-in-base64-out",
       "--payload",

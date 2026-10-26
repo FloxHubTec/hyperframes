@@ -27,6 +27,7 @@ describe("warmFunction", () => {
     ]);
     expect(args[args.indexOf("--payload") + 1]).toBe('{"Action":"warm"}');
     expect(args).toContain("eu-west-1");
+    expect(args[args.indexOf("--output") + 1]).toBe("json");
   });
 
   it("throws with the aws error text when the invoke exits non-zero", () => {
