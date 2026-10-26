@@ -20,6 +20,7 @@ import { getDebugSurface } from "./globals.js";
 import { readElementPlaybackRate } from "./media.js";
 import { classifyWebAudioMediaRoute, reportWebAudioMediaRoute } from "./webAudioRoute.js";
 import { assetUrl } from "./assetUrl.js";
+import { clampFadesToDuration, fadeGain, readElementFades } from "../audioFade.js";
 
 const MASTER_FX_ATTRS: FxAttributes = { automation: null };
 
@@ -92,6 +93,35 @@ function startBoundedSource(
   return true;
 }
 
+/**
+ * The clip's `data-fade-in` / `data-fade-out` booked on their own gain on the audio clock, from where the clip starts
+ * sounding (`from`, clip seconds). A per-tick volume write is 50 ms apart, coarser than a fade: stepped, the clip
+ * starts and stops at full level and clicks at every cut. Null when the clip has no fade.
+ */
+function bookedFades(
+  ctx: AudioContext,
+  el: HTMLMediaElement,
+  timing: AutomationTiming,
+  from: number,
+  clipDuration: number,
+): GainNode | null {
+  const fades = clampFadesToDuration(readElementFades(el), clipDuration);
+  if (fades.fadeIn <= 0 && fades.fadeOut <= 0) return null;
+  const node = ctx.createGain();
+  const gain = node.gain;
+  const at = (clipSeconds: number) =>
+    timing.scheduledAt + Math.max(0, clipSeconds - timing.elapsed) / timing.rate;
+  const level = (clipSeconds: number) => fadeGain(clipSeconds, clipDuration, fades);
+  gain.setValueAtTime(level(from), at(from));
+  if (fades.fadeIn > from) gain.linearRampToValueAtTime(level(fades.fadeIn), at(fades.fadeIn));
+  if (fades.fadeOut > 0 && Number.isFinite(clipDuration)) {
+    const hold = clipDuration - fades.fadeOut;
+    if (hold > from && hold > fades.fadeIn) gain.setValueAtTime(level(hold), at(hold));
+    gain.linearRampToValueAtTime(0, at(clipDuration));
+  }
+  return node;
+}
+
 // Clip gain, FX, then the volume lane on its own gain ahead of `gainNode` (all but the lane
 // rewritten every tick); the FX handle re-aims the lane on rate changes and edits.
 function attachClipStages(
@@ -100,17 +130,25 @@ function attachClipStages(
   source: AudioNode,
   gainNode: GainNode,
   timing: AutomationTiming,
-): { fx: ElementFxHandle | null; laneNode: GainNode; clipGainNode: GainNode } {
+  span: { from: number; clipDuration: number },
+): {
+  fx: ElementFxHandle | null;
+  laneNode: GainNode;
+  clipGainNode: GainNode;
+  fadeNode: GainNode | null;
+} {
   const laneNode = ctx.createGain();
   laneNode.connect(gainNode);
   const clipGainNode = ctx.createGain();
-  source.connect(clipGainNode);
+  const fadeNode = bookedFades(ctx, el, timing, span.from, span.clipDuration);
+  if (fadeNode) source.connect(fadeNode);
+  (fadeNode ?? source).connect(clipGainNode);
   const fx = attachElementFxChain(ctx, el, clipGainNode, laneNode, timing, undefined, {
     param: laneNode.gain,
     gain: () => readAudioGroupVolume(el),
     gainAhead: true,
   });
-  return { fx, laneNode, clipGainNode };
+  return { fx, laneNode, clipGainNode, fadeNode };
 }
 
 type ScheduledSourceBase = {
@@ -122,6 +160,8 @@ type ScheduledSourceBase = {
   clipGainNode: GainNode;
   /** FX chain spliced between source and gain, when the element carries one. */
   fx?: ElementFxHandle | null;
+  /** The clip's fades booked on the audio clock, between the source and its clip gain; absent without a fade. */
+  fadeNode?: GainNode | null;
   compositionStart: number;
   mediaStart: number;
   scheduledAt: number;
@@ -429,6 +469,7 @@ export class WebAudioTransport {
     volume: number,
     generation: number,
     rate = 1,
+    clipDuration = Number.POSITIVE_INFINITY,
   ): Promise<ScheduledSource | null> {
     if (!this._ctx || !this._masterGain) return null;
     if (generation !== this._playGeneration) return null;
@@ -455,12 +496,13 @@ export class WebAudioTransport {
       gainNode.connect(
         this.resolveDestination(el, scheduledAt, compositionTime, safeRate) ?? this._masterGain,
       );
-      const { fx, laneNode, clipGainNode } = attachClipStages(
+      const { fx, laneNode, clipGainNode, fadeNode } = attachClipStages(
         this._ctx,
         el,
         sourceNode,
         gainNode,
         timing,
+        { from: Math.max(elapsed, 0), clipDuration },
       );
 
       this._rate = safeRate;
@@ -469,6 +511,7 @@ export class WebAudioTransport {
 
       const scheduled: ScheduledSource = {
         fx,
+        fadeNode,
         el,
         sourceNode,
         sourceKind: "media-element",
@@ -730,6 +773,7 @@ export class WebAudioTransport {
     try {
       sourceNode.disconnect();
       scheduled.fx?.dispose();
+      scheduled.fadeNode?.disconnect();
       scheduled.clipGainNode.disconnect();
       scheduled.laneNode.disconnect();
       scheduled.gainNode.disconnect();
@@ -788,12 +832,14 @@ export class WebAudioTransport {
       gainNode.connect(
         this.resolveDestination(el, scheduledAt, compositionTime, safeRate) ?? this._masterGain,
       );
-      const { fx, laneNode, clipGainNode } = attachClipStages(
+      const headCut = windowStart - compositionStart;
+      const { fx, laneNode, clipGainNode, fadeNode } = attachClipStages(
         this._ctx,
         el,
         sourceNode,
         gainNode,
         timing,
+        { from: Math.max(elapsed, headCut, 0), clipDuration },
       );
 
       this._rate = safeRate;
@@ -808,12 +854,13 @@ export class WebAudioTransport {
           globalRate: safeRate,
           mediaRate,
           clipDuration,
-          headCut: windowStart - compositionStart,
+          headCut,
         })
       ) {
         // Playhead already past the clip end — discard the nodes we built.
         sourceNode.disconnect();
         fx?.dispose();
+        fadeNode?.disconnect();
         clipGainNode.disconnect();
         laneNode.disconnect();
         gainNode.disconnect();
@@ -826,6 +873,7 @@ export class WebAudioTransport {
 
       const scheduled: ScheduledSource = {
         fx,
+        fadeNode,
         el,
         sourceNode,
         sourceKind: "buffer",
@@ -933,6 +981,7 @@ export class WebAudioTransport {
       if (isBufferSource(source)) source.sourceNode.stop();
       source.sourceNode.disconnect();
       source.fx?.dispose();
+      source.fadeNode?.disconnect();
       source.clipGainNode.disconnect();
       source.laneNode.disconnect();
       source.gainNode.disconnect();
@@ -963,13 +1012,19 @@ export class WebAudioTransport {
    * divergence this ceiling exists to close. Automation lanes hid it, because
    * they schedule ramps onto the param directly and never pass through here.
    */
-  setElementVolume(el: HTMLMediaElement, volume: number, clipGain = 1): void {
-    const safeVolume = clampAudioGain(volume);
+  /** `volume` carries the clip's fade as the sync tick reads it; `unfadedVolume` is the same level without it, for a
+   * source whose fades are booked on the audio clock (`fadeNode`), so the fade is not applied twice. */
+  setElementVolume(
+    el: HTMLMediaElement,
+    volume: number,
+    clipGain = 1,
+    unfadedVolume = volume,
+  ): void {
     for (const source of this._activeSources) {
       if (source.el !== el) continue;
       try {
         if (source.sourceKind === "media-element") source.el.volume = 1;
-        source.gainNode.gain.value = safeVolume;
+        source.gainNode.gain.value = clampAudioGain(source.fadeNode ? unfadedVolume : volume);
         source.clipGainNode.gain.value = clampAudioGain(clipGain);
       } catch (err) {
         swallow("webAudioTransport.setElementVolume", err);
