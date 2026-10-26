@@ -7,7 +7,7 @@ import { resolve, dirname } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { getMimeType } from "@hyperframes/studio-server";
-import { stripSdrPngColourTags } from "@hyperframes/studio-server/png-colour-tags";
+import { stripSdrPngColourTags } from "@hyperframes/core/compiler/png-colour-tags";
 import { injectTagsAtHeadStart } from "@hyperframes/core/compiler/html-document";
 
 /**

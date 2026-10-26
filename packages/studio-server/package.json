@@ -104,12 +104,6 @@
       "node": "./dist/helpers/encoderOptions.js",
       "import": "./src/helpers/encoderOptions.ts",
       "types": "./src/helpers/encoderOptions.ts"
-    },
-    "./png-colour-tags": {
-      "bun": "./src/helpers/pngColourTags.ts",
-      "node": "./dist/helpers/pngColourTags.js",
-      "import": "./src/helpers/pngColourTags.ts",
-      "types": "./src/helpers/pngColourTags.ts"
     }
   },
   "publishConfig": {
@@ -175,10 +169,6 @@
       "./encoder-options": {
         "import": "./dist/helpers/encoderOptions.js",
         "types": "./dist/helpers/encoderOptions.d.ts"
-      },
-      "./png-colour-tags": {
-        "import": "./dist/helpers/pngColourTags.js",
-        "types": "./dist/helpers/pngColourTags.d.ts"
       }
     },
     "main": "./dist/index.js",

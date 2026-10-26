@@ -28,7 +28,7 @@ import { Readable } from "node:stream";
 import { join, extname, resolve, sep } from "node:path";
 import { injectScriptsAtHeadStart, injectScriptsIntoHtml } from "@hyperframes/core/compiler";
 import { fpsToNumber, type Fps } from "@hyperframes/core";
-import { stripSdrPngColourTags } from "@hyperframes/studio-server/png-colour-tags";
+import { stripSdrPngColourTags } from "@hyperframes/core/compiler/png-colour-tags";
 import { getVerifiedHyperframeRuntimeSource } from "./hyperframeRuntimeLoader.js";
 import { getHfEarlyStub } from "../generated/hf-early-stub-inline.js";
 import { defaultLogger, type ProducerLogger } from "../logger.js";
@@ -838,7 +838,7 @@ export function createFileServer(options: FileServerOptions): Promise<FileServer
       }
 
       if (ext === ".png") {
-        const untagged = stripSdrPngColourTags(await readFileAsync(filePath));
+        const untagged = stripSdrPngColourTags(await readFileAsync(fd));
         if (untagged) {
           const headers = {
             "Content-Type": contentType,
@@ -896,7 +896,8 @@ export function createFileServer(options: FileServerOptions): Promise<FileServer
       const stream = createReadStream(filePath, {
         fd,
         autoClose: true,
-        ...(range ? { start: range.start, end: range.end } : {}),
+        start: range?.start ?? 0,
+        ...(range ? { end: range.end } : {}),
       });
       streamOwnsFd = true;
       try {

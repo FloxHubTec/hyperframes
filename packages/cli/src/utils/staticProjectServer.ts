@@ -1,7 +1,7 @@
 import { createServer, request as httpRequest, type Server, type ServerResponse } from "node:http";
 import { Duplex } from "node:stream";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
-import { stripSdrPngColourTags } from "@hyperframes/studio-server/png-colour-tags";
+import { stripSdrPngColourTags } from "@hyperframes/core/compiler/png-colour-tags";
 import { isAbsolute, relative, resolve } from "node:path";
 import {
   PREVIEW_PROXY_BOX_PARAM,

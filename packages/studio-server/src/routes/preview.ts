@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 import { parseHTML } from "linkedom";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
-import { stripSdrPngColourTags } from "../helpers/pngColourTags.js";
+import { stripSdrPngColourTags } from "@hyperframes/core/compiler/png-colour-tags";
 import { Readable } from "node:stream";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
