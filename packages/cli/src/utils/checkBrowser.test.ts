@@ -736,6 +736,7 @@ describe("skipContrastInMotion", () => {
     } as unknown as CanvasRenderingContext2D);
     const main = {
       time: () => 5,
+      repeat: () => 0,
       globalTime: (local: number) => local,
       getChildren: () => children,
     };

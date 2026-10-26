@@ -114,6 +114,22 @@ describe("contrast motion policy with real GSAP", () => {
     }
   });
 
+  it.each([2.1, 5.3, 12.7])("keeps ambient motion inside an infinite timeline at %s", (time) => {
+    const { card, label } = stage(1);
+    const root = realGsap.timeline({ paused: true });
+    const pulse = realGsap.timeline({ repeat: -1, yoyo: true });
+    pulse.to(card, { scale: 1.05, duration: 0.8 }).to(card, { scale: 1, duration: 0.8 });
+    root.add(pulse, 0).totalTime(time, true);
+    Reflect.set(window, "__timelines", { root });
+    prepared(label);
+    try {
+      const sample = readContrastMotion()[0];
+      expect(sample && measuredInMotion(sample)).toBe(false);
+    } finally {
+      root.kill();
+    }
+  });
+
   it("does not treat a paused nested timeline as moving", () => {
     const { label } = stage(1);
     const root = realGsap.timeline({ paused: true });

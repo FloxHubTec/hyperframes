@@ -1102,8 +1102,13 @@ compliant colour you could use instead.
 environment, leaves out a contrast failure measured while a GSAP tween on the text
 or an ancestor is running, or while the text's opacity multiplied up its ancestors
 is below 1. The failure is not reported, and the counts and `ok` leave it out.
-Repeating tweens and tweens of 4s or longer, such as a slow camera drift, do not
-count as motion. Text no GSAP tween targets is reported as usual. Off by default.
+Repeating tweens, tweens inside infinitely repeating timelines, and tweens of
+4s or longer, such as a slow camera drift, do not count as motion. The opacity
+rule also applies at rest, including deliberately translucent text, when a tween
+targets the text or an ancestor. Text no GSAP tween targets is reported as usual.
+Dropped samples do not contribute to persistence: a retained failure can become
+a warning when only one failing sample remains among multiple measured times.
+Off by default.
 
 Severity is persistence-aware: a finding at a single sample demotes to info, a
 finding that persists gates the exit code, and a composition of 3s or more

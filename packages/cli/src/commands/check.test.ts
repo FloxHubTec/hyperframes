@@ -2801,6 +2801,33 @@ describe("contrast persistence", () => {
     expect(checkExitCode(report)).toBe(1);
   });
 
+  it("uses only retained samples for contrast persistence when motion filtering is enabled", async () => {
+    const driver = fakeDriver({
+      collectContrast: vi.fn(async (time: number, _annotations, skipInMotion) => ({
+        entries: [
+          contrastEntry({ time, selector: "#passing", ratio: 8, wcagAA: true }),
+          ...(skipInMotion && time < 1 ? [] : [contrastEntry({ time })]),
+        ],
+      })),
+    });
+    const { report: off } = await runScenario(driver, { at: [0.5, 1.5] });
+    const { report: on } = await runScenario(driver, {
+      at: [0.5, 1.5],
+      skipContrastInMotion: true,
+    });
+    expect(off.contrast.errorCount).toBe(1);
+    expect(checkExitCode(off)).toBe(1);
+    expect(on.contrast).toMatchObject({ errorCount: 0, warningCount: 1, checked: 3, passed: 2 });
+    expect(on.ok).toBe(true);
+    expect(checkExitCode(on)).toBe(0);
+    const { report: strict } = await runScenario(driver, {
+      at: [0.5, 1.5],
+      skipContrastInMotion: true,
+      strict: true,
+    });
+    expect(checkExitCode(strict)).toBe(1);
+  });
+
   it("keeps full severity when only one sample time exists", async () => {
     const driver = fakeDriver({
       collectContrast: vi.fn(async (time: number) => ({

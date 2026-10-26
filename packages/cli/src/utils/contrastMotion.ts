@@ -1,5 +1,6 @@
 export interface ContrastTweenState {
   active: boolean;
+  infiniteAncestor: boolean;
   duration: number;
   repeat: number;
 }
@@ -13,7 +14,7 @@ export interface ContrastMotionSample {
 const AMBIENT_TWEEN_SECONDS = 4;
 
 function isAmbientTween(tween: ContrastTweenState): boolean {
-  return tween.repeat !== 0 || tween.duration >= AMBIENT_TWEEN_SECONDS;
+  return tween.infiniteAncestor || tween.repeat !== 0 || tween.duration >= AMBIENT_TWEEN_SECONDS;
 }
 
 /** True when a non-ambient tween on the text or an ancestor is running at the current seek, or the text is not fully opaque. */
@@ -66,12 +67,21 @@ export function readContrastMotion(): (ContrastMotionSample | null)[] {
     );
   }
 
+  function hasInfiniteAncestor(animation: Animation, root: Animation): boolean {
+    for (let parent = animation.parent; parent; parent = parent.parent) {
+      if (parent.repeat() === -1) return true;
+      if (parent === root) break;
+    }
+    return false;
+  }
+
   function addTweens(timeline: Animation): void {
     for (const tween of timeline.getChildren(true, true, false)) {
       const total = tween.totalDuration();
       if (!(total > 0)) continue;
       const state = {
         active: activeInRoot(tween, timeline),
+        infiniteAncestor: hasInfiniteAncestor(tween, timeline),
         duration: tween.duration(),
         repeat: tween.repeat(),
       };
