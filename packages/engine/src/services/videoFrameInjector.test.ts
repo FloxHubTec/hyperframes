@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type Page } from "puppeteer-core";
+import { parseHTML } from "linkedom";
+import { groupIntoLayers } from "../utils/layerCompositor.js";
 import { COMPLETE_SENTINEL } from "./extractionCache.js";
 
 // Hoist mocks before importing the module under test so the mock factory wins.
@@ -24,7 +26,7 @@ vi.mock("./screenshotService.js", () => ({
   syncVideoFrameVisibility: syncVideoFrameVisibilityMock,
 }));
 
-import { __testing, createVideoFrameInjector } from "./videoFrameInjector.js";
+import { __testing, createVideoFrameInjector, queryElementStacking } from "./videoFrameInjector.js";
 import { type ExtractedFrames, FrameLookupTable } from "./videoFrameExtractor.js";
 import { type BeforeCaptureHook } from "./frameCapture.js";
 import { DEFAULT_CONFIG } from "../config.js";
@@ -492,4 +494,67 @@ describe("createVideoFrameInjector extraction-cache lease renewal", () => {
 
     await expect(hook(fakePage, 0)).resolves.toBeUndefined();
   });
+});
+
+describe("HDR untimed overlay stacking", () => {
+  it.each([false, true])(
+    "keeps nested stacking content below HDR with composition host=%s",
+    async (nestedComposition) => {
+      const { window, document } = parseHTML(`
+      <html><body><div data-composition-id="main">
+        <div style="position:absolute;z-index:2">
+          <video id="plate" data-start="0"></video>
+          <img id="__render_frame_plate__" style="position:absolute;z-index:2">
+        </div>
+        <div id="lower-third" ${nestedComposition ? 'data-start="0" data-composition-id="sub"' : ""} style="position:absolute;z-index:1">
+          <div><div id="badge" style="position:absolute;z-index:3"></div></div>
+        </div>
+        <div id="caps" style="position:absolute;z-index:4"><div id="cap">${"<span>word</span>".repeat(2000)}</div></div>
+      </div></body></html>
+    `);
+      for (const node of document.querySelectorAll("*")) {
+        Object.defineProperty(node, "getBoundingClientRect", {
+          value: () => ({ x: 0, y: 0, width: 540, height: 960 }),
+        });
+      }
+      vi.stubGlobal("document", document);
+      vi.stubGlobal("HTMLElement", window.HTMLElement);
+      const getComputedStyle = vi.fn((node: HTMLElement) => ({
+        position: node.style.position || "static",
+        zIndex: node.style.zIndex || "auto",
+        opacity: node.style.opacity || "1",
+        display: "block",
+        visibility: "visible",
+        transform: "none",
+      }));
+      vi.stubGlobal("window", {
+        __hfMediaId: (node: Element) => node.getAttribute("data-hf-render-id") || node.id,
+        getComputedStyle,
+      });
+      // The page boundary executes the serialized callback against this DOM fixture.
+      const page = {
+        evaluate: async (fn: (...args: never[]) => unknown, ...args: never[]) => fn(...args),
+      } as unknown as Page;
+      try {
+        const stacking = await queryElementStacking(page, new Set());
+        expect(stacking.map((el) => el.id)).toContain("caps");
+        expect(stacking.map((el) => el.id)).not.toContain("badge");
+        expect(stacking.map((el) => el.id)).not.toContain("__render_frame_plate__");
+        const layers = groupIntoLayers(stacking.map((el) => ({ ...el, isHdr: el.id === "plate" })));
+        expect(layers.map((layer) => layer.type)).toEqual(["dom", "hdr", "dom"]);
+        expect(layers.at(-1)).toEqual({ type: "dom", elementIds: ["caps"] });
+        expect(layers[0]?.elementIds).toContain("lower-third");
+        expect(getComputedStyle.mock.calls.some(([node]) => node.tagName === "SPAN")).toBe(false);
+        const styleReads = getComputedStyle.mock.calls.map(([node]) => node);
+        expect(styleReads.length).toBe(new Set(styleReads).size);
+        const wrapper = document.querySelector("video")?.parentElement;
+        expect(wrapper?.getAttribute("data-hf-render-id")).toBeTruthy();
+        expect((await queryElementStacking(page, new Set())).map((el) => el.id)).toEqual(
+          stacking.map((el) => el.id),
+        );
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });

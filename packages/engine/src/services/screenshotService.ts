@@ -425,7 +425,7 @@ export async function applyDomLayerMask(
       const restoreMaskedElements = () => {
         const masked = document.querySelectorAll(`[${args.hiddenAttr}="1"]`);
         for (const node of masked) {
-          if (!(node instanceof HTMLElement)) continue;
+          if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) continue;
           const prevVisibility = node.getAttribute(args.prevVisibilityAttr);
           const prevPriority = node.getAttribute(args.prevPriorityAttr);
           if (prevVisibility === null) {
@@ -440,7 +440,7 @@ export async function applyDomLayerMask(
       };
       restoreMaskedElements();
 
-      const rememberAndHideElement = (el: HTMLElement) => {
+      const rememberAndHideElement = (el: HTMLElement | SVGElement) => {
         if (el.getAttribute(args.hiddenAttr) !== "1") {
           const prevVisibility = el.style.getPropertyValue("visibility");
           const prevPriority =
@@ -473,9 +473,13 @@ export async function applyDomLayerMask(
       };
 
       const showSelectors: string[] = [];
+      const shownElements: Element[] = [];
       for (const id of args.show) {
         const el = window.__hfMediaEl?.(id) ?? document.getElementById(id);
-        if (el) rememberHiddenTimedDescendants(el);
+        if (el) {
+          shownElements.push(el);
+          rememberHiddenTimedDescendants(el);
+        }
         // Address the element by its render id when it has one. `#id` must not
         // be used as an extra fallback here: an id is duplicated exactly when
         // two compositions share it, so `#id` would also unhide the other
@@ -511,8 +515,13 @@ export async function applyDomLayerMask(
 
       for (const id of args.hide) {
         const el = window.__hfMediaEl?.(id) ?? document.getElementById(id);
-        if (el instanceof HTMLElement) {
-          rememberAndHideElement(el);
+        if (el) {
+          const shownSubtrees = shownElements.filter((shown) => el.contains(shown));
+          for (const node of [el, ...el.querySelectorAll("*")]) {
+            if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) continue;
+            if (shownSubtrees.some((shown) => shown.contains(node))) continue;
+            rememberAndHideElement(node);
+          }
         }
         const img = document.getElementById(renderFrameId(id));
         if (img) {
@@ -566,7 +575,7 @@ export async function removeDomLayerMask(page: Page, _extraHideIds: string[]): P
       if (style) style.remove();
       const masked = document.querySelectorAll(`[${args.hiddenAttr}="1"]`);
       for (const node of masked) {
-        if (!(node instanceof HTMLElement)) continue;
+        if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) continue;
         const prevVisibility = node.getAttribute(args.prevVisibilityAttr);
         const prevPriority = node.getAttribute(args.prevPriorityAttr);
         if (prevVisibility === null) {

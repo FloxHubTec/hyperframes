@@ -17,6 +17,7 @@ import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import {
   HF_COLOR_GRADING_ATTR,
   HF_COLOR_GRADING_CANVAS_ID_PREFIX,
+  MEDIA_RENDER_ID_ATTR,
   RENDER_FRAME_ID_PREFIX,
   RENDER_FRAME_ID_SUFFIX,
   renderFrameIdForRenderId,
@@ -528,10 +529,51 @@ export async function queryElementStacking(
   const hdrIds = Array.from(nativeHdrIds);
   return page.evaluate(
     // fallow-ignore-next-line complexity
-    (hdrIdList: string[], prefix: string, suffix: string): ElementStackingInfo[] => {
+    (
+      hdrIdList: string[],
+      prefix: string,
+      suffix: string,
+      renderIdAttr: string,
+      colorGradingPrefix: string,
+    ): ElementStackingInfo[] => {
       const hdrSet = new Set(hdrIdList);
-      const elements = document.querySelectorAll("[data-start]");
+      const elements = document.querySelectorAll("[data-start], [data-composition-id] *");
       const results: ElementStackingInfo[] = [];
+      const styles = new Map<Element, CSSStyleDeclaration>();
+      const styleFor = (node: Element): CSSStyleDeclaration => {
+        let style = styles.get(node);
+        if (!style) {
+          style = window.getComputedStyle(node);
+          styles.set(node, style);
+        }
+        return style;
+      };
+      const compositionRoots = new Set(
+        Array.from(document.querySelectorAll("[data-composition-id]")).filter(
+          (node) => !node.parentElement?.closest("[data-composition-id]"),
+        ),
+      );
+      const captured = new Map<Element, boolean>();
+      const capturedByAncestor = (node: Element | null): boolean => {
+        const visited: Element[] = [];
+        let result = false;
+        while (node && !compositionRoots.has(node)) {
+          const cached = captured.get(node);
+          if (cached !== undefined) {
+            result = cached;
+            break;
+          }
+          visited.push(node);
+          const style = styleFor(node);
+          if (style.position !== "static" && style.zIndex !== "auto") {
+            result = true;
+            break;
+          }
+          node = node.parentElement;
+        }
+        for (const ancestor of visited) captured.set(ancestor, result);
+        return result;
+      };
 
       // Walk up the DOM to find the effective z-index from the nearest
       // positioned ancestor with a z-index. CSS z-index only applies to
@@ -556,7 +598,7 @@ export async function queryElementStacking(
       function getEffectiveZIndex(node: Element): number {
         let current: Element | null = node;
         while (current) {
-          const cs = window.getComputedStyle(current);
+          const cs = styleFor(current);
           const pos = cs.position;
           const z = parseInt(cs.zIndex);
           if (!Number.isNaN(z) && pos !== "static") return z;
@@ -586,7 +628,7 @@ export async function queryElementStacking(
         }
 
         // Check element itself (replaced elements clip to own border-radius)
-        const selfCs = window.getComputedStyle(node);
+        const selfCs = styleFor(node);
         const selfRadii: [number, number, number, number] = [
           resolveRadius(selfCs.borderTopLeftRadius, node),
           resolveRadius(selfCs.borderTopRightRadius, node),
@@ -600,7 +642,7 @@ export async function queryElementStacking(
         // Walk ancestors looking for clipping container
         let current: Element | null = node.parentElement;
         while (current) {
-          const cs = window.getComputedStyle(current);
+          const cs = styleFor(current);
           if (cs.overflow !== "visible") {
             const tl = resolveRadius(cs.borderTopLeftRadius, current);
             const tr = resolveRadius(cs.borderTopRightRadius, current);
@@ -623,7 +665,7 @@ export async function queryElementStacking(
         let current: Element | null = node.parentElement;
         let clip: { x: number; y: number; width: number; height: number } | null = null;
         while (current) {
-          const cs = window.getComputedStyle(current);
+          const cs = styleFor(current);
           if (cs.overflow === "hidden" || cs.overflow === "clip") {
             const r = current.getBoundingClientRect();
             const ancestor = {
@@ -656,7 +698,7 @@ export async function queryElementStacking(
         let opacity = 1;
         let current: Element | null = node;
         while (current) {
-          const cs = window.getComputedStyle(current);
+          const cs = styleFor(current);
           const val = parseFloat(cs.opacity);
           // Note: `val || 1` would turn opacity:0 into 1 (0 is falsy)
           opacity *= Number.isNaN(val) ? 1 : val;
@@ -686,7 +728,7 @@ export async function queryElementStacking(
           const htmlEl = chain[i];
           if (!htmlEl) continue;
           mat = mat.translate(htmlEl.offsetLeft, htmlEl.offsetTop);
-          const cs = window.getComputedStyle(htmlEl);
+          const cs = styleFor(htmlEl);
           const origin = cs.transformOrigin.split(" ");
           const ox = resolveLength(origin[0] ?? "0", htmlEl.offsetWidth);
           const oy = resolveLength(origin[1] ?? "0", htmlEl.offsetHeight);
@@ -759,7 +801,7 @@ export async function queryElementStacking(
 
       function isElementPaintable(node: Element): boolean {
         const rect = node.getBoundingClientRect();
-        const style = window.getComputedStyle(node);
+        const style = styleFor(node);
         return (
           style.visibility !== "hidden" &&
           style.display !== "none" &&
@@ -770,11 +812,29 @@ export async function queryElementStacking(
 
       for (const el of elements) {
         // Report the render id so callers can match these back to the media list.
-        // `||`, not `??`: `__hfMediaId` yields "" for an element with neither id.
-        const id = window.__hfMediaId?.(el) || el.id;
-        if (!id) continue;
+        if (["SCRIPT", "STYLE", "TEMPLATE", "LINK", "META"].includes(el.tagName)) continue;
+        let id = window.__hfMediaId?.(el) || el.getAttribute(renderIdAttr) || el.id;
+        if (id.startsWith(prefix) && id.endsWith(suffix)) continue;
+        if (id.startsWith(colorGradingPrefix)) continue;
+        const isTimed = el.hasAttribute("data-start");
+        if (!isTimed && !hdrSet.has(id) && capturedByAncestor(el.parentElement)) continue;
+        const style = styleFor(el);
+        const isCompositionChild = el.parentElement?.hasAttribute("data-composition-id");
+        const hasStackingOrder = style.position !== "static" && style.zIndex !== "auto";
+        if (!isTimed && !hdrSet.has(id)) {
+          if (!isCompositionChild && !hasStackingOrder) continue;
+        }
+        if (!id) {
+          let index = 0;
+          do {
+            id = `hf-hdr-dom-${index++}`;
+          } while (
+            document.getElementById(id) ||
+            document.querySelector(`[${renderIdAttr}="${id}"]`)
+          );
+          el.setAttribute(renderIdAttr, id);
+        }
         const rect = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
         const zIndex = getEffectiveZIndex(el);
         const isHdrEl = hdrSet.has(id);
         // The frame injector now uses `visibility: hidden` (without `opacity: 0`)
@@ -821,5 +881,7 @@ export async function queryElementStacking(
     hdrIds,
     RENDER_FRAME_ID_PREFIX,
     RENDER_FRAME_ID_SUFFIX,
+    MEDIA_RENDER_ID_ATTR,
+    HF_COLOR_GRADING_CANVAS_ID_PREFIX,
   );
 }

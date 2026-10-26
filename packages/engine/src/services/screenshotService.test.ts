@@ -1,6 +1,7 @@
 // @vitest-environment node
 // fallow-ignore-file code-duplication
 import { describe, it, expect, vi } from "vitest";
+import { ok } from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { type Page } from "puppeteer-core";
 import { installMediaRenderIdBridge } from "./mediaRenderIdBridge.js";
@@ -553,20 +554,24 @@ describe("video-frame injection respects ancestor visibility", () => {
       window?: Window;
       document?: Document;
       HTMLElement?: typeof HTMLElement;
+      SVGElement?: typeof SVGElement;
       CSS?: typeof CSS;
     };
     const previousWindow = globals.window;
     const previousDocument = globals.document;
     const previousHTMLElement = globals.HTMLElement;
+    const previousSVGElement = globals.SVGElement;
     const previousCSS = globals.CSS;
     globals.window = setup.window;
     globals.document = setup.document;
     globals.HTMLElement = setup.window.HTMLElement;
+    globals.SVGElement = setup.window.SVGElement;
     globals.CSS = { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") } as CSS;
     return () => {
       globals.window = previousWindow;
       globals.document = previousDocument;
       globals.HTMLElement = previousHTMLElement;
+      globals.SVGElement = previousSVGElement;
       globals.CSS = previousCSS;
     };
   }
@@ -885,6 +890,57 @@ describe("video-frame injection respects ancestor visibility", () => {
       teardown();
     }
   });
+
+  it.each([false, true])(
+    "hides a promoted subtree but keeps explicitly shown descendants with render identity=%s",
+    async (renderIdentity) => {
+      const { window, document } = parseHTML(`<html><head></head><body>
+      <div id="root" data-start="0">
+        <div ${renderIdentity ? 'data-hf-render-id="overlay"' : 'id="overlay"'} style="opacity:0.5">
+          <span id="label" style="visibility:visible">caption</span>
+          <svg><path></path></svg>
+          <div id="kept"><span>current layer</span></div>
+        </div>
+      </div>
+    </body></html>`);
+      Object.defineProperty(window, "getComputedStyle", {
+        configurable: true,
+        value: () => ({ display: "block", visibility: "visible" }),
+      });
+      const overlay = document.querySelector<HTMLDivElement>("#root > div");
+      const label = document.getElementById("label");
+      const svg = document.querySelector("svg");
+      const path = document.querySelector("path");
+      const kept = document.getElementById("kept");
+      ok(overlay);
+      ok(label);
+      ok(svg);
+      ok(path);
+      ok(kept);
+      const teardown = installDomMaskGlobals({ window, document });
+      try {
+        window.__hfMediaEl = (id: string) =>
+          document.querySelector(`[data-hf-render-id="${id}"]`) ?? document.getElementById(id);
+        await applyDomLayerMask(passthroughPage(), ["root", "kept"], ["overlay"]);
+        expect(overlay.style.visibility).toBe("hidden");
+        expect(label.style.visibility).toBe("hidden");
+        expect(svg.style.visibility).toBe("hidden");
+        expect(path.style.visibility).toBe("hidden");
+        expect(kept.style.visibility || "").toBe("");
+        expect(kept.querySelector("span")?.style.visibility || "").toBe("");
+        expect(overlay.style.opacity).toBe("0.5");
+
+        await removeDomLayerMask(passthroughPage(), ["overlay"]);
+        expect(overlay.style.visibility || "").toBe("");
+        expect(label.style.visibility).toBe("visible");
+        expect(svg.style.visibility || "").toBe("");
+        expect(path.style.visibility || "").toBe("");
+        expect(document.querySelectorAll('[data-hf-dom-layer-mask-hidden="1"]')).toHaveLength(0);
+      } finally {
+        teardown();
+      }
+    },
+  );
 
   it("removeDomLayerMask keeps hidden timed descendants hidden when they are also extraHideIds", async () => {
     const { window, document } = parseHTML(
