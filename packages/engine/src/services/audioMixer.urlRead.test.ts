@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getFfmpegBinary } from "../utils/ffmpegBinaries.js";
@@ -12,15 +12,16 @@ import { processCompositionAudio } from "./audioMixer.js";
 const HAS_FFMPEG = spawnSync(getFfmpegBinary(), ["-version"], { encoding: "utf-8" }).status === 0;
 const BYTES_PER_SECOND = 48_000 * 2 * 2;
 
-// Writes the body in pieces, counting the bytes served.
+// Writes body[start, end) in pieces, counting the bytes served.
 async function streamBody(
   res: ServerResponse,
   body: Buffer,
   start: number,
+  end: number,
   served?: { bytes: number },
 ): Promise<void> {
-  for (let at = start; at < body.length && !res.destroyed; at += 65_536) {
-    const piece = body.subarray(at, at + 65_536);
+  for (let at = start; at < end && !res.destroyed; at += 65_536) {
+    const piece = body.subarray(at, Math.min(at + 65_536, end));
     if (served) served.bytes += piece.length;
     if (!res.write(piece)) await once(res, "drain").catch(() => undefined);
   }
@@ -29,7 +30,10 @@ async function streamBody(
 
 // A range server like S3's (ffmpeg asks for `bytes=<start>-`). With `cut`, the first read starting
 // at `cut.from` or later (past the probes' header reads) stops at `cut.at`, and every later request
-// is refused, as for a link that just expired.
+// is refused, as for a link that just expired. With `served`, each answer is capped at SERVED_RANGE_BYTES:
+// an open-ended answer is written into the kernel's socket buffers long before the client closes it, so
+// the count would measure buffering, which varies with load, not what the client read.
+const SERVED_RANGE_BYTES = 1_048_576;
 function serve(
   body: Buffer,
   cut?: { from: number; at: number },
@@ -39,14 +43,15 @@ function serve(
   const server = createServer(async (req, res) => {
     if (refusing) return void res.writeHead(403).end("Request has expired");
     const start = Number(/bytes=(\d+)-/.exec(req.headers.range ?? "")?.[1] ?? 0);
+    const end = served ? Math.min(body.length, start + SERVED_RANGE_BYTES) : body.length;
     res.writeHead(206, {
       "Accept-Ranges": "bytes",
-      "Content-Length": body.length - start,
-      "Content-Range": `bytes ${start}-${body.length - 1}/${body.length}`,
+      "Content-Length": end - start,
+      "Content-Range": `bytes ${start}-${end - 1}/${body.length}`,
       "Content-Type": "audio/wav",
     });
     const cutHere = cut !== undefined && start >= cut.from && start < cut.at;
-    if (!cutHere) return streamBody(res, body, start, served);
+    if (!cutHere) return streamBody(res, body, start, end, served);
     refusing = true;
     res.write(body.subarray(start, cut.at), () => res.destroy());
   });
@@ -230,5 +235,51 @@ describe.skipIf(!HAS_FFMPEG)("audio cut from a cloud-held file's URL", { timeout
     } finally {
       await new Promise((resolve) => sidecarServer.close(resolve));
     }
+  });
+
+  it("reads many clips of one URL at once, since the wait is on the network and not the CPU", async () => {
+    const body = makeVoice();
+    let open = 0;
+    let peak = 0;
+    server = createServer((req, res) => {
+      const start = Number(/bytes=(\d+)-/.exec(req.headers.range ?? "")?.[1] ?? 0);
+      open++;
+      peak = Math.max(peak, open);
+      res.on("close", () => open--);
+      setTimeout(() => {
+        res.writeHead(206, {
+          "Accept-Ranges": "bytes",
+          "Content-Length": body.length - start,
+          "Content-Range": `bytes ${start}-${body.length - 1}/${body.length}`,
+        });
+        res.end(body.subarray(start));
+      }, 300);
+    });
+    await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const baseDir = join(dir, "project");
+    const local = join(baseDir, "takes", "voice.wav");
+
+    const result = await processCompositionAudio(
+      Array.from({ length: 24 }, (_, i) => ({
+        id: `clip-${i}`,
+        src: "takes/voice.wav",
+        start: i,
+        end: i + 1,
+        mediaStart: i % 10,
+        layer: i,
+        volume: 1,
+        type: "audio" as const,
+      })),
+      baseDir,
+      join(dir, "work"),
+      join(dir, "out.m4a"),
+      24,
+      abort.signal,
+      { urlByAbsentLocalPath: new Map([[local, `http://127.0.0.1:${port}/voice.wav`]]) },
+    );
+
+    expect(result.success).toBe(true);
+    expect(peak).toBeGreaterThan(Math.max(2, Math.floor(cpus().length / 2)));
   });
 });

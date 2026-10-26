@@ -17,7 +17,7 @@ import { readServerError } from "./serverError";
 import { ffmpegInstallMessage, useFfmpegStatus } from "./useFfmpegStatus";
 import { requestStudioFeedback, type FeedbackContext } from "../feedback/feedbackTrigger";
 import { studioApiFetch } from "../../utils/studioApiFetch";
-import { getRenderSettings, type AdvancedRenderSettings } from "./renderSettings";
+import { getDefaultRenderSettings, type AdvancedRenderSettings } from "./renderSettings";
 import {
   resolveRenderOptions,
   serializeEncoderOptions,
@@ -43,10 +43,11 @@ export type ResolutionPreset = CanvasResolution;
 export interface StartRenderOptions extends Partial<AdvancedRenderSettings> {
   fps?: number;
   quality?: "draft" | "standard" | "high";
-  format?: "mp4" | "webm" | "mov";
+  format?: "mp4" | "webm" | "mov" | "gif";
   /** `"auto"` (default) renders at the composition's authored dimensions. */
   resolution?: ResolutionPreset | "auto";
   gpu?: boolean;
+  gifLoop?: number;
   /**
    * Render a specific composition file. Omit it to render the composition the
    * user currently has open — only the sidebar's per-composition Render button
@@ -264,7 +265,7 @@ export function useRenderQueue(
         return;
       }
 
-      const resolved = resolveRenderOptions(getRenderSettings(), opts);
+      const resolved = resolveRenderOptions(getDefaultRenderSettings(), opts);
       if (!resolved.ok) {
         addSessionJob(
           {
@@ -319,6 +320,7 @@ export function useRenderQueue(
         composition?: string;
         variables?: Record<string, unknown>;
         gpu?: boolean;
+        gifLoop?: number;
         telemetryDistinctId?: string;
         telemetryOptOut?: boolean;
       } & EncoderOptionsBody = {
@@ -345,6 +347,7 @@ export function useRenderQueue(
       if (resolution && resolution !== "auto") body.resolution = resolution;
       if (composition) body.composition = composition;
       if (gpu) body.gpu = true;
+      if (format === "gif" && opts.gifLoop !== undefined) body.gifLoop = opts.gifLoop;
       if (opts.variables && Object.keys(opts.variables).length > 0) {
         body.variables = opts.variables;
       }
@@ -396,7 +399,12 @@ export function useRenderQueue(
         startRequestPendingRef.current = false;
       }
 
-      const FORMAT_EXT: Record<string, string> = { mp4: ".mp4", webm: ".webm", mov: ".mov" };
+      const FORMAT_EXT: Record<string, string> = {
+        mp4: ".mp4",
+        webm: ".webm",
+        mov: ".mov",
+        gif: ".gif",
+      };
       const ext = FORMAT_EXT[format] ?? ".mp4";
       const job: RenderJob = {
         id: jobId,

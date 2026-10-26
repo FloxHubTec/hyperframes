@@ -1,12 +1,24 @@
-import { BrowserCleanupError } from "../browser/launch.js";
+import { BrowserCleanupError, onStopSignal } from "../browser/launch.js";
 import type { CheckProgress } from "./checkProgress.js";
-import { CheckDeadline, CheckDeadlineError, type CheckPhase } from "./checkDeadline.js";
+import {
+  CheckDeadline,
+  CheckDeadlineError,
+  CheckStoppedError,
+  type CheckPhase,
+} from "./checkDeadline.js";
 import {
   checkSnapshotDirectory,
   beginCheckSnapshots,
   finishCheckSnapshots,
 } from "./checkSnapshotDirectory.js";
 import { findingElementKey, groupSampledFindings } from "./checkFindings.js";
+import {
+  MAX_FINDING_FRAME_TIMES,
+  selectFindingFrames,
+  withFindingFrameFields,
+  findingFrameRequests,
+} from "./checkFindingFrames.js";
+export { selectFindingFrames } from "./checkFindingFrames.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import type { PrelaunchedBrowser } from "../capture/captureCompositionFrame.js";
@@ -58,6 +70,8 @@ import type {
   CheckDependencies,
   CheckFinding,
   CheckFindingCropRequest,
+  CheckFindingFrameRequest,
+  CheckFindingFrames,
   CheckGeometryCandidate,
   CheckOptions,
   CheckReport,
@@ -84,6 +98,7 @@ export type {
   CheckDependencies,
   CheckFinding,
   CheckFindingCropRequest,
+  CheckFindingFrameRequest,
   CheckOptions,
   CheckReport,
   CheckSection,
@@ -517,6 +532,7 @@ async function collectGridSamples(
   helpers: Promise<CheckAuditDriver[]>,
   enter: (phase: CheckPhase) => void,
   report: CheckProgress,
+  keep: (read: () => Partial<CheckBrowserResult>) => void,
 ): Promise<GridSamples> {
   const geometryEnabled = grid.captionSamples.length > 0 || grid.frameSamples.length > 0;
   const sets: SampleSets = {
@@ -528,6 +544,17 @@ async function collectGridSamples(
   const times = mergeSampleTimes(grid.layoutSamples, motion.times);
   const pending = times.map((_, index) => index);
   const perTime: GridSamples[] = [];
+  keep(() => {
+    const so = emptyGridSamples();
+    for (const samples of perTime) if (samples) appendGridSamples(so, samples);
+    const contrast = buildContrastResults(so.contrastEntries);
+    return {
+      layoutIssues: so.layoutIssues,
+      contrastFindings: contrast.findings,
+      contrastChecked: so.contrastEntries.length,
+      contrastPassed: contrast.passed,
+    };
+  });
   let finished = 0;
   const work = async (worker: CheckAuditDriver, taken: number[] = []) => {
     for (let index = pending.shift(); index !== undefined; index = pending.shift()) {
@@ -591,9 +618,12 @@ async function collectContrastAt(
   collected: GridSamples,
 ): Promise<void> {
   const contrastStart = Date.now();
-  const capture = options.snapshots
-    ? await driver.collectContrast(time, annotationBoxesFrom(issuesAtTime))
-    : await driver.collectContrast(time);
+  const annotations = options.snapshots ? annotationBoxesFrom(issuesAtTime) : undefined;
+  const capture = options.skipContrastInMotion
+    ? await driver.collectContrast(time, annotations, true)
+    : options.snapshots
+      ? await driver.collectContrast(time, annotations)
+      : await driver.collectContrast(time);
   collected.contrastMs += Date.now() - contrastStart;
   collected.contrastEntries.push(...capture.entries);
   if (capture.pngBase64) collected.screenshots.push({ time, pngBase64: capture.pngBase64 });
@@ -1466,6 +1496,7 @@ export async function runAuditGrid(
   helpers: Promise<CheckAuditDriver[]> = Promise.resolve([]),
   enter: (phase: CheckPhase) => void = () => {},
   report: CheckProgress = () => {},
+  keep: (read: () => Partial<CheckBrowserResult>) => void = () => {},
 ): Promise<CheckBrowserResult> {
   enter("samples");
   await driver.initialize(options.contrast);
@@ -1476,7 +1507,16 @@ export async function runAuditGrid(
     grid.duration,
   );
   const seekLoopStart = Date.now();
-  const collected = await collectGridSamples(driver, options, grid, plan, helpers, enter, report);
+  const collected = await collectGridSamples(
+    driver,
+    options,
+    grid,
+    plan,
+    helpers,
+    enter,
+    report,
+    keep,
+  );
   const seekLoopMs = Date.now() - seekLoopStart;
 
   let motionIssues = plan.preflightIssues;
@@ -1633,6 +1673,7 @@ export async function runCheckPipeline(
         : [];
 
     const deadline = new CheckDeadline();
+    const forgetStop = onStopSignal(deadline.stop);
     let outcome: { kind: "report"; report: CheckReport } | { kind: "failed"; error: unknown };
     try {
       let browser: CheckBrowserResult;
@@ -1642,8 +1683,9 @@ export async function runCheckPipeline(
           dependencies.runBrowserCheck(project, options, motion, deadline, browserAhead),
         );
       } catch (error) {
-        browser = emptyBrowserResult();
-        browser.runtimeFindings.push(runtimeFailure(error));
+        const found = deadline.partialResult();
+        browser = { ...emptyBrowserResult(), ...found, skipped: Object.keys(found).length === 0 };
+        browser.runtimeFindings = [...browser.runtimeFindings, runtimeFailure(error)];
       }
 
       const snapshotFiles = options.snapshots
@@ -1661,13 +1703,20 @@ export async function runCheckPipeline(
       );
       outcome = {
         kind: "report",
-        report: options.snapshots
-          ? await withFindingCrops(dependencies, project, options, report, deadline)
-          : report,
+        report: await withOptionalFindingFrames(
+          dependencies,
+          project,
+          options,
+          options.snapshots
+            ? await withFindingCrops(dependencies, project, options, report, deadline)
+            : report,
+          deadline,
+        ),
       };
     } catch (error) {
       outcome = { kind: "failed", error };
     }
+    forgetStop();
     try {
       await deadline.close();
     } catch (error) {
@@ -1743,6 +1792,38 @@ async function withFindingCrops(
     // (a second Chrome launch failing/timing out) without failing the run.
     console.error("   finding crops skipped: " + normalizeErrorMessage(error));
     trackCommandFailure("check-finding-crops", error);
+    return report;
+  }
+}
+
+async function withOptionalFindingFrames(
+  dependencies: CheckDependencies,
+  project: ProjectDir,
+  options: CheckOptions,
+  report: CheckReport,
+  deadline: CheckDeadline,
+): Promise<CheckReport> {
+  if (!options.findingFrames || deadline.signal.aborted) return report;
+  const plan = selectFindingFrames(report);
+  if (plan.requests.length === 0) return report;
+  if (plan.skipped > 0) {
+    console.error(
+      `   finding frames: ${plan.skipped} finding(s) left out past ${MAX_FINDING_FRAME_TIMES} distinct times`,
+    );
+  }
+  const capture = dependencies.captureFindingFrames ?? captureFindingFrames;
+  try {
+    deadline.enter("frames");
+    const requests = findingFrameRequests(report, plan, options.inspect);
+    const captured = await deadline.run(() => capture(project, options, requests, deadline));
+    return withFindingFrameFields(report, plan, captured);
+  } catch (error) {
+    if (error instanceof CheckDeadlineError || error instanceof CheckStoppedError) {
+      const finding = runtimeFailure(error);
+      return { ...report, ok: false, runtime: section([...report.runtime.findings, finding]) };
+    }
+    console.error("   finding frames skipped: " + normalizeErrorMessage(error));
+    trackCommandFailure("check-finding-frames", error);
     return report;
   }
 }
@@ -2204,6 +2285,16 @@ async function writeSnapshot(
   return relative(projectDir, path);
 }
 
+async function captureFindingFrames(
+  project: ProjectDir,
+  options: CheckOptions,
+  requests: CheckFindingFrameRequest[],
+  deadline?: CheckDeadline,
+): Promise<CheckFindingFrames> {
+  const module = await import("./checkBrowser.js");
+  return module.captureFindingFrames(project, options, requests, deadline);
+}
+
 async function captureFindingCrops(
   project: ProjectDir,
   options: CheckOptions,
@@ -2222,5 +2313,6 @@ const DEFAULT_DEPENDENCIES: CheckDependencies = {
   prelaunchBrowser,
   writeSnapshot,
   captureFindingCrops,
+  captureFindingFrames,
   inspectHdrAutoPromotion,
 };

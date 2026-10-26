@@ -9,12 +9,20 @@ import { resolveFloatingPanelPosition, type FloatingPosition } from "../editor/f
 import type { ResolutionPreset } from "./useRenderQueue";
 import type { CompositionDimensions, StartRenderHandler } from "./RenderQueue";
 import {
+  FORMAT_INFO,
+  getRenderFpsOptions,
+  resolveRenderFormat,
+  resolveRenderFps,
+  startConfiguredRender,
+  isRenderExportBlocked,
   getRenderSettings,
   normalizeRenderSettings,
   updatePersistedRenderSettings,
   type RenderSettings,
 } from "./renderSettings";
 import { GpuEncodingToggle } from "./GpuEncodingToggle";
+import { GifLoopInput, isInvalidGifLoop } from "./GifLoopInput";
+import { RenderDurationNote } from "./RenderDurationNote";
 import { AdvancedRenderSettings } from "./AdvancedRenderSettings";
 import { trackStudioEvent } from "../../utils/studioTelemetry";
 
@@ -97,21 +105,9 @@ function scaleOptionLabel(
   return base;
 }
 
-const FORMAT_INFO: Record<"mp4" | "webm" | "mov", { label: string; desc: string }> = {
-  mp4: { label: "MP4", desc: "Best for general use. Smallest file, universal playback." },
-  mov: {
-    label: "MOV (ProRes 4444)",
-    desc: "Transparent video. Works in Final Cut Pro, DaVinci Resolve, and most video editors. Large files.",
-  },
-  webm: {
-    label: "WebM (VP9)",
-    desc: "Transparent video for web. Smaller than MOV but limited editor support.",
-  },
-};
-
 // Estimated, like COLOR_PICKER_SIZE in propertyPanelColor: only the flip
 // decision uses the height, and the clamp keeps the panel on screen either way.
-const FORMAT_PANEL_SIZE = { width: 208, height: 150 };
+const FORMAT_PANEL_SIZE = { width: 208, height: 210 };
 
 // Rich format guidance in a keyboard-reachable disclosure: the trigger is a
 // real button (focusable, labelled), the panel is tied to it via
@@ -119,7 +115,7 @@ const FORMAT_PANEL_SIZE = { width: 208, height: 150 };
 // for the one-line ui/Tooltip primitive, so this stays a local popover.
 // It renders in a portal because the right panel is overflow-hidden: an
 // in-flow absolute panel gets clipped at the panel edge.
-function FormatInfoTooltip({ format }: { format: "mp4" | "webm" | "mov" }) {
+function FormatInfoTooltip({ format }: { format: "mp4" | "webm" | "mov" | "gif" }) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<FloatingPosition | null>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
@@ -204,7 +200,7 @@ function FormatInfoTooltip({ format }: { format: "mp4" | "webm" | "mov" }) {
             <p className="text-step-10 font-semibold text-text-1 mb-0.5">{info.label}</p>
             <p className="text-step-9 text-text-3 leading-tight">{info.desc}</p>
             <div className="mt-1.5 pt-1.5 border-t border-border">
-              {(["mp4", "mov", "webm"] as const)
+              {(["mp4", "mov", "webm", "gif"] as const)
                 .filter((f) => f !== format)
                 .map((f) => (
                   <p key={f} className="text-step-9 text-text-4 leading-relaxed">
@@ -225,6 +221,7 @@ const FORMAT_OPTIONS: SelectOption[] = [
   { value: "mp4", label: "MP4" },
   { value: "mov", label: "MOV (ProRes)" },
   { value: "webm", label: "WebM" },
+  { value: "gif", label: "GIF" },
 ];
 
 const QUALITY_OPTIONS: SelectOption[] = [
@@ -233,19 +230,8 @@ const QUALITY_OPTIONS: SelectOption[] = [
   { value: "high", label: "High Quality" },
 ];
 
-const FPS_OPTIONS: SelectOption[] = [
-  { value: "24", label: "24 fps" },
-  { value: "30", label: "30 fps" },
-  { value: "60", label: "60 fps" },
-];
-
 function missingFfmpegStatus(status: FfmpegStatus | null): FfmpegStatus | null {
   return status && !status.ok ? status : null;
-}
-
-function formatEta(ms: number): string {
-  const s = Math.round(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
 export function RenderExportSettings({
@@ -266,13 +252,22 @@ export function RenderExportSettings({
   onRecheckFfmpeg: () => void;
 }) {
   const [settings, setSettings] = useState(getRenderSettings);
+  const [requestedFps, setRequestedFps] = useState(settings.fps);
+  const [gifLoop, setGifLoop] = useState("0");
   const [resolution, setResolution] = useState<RenderScale>("auto");
   const [invalidDraft, setInvalidDraft] = useState(false);
   const [rateNotice, setRateNotice] = useState<string | null>(null);
-  const { format, quality, fps, gpu } = settings;
+  const { format, quality, gpu } = settings;
+  const fps = resolveRenderFps(format, requestedFps);
+  const invalidGifLoop = isInvalidGifLoop(format, gifLoop);
 
   const commit = (patch: Partial<RenderSettings>) => {
-    const next = normalizeRenderSettings({ ...settings, ...patch });
+    const next = normalizeRenderSettings({
+      ...settings,
+      ...patch,
+      fps: patch.fps ?? resolveRenderFps(patch.format ?? format, requestedFps),
+    });
+    if (patch.format === "gif") setInvalidDraft(false);
     if (patch.format && settings.rateControl.mode !== "auto" && next.rateControl.mode === "auto") {
       setRateNotice(
         "Custom rate control cleared because it is unavailable for the selected format.",
@@ -288,6 +283,12 @@ export function RenderExportSettings({
   // setups that are perfectly fine. Holding the narrowed value rather than a
   // boolean keeps the notice from re-testing what this line already decided.
   const missingFfmpeg = missingFfmpegStatus(ffmpeg);
+  const exportBlocked = isRenderExportBlocked(
+    isRendering,
+    missingFfmpeg !== null,
+    invalidGifLoop,
+    invalidDraft,
+  );
 
   // MOV (ProRes) is a fixed-quality codec — quality selector has no effect.
   const showQuality = format !== "mov";
@@ -313,7 +314,7 @@ export function RenderExportSettings({
             options={FORMAT_OPTIONS}
             disabled={isRendering}
             onCommit={(next) => {
-              if (next === "mp4" || next === "webm" || next === "mov") commit({ format: next });
+              commit({ format: resolveRenderFormat(next) });
             }}
           />
         </div>
@@ -338,11 +339,14 @@ export function RenderExportSettings({
           <Select
             label="Frame rate"
             value={String(fps)}
-            options={FPS_OPTIONS}
+            options={getRenderFpsOptions(format)}
             disabled={isRendering}
             onCommit={(next) => {
               const value = Number(next);
-              if (value === 24 || value === 30 || value === 60) commit({ fps: value });
+              if (value === 24 || value === 30 || value === 60) {
+                setRequestedFps(value);
+                commit({ fps: value });
+              }
             }}
           />
         </div>
@@ -362,6 +366,13 @@ export function RenderExportSettings({
           </div>
         )}
       </div>
+      <GifLoopInput
+        format={format}
+        value={gifLoop}
+        disabled={isRendering}
+        invalid={invalidGifLoop}
+        onChange={setGifLoop}
+      />
       <GpuEncodingToggle
         format={format}
         checked={gpu}
@@ -373,46 +384,40 @@ export function RenderExportSettings({
           {rateNotice}
         </p>
       )}
-      <AdvancedRenderSettings
-        settings={settings}
-        disabled={isRendering}
-        onChange={commit}
-        onValidityChange={setInvalidDraft}
-      />
+      {format !== "gif" && (
+        <AdvancedRenderSettings
+          settings={settings}
+          disabled={isRendering}
+          onChange={commit}
+          onValidityChange={setInvalidDraft}
+        />
+      )}
       <Button
         variant="primary"
         size="md"
         data-testid="renders-export"
         loading={isRendering}
-        disabled={missingFfmpeg !== null || invalidDraft}
+        disabled={exportBlocked}
         title={missingFfmpeg ? "Install FFmpeg to export. See the note above." : undefined}
         onClick={() => {
           // loading already disables the button; this guard also stops a
           // double-click in the same frame from enqueueing two renders.
-          if (isRendering || missingFfmpeg || invalidDraft) return;
+          if (exportBlocked) return;
           const outputResolution = resolveResolution(resolution, compositionDimensions);
           trackStudioEvent("render_start", { format, quality, resolution: outputResolution, fps });
-          const { rateControl, videoFrameFormat, hdrMode } = settings;
-          if (rateControl.mode === "auto" && videoFrameFormat === "auto" && hdrMode === "auto") {
-            void onStartRender(format, quality, outputResolution, fps, gpu);
-          } else {
-            void onStartRender(format, quality, outputResolution, fps, gpu, {
-              rateControl,
-              videoFrameFormat,
-              hdrMode,
-            });
-          }
+          void startConfiguredRender(onStartRender, {
+            ...settings,
+            resolution: outputResolution,
+            fps,
+            gifLoop: Number(gifLoop),
+          });
         }}
         // Width only: the size recipe keeps this Export consistent with the header.
         className="w-full"
       >
         {isRendering ? "Rendering…" : "Export"}
       </Button>
-      {lastRenderDurationMs !== undefined && !isRendering && (
-        <p className="text-step-9 text-text-5 text-center -mt-1.5">
-          Last render took {formatEta(lastRenderDurationMs)}
-        </p>
-      )}
+      <RenderDurationNote durationMs={lastRenderDurationMs} isRendering={isRendering} />
     </div>
   );
 }

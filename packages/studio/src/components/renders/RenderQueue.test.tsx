@@ -352,21 +352,24 @@ describe("RenderQueue advanced export settings", () => {
     expect(host.querySelector('[aria-label="Rate control"]')).toBeNull();
   });
 
-  it.each([0, 51])("preserves MP4 CRF %s and passes the optional sixth argument", async (crf) => {
-    const onStartRender: Mock<StartRenderHandler> = vi.fn();
-    const host = mountRenderQueue(onStartRender);
-    expandAdvanced(host);
-    await chooseOption(host, "Rate control", "CRF");
-    const input = editInput(host, "CRF", String(crf));
-    expect(input.min).toBe("0");
-    expect(input.max).toBe("51");
-    expect(input.step).toBe("1");
-    act(() => exportButtonIn(host).click());
-    expect(onStartRender).toHaveBeenCalledWith("mp4", "standard", "auto", 30, false, {
-      ...autoAdvanced,
-      rateControl: { mode: "crf", value: crf },
-    });
-  });
+  it.each([0, 51])(
+    "preserves MP4 CRF %s and passes advanced settings after the GIF loop argument",
+    async (crf) => {
+      const onStartRender: Mock<StartRenderHandler> = vi.fn();
+      const host = mountRenderQueue(onStartRender);
+      expandAdvanced(host);
+      await chooseOption(host, "Rate control", "CRF");
+      const input = editInput(host, "CRF", String(crf));
+      expect(input.min).toBe("0");
+      expect(input.max).toBe("51");
+      expect(input.step).toBe("1");
+      act(() => exportButtonIn(host).click());
+      expect(onStartRender).toHaveBeenCalledWith("mp4", "standard", "auto", 30, false, undefined, {
+        ...autoAdvanced,
+        rateControl: { mode: "crf", value: crf },
+      });
+    },
+  );
 
   it.each(["-1", "52", "18.5"])(
     "blocks invalid CRF %s without replacing the saved valid value",
@@ -436,10 +439,18 @@ describe("RenderQueue advanced export settings", () => {
     expect(savedSettings()).not.toHaveProperty("rateControl");
     editInput(host, "Target bitrate", " 1.5M ");
     act(() => exportButtonIn(host).click());
-    expect(onStartRender).toHaveBeenLastCalledWith("mp4", "standard", "auto", 30, false, {
-      ...autoAdvanced,
-      rateControl: { mode: "bitrate", value: "1.5M" },
-    });
+    expect(onStartRender).toHaveBeenLastCalledWith(
+      "mp4",
+      "standard",
+      "auto",
+      30,
+      false,
+      undefined,
+      {
+        ...autoAdvanced,
+        rateControl: { mode: "bitrate", value: "1.5M" },
+      },
+    );
     const saved = savedSettings();
     editInput(host, "Target bitrate", "10MB");
     expect(exportButtonIn(host).disabled).toBe(true);
@@ -489,11 +500,19 @@ describe("RenderQueue advanced export settings", () => {
     expect(host.textContent).toContain("native HDR");
     expect(host.textContent).toContain("source video");
     act(() => exportButtonIn(host).click());
-    expect(onStartRender).toHaveBeenLastCalledWith("mov", "standard", "auto", 30, false, {
-      rateControl: { mode: "auto" },
-      videoFrameFormat: "jpg",
-      hdrMode: "force-hdr",
-    });
+    expect(onStartRender).toHaveBeenLastCalledWith(
+      "mov",
+      "standard",
+      "auto",
+      30,
+      false,
+      undefined,
+      {
+        rateControl: { mode: "auto" },
+        videoFrameFormat: "jpg",
+        hdrMode: "force-hdr",
+      },
+    );
     await chooseOption(host, "Format", "MP4");
     expect(triggerFor(host, "Rate control").textContent).toContain("Quality preset");
     expect(savedSettings()).not.toHaveProperty("rateControl");
@@ -528,7 +547,7 @@ describe("RenderQueue advanced export settings", () => {
     const host = mountRenderQueue(onStartRender);
     expect(advancedButtonIn(host).getAttribute("aria-expanded")).toBe("false");
     act(() => exportButtonIn(host).click());
-    expect(onStartRender).toHaveBeenCalledWith("webm", "high", "auto", 60, true, {
+    expect(onStartRender).toHaveBeenCalledWith("webm", "high", "auto", 60, true, undefined, {
       rateControl: { mode: "crf", value: 63 },
       videoFrameFormat: "png",
       hdrMode: "force-sdr",
@@ -556,5 +575,122 @@ describe("RenderQueue advanced export settings", () => {
     expect(exportButtonIn(host).disabled).toBe(true);
     act(() => exportButtonIn(host).click());
     expect(onStartRender).not.toHaveBeenCalled();
+  });
+});
+
+function mountGifQueue() {
+  localStorage.setItem("hf-studio-render-settings", JSON.stringify({ format: "gif" }));
+  const onStartRender: Mock<StartRenderHandler> = vi.fn();
+  return { onStartRender, host: mountRenderQueue(onStartRender) };
+}
+
+function enterGifLoop(host: HTMLElement, value: string) {
+  const input = host.querySelector<HTMLInputElement>('input[type="number"]');
+  if (!input) throw new Error("missing loop count");
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  return input;
+}
+
+describe("GIF export controls", () => {
+  it("offers GIF, persists the selection, and exports with infinite looping", async () => {
+    const onStartRender: Mock<StartRenderHandler> = vi.fn();
+    const host = mountRenderQueue(onStartRender);
+    await chooseByArrowing(triggerFor(host, "Format"), 3);
+    expect(getPersistedRenderSettings().format).toBe("gif");
+    const input = host.querySelector<HTMLInputElement>('input[type="number"]');
+    expect(input?.value).toBe("0");
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenCalledWith("gif", "standard", "auto", 30, false, 0);
+  });
+
+  it("restores GIF settings and exports a finite loop count", () => {
+    const { host, onStartRender } = mountGifQueue();
+    enterGifLoop(host, "3");
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenCalledWith("gif", "standard", "auto", 30, false, 3);
+  });
+
+  it.each(["", "-1", "1.5", "65536"])("blocks export for invalid GIF loop count %j", (value) => {
+    const { host, onStartRender } = mountGifQueue();
+    const input = enterGifLoop(host, value);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(exportButtonIn(host).disabled).toBe(true);
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).not.toHaveBeenCalled();
+  });
+});
+
+describe("GIF frame-rate controls", () => {
+  it("caps a saved GIF frame rate of 60 and disables that option", async () => {
+    localStorage.setItem("hf-studio-render-settings", JSON.stringify({ format: "gif", fps: 60 }));
+    const onStartRender: Mock<StartRenderHandler> = vi.fn();
+    const host = mountRenderQueue(onStartRender);
+    const fps = triggerFor(host, "Frame rate");
+    expect(fps.textContent).toContain("30 fps");
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenCalledWith("gif", "standard", "auto", 30, false, 0);
+    act(() => fps.click());
+    await settle();
+    const sixty = Array.from(document.querySelectorAll('[role="option"]')).find((option) =>
+      option.textContent?.includes("60 fps"),
+    );
+    expect(sixty?.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("switches a 60 fps video to a 30 fps GIF and preserves 60 fps for video", async () => {
+    localStorage.setItem("hf-studio-render-settings", JSON.stringify({ format: "mp4", fps: 60 }));
+    const onStartRender: Mock<StartRenderHandler> = vi.fn();
+    const host = mountRenderQueue(onStartRender);
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenLastCalledWith("mp4", "standard", "auto", 60, false);
+    await chooseByArrowing(triggerFor(host, "Format"), 3);
+    expect(triggerFor(host, "Frame rate").textContent).toContain("30 fps");
+    expect(getPersistedRenderSettings()).toMatchObject({ format: "gif", fps: 30 });
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenLastCalledWith("gif", "standard", "auto", 30, false, 0);
+  });
+});
+
+describe("GIF and advanced export integration", () => {
+  it("hides advanced controls and exports GIF without the video's saved advanced overrides", async () => {
+    const onStartRender: Mock<StartRenderHandler> = vi.fn();
+    const host = await mountWithCrf(onStartRender);
+    await chooseFramesAndHdr(host, "PNG", "Force on");
+    await chooseOption(host, "Format", "GIF");
+    expect(
+      [...host.querySelectorAll("button")].some((button) => button.textContent === "Advanced"),
+    ).toBe(false);
+    expect(host.querySelector('[aria-label="Rate control"]')).toBeNull();
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenCalledExactlyOnceWith("gif", "standard", "auto", 30, false, 0);
+  });
+
+  it("discards an invalid video draft when switching to GIF", async () => {
+    const onStartRender: Mock<StartRenderHandler> = vi.fn();
+    const host = await mountWithCrf(onStartRender);
+    editInput(host, "CRF", "52");
+    expect(exportButtonIn(host).disabled).toBe(true);
+    await chooseOption(host, "Format", "GIF");
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(exportButtonIn(host).disabled).toBe(false);
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenCalledExactlyOnceWith("gif", "standard", "auto", 30, false, 0);
+  });
+
+  it("restores the video's requested 60 fps after returning from GIF", async () => {
+    localStorage.setItem("hf-studio-render-settings", JSON.stringify({ format: "mp4", fps: 60 }));
+    const onStartRender: Mock<StartRenderHandler> = vi.fn();
+    const host = mountRenderQueue(onStartRender);
+    await chooseOption(host, "Format", "GIF");
+    expect(triggerFor(host, "Frame rate").textContent).toContain("30 fps");
+    await chooseOption(host, "Format", "MP4");
+    expect(triggerFor(host, "Frame rate").textContent).toContain("60 fps");
+    expect(getPersistedRenderSettings()).toMatchObject({ format: "mp4", fps: 60 });
+    act(() => exportButtonIn(host).click());
+    expect(onStartRender).toHaveBeenCalledExactlyOnceWith("mp4", "standard", "auto", 60, false);
   });
 });

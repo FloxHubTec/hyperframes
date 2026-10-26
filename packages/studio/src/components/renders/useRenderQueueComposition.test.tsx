@@ -14,7 +14,7 @@ import {
   stubRenderFetch,
   type MountedQueue,
 } from "./renderQueueTestHarness";
-import { updatePersistedRenderSettings } from "./renderSettings";
+import { getRenderSettings, updatePersistedRenderSettings } from "./renderSettings";
 
 vi.mock("../../telemetry/policy", () => ({ browserTelemetryAllowed: () => false }));
 vi.mock("../../telemetry/config", () => ({ getAnonymousId: () => "unused" }));
@@ -76,31 +76,54 @@ describe("GPU encoding", () => {
   });
 });
 
-describe("saved settings at every export entry", () => {
+describe("settings at each export entry", () => {
   it.each([undefined, { composition: "parts/card.html" }])(
-    "applies saved settings to header/card-shaped options %s",
+    "uses defaults for header/card-shaped options %s without changing saved settings",
     async (opts) => {
-      updatePersistedRenderSettings({
+      const saved = updatePersistedRenderSettings({
         format: "webm",
         quality: "high",
         fps: 60,
+        gpu: true,
         rateControl: { mode: "crf", value: 63 },
         videoFrameFormat: "png",
         hdrMode: "force-sdr",
       });
       const body = await renderBody("parts/active.html", opts);
       expect(body).toEqual({
-        format: "webm",
-        quality: "high",
-        fps: 60,
-        crf: 63,
-        videoFrameFormat: "png",
-        hdrMode: "force-sdr",
+        format: "mp4",
+        quality: "standard",
+        fps: 30,
         composition: opts?.composition ?? "parts/active.html",
         telemetryOptOut: true,
       });
+      expect(getRenderSettings()).toEqual(saved);
     },
   );
+
+  it("uses saved settings when the render panel passes its form explicitly", async () => {
+    const saved = updatePersistedRenderSettings({
+      format: "webm",
+      quality: "high",
+      fps: 60,
+      gpu: true,
+      rateControl: { mode: "crf", value: 63 },
+      videoFrameFormat: "png",
+      hdrMode: "force-sdr",
+    });
+    expect(await renderBody("parts/active.html", saved)).toEqual({
+      format: "webm",
+      quality: "high",
+      fps: 60,
+      gpu: true,
+      crf: 63,
+      videoFrameFormat: "png",
+      hdrMode: "force-sdr",
+      composition: "parts/active.html",
+      telemetryOptOut: true,
+    });
+    expect(getRenderSettings()).toEqual(saved);
+  });
 
   it("lets explicit Auto/false clear overrides and preserves per-export fps", async () => {
     updatePersistedRenderSettings({
@@ -126,12 +149,12 @@ describe("saved settings at every export entry", () => {
   });
 
   it("omits MOV rate fields while preserving source-frame/HDR requests", async () => {
-    updatePersistedRenderSettings({
+    const saved = updatePersistedRenderSettings({
       rateControl: { mode: "bitrate", value: "500k" },
       videoFrameFormat: "jpg",
       hdrMode: "force-hdr",
     });
-    expect(await renderBody(null, { format: "mov" })).toEqual({
+    expect(await renderBody(null, { ...saved, format: "mov" })).toEqual({
       format: "mov",
       quality: "standard",
       fps: 30,
@@ -210,5 +233,18 @@ describe("render submission concurrency", () => {
     });
     expect(renderPosts(fetchMock)).toHaveLength(2);
     expect(queue.api().jobs.at(-1)).toMatchObject({ id: "retry", status: "rendering" });
+  });
+});
+
+describe("GIF export transport", () => {
+  it.each([0, 3, 65535])("forwards loop count %i and creates a GIF queue item", async (gifLoop) => {
+    const body = await renderBody(null, { format: "gif", gifLoop });
+    expect(body).toMatchObject({ format: "gif", gifLoop });
+    expect(queue?.api().jobs).toEqual([expect.objectContaining({ filename: "j1.gif" })]);
+  });
+
+  it("omits GIF options for video exports", async () => {
+    const body = await renderBody(null, { format: "mp4", gifLoop: 3 });
+    expect(body).not.toHaveProperty("gifLoop");
   });
 });

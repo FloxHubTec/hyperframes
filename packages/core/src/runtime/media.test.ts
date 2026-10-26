@@ -524,6 +524,23 @@ describe("syncRuntimeMedia", () => {
       expect(at(11.9)).toBeCloseTo(0.08, 5); // almost at the clip's end
     });
 
+    it("also hands a transport the level without the fade, so one that books fades on its own clock does not fade twice", () => {
+      const clip = createMockClip({ start: 2, end: 12, duration: 10, volume: 0.8 });
+      Object.defineProperty(clip.el, "readyState", { value: 4, writable: true });
+      clip.fades = { fadeIn: 2, fadeOut: 1 };
+      const onElementVolume = vi.fn();
+      syncRuntimeMedia({
+        clips: [clip],
+        timeSeconds: 3,
+        playing: true,
+        playbackRate: 1,
+        onElementVolume,
+      });
+      const [, , authorVolume, , unfadedVolume] = onElementVolume.mock.lastCall ?? [];
+      expect(authorVolume).toBeCloseTo(0.4, 5); // halfway through the fade-in, as the tick steps it
+      expect(unfadedVolume).toBeCloseTo(0.8, 5);
+    });
+
     it("never writes NaN or a negative volume for 0, negative, NaN, or longer-than-clip fades", () => {
       const cases: Array<{ fadeIn: number; fadeOut: number }> = [
         { fadeIn: 0, fadeOut: 0 },
@@ -1992,7 +2009,7 @@ describe("syncRuntimeMedia", () => {
     });
 
     it("runs a video that is ahead 3% slow", () => {
-      const clip = playingVideoAt(5.3);
+      const clip = playingVideoAt(5.06);
       tick(clip, 5);
       tick(clip, 5);
       expect(clip.el.playbackRate).toBeCloseTo(0.97, 9);
@@ -2074,6 +2091,26 @@ describe("syncRuntimeMedia", () => {
       });
       for (let i = 0; i < 5; i++) tick(clip, 5);
       expect(writes).toBe(1);
+    });
+
+    it("steers a video that is far behind harder, in steps", () => {
+      const clip = playingVideoAt(4.85);
+      tick(clip, 5);
+      tick(clip, 5);
+      expect(clip.el.playbackRate).toBeCloseTo(1.1, 9);
+      clip.el.currentTime = 4.6;
+      tick(clip, 5);
+      expect(clip.el.playbackRate).toBeCloseTo(1.25, 9);
+      clip.el.currentTime = 4.93;
+      tick(clip, 5);
+      expect(clip.el.playbackRate).toBeCloseTo(1.03, 9);
+    });
+
+    it("steers a video that is far ahead slower, by the same steps", () => {
+      const clip = playingVideoAt(5.2);
+      tick(clip, 5);
+      tick(clip, 5);
+      expect(clip.el.playbackRate).toBeCloseTo(0.9, 9);
     });
 
     it("scales the steer with the transport rate", () => {

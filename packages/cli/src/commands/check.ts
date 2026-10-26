@@ -11,12 +11,13 @@ import {
 } from "@hyperframes/studio-server/history";
 import { formatFindingTimes } from "../utils/checkFindings.js";
 import { withProjectLock } from "../utils/projectLock.js";
-import { reportArtifacts } from "../utils/toolContext.js";
+import { readToolContext, reportArtifacts, type ToolContext } from "../utils/toolContext.js";
 import { defineCommand, parseArgs } from "citty";
 import type { ArgsDef } from "citty";
 import type { Example } from "./_examples.js";
 import { parseAt } from "./layout.js";
 import { c } from "../ui/colors.js";
+import { registerBrowserSessionCleanup } from "../browser/launch.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { setCommandExitCode } from "../utils/commandResult.js";
 import { swallowedFlagUsageError } from "../utils/reject-unknown-flags.js";
@@ -272,6 +273,7 @@ export function createCheckCommand(
       const args = parseArgs(rawArgs, CHECK_COMMAND_ARGS);
       const asJson = args.json === true;
 
+      const reported = untilReported();
       try {
         const project = dependencies.resolveProject(args.dir);
         const options = parseCheckOptions(args);
@@ -307,9 +309,36 @@ export function createCheckCommand(
           console.error(`${c.error("✗")} Check failed: ${message}`);
         }
         setCommandExitCode(1);
+      } finally {
+        reported.done();
       }
     },
   });
+}
+
+const REPORT_GRACE_MS = 5_000;
+
+function untilReported(): { done: () => void } {
+  let done = (): void => undefined;
+  const printed = new Promise<void>((resolve) => {
+    done = resolve;
+  });
+  const forget = registerBrowserSessionCleanup(
+    () =>
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, REPORT_GRACE_MS);
+        void printed.then(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      }),
+  );
+  return {
+    done: () => {
+      done();
+      forget();
+    },
+  };
 }
 
 async function runPrepareMedia(
@@ -346,6 +375,10 @@ async function runPrepareMedia(
   setCommandExitCode(failed.length === 0 ? 0 : 1);
 }
 
+function checkReview(): ToolContext["checkReview"] {
+  return readToolContext().checkReview;
+}
+
 function parseCheckOptions(args: Record<string, unknown>): CheckOptions {
   const maxTransitionSamples = positiveInteger(args["max-transition-samples"], 0);
   return {
@@ -360,8 +393,11 @@ function parseCheckOptions(args: Record<string, unknown>): CheckOptions {
     tolerance: nonNegativeNumber(args.tolerance, DEFAULT_CHECK_OPTIONS.tolerance),
     timeout: Math.max(500, positiveInteger(args.timeout, DEFAULT_CHECK_OPTIONS.timeout)),
     contrast: args.contrast !== false,
+    ...(checkReview()?.skipContrastInMotion ? { skipContrastInMotion: true } : {}),
     strict: args.strict === true,
     snapshots: args.snapshots === true,
+    ...(checkReview()?.findingFrames ? { findingFrames: true } : {}),
+    ...(checkReview()?.inspect ? { inspect: true } : {}),
     captionZone: parseCaptionZone(args["caption-zone"]),
     frameCheck: parseFrameCheck(args["frame-check"]),
     layout: parseLayout(args.layout),

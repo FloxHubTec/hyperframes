@@ -113,7 +113,7 @@ npx hyperframes init my-video --tailwind
 | `--keep-original`   | Copy the `--video` file as is instead of converting a non-web codec to H.264 MP4                                                                                                                                                                                                     |
 | `--model`           | Whisper model for that transcription (for example `small.en`, `medium.en`, `large`)                                                                                                                                                                                                   |
 | `--language`        | Language code for transcription (`en`, `es`, `ja`, …). Filters out speech in other languages.                                                                                                                                                                                         |
-| `--skip-skills`     | Currently ignored. Set `HYPERFRAMES_SKIP_SKILLS=1` to opt out in CI or tests.                                                                                                                                                                                                         |
+| `--skip-skills`     | Leave AI coding skills alone: `init` does not install the core set. `HYPERFRAMES_SKIP_SKILLS=1` does the same.
 
 Pass `--video` or `--audio` and the CLI transcribes the audio with Whisper and
 patches the captions into the composition for you. `--skip-transcribe` turns
@@ -149,6 +149,10 @@ npx hyperframes add shader-wipe --no-clipboard --json   # headless / CI
 The positional name is a registry item, or a tag — a tag installs every block
 carrying it. `--dir` picks the project directory, `--json` prints the written
 files and paste snippet, and `--no-clipboard` skips the clipboard copy for CI.
+
+If any block in a tag fails to install, `add` keeps the successful installs and
+exits with code 1. With `--json`, `ok` is `false` and `errors` lists each failed
+block's `name` and `error`; `installed` lists the blocks that succeeded.
 
 Every install produces files plus a **paste snippet**: the `<iframe>` tag for a
 block, or the fragment path for a component. It goes to your clipboard by
@@ -277,6 +281,11 @@ the page exposed. It is raw material for an agent, not a finished composition;
 the `/hyperframes` skill uses it when a real product has to appear on screen. Dynamic sites, protected pages, and unusual media loaders produce
 partial results, so read `dropped`, the warnings, and the contact sheets before
 you build.
+
+Downloaded fonts are saved under `assets/fonts/`, and their CSS references point
+to those local files. Distinct URLs such as `demo.woff2?v=1` and
+`demo.woff2?v=10` keep separate files. A failed font download leaves its original
+URL unchanged.
 
 For AI image descriptions, set `GEMINI_API_KEY` in a `.env` file
 (~$0.001/image), or `OPENROUTER_API_KEY` to route any vision model through
@@ -598,7 +607,7 @@ whether it reused a file, never your intent text or paths — and honors the sam
 opt-outs as [`telemetry`](#telemetry).
 
 See [Voice, sound, and captions](/guides/voice-and-audio) and
-[Color grading](/guides/color-grading) for the workflows around these assets, and
+[Color grading](/guides/media-effects#fix-and-grade-the-color) for the workflows around these assets, and
 [Authentication](/guides/authentication) for HeyGen credentials.
 
 ### `beats`
@@ -870,6 +879,13 @@ The server picks one of three modes by itself: **embedded** (the default for
 **monorepo** (the studio dev server, when you run from the source repo).
 `--background` works with the embedded server only.
 
+The CLI ships GSAP, CustomEase, and MotionPathPlugin, so the GSAP scripts
+Studio adds to previews load from the preview server itself, not from jsDelivr.
+To use your own mirror instead, set `HYPERFRAMES_GSAP_BASE_URL` before starting
+the server. See
+[Where Studio loads GSAP from](/packages/studio-server#where-studio-loads-gsap-from)
+for the lookup order, the mirror layout, and what the setting does not cover.
+
 <Note>
   Preview plays in real time, so paint-heavy compositions can stutter on your
   machine. Render seeks and captures one frame at a time, so the same work usually
@@ -995,7 +1011,7 @@ unless you pass `--verbose`, which keeps output clean for agents and CI.
 `--json` adds `errorCount`, `warningCount`, `infoCount`, and a `findings` array.
 
 The linter catches missing attributes, missing adapter libraries (GSAP, Lottie,
-Three.js), and structural problems. [Troubleshooting](/guides/troubleshooting)
+Three.js), and structural problems. [Troubleshooting](/help)
 explains each rule.
 
 ### `check`
@@ -1051,10 +1067,12 @@ cover every finding from the full check.
 | `--prepare-media`                            | Only make the browser-playable video copies, then exit: no browser, no report. `--json` lists each file as `ready`, `cached` or `failed`; exit 1 if any failed |
 
 A video Chrome cannot decode (HEVC, ProRes) is copied once, and the first check waits
-for it. A source longer than a few minutes is copied in one-minute pieces that are kept,
-so a copy that is stopped continues from its finished pieces on the next run. For a long
-project, run `hyperframes check --prepare-media` first, then the check itself finds every
-copy ready.
+for it. A source longer than 22 seconds is copied in 15-second pieces that are kept, so a
+copy that is stopped continues from its finished pieces on the next run. While it works, the
+check prints each copy's progress to stderr every 10 seconds (stdout stays clean for `--json`),
+and ends a copy only when it makes no progress for 3 minutes (`HYPERFRAMES_PROXY_STALL_MS`).
+For a long project, run `hyperframes check --prepare-media` first, then the check itself finds
+every copy ready.
 
 `--caption-zone` and `--frame-check` refuse a ranged check when none of their
 configured seek samples falls inside `--range`; a requested gate never silently
@@ -1078,6 +1096,19 @@ enters with `data-layout-allow-occlusion`.
 Contrast failures are errors, and each one reports the sampled foreground and
 background colours, the measured ratio against the required one, and a
 compliant colour you could use instead.
+
+An agent harness can turn on `skipContrastInMotion` in the `check-review`
+capability of [`HF_TOOL_CONTEXT`](/developers/harness-tool-context). It leaves
+out a contrast failure measured while a GSAP tween on the text or an ancestor
+is running, or while the text's opacity multiplied up its ancestors
+is below 1. The failure is not reported, and the counts and `ok` leave it out.
+Repeating tweens, tweens inside infinitely repeating timelines, and tweens of
+4s or longer, such as a slow camera drift, do not count as motion. The opacity
+rule also applies at rest, including deliberately translucent text, when a tween
+targets the text or an ancestor. Text no GSAP tween targets is reported as usual.
+Dropped samples do not contribute to persistence: a retained failure can become
+a warning when only one failing sample remains among multiple measured times.
+Off by default.
 
 Severity is persistence-aware: a finding at a single sample demotes to info, a
 finding that persists gates the exit code, and a composition of 3s or more
@@ -1216,7 +1247,7 @@ npx hyperframes snapshot my-project --review --json
 | `--angle`               | Orthogonal 3D camera for depth and occlusion checks: `front`, `iso`, `top`, `side`, or `yaw,pitch` in degrees. Tilts the whole stage, so you get real pixels.        |
 | `--review`              | Capture the frames that show the film over time instead of evenly spaced ones: `review-beats.jpg` (each scene at its start + 0.3 s and at its middle, and each timed `data-beat="name"` element at its start + 0.3 s), `review-seam-NN.jpg` (−0.2 to +0.2 s around every cut) and `review-phone.jpg` (the beat frames 360 px wide). Scenes are the top-level timed clips and sub-composition hosts; `--composition` scopes to one. |
 | `--json`                | Print one envelope: `frames` with path, time and (under `--review`) role and label, the contact sheets, and under `--review` the scenes, beats and seams behind them. Progress goes to stderr. |
-| `--describe`            | Gemini vision analysis of each frame. Runs by default when `GEMINI_API_KEY` is set. Pass a question to override the prompt, or `--describe false` to opt out.        |
+| `--describe`            | Off by default. Sends each frame to Gemini and writes `descriptions.md`. Needs `GEMINI_API_KEY` or `GOOGLE_API_KEY`. A bare `--describe` uses the default prompt; `--describe "<question>"` asks your own. Put the project directory before a bare `--describe`. |
 | `--timeout`             | Ms to wait for the runtime (default 5000)                                                                                                                           |
 | `--browser-gpu`, `--proxy` | Same meaning as on [`check`](#check)                                                                                                                             |
 
@@ -1346,6 +1377,12 @@ npx hyperframes timeline delete '#outro' --start 6 --end 7   # cut one second ou
 | `undo <receipt>`            | Restore the files an edit changed, from its receipt (the JSON or its file)                                                                |
 | `ids`                       | Stamp stable ids on the timeline's clips                                                                                                  |
 
+`duplicate` shifts clips at or after the insertion time on the same track by
+the copied clip's length. Video and audio clips can use their source length
+without `data-duration`, including clips shifted by the insertion.
+For clips with `data-end`, the copy and any shifted clips keep their length by
+moving their end with their start.
+
 A time is seconds (`4.5`), an offset from the clip's start (`+1`, `-0.5`),
 frames (`30f`), `end`, or an anchor on another clip: `after:#intro`,
 `before:#intro`, `start-of:#intro` or `end-of:#intro`. A flag an edit command does not
@@ -1465,7 +1502,7 @@ How it uses the machine, and when it gives up:
 
 | Flag                                                     | Default                                    | Description                                                                                                       |
 | -------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `--workers, -w`                                          | auto                                       | 1–24 workers. Each is a separate Chrome, roughly 256 MB. Auto weighs cores, memory, frame count, and cost.          |
+| `--workers, -w`                                          | auto                                       | 1–24 workers. Each is a separate Chrome, roughly 256 MB. Auto weighs cores, memory, frame count, and cost. N is a ceiling: a render drawElement can capture still uses one worker. |
 | `--low-memory-mode` / `--no-low-memory-mode`             | auto at 8 GB RAM or less                   | Safe profile: one worker, screenshot capture, no calibration. See the note below.                                   |
 | `--gpu`                                                  | off                                        | Hardware FFmpeg encoding (NVENC, VideoToolbox, AMF, VAAPI, QSV)                                                    |
 | `--browser-gpu` / `--no-browser-gpu`                     | auto locally, off in Docker                | Host GPU for Chrome and WebGL capture, or software rendering. Auto probes WebGL once and falls back.                |
@@ -1789,10 +1826,10 @@ scripts.
 With `--file-issue`, the CLI publishes a minimal repro to a public URL — with
 your consent — and opens a pre-filled `bug` issue draft that you review and
 submit yourself. No token, no backend. See
-[Share feedback](/guides/feedback#report-a-reproducible-bug).
+[Share feedback](/help#report-a-reproducible-bug).
 
 Agents can call this after a render;
-[About feedback data](/guides/feedback#about-feedback-data) covers what the
+[About feedback data](/help#about-feedback-data) covers what the
 surface includes. An app that launches the CLI can attach its signed-in
 person's email with the `HYPERFRAMES_FEEDBACK_EMAIL` environment variable. It
 is never a flag and never read from a project `.env`, and it goes only into
@@ -1830,7 +1867,7 @@ account has no email — is linked to your usage, and your prior anonymous usage
 is stitched to it. Nothing else personal, and only once you choose to sign in.
 
 Turn it all off with `HYPERFRAMES_NO_TELEMETRY=1` or the command above.
-[Feedback collection](/guides/feedback) explains the post-render prompt and the
+[Feedback collection](/help#share-feedback) explains the post-render prompt and the
 Studio feedback bar.
 
 One consequence worth knowing: turning telemetry off also opts the install out
@@ -1862,9 +1899,10 @@ npx hyperframes skills update slideshow
 Bare `skills` installs everything. `skills update` keeps a deliberate partial
 installation partial: it refreshes the core set plus whatever is already
 installed, and never expands beyond that unless you name a skill. Naming one
-adds it. `check` and `update` both accept `--json`, plus `--dir` and `--source`
-to point removed-detection at a different skills directory or source — those two
-scope the prune, not the install.
+adds it. `check` and `update` both accept `--json`, and `check` also accepts
+`--dir` and `--source`. `update` never removes a skill, and it leaves a skill the
+install record attributes to another publisher alone, even when the name matches
+one of ours.
 
 Set `HYPERFRAMES_SKIP_SKILLS=1` when something else manages the skills (CI, tests,
 or an install pinned to one commit). `skills update` and bare `skills` then exit 0
@@ -1872,7 +1910,7 @@ with a one-line notice and leave the installed skills unchanged.
 
 The CLI installs from the current HyperFrames GitHub source and links the global
 bundles into whichever compatible agents it finds. After scaffolding, `init`
-also refreshes the core set plus any HyperFrames skills you already have.
+installs the core set if it is missing. It never refreshes or removes a skill you already have; run `skills update` for that.
 
 #### `fatal: active post-checkout hook found during git clone`
 
@@ -2217,6 +2255,7 @@ deploy:
 | `--chrome-source` | `sparticuz`                          | `sparticuz` or `chrome-headless-shell`                   |
 | `--video-arch`    | `arm64`                              | `arm64` runs the plan and the chunks on an arm64 container-image function, pushed to an ECR repository named `<stack>-video`; audio and assemble stay on x86. Needs `sparticuz`. `x86_64` runs everything on the x86 function |
 | `--skip-build`    | off                                  | Reuse the existing `handler.zip`                         |
+| `--no-warm`       | warm                                 | Skip the one warm-up call to the video function after deploy, which loads its container image so the first render is not the one that waits for it |
 
 And these drive `render` and `render-batch`:
 

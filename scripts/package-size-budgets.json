@@ -8,12 +8,12 @@
     "unpacked": 23722874
   },
   "@hyperframes/core": {
-    "packed": 1645000,
-    "unpacked": 3965000
+    "packed": 1661748,
+    "unpacked": 4024585
   },
   "@hyperframes/engine": {
-    "packed": 428562,
-    "unpacked": 1436293
+    "packed": 456397,
+    "unpacked": 1526873
   },
   "@hyperframes/gcp-cloud-run": {
     "packed": 49412,
@@ -24,8 +24,8 @@
     "unpacked": 3645432
   },
   "@hyperframes/lint": {
-    "packed": 168745,
-    "unpacked": 654607
+    "packed": 179338,
+    "unpacked": 695173
   },
   "@hyperframes/parsers": {
     "packed": 191000,
@@ -36,8 +36,8 @@
     "unpacked": 541601
   },
   "@hyperframes/producer": {
-    "packed": 768210,
-    "unpacked": 2807938
+    "packed": 828932,
+    "unpacked": 2897429
   },
   "@hyperframes/sdk": {
     "packed": 90662,
@@ -52,7 +52,7 @@
     "unpacked": 24360208
   },
   "@hyperframes/studio-server": {
-    "packed": 142100,
-    "unpacked": 559199
+    "packed": 154437,
+    "unpacked": 603489
   }
 }

@@ -47,7 +47,7 @@ export function serializeEncoderOptions(
   settings: AdvancedRenderSettings & { format: RenderSettings["format"] },
 ): EncoderOptionsBody {
   const body: EncoderOptionsBody = {};
-  if (settings.format !== "mov") {
+  if (settings.format !== "mov" && settings.format !== "gif") {
     if (settings.rateControl.mode === "crf") body.crf = settings.rateControl.value;
     if (settings.rateControl.mode === "bitrate") body.videoBitrate = settings.rateControl.value;
   }

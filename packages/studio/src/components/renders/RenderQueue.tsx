@@ -14,11 +14,12 @@ export interface CompositionDimensions {
 }
 
 export type StartRenderHandler = (
-  format: "mp4" | "webm" | "mov",
+  format: "mp4" | "webm" | "mov" | "gif",
   quality: "draft" | "standard" | "high",
   resolution: ResolutionPreset | "auto",
   fps: 24 | 30 | 60,
   gpu?: boolean,
+  gifLoop?: number,
   advanced?: AdvancedRenderSettings,
 ) => void | Promise<void>;
 
