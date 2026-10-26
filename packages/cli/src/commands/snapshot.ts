@@ -60,6 +60,7 @@ import {
 } from "../utils/lintProject.js";
 import { formatLintFindings } from "../utils/lintFormat.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
+import { describeSharpLoadFailure } from "../utils/sharpLoadFailure.js";
 import { serveStaticProjectHtml } from "../utils/staticProjectServer.js";
 import { c } from "../ui/colors.js";
 import { writeCaptureFileSync } from "../capture/captureFile.js";
@@ -473,6 +474,22 @@ export const examples: Example[] = [
   ],
 ];
 
+const DEFAULT_DESCRIBE_PROMPT =
+  "Describe this video composition frame in 1-2 sentences. Be specific and factual: what elements are visible, what text appears, is the frame blank/black/loading, what is the composition. Flag any obvious problems.";
+
+/**
+ * The Gemini prompt for `--describe`, or null when frames stay local. Opt-in:
+ * no flag and `--describe false` return null; a bare `--describe` (or `true`)
+ * uses the default prompt; any other value is the question to ask.
+ */
+function resolveDescribePrompt(value: unknown): string | null {
+  if (value === undefined || value === false) return null;
+  const text = String(value).trim();
+  if (text === "false") return null;
+  if (text === "" || text === "true") return DEFAULT_DESCRIBE_PROMPT;
+  return text;
+}
+
 /** `--zoom-scale`: the deviceScaleFactor used for zoomed crops. Defaults to 3;
  * falls back to the default for anything that doesn't parse as a positive number. */
 export function parseZoomScale(value: unknown): number {
@@ -595,6 +612,7 @@ async function captureSnapshots(
   const server = await serveCapturePage(projectDir, html, opts.autoProxy);
 
   const savedPaths: string[] = [];
+  let pairSheetFailure: string | null = null;
 
   try {
     const {
@@ -659,7 +677,7 @@ async function captureSnapshots(
       });
 
       if (duration <= 0 && !opts.at?.length) {
-        return { paths: [], warnings };
+        return { paths: [], warnings, pairSheetsSkipped: false };
       }
 
       const readTiming = () =>
@@ -1019,14 +1037,24 @@ async function captureSnapshots(
             const refPath = join(snapshotDir, `ref-${slot}.png`);
             writeCaptureFileSync(refPath, refPng);
             const pairPath = join(snapshotDir, `pair-${slot}.jpg`);
-            const { createContactSheet } = await import("../capture/contactSheet.js");
-            await createContactSheet([framePath, refPath], pairPath, {
-              cols: 2,
-              maxImages: 2,
-              cellWidth: 960,
-              labelMode: "custom",
-              labels: ["render", "reference"],
-            });
+            if (!pairSheetFailure) {
+              try {
+                const { createContactSheet } = await import("../capture/contactSheet.js");
+                await createContactSheet([framePath, refPath], pairPath, {
+                  cols: 2,
+                  maxImages: 2,
+                  cellWidth: 960,
+                  labelMode: "custom",
+                  labels: ["render", "reference"],
+                });
+              } catch (err) {
+                pairSheetFailure = describeSharpLoadFailure(err);
+                if (!pairSheetFailure) throw err;
+                console.error(
+                  `   ${c.warn("⚠")} Reference pair sheets skipped: ${pairSheetFailure}`,
+                );
+              }
+            }
           }
         }
         // Only the capture itself is a "snapshot": the reference frame and the
@@ -1061,6 +1089,7 @@ async function captureSnapshots(
   return {
     paths: savedPaths,
     warnings,
+    pairSheetsSkipped: pairSheetFailure !== null,
     ...(review && reviewList
       ? {
           review: {
@@ -1080,6 +1109,8 @@ interface CapturedSnapshots {
   paths: string[];
   /** Why a frame may differ from the composition: shown on the console and in `--json`. */
   warnings: string[];
+  /** --against wrote no pair sheets because sharp could not load. */
+  pairSheetsSkipped: boolean;
   review?: { plan: ReviewPlan; frames: Array<ReviewFrame & { path: string }> };
 }
 
@@ -1290,7 +1321,7 @@ export default defineCommand({
     describe: {
       type: "string",
       description:
-        "Gemini vision frame analysis. Runs by default when GEMINI_API_KEY is set. Pass a custom question (e.g. --describe 'Is the logo visible in every beat?') to override the default prompt, or --describe false to opt out.",
+        "Send each frame to Gemini for a vision description (off by default; needs GEMINI_API_KEY or GOOGLE_API_KEY). A bare --describe uses the default prompt; --describe 'Is the logo visible in every beat?' asks your own question.",
     },
     proxy: {
       type: "boolean",
@@ -1362,16 +1393,7 @@ export default defineCommand({
       failCommand();
     }
     const timeout = parseInt(args.timeout as string, 10) || RENDER_READY_TIMEOUT_MS;
-    // Gemini frame analysis runs by default (silently skipped if
-    // GEMINI_API_KEY is not set). `--describe "custom question"` overrides
-    // the default prompt with a targeted question. `--describe false` opts
-    // out entirely.
-    const describeArg =
-      args.describe === undefined
-        ? "true"
-        : String(args.describe) === "false"
-          ? null
-          : String(args.describe);
+    const describePrompt = resolveDescribePrompt(args.describe);
 
     const camera = args.angle ? parseAngle(String(args.angle)) : undefined;
     const zoomTarget = args.zoom ? parseZoomTarget(String(args.zoom)) : undefined;
@@ -1431,7 +1453,9 @@ export default defineCommand({
         }
         if (against) {
           log(
-            `   ${c.dim("ref-*.png + pair-*.jpg")} beside each frame (reference frame, render | reference sheet)`,
+            captured.pairSheetsSkipped
+              ? `   ${c.dim("ref-*.png")} beside each frame (reference frame)`
+              : `   ${c.dim("ref-*.png + pair-*.jpg")} beside each frame (reference frame, render | reference sheet)`,
           );
         }
 
@@ -1465,34 +1489,28 @@ export default defineCommand({
           }
         } catch (err) {
           console.warn(
-            `   ${c.warn("⚠")} Contact sheet skipped: ${normalizeErrorMessage(err)}. Individual snapshot PNGs are still available.`,
+            `   ${c.warn("⚠")} Contact sheet skipped: ${describeSharpLoadFailure(err) ?? normalizeErrorMessage(err)}. Individual snapshot PNGs are still available.`,
           );
         }
 
         let describedPath: string | undefined;
-        // Gemini vision descriptions. Runs by default — see describeArg
-        // resolution above. `null` means the user explicitly opted out with
-        // `--describe false`; missing GEMINI_API_KEY logs a skip and continues.
-        if (describeArg !== null) {
+        // Gemini vision descriptions upload the frames, so they run only when
+        // --describe was passed. A missing key logs a skip and continues.
+        if (describePrompt !== null) {
           try {
             const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
             if (!geminiKey) {
-              if (args.describe !== undefined)
-                log(`   ${c.dim("--describe: GEMINI_API_KEY not set, skipping")}`);
+              log(`   ${c.dim("--describe: GEMINI_API_KEY or GOOGLE_API_KEY not set, skipping")}`);
             } else if (paths.length > 0) {
               log(`   ${c.dim("Describing frames with Gemini vision...")}`);
               const { GoogleGenAI } = await loadOptionalPackage("@google/genai", "--describe");
               const ai = new GoogleGenAI({ apiKey: geminiKey });
               const model = process.env.HYPERFRAMES_GEMINI_MODEL || "gemini-3.1-flash-lite-preview";
-              const customQuestion =
-                describeArg === "true"
-                  ? "Describe this video composition frame in 1-2 sentences. Be specific and factual: what elements are visible, what text appears, is the frame blank/black/loading, what is the composition. Flag any obvious problems."
-                  : describeArg;
 
               const descriptions: string[] = [
                 `# Snapshot Frame Descriptions`,
                 ``,
-                `**Question asked:** ${customQuestion}`,
+                `**Question asked:** ${describePrompt}`,
                 ``,
                 `Compare each description against your storyboard spec. A "black frame" or "loading screen" for a content beat is a bug.`,
                 ``,
@@ -1502,10 +1520,11 @@ export default defineCommand({
               // limit. Full 1920×1080 PNGs are typically 3-6 MB. Use sharp if it is
               // already there (never installed for this); otherwise skip files over the limit.
               let sharp: ReturnType<typeof loadInstalledSharp> = null;
+              let sharpFailure: string | null = null;
               try {
                 sharp = loadInstalledSharp("--describe");
-              } catch {
-                /* a copy that cannot load — fall back to size check */
+              } catch (err) {
+                sharpFailure = describeSharpLoadFailure(err);
               }
 
               const results = await Promise.allSettled(
@@ -1523,7 +1542,9 @@ export default defineCommand({
                     if (raw.length > 3_800_000)
                       return {
                         filename,
-                        desc: "file too large for Gemini — install sharp to enable auto-resize",
+                        desc: sharpFailure
+                          ? "file too large for Gemini — sharp failed to load, so it was not resized"
+                          : "file too large for Gemini — install sharp to enable auto-resize",
                       };
                     imageData = raw;
                   }
@@ -1535,7 +1556,7 @@ export default defineCommand({
                         role: "user",
                         parts: [
                           { inlineData: { mimeType, data: base64 } },
-                          { text: customQuestion },
+                          { text: describePrompt },
                         ],
                       },
                     ],

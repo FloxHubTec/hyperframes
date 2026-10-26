@@ -24,6 +24,8 @@ import {
   lengthIsAuthored,
   stopMediaDownload,
 } from "./preloadMedia";
+import { notePlaybackFrame, noteDisplayScale } from "./playbackHealth";
+import { copiesReady } from "./previewCopies";
 import { installRuntimeControlBridge, postRuntimeMessage, setRuntimeProtocolFps } from "./bridge";
 import { instantTolerance } from "../clipFacts";
 import { isInClipWindow } from "./clipWindow";
@@ -79,6 +81,7 @@ import { createWaapiAdapter } from "./adapters/waapi";
 import {
   MEDIA_SYNC_TOLERANCE_SECONDS,
   isUnplayable,
+  mediaSourceTimeAt,
   readElementPlaybackRate,
   readElementPlaybackStart,
   readElementRateSpec,
@@ -94,6 +97,10 @@ import {
   handleMetadataForProxy,
   isRenderMode,
   maybeProxyProactively,
+  describeVideoSources,
+  levelsWithLighterCopies,
+  retryPreviewCopies,
+  setPreviewQuality,
   setProxyDisplayScale,
 } from "./mediaProxy";
 import {
@@ -2870,7 +2877,12 @@ export function initSandboxRuntimeModular(): void {
     rootComp: HTMLElement | null,
   ) => {
     for (let node = from; node && node !== rootComp; node = node.parentElement)
-      if (isStylableElement(node) && node.hasAttribute("data-start") && !visibleAt(node, time))
+      if (
+        isStylableElement(node) &&
+        node.hasAttribute("data-start") &&
+        !isDiscoveryStamped(node) &&
+        !visibleAt(node, time)
+      )
         return false;
     return true;
   };
@@ -2889,14 +2901,19 @@ export function initSandboxRuntimeModular(): void {
       resolver: timingResolverFor(true),
     }),
   );
-  // A clip's first visible style pass is slow; each hidden clip gets it once on a seek, so its cut does not.
+  // A clip's first visible style pass is slow; playing, each hidden clip gets it once just before its start.
   const clipsNeverStyledVisible = new Set<StylableElement>();
   const clipsStyledVisible = new WeakSet<Element>();
-  const styleHiddenClipsVisibleOnce = () => {
-    const clips = Array.from(clipsNeverStyledVisible).filter(
-      (el) => el.isConnected && el.hasAttribute(CLIP_HIDDEN_ATTR),
-    );
-    clipsNeverStyledVisible.clear();
+  const styleClipsDueVisibleOnce = (t: number) => {
+    if (clipsNeverStyledVisible.size === 0 || !clock.isPlaying()) return;
+    const clips: StylableElement[] = [];
+    for (const el of clipsNeverStyledVisible) {
+      const start = resolveStartForElement(el, Number.NaN);
+      if (el.isConnected && el.hasAttribute(CLIP_HIDDEN_ATTR) && !(start <= t + LOOKAHEAD_SECONDS))
+        continue;
+      clipsNeverStyledVisible.delete(el);
+      if (el.isConnected && el.hasAttribute(CLIP_HIDDEN_ATTR) && start > t) clips.push(el);
+    }
     if (clips.length === 0) return;
     const farHosts = new Set(clips.flatMap((el) => el.closest(`[${FAR_SCENE_ATTR}]`) ?? []));
     for (const host of farHosts) host.removeAttribute(FAR_SCENE_ATTR);
@@ -3079,6 +3096,22 @@ export function initSandboxRuntimeModular(): void {
     dueAtLoopStart(el, visibleAt);
 
   const visibilityDecided = new WeakMap<Element, boolean>();
+  // The pass hides with `!important`; a script's write replaces the declaration and drops it. So a
+  // plain inline hidden on a clip in its window is the script's, except on a clip authored that way.
+  const clipsSeen = new WeakSet<Element>();
+  const authoredInlineHidden = new WeakSet<Element>();
+  const scriptVisibility = new WeakMap<Element, string>();
+  const hiddenByScript = (el: StylableElement): boolean =>
+    el.style.visibility === "hidden" &&
+    el.style.getPropertyPriority("visibility") !== "important" &&
+    !authoredInlineHidden.has(el);
+  const hiddenUnderScript = new WeakMap<Element, boolean>();
+  const underScriptHiddenClip = (el: Element, rootComp: Element | null): boolean => {
+    for (let up = el.parentElement; up && up !== rootComp; up = up.parentElement) {
+      if (up.hasAttribute("data-start") && isStylableElement(up) && hiddenByScript(up)) return true;
+    }
+    return false;
+  };
   // Every time at which an element's visibility, upcoming or preload decision can flip: its own window
   // edges, the look-ahead and release edges around them, and the window edges of each timed ancestor.
   const decisionEdges = new Map<Element, number[] | null>();
@@ -3134,6 +3167,8 @@ export function initSandboxRuntimeModular(): void {
         !node.hasAttribute(RUNTIME_STAMPED_ATTR) &&
         (node as HTMLElement).style.visibility !== (decided ? "visible" : "hidden")
       )
+        return false;
+      if (underScriptHiddenClip(node, rootComp) !== (hiddenUnderScript.get(node) ?? false))
         return false;
       let edges = decisionEdges.get(node);
       if (edges === undefined) {
@@ -3197,12 +3232,28 @@ export function initSandboxRuntimeModular(): void {
       // Descendants must not override a hidden ancestor clip. CSS visibility can
       // otherwise leak child pixels through inactive scenes because a descendant
       // with visibility:visible escapes an ancestor's visibility:hidden.
+      const underScript = underScriptHiddenClip(rawNode, rootComp);
+      hiddenUnderScript.set(rawNode, underScript);
       const isVisibleNow =
         visibleAt(rawNode, currentTime) &&
-        clipChainVisibleAt(rawNode.parentElement, currentTime, visibleAt, rootComp);
+        clipChainVisibleAt(rawNode.parentElement, currentTime, visibleAt, rootComp) &&
+        !underScript;
       visibilityDecided.set(rawNode, isVisibleNow);
       const isRuntimeStamped = isDiscoveryStamped(rawNode);
-      if (!isRuntimeStamped) rawNode.style.visibility = isVisibleNow ? "visible" : "hidden";
+      if (!clipsSeen.has(rawNode)) {
+        clipsSeen.add(rawNode);
+        if (rawNode.style.visibility === "hidden") authoredInlineHidden.add(rawNode);
+      }
+      if (!isRuntimeStamped && !(isVisibleNow && hiddenByScript(rawNode))) {
+        const style = rawNode.style;
+        const passHid = style.getPropertyPriority("visibility") === "important";
+        if (!isVisibleNow && !passHid && !authoredInlineHidden.has(rawNode))
+          scriptVisibility.set(rawNode, style.getPropertyValue("visibility"));
+        const shown = isVisibleNow
+          ? (passHid && scriptVisibility.get(rawNode)) || "visible"
+          : "hidden";
+        style.setProperty("visibility", shown, isVisibleNow ? "" : "important");
+      }
       rawNode.toggleAttribute(CLIP_HIDDEN_ATTR, !isRuntimeStamped && !isVisibleNow);
       if (!isRuntimeStamped && !isVisibleNow && !clipsStyledVisible.has(rawNode))
         clipsNeverStyledVisible.add(rawNode);
@@ -3246,6 +3297,18 @@ export function initSandboxRuntimeModular(): void {
       scheduleWebAudioForActiveClips();
     }
     hiddenAudioDirty = false;
+  };
+
+  // The timeline writes after the pass on a preview seek, so clips under a clip it just hid or showed
+  // are decided again.
+  const decideClipsUnderScriptHidden = (currentTime: number) => {
+    const rootComp = resolveRootCompositionElement();
+    const stale = queryForTransport("[data-start]").filter(
+      (el) =>
+        visibilityDecided.has(el) &&
+        underScriptHiddenClip(el, rootComp) !== (hiddenUnderScript.get(el) ?? false),
+    );
+    if (stale.length > 0) syncTimedElementVisibility(currentTime, stale);
   };
 
   // Scope 2 of 3 (see `withTimingResolver`). One resolver for the whole
@@ -3450,6 +3513,11 @@ export function initSandboxRuntimeModular(): void {
   };
   window.__hf.leasePausedMedia = leasePausedMedia;
   window.__hf.releasePausedMedia = releasePausedMedia;
+  // Clips the transport may move now (not a paused lease); null while the host drives media.
+  const transportMovableClips = (clips: RuntimeMediaClip[]): RuntimeMediaClip[] | null => {
+    if (state.nativeMediaSyncDisabled) return null;
+    return state.isPlaying ? clips : clips.filter((clip) => !pausedMediaLeases.has(clip.el));
+  };
   window.__hf.setLoopStart = (seconds) => {
     loopStartSeconds = seconds != null && Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
   };
@@ -3561,17 +3629,13 @@ export function initSandboxRuntimeModular(): void {
       if (kf) clip.volumeKeyframes = kf;
     }
 
-    // A leased element is not the transport's to touch while the clock is paused;
-    // during playback the transport owns everything again. Filtered here rather
-    // than out of `mediaClips` so the in-window bookkeeping below still records it
-    // and the pass after its release visits it normally.
-    const syncedClips = state.isPlaying
-      ? mediaClips
-      : mediaClips.filter((clip) => !pausedMediaLeases.has(clip.el));
+    // Filtered here rather than out of `mediaClips` so the in-window bookkeeping
+    // below still records a leased clip and the pass after its release visits it.
+    const syncedClips = transportMovableClips(mediaClips);
 
     const forceSync = state.mediaForceSyncNextTick;
     if (forceSync) state.mediaForceSyncNextTick = false;
-    if (!state.nativeMediaSyncDisabled) {
+    if (syncedClips) {
       syncRuntimeMedia({
         clips: syncedClips,
         timeSeconds: state.currentTime,
@@ -3584,8 +3648,8 @@ export function initSandboxRuntimeModular(): void {
         cueAheadSeconds,
         getCompositionDuration: () =>
           getSafeTimelineDurationSeconds(state.capturedTimeline, 0, timingRevision),
-        onElementVolume: (el, _effectiveVolume, authorVolume, clipGain) =>
-          webAudio.setElementVolume(el, authorVolume, clipGain),
+        onElementVolume: (el, _effectiveVolume, authorVolume, clipGain, unfadedVolume) =>
+          webAudio.setElementVolume(el, authorVolume, clipGain, unfadedVolume),
         isWebAudioOwned: (el) => webAudio.ownsElement(el),
         isWebAudioRouted: (el) => webAudio.routesElement(el),
         onAutoplayBlocked: () => {
@@ -4534,16 +4598,6 @@ export function initSandboxRuntimeModular(): void {
     if (state.capturedTimeline && typeof state.capturedTimeline.timeScale === "function") {
       state.capturedTimeline.timeScale(state.playbackRate);
     }
-    const mediaEls = document.querySelectorAll("video, audio");
-    for (const el of mediaEls) {
-      if (!isMediaElement(el)) continue;
-      try {
-        el.playbackRate = state.playbackRate;
-      } catch (err) {
-        // ignore unsupported values
-        swallow("runtime.init.site10", err);
-      }
-    }
   };
 
   // A paused seek that would reveal undecoded images holds the previous picture until they decode.
@@ -4571,6 +4625,7 @@ export function initSandboxRuntimeModular(): void {
     const tl = state.capturedTimeline;
     pauseTimelineIfPossible(tl);
     const pageAnimations = seekTimelineAndAdapters(state.currentTime);
+    if (!keepPlaying) decideClipsUnderScriptHidden(state.currentTime);
     runAdapters("pause", 0, pageAnimations);
     if (keepPlaying) {
       transport.play();
@@ -5175,7 +5230,7 @@ export function initSandboxRuntimeModular(): void {
     const revision = opts?.revision ?? readCompositionTimingRevision();
     if (revision !== tweensRenderedThrough.revision)
       tweensRenderedThrough = { revision, time: Number.NEGATIVE_INFINITY };
-    styleHiddenClipsVisibleOnce();
+    styleClipsDueVisibleOnce(t);
     const firstRenders = t > tweensRenderedThrough.time;
     // Only clips holding a tween that renders for the first time on this seek need their authored style read.
     const firstRendered =
@@ -5569,6 +5624,20 @@ export function initSandboxRuntimeModular(): void {
 
       const t = clock.now();
       state.currentTime = t;
+      if (!window.__HF_EXPORT_RENDER_SEEK_CONFIG) {
+        notePlaybackFrame({
+          nowMs: performance.now(),
+          filmTime: t,
+          fps: state.canonicalFps,
+          rate: state.playbackRate,
+          playing,
+          hidden: document.visibilityState === "hidden",
+          waiting: mediaClipsInWindow.some(
+            ({ el }) => el.tagName === "VIDEO" && !el.paused && el.readyState < 3,
+          ),
+          layoutKey: `${window.innerWidth}x${window.innerHeight}@${window.devicePixelRatio}`,
+        });
+      }
       // During a paused Studio manual-edit drag, the draft writer owns the
       // gestured element's transform (e.g. gsap.set for x/y). Re-seeking the
       // timeline every frame re-applies the animated value and clobbers the
@@ -5643,23 +5712,17 @@ export function initSandboxRuntimeModular(): void {
   };
 
   const hardSyncAllMedia = (timeSeconds: number) => {
-    const mediaEls = document.querySelectorAll("video, audio");
-    for (const el of mediaEls) {
-      if (!isMediaElement(el)) continue;
-      if (!el.isConnected) continue;
-      if (!el.hasAttribute("data-start")) continue;
-      const start = resolveAbsoluteMediaStartSeconds(el);
-      if (!Number.isFinite(start)) continue;
-      const kept = playedMediaWindow(el, start);
-      if (!isInClipWindow(timeSeconds, kept.start, kept.end)) continue;
-      const mediaStart = readElementPlaybackStart(el);
-      const relTime = timeSeconds - start + mediaStart;
-      if (relTime >= 0) {
-        try {
-          el.currentTime = relTime;
-        } catch {
-          // ignore seek restrictions
-        }
+    // Same clips and source time as the media sync that follows, so it has nothing left to seek.
+    const clips = withTimingResolver(() => buildRuntimeMediaCache().mediaClips);
+    for (const clip of transportMovableClips(clips) ?? []) {
+      if (!clip.el.isConnected || !isInClipWindow(timeSeconds, clip.start, clip.end)) continue;
+      const target = mediaSourceTimeAt(clip, timeSeconds);
+      // A seek flushes the decoder even when it lands where the video already is.
+      if (Math.abs(clip.el.currentTime - target) <= 0.001) continue;
+      try {
+        clip.el.currentTime = target;
+      } catch {
+        // ignore seek restrictions
       }
     }
   };
@@ -5749,6 +5812,7 @@ export function initSandboxRuntimeModular(): void {
               vol,
               gen,
               state.playbackRate,
+              clipDuration,
             )
           : Promise.resolve(null);
       void capture.then((scheduled) => {
@@ -5929,7 +5993,23 @@ export function initSandboxRuntimeModular(): void {
     onSetDisplayScale: (scale) => {
       setProxyDisplayScale(scale);
       setPreviewRasterScale(scale);
+      noteDisplayScale(scale);
     },
+    onRequestPreviewFacts: () =>
+      postRuntimeMessage({
+        source: "hf-preview",
+        type: "preview-facts",
+        facts: {
+          sceneCount: windowScenes.length,
+          mountedElementCount: document.body.querySelectorAll("*").length,
+          durationSeconds: clock.getDuration(),
+          videos: describeVideoSources(),
+          lighterAt: levelsWithLighterCopies(),
+          copiesReady: copiesReady(),
+        },
+      }),
+    onSetPreviewQuality: setPreviewQuality,
+    onRetryPreviewCopies: retryPreviewCopies,
     onSetIdleHeartbeat: (slow) => {
       slowIdleHeartbeat = slow;
       wakeTransport();

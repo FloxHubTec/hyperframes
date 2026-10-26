@@ -31,8 +31,14 @@ import { loadBrowserScript } from "../commands/layout.js";
 import { normalizeErrorMessage } from "./errorMessage.js";
 import { ambiguousIssue, type MotionFrame } from "./motionAudit.js";
 import type { LayoutIssue, LayoutIssueCode, LayoutRect } from "./layoutAudit.js";
-import { serveStaticProjectHtml } from "./staticProjectServer.js";
+import { serveStaticProjectHtml, type StaticProjectServer } from "./staticProjectServer.js";
+import { prepareFindingInspector } from "./checkFindingInspect.js";
 import { collectTweenRecords, findTweenTails, tweenTailMessage } from "./gsapTweenTails.js";
+import {
+  measuredInMotion,
+  readContrastMotion,
+  type ContrastMotionSample,
+} from "./contrastMotion.js";
 import { resolveAutoProxy } from "./projectConfig.js";
 import { findStageProxyBox } from "./compositionViewport.js";
 import type { PreviewProxyBox } from "@hyperframes/core";
@@ -62,6 +68,9 @@ import type {
   CheckBrowserResult,
   CheckFinding,
   CheckFindingCropRequest,
+  CheckFindingFrameRequest,
+  CheckFindingFrames,
+  CheckFindingInspection,
   CheckGeometryCandidate,
   CheckOptions,
   CheckSeverity,
@@ -125,6 +134,7 @@ interface PreparedContrast {
   candidate: ContrastCandidate;
   knownBackdrop: boolean;
   anchor: CheckAnchor;
+  motion: ContrastMotionSample | null;
 }
 
 interface FinishedContrast {
@@ -312,8 +322,12 @@ function proxyFailedDraft(message: string): RuntimeDraft {
 
 async function loadCheckHtmlWithDeferredMedia(dir: string): Promise<string> {
   const { bundleWithLocalizedFonts } = await import("./bundleWithLocalizedFonts.js");
+  return withCapturePreviewMark(await bundleWithLocalizedFonts(dir));
+}
+
+function withCapturePreviewMark(html: string): string {
   return injectTagsAtHeadStart(
-    await bundleWithLocalizedFonts(dir),
+    html,
     `<meta name="${STUDIO_PREVIEW_MARK_META}" content="${STUDIO_PREVIEW_CAPTURE_MODE}">`,
   );
 }
@@ -559,34 +573,8 @@ export async function captureFindingCrops(
   deadline?: CheckDeadline,
 ): Promise<string[]> {
   if (requests.length === 0) return [];
-  const html = await loadCheckHtmlWithDeferredMedia(project.dir);
-  const server = await serveStaticProjectHtml(
-    project.dir,
-    html,
-    "Failed to bind check server",
-    [],
-    options.autoProxy,
-  );
-  let chromeBrowser: import("puppeteer-core").Browser | undefined;
-  const written: string[] = [];
-  let failure: { kind: "none" } | { kind: "failed"; error: unknown } = { kind: "none" };
-  try {
-    const session = await openSettledCompositionPage(html, server.url, {
-      navigationTimeoutMs: options.timeout,
-      renderReadyTimeoutMs: options.timeout,
-      renderReadyWarningSuffix: "capturing finding crops",
-      signal: deadline?.signal,
-      onBrowser: deadline?.ownBrowser,
-      onBrowserReady: deadline?.start,
-      beforeNavigate: (page) => deadline?.preparePage(page),
-      browserGpuMode: options.browserGpuMode ?? resolveCliChromeGpuMode(),
-    });
-    chromeBrowser = session.browser;
-    const page = session.page;
-    await waitForPreferredSeekTarget(page);
-
-    const snapshotDir = checkSnapshotDirectory(project.dir);
-    mkdirSync(snapshotDir, { recursive: true });
+  return withFindingCapturePage(project, options, deadline, "crops", async (page, snapshotDir) => {
+    const written: string[] = [];
     for (const request of requests) {
       await seekCompositionTimeline(page, request.time, SCREENSHOT_SEEK_OPTIONS);
       const canvas = await page.evaluate(() => ({
@@ -599,6 +587,89 @@ export async function captureFindingCrops(
       written.push(join(snapshotDir, request.filename));
     }
     return written;
+  });
+}
+
+export async function captureFindingFrames(
+  project: ProjectDir,
+  options: CheckOptions,
+  requests: CheckFindingFrameRequest[],
+  deadline?: CheckDeadline,
+): Promise<CheckFindingFrames> {
+  if (requests.length === 0) return { written: [], inspected: [] };
+  const inspector = requests.some((request) => request.inspect?.length)
+    ? await prepareFindingInspector(project.dir, async (bundleOptions) => {
+        const { bundleWithLocalizedFonts } = await import("./bundleWithLocalizedFonts.js");
+        return withCapturePreviewMark(
+          await bundleWithLocalizedFonts(project.dir, undefined, bundleOptions),
+        );
+      })
+    : undefined;
+  deadline?.signal.throwIfAborted();
+  return withFindingCapturePage(
+    project,
+    options,
+    deadline,
+    "frames",
+    async (page, snapshotDir, server) => {
+      await inspector?.ready(server);
+      deadline?.signal.throwIfAborted();
+      const written: string[] = [];
+      const inspected: CheckFindingInspection[] = [];
+      for (const request of requests) {
+        deadline?.enter("frames");
+        await seekCompositionTimeline(page, request.time, SCREENSHOT_SEEK_OPTIONS);
+        const buffer = await page.screenshot({ type: "png", optimizeForSpeed: true });
+        writeFileSync(join(snapshotDir, request.filename), buffer);
+        written.push(join(snapshotDir, request.filename));
+        if (!inspector) continue;
+        for (const target of request.inspect ?? []) {
+          deadline?.enter("frames");
+          const inspect = await inspector.inspect(page, target);
+          deadline?.signal.throwIfAborted();
+          inspected.push({ time: request.time, target, inspect });
+        }
+      }
+      return { written, inspected };
+    },
+    inspector?.html,
+  );
+}
+
+async function withFindingCapturePage<T>(
+  project: ProjectDir,
+  options: CheckOptions,
+  deadline: CheckDeadline | undefined,
+  what: "crops" | "frames",
+  capture: (page: Page, snapshotDir: string, server: StaticProjectServer) => Promise<T>,
+  pageHtml?: string,
+): Promise<T> {
+  const html = pageHtml ?? (await loadCheckHtmlWithDeferredMedia(project.dir));
+  const server = await serveStaticProjectHtml(
+    project.dir,
+    html,
+    "Failed to bind check server",
+    [],
+    options.autoProxy,
+  );
+  let chromeBrowser: import("puppeteer-core").Browser | undefined;
+  let failure: { kind: "none" } | { kind: "failed"; error: unknown } = { kind: "none" };
+  try {
+    const session = await openSettledCompositionPage(html, server.url, {
+      navigationTimeoutMs: options.timeout,
+      renderReadyTimeoutMs: options.timeout,
+      renderReadyWarningSuffix: `capturing finding ${what}`,
+      signal: deadline?.signal,
+      onBrowser: deadline?.ownBrowser,
+      onBrowserReady: deadline?.start,
+      beforeNavigate: (page) => deadline?.preparePage(page),
+      browserGpuMode: options.browserGpuMode ?? resolveCliChromeGpuMode(),
+    });
+    chromeBrowser = session.browser;
+    await waitForPreferredSeekTarget(session.page);
+    const snapshotDir = checkSnapshotDirectory(project.dir);
+    mkdirSync(snapshotDir, { recursive: true });
+    return await capture(session.page, snapshotDir, server);
   } catch (error) {
     failure = { kind: "failed", error };
     throw error;
@@ -919,7 +990,8 @@ export function createPageDriver(
     collectMotionFrame: (time, selectors, scopes) =>
       collectMotionFrame(page, time, selectors, scopes),
     anchorMotionIssues: (issues) => anchorLayoutIssues(page, issues),
-    collectContrast: (time, annotations) => collectContrast(page, time, annotations),
+    collectContrast: (time, annotations, skipInMotion) =>
+      collectContrast(page, time, annotations, skipInMotion),
     collectCraftFrame: (time) => collectCraftFrame(page, time),
     collectCraftFilm: () => collectCraftFilm(page),
   });
@@ -1504,10 +1576,13 @@ async function collectContrast(
   page: Page,
   time: number,
   snapshotAnnotations?: CheckAnnotationBox[],
+  skipInMotion = false,
 ): Promise<ContrastCapture> {
   let prepared: PreparedContrast[] = [];
   try {
-    prepared = parsePreparedContrast(await prepareContrast(page, time));
+    const candidates = await prepareContrast(page, time);
+    const motion = skipInMotion ? await page.evaluate(readContrastMotion).catch(() => []) : [];
+    prepared = parsePreparedContrast(candidates, motion);
     if (prepared.length === 0 && !snapshotAnnotations) return { entries: [] };
     // This screenshot is the one contrast math is sampled from below — it must
     // stay untouched by the annotation overlay (finishContrast reads real
@@ -1767,14 +1842,25 @@ async function finishContrast(
   );
 }
 
-function parsePreparedContrast(raw: unknown[]): PreparedContrast[] {
-  return raw.flatMap((value) => {
+function parsePreparedContrast(
+  raw: unknown[],
+  motion: (ContrastMotionSample | null)[],
+): PreparedContrast[] {
+  return raw.flatMap((value, index) => {
     if (!isRecord(value)) return [];
     const raw = Reflect.get(value, "candidate");
     const candidate = parseContrastCandidate(raw);
     const anchor = parseAnchor(Reflect.get(value, "anchor"));
     return candidate && anchor
-      ? [{ raw, candidate, anchor, knownBackdrop: knownBackdrop(raw) }]
+      ? [
+          {
+            raw,
+            candidate,
+            anchor,
+            knownBackdrop: knownBackdrop(raw),
+            motion: motion[index] ?? null,
+          },
+        ]
       : [];
   });
 }
@@ -1829,7 +1915,9 @@ function joinContrastEntries(
         candidate.candidate.selector === entry.selector && candidate.candidate.text === entry.text,
     );
     const match = index >= 0 ? remaining.splice(index, 1)[0] : undefined;
-    return match ? [{ ...entry, ...match.anchor }] : [];
+    if (!match) return [];
+    if (!entry.wcagAA && match.motion && measuredInMotion(match.motion)) return [];
+    return [{ ...entry, ...match.anchor }];
   });
 }
 

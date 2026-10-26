@@ -61,7 +61,12 @@ import {
   type ShownBox,
 } from "@hyperframes/engine";
 import { defaultLogger } from "../../logger.js";
-import { applyRenderWarningPolicy, collectVideoMetadataHints } from "../renderOrchestrator.js";
+import {
+  applyRenderWarningPolicy,
+  collectVideoMetadataHints,
+  frameStallRule,
+} from "../renderOrchestrator.js";
+import { RenderObservabilityRecorder, observeRenderStage } from "../render/observability.js";
 import {
   canEncodeWhileCapturing,
   encodeWhileCapturing,
@@ -221,6 +226,11 @@ export interface RenderChunkOptions {
    * this many, one browser per 20 frames; never lowers it.
    */
   maxCaptureWorkers?: number;
+  interleaveCapture?: boolean;
+}
+
+export function interleavesCapture(overlapping: boolean, options?: RenderChunkOptions): boolean {
+  return overlapping && options?.interleaveCapture === true;
 }
 
 /** A browser starts in about 3 s, a small share of 20 frames' capture. */
@@ -979,27 +989,36 @@ export async function renderChunk(
           overlap.current = canEncodeWhileCapturing(encodeInput, chunkWorkerCount, cpus().length)
             ? encodeWhileCapturing(encodeInput, framesInChunk)
             : null;
-          await runCaptureStage({
-            fileServer,
-            workDir,
-            framesDir,
-            job,
-            totalFrames: framesInChunk,
-            cfg: captureCfg,
-            plan: capturePlan,
-            log,
-            probeSession: captureSession,
-            captureAttempts,
-            // This sink records each worker's effective capture mode so a
-            // fallback remains observable to adapters and smoke tests.
-            dedupPerfs: capturePerfs,
-            buildCaptureOptions: () => captureOptions,
-            createRenderVideoFrameInjector: createChunkVideoFrameInjector,
-            abortSignal: undefined,
-            assertNotAborted: () => {},
-            frameRange: range,
-            onFrameLanded: (frame) => overlap.current?.onFrameLanded(frame),
-          }).catch(async (captureError: unknown) => {
+          await observeRenderStage(
+            new RenderObservabilityRecorder({ pipelineStartMs: start, log }),
+            "capture_chunk",
+            { chunkIndex },
+            (openAttempt) =>
+              runCaptureStage({
+                fileServer,
+                workDir,
+                framesDir,
+                job,
+                totalFrames: framesInChunk,
+                cfg: captureCfg,
+                plan: capturePlan,
+                log,
+                probeSession: captureSession,
+                captureAttempts,
+                // This sink records each worker's effective capture mode so a
+                // fallback remains observable to adapters and smoke tests.
+                dedupPerfs: capturePerfs,
+                buildCaptureOptions: () => captureOptions,
+                createRenderVideoFrameInjector: createChunkVideoFrameInjector,
+                abortSignal: undefined,
+                assertNotAborted: () => {},
+                frameRange: range,
+                onFrameLanded: (frame) => overlap.current?.onFrameLanded(frame),
+                interleaveFrames: interleavesCapture(overlap.current !== null, options),
+                openAttempt,
+              }),
+            { stall: frameStallRule(job) },
+          ).catch(async (captureError: unknown) => {
             await overlap.current?.abort();
             overlap.current = null;
             throw captureError;

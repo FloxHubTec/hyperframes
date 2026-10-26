@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.200",
+  "version": "0.8.203",
   "description": "",
   "repository": {
     "type": "git",
@@ -133,6 +133,12 @@
       "node": "./dist/motionBlurSettings.js",
       "import": "./src/motionBlurSettings.ts",
       "types": "./src/motionBlurSettings.ts"
+    },
+    "./preview-quality": {
+      "bun": "./src/previewProxyBox.ts",
+      "node": "./dist/previewProxyBox.js",
+      "import": "./src/previewProxyBox.ts",
+      "types": "./src/previewProxyBox.ts"
     },
     "./gsap-cdn": {
       "bun": "./src/gsapCdn.ts",
@@ -649,6 +655,10 @@
       "./motion-blur-settings": {
         "import": "./dist/motionBlurSettings.js",
         "types": "./dist/motionBlurSettings.d.ts"
+      },
+      "./preview-quality": {
+        "import": "./dist/previewProxyBox.js",
+        "types": "./dist/previewProxyBox.d.ts"
       },
       "./gsap-cdn": {
         "import": "./dist/gsapCdn.js",

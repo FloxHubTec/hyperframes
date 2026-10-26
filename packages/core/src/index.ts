@@ -66,6 +66,7 @@ export {
   isAspectAgnosticResolutionAlias,
   resolveResolutionFlagPair,
   checkOutputResolutionCompatibility,
+  outputResolutionForSize,
   suggestMatchingPreset,
   parseFps,
   parseFpsWithDefault,
@@ -177,6 +178,7 @@ export {
   rewriteInlineStyleAssetUrls,
 } from "./compiler/rewriteSubCompPaths";
 export { CSS_URL_RE, isNonRelativeUrl, isPathInside } from "./compiler/assetPaths";
+export { rewriteSrcsetUrls } from "./compiler/srcset";
 export {
   checkSubCompositionUsability,
   type ParsableDocumentLike,
@@ -267,11 +269,22 @@ export {
   type ToneMapSourceColour,
 } from "./hdrToneMap";
 export {
+  HEAVY_BITRATE,
+  HEAVY_PIXEL_SHARE,
   PREVIEW_PROXY_BOX_PARAM,
+  PREVIEW_PROXY_LIGHT_PARAM,
+  PREVIEW_PROXY_PROGRESS_HEADER,
+  PREVIEW_PROXY_RETRY_PARAM,
+  PREVIEW_QUALITY_LEVELS,
   formatPreviewProxyBox,
+  isHeavyForPreview,
+  isPreviewQuality,
   parsePreviewProxyBox,
   quantizePreviewProxyBox,
+  scalePreviewProxyBox,
   type PreviewProxyBox,
+  type PreviewQuality,
+  type PreviewSourceFacts,
 } from "./previewProxyBox";
 
 // Inline scripts
