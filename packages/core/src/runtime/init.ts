@@ -4526,7 +4526,6 @@ export function initSandboxRuntimeModular(): void {
     const wantedNow = (name: string) =>
       heldScenes.has(name) ||
       scenesWanted(windowScenes, state.currentTime, clock.isPlaying()).has(name);
-    restartPlaybackHealth();
     windowWork = (async () => {
       if (landed) await mountScene(landed.name);
       else if (toMount) {
