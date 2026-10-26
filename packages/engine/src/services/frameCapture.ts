@@ -2643,7 +2643,9 @@ export function classifyPageError(
   // Frameless: a parse error names its script; a rejection names whatever document is current, so it is unattributable.
   if (frames.length === 0 && details.text.startsWith("Uncaught (in promise)")) return null;
   const urls = frames.length > 0 ? frames : [details.url];
-  return urls.some((url) => isOwnedScriptUrl(url, projectScripts)) ? `runtime-error:${firstLine}` : null;
+  return urls.some((url) => isOwnedScriptUrl(url, projectScripts))
+    ? `runtime-error:${firstLine}`
+    : null;
 }
 
 // The render compiler names the composition's inline code.
