@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { open } from "node:fs/promises";
+import {
+  closeSync,
+  createReadStream,
+  existsSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { formatPreviewProxyBox, type PreviewProxyBox } from "@hyperframes/core";
 
@@ -42,12 +50,12 @@ export async function contentCopyKey(
   signal: AbortSignal,
 ): Promise<string> {
   const hash = createHash("sha256");
-  const file = await open(sourcePath);
+  const fd = openSync(sourcePath, "r");
   try {
-    if ((await file.stat()).size <= SMALL_FILE_BYTES) hash.update(await file.readFile({ signal }));
-    else for await (const chunk of file.createReadStream({ signal, autoClose: false })) hash.update(chunk);
+    if (fstatSync(fd).size <= SMALL_FILE_BYTES) hash.update(readFileSync(fd));
+    else for await (const chunk of createReadStream(sourcePath, { fd, autoClose: false, signal })) hash.update(chunk);
   } finally {
-    await file.close();
+    closeSync(fd);
   }
   return digest(hash.digest("hex"), version, variant, boxPart(box));
 }
