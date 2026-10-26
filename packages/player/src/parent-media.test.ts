@@ -3,8 +3,11 @@ import { mediaElementTime } from "@hyperframes/core/runtime/media-clock";
 import { ParentMediaManager, type ProxyEntry } from "./parent-media";
 
 // A fake media element whose paused state is driven by play()/pause() stubs.
-function makeFakeAudio(initiallyPaused: boolean): HTMLMediaElement {
-  const el = new Audio();
+function makeFakeAudio(
+  initiallyPaused: boolean,
+  tag: "audio" | "video" = "audio",
+): HTMLMediaElement {
+  const el = tag === "video" ? document.createElement("video") : new Audio();
   let paused = initiallyPaused;
   Object.defineProperty(el, "paused", { get: () => paused });
   el.pause = () => {
@@ -486,9 +489,9 @@ describe("ParentMediaManager drift policy", () => {
   });
 
   // A playing proxy `lag` seconds behind a timeline at `t`, a clip that starts at 0 and plays from media 0.
-  function playingProxy(lag: number, t = 5) {
+  function playingProxy(lag: number, t = 5, tag: "audio" | "video" = "audio") {
     const mgr = makeManager({ isPaused: false });
-    const el = makeFakeAudio(false);
+    const el = makeFakeAudio(false, tag);
     const writes: number[] = [];
     let time = t - lag;
     Object.defineProperty(el, "currentTime", {
@@ -535,6 +538,15 @@ describe("ParentMediaManager drift policy", () => {
     mgr.mirrorTime(5.1);
     expect(writes).toHaveLength(1);
     expect(writes[0]).toBeCloseTo(mediaElementTime(5.1), 9);
+  });
+
+  it("seeks a video proxy that holds a 1 s lag: a proxy is heard, whatever its tag", () => {
+    const { mgr, el, writes, setTime } = playingProxy(1, 5, "video");
+    mgr.mirrorTime(5);
+    setTime(4.1);
+    mgr.mirrorTime(5.1);
+    expect(writes).toHaveLength(1);
+    expect(el.playbackRate).toBe(1);
   });
 
   it("steers, never seeks, a proxy whose lag keeps growing because it is stalled", () => {

@@ -15,15 +15,19 @@ const AUDIO_STEER_LIMIT_SECONDS = 0.1;
 /** Direction (+1 fast, -1 slow) an element is being steered in; absent when it plays at its authored rate. */
 const steering = new WeakMap<HTMLMediaElement, number>();
 
-/** Rate or seek for media `offset` s behind (+) or ahead (-); a lag still growing (`settled` false) never seeks. */
+/**
+ * Rate or seek for media `offset` s behind (+) or ahead (-); a lag still growing (`settled` false) never seeks.
+ * `audioOnly` is what the element is for: only its sound is heard (an `<audio>`, or a proxy of any tag).
+ */
 export function steerMedia(
   el: HTMLMediaElement,
   offset: number,
   baseRate: number,
   settled: boolean,
+  audioOnly = el.tagName === "AUDIO",
 ): { rate: number; seek: boolean } {
   const lag = Math.abs(offset);
-  if (el.tagName === "AUDIO" && settled && lag > AUDIO_STEER_LIMIT_SECONDS) {
+  if (audioOnly && settled && lag > AUDIO_STEER_LIMIT_SECONDS) {
     steering.delete(el);
     return { rate: baseRate, seek: true };
   }
@@ -35,7 +39,7 @@ export function steerMedia(
     return { rate: baseRate, seek: false };
   }
   const step = MEDIA_STEER_STEPS.find(([from]) => lag > from)?.[1] ?? MEDIA_STEER;
-  const steer = el.tagName === "AUDIO" ? Math.min(step, AUDIO_MAX_STEER) : step;
+  const steer = audioOnly ? Math.min(step, AUDIO_MAX_STEER) : step;
   return { rate: baseRate * (1 + direction * steer), seek: false };
 }
 

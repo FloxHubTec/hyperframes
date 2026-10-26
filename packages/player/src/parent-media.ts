@@ -285,7 +285,7 @@ export class ParentMediaManager {
     const settled =
       m.lastOffset !== undefined && Math.abs(offset - m.lastOffset) < SETTLED_OFFSET_DELTA_SECONDS;
     m.lastOffset = offset;
-    const { rate, seek } = steerMedia(m.el, offset, this._getPlaybackRate(), settled);
+    const { rate, seek } = steerMedia(m.el, offset, this._getPlaybackRate(), settled, true);
     if (seek) this._jumpTo(m, target, true);
     else if (Math.abs(m.el.playbackRate - rate) > 1e-6) m.el.playbackRate = rate;
   }
