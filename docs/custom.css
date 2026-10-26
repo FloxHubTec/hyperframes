@@ -1625,7 +1625,8 @@ html:not(.dark) pre span[style*="color: rgb(17, 99, 41)"] {
   color: oklch(0.793 0.11 133) !important;
 }
 
-.dark pre span[style*="--shiki-dark: #569CD6"] {
+.dark pre span[style*="--shiki-dark: #569CD6"],
+.dark pre span[style*="--shiki-dark: #C586C0"] {
   color: oklch(0.829 0.164 318) !important;
 }
 
