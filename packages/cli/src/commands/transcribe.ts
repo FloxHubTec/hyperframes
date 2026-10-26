@@ -1,11 +1,19 @@
+import { createProgressWriter } from "../whisper/progress.js";
 import { failCommand, setCommandExitCode } from "../utils/commandResult.js";
-// fallow-ignore-file code-duplication
 import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
-import { existsSync, writeFileSync } from "node:fs";
-import { findParakeet, transcribeWithParakeet } from "../whisper/parakeet.js";
-
-type CaptionExportFormat = "srt" | "vtt";
+import * as clack from "@clack/prompts";
+import { c } from "../ui/colors.js";
+import { DEFAULT_MODEL } from "../whisper/manager.js";
+import { trackTranscribeUnavailable } from "../telemetry/events.js";
+import {
+  MIN_TIMEOUT_MS,
+  TranscribeError,
+  runTranscribe,
+  type CaptionFormat,
+  type TranscribeEngineEvent,
+  type TranscribeResult,
+} from "../api/transcribe.js";
 
 export const examples: Example[] = [
   ["Transcribe an audio file", "hyperframes transcribe audio.mp3"],
@@ -15,24 +23,12 @@ export const examples: Example[] = [
   ["Import an existing SRT file", "hyperframes transcribe subtitles.srt"],
   ["Import an OpenAI Whisper JSON response", "hyperframes transcribe response.json"],
   ["Export captions to SRT", "hyperframes transcribe transcript.json --to srt"],
+  ["Transcribe a video straight to VTT captions", "hyperframes transcribe video.mp4 --to vtt"],
   [
     "Export single-word/CJK captions without re-grouping",
     "hyperframes transcribe transcript.json --to vtt --preserve-cues",
   ],
 ];
-import { resolve, join, extname, dirname } from "node:path";
-import * as clack from "@clack/prompts";
-import { c } from "../ui/colors.js";
-import { DEFAULT_MODEL, isWhisperUnavailable } from "../whisper/manager.js";
-
-// Minimum accepted value for `--timeout` / `HYPERFRAMES_TRANSCRIBE_TIMEOUT_MS`.
-// Kept out of `whisper/transcribe.ts` (avoids a top-level import into this
-// command module) so the CLI test file can hoist its
-// `vi.mock("../whisper/transcribe.js")` factory without the mocked module
-// entering the sync-import graph. Below this floor the whisper spawn has no
-// realistic chance of completing even on the fastest hardware for the shortest clip.
-const CLI_TIMEOUT_MIN_MS = 5000;
-import { trackCommandFailure, trackTranscribeUnavailable } from "../telemetry/events.js";
 
 export default defineCommand({
   meta: {
@@ -55,27 +51,29 @@ export default defineCommand({
     engine: {
       type: "string",
       description:
-        "ASR engine: auto (Parakeet if installed, else whisper), parakeet, or whisper. Default: auto. Parakeet is more accurate and faster; enable with `uv pip install parakeet-mlx`.",
+        "ASR engine: auto (Parakeet if installed and it covers --language, else whisper), parakeet, or whisper. Default: auto. Parakeet is more accurate and faster; install it with `hyperframes models install parakeet`.",
       alias: "e",
     },
     model: {
       type: "string",
-      description: `Whisper model (default: ${DEFAULT_MODEL}). Options: tiny.en, base.en, small.en, medium.en, large-v3`,
+      description: `Whisper model (default: ${DEFAULT_MODEL}). Options: tiny.en, base.en, small.en, medium.en, small, medium, large-v3`,
       alias: "m",
     },
     language: {
       type: "string",
-      description: "Language code (e.g. en, es, ja). Filters out non-target language speech.",
+      description:
+        "Language code (e.g. en, es, ja). Whisper transcribes as this language; Parakeet, used when it covers it, detects the language itself.",
       alias: "l",
     },
     json: {
       type: "boolean",
-      description: "Output result as JSON",
+      description: "Output result as JSON; progress JSON lines go to stderr",
       default: false,
     },
     to: {
       type: "string",
-      description: "Export transcript sidecar format: srt or vtt",
+      description:
+        "Write an srt or vtt caption sidecar: exported from a transcript file, or written after transcribing audio/video",
     },
     output: {
       type: "string",
@@ -87,6 +85,12 @@ export default defineCommand({
       description:
         "Keep each transcript entry as its own caption cue (skip word-level grouping). Use when exporting an already-cued transcript whose entries have no internal spaces, e.g. single-word or CJK captions.",
       default: false,
+    },
+    "runtime-install": {
+      type: "boolean",
+      default: true,
+      description:
+        "Allow installing the Whisper runtime. Use --no-runtime-install to require an existing runtime; model downloads remain allowed.",
     },
     optional: {
       type: "boolean",
@@ -106,289 +110,212 @@ export default defineCommand({
     },
   },
   async run({ args }) {
-    const inputPath = resolve(args.input);
-    if (!existsSync(inputPath)) {
-      const message = `File not found: ${args.input}`;
-      trackCommandFailure("transcribe", message);
-      console.error(c.error(message));
-      failCommand();
-    }
-
-    // Default to the directory containing the input file so transcript.json
-    // lands next to narration.wav regardless of where the command is run from.
-    // Explicit --dir overrides this (e.g. for import mode targeting a project dir).
-    const dir = resolve(args.dir ?? dirname(inputPath));
-    const ext = extname(inputPath).toLowerCase();
-
-    // ── Import mode: convert existing transcript ──────────────────────────
-    const isImport = ext === ".json" || ext === ".srt" || ext === ".vtt";
-    const to = parseExportFormat(args.to, args.json);
-
-    if (to) {
-      if (!isImport) {
-        failWith(
-          "--to can only export from transcript files (.json, .srt, .vtt). Run transcribe first.",
-          args.json,
-        );
+    const { json } = args;
+    const ui: { spin: Spinner | null } = { spin: null };
+    let result: TranscribeResult;
+    try {
+      result = await runTranscribe({
+        input: args.input,
+        dir: args.dir,
+        engine: args.engine,
+        model: args.model,
+        language: args.language,
+        installRuntime: args["runtime-install"],
+        timeoutMs: readTimeout(args.timeout)?.ms,
+        captions: { format: args.to, outputPath: args.output, preserveCues: args["preserve-cues"] },
+        stopOnProcessSignals: true,
+        onStatus: json ? undefined : (message) => ui.spin?.message(message),
+        onProgress: json ? createProgressWriter(process.stderr) : undefined,
+        onEngine: (event) => {
+          if (event.notice && !json) console.error(c.dim(`  Note: ${event.notice}`));
+          ui.spin = showEngine(event, ui.spin, { json, model: args.model });
+        },
+      });
+    } catch (err) {
+      if (!(err instanceof TranscribeError)) throw err;
+      if (isRunFailure(err)) {
+        reportRunFailure(err, ui.spin, { json, optional: args.optional === true });
+      } else {
+        reportSetupFailure(err, json, args.timeout);
       }
-      return exportTranscript(inputPath, dir, to, args.output, args.json, args["preserve-cues"]);
+      return;
     }
-
-    if (isImport) {
-      return importTranscript(inputPath, dir, args.json);
-    }
-
-    // ── Transcribe mode: run the ASR engine ──────────────────────────────
-    const timeoutMs = parseTimeoutMs(args.timeout, args.json);
-
-    return transcribeAudio(inputPath, dir, {
-      engine: args.engine,
-      model: args.model,
-      language: args.language,
-      json: args.json,
-      optional: args.optional,
-      timeoutMs,
-    });
+    reportResult(result, json, ui.spin);
   },
 });
 
+type Spinner = ReturnType<typeof clack.spinner>;
+
 /**
- * Resolve the whisper timeout override from `--timeout <ms>` or the
- * `HYPERFRAMES_TRANSCRIBE_TIMEOUT_MS` env var. The flag wins over env; both
- * paths share the same integer + minimum-5000ms validation so a bad value
- * fails loud instead of silently reverting to the auto-scaled default.
- * Returns `undefined` when neither source is set — the transcribe layer then
- * derives the timeout from audio duration and model factor.
+ * The whisper timeout override from `--timeout <ms>` or the
+ * `HYPERFRAMES_TRANSCRIBE_TIMEOUT_MS` env var. The flag wins over env. The
+ * transcribe layer rejects a value that is not an integer >= MIN_TIMEOUT_MS, at
+ * the point it would use it, so a bad value fails loud instead of silently
+ * reverting to the auto-scaled default. Undefined when neither source is set:
+ * the timeout then comes from audio duration and model factor.
  */
-function parseTimeoutMs(raw: string | undefined, json: boolean): number | undefined {
+function readTimeout(
+  raw: string | undefined,
+): { ms: number; source: string; origin: string } | undefined {
   const source = raw ?? process.env["HYPERFRAMES_TRANSCRIBE_TIMEOUT_MS"];
   if (source == null || source === "") return undefined;
+  const origin = raw != null ? "--timeout" : "HYPERFRAMES_TRANSCRIBE_TIMEOUT_MS";
+  return { ms: Number.parseInt(source, 10), source, origin };
+}
 
-  const parsed = Number.parseInt(source, 10);
-  if (!Number.isFinite(parsed) || parsed < CLI_TIMEOUT_MIN_MS) {
-    const origin = raw != null ? "--timeout" : "HYPERFRAMES_TRANSCRIBE_TIMEOUT_MS";
-    failWith(
-      `Invalid ${origin}: "${source}". Must be an integer >= ${CLI_TIMEOUT_MIN_MS} (ms).`,
-      json,
+/** Starts the spinner for a runner, or, after a Parakeet failure, says which runner takes over. */
+function showEngine(
+  event: TranscribeEngineEvent,
+  spin: Spinner | null,
+  opts: { json: boolean; model?: string },
+): Spinner | null {
+  // The requested model, as the spinner has always shown it; event.model is the one whisper runs.
+  const label = c.accent(event.runner === "whisper" ? (opts.model ?? DEFAULT_MODEL) : "Parakeet");
+  if (event.fallbackReason !== undefined) {
+    spin?.clear();
+    console.error(c.warn(`${event.fallbackReason}. Using ${event.runner} for this run.`));
+    spin?.start(`Transcribing with ${label}...`);
+    return spin;
+  }
+  // --model selects the whisper model only; Parakeet uses its own fixed model.
+  if (event.runner !== "whisper" && opts.model && !opts.json) {
+    console.error(
+      c.dim(`  Note: --model applies to the whisper engine only; ignored under Parakeet.`),
     );
   }
-  return parsed;
+  const started = opts.json ? null : clack.spinner();
+  started?.start(`Transcribing with ${label}...`);
+  return started;
 }
 
 function failWith(message: string, json: boolean): never {
-  trackCommandFailure("transcribe", message);
   if (json) {
     console.log(JSON.stringify({ ok: false, error: message }));
   } else {
     console.error(c.error(message));
   }
-  failCommand();
+  failCommand(1, message);
 }
 
-function parseExportFormat(
-  value: string | undefined,
-  json: boolean,
-): CaptionExportFormat | undefined {
-  if (!value) return undefined;
-  const normalized = value.toLowerCase();
-  if (normalized === "srt" || normalized === "vtt") return normalized;
-
-  failWith(`Unsupported caption export format: ${value}. Use srt or vtt.`, json);
+/** Failures once a runner has started, reported through its spinner. */
+function isRunFailure(err: TranscribeError): boolean {
+  if (err.code === "caption_write_failed") return err.transcriptPath !== undefined;
+  return err.code === "cancelled" || err.code === "whisper_unavailable" || err.code === "failed";
 }
 
-// ---------------------------------------------------------------------------
-// Import existing transcript
-// ---------------------------------------------------------------------------
-
-function exitNoWords(json: boolean): never {
-  failWith("No words found in transcript.", json);
+function reportSetupFailure(err: TranscribeError, json: boolean, timeoutFlag?: string): never {
+  if (err.code === "input_not_found") {
+    console.error(c.error(err.message));
+    failCommand(1, err.message);
+  }
+  // An unreadable transcript file keeps failing the way it always has: with the parser's own error.
+  if (err.code === "invalid_transcript") throw err.cause;
+  const timeout = err.code === "invalid_timeout" ? readTimeout(timeoutFlag) : undefined;
+  if (timeout) {
+    failWith(
+      `Invalid ${timeout.origin}: "${timeout.source}". Must be an integer >= ${MIN_TIMEOUT_MS} (ms).`,
+      json,
+    );
+  }
+  failWith(err.message, json);
 }
 
-async function importTranscript(inputPath: string, dir: string, json: boolean): Promise<void> {
-  const { loadTranscript, patchCaptionHtml } = await import("../whisper/normalize.js");
-  const { words, format } = loadTranscript(inputPath);
+function reportRunFailure(
+  err: TranscribeError,
+  spin: Spinner | null,
+  opts: { json: boolean; optional: boolean },
+): void {
+  if (err.code === "whisper_unavailable") return reportWhisperUnavailable(err, spin, opts);
+  if (err.code === "cancelled" || err.code === "caption_write_failed") {
+    if (opts.json) console.log(JSON.stringify({ ok: false, error: err.message }));
+    else spin?.stop(err.code === "cancelled" ? c.warn(err.message) : c.error(err.message));
+    setCommandExitCode(err.code === "cancelled" ? 130 : 1);
+    return;
+  }
+  if (opts.json) {
+    console.log(JSON.stringify({ ok: false, error: err.message }));
+  } else {
+    spin?.stop(c.error(`Transcription failed: ${err.message}`));
+  }
+  failCommand(1, err.cause);
+}
 
-  if (words.length === 0) exitNoWords(json);
-
-  const outPath = join(dir, "transcript.json");
-  writeFileSync(outPath, JSON.stringify(words, null, 2));
-  patchCaptionHtml(dir, words);
-
-  if (json) {
+// whisper-cpp is an optional prerequisite, not part of the CLI. When it is
+// simply unavailable (no binary, no toolchain to build one), that is a setup
+// condition, not a command crash — report it on its own metric so it does
+// not inflate the cli_error budget, and let `--optional` callers continue.
+function reportWhisperUnavailable(
+  err: TranscribeError,
+  spin: Spinner | null,
+  opts: { json: boolean; optional: boolean },
+): void {
+  trackTranscribeUnavailable({ optional: opts.optional });
+  const { install } = err;
+  if (opts.json) {
     console.log(
-      JSON.stringify({ ok: true, format, wordCount: words.length, transcriptPath: outPath }),
+      JSON.stringify({ ok: false, skipped: true, reason: "whisper_unavailable", install }),
     );
   } else {
-    console.log(
-      `${c.success("◇")}  Imported ${c.accent(String(words.length))} words from ${c.accent(format)} format → ${c.accent("transcript.json")}`,
-    );
+    const orParakeet = install ? `\nOr transcribe with Parakeet after: ${install}` : "";
+    spin?.stop(c.warn(`Captions skipped — ${err.message}${orParakeet}`));
   }
+  // Optional callers (pipelines) treat a missing prerequisite as a clean
+  // skip; explicit runs still surface non-zero. Set the status and return
+  // rather than guarding a process.exit() on the flag.
+  setCommandExitCode(opts.optional ? 0 : 1);
 }
 
-// ---------------------------------------------------------------------------
-// Export transcript sidecars
-// ---------------------------------------------------------------------------
-
-async function exportTranscript(
-  inputPath: string,
-  dir: string,
-  to: CaptionExportFormat,
-  output: string | undefined,
-  json: boolean,
-  preserveCues: boolean,
-): Promise<void> {
-  const { loadTranscript, formatSrt, formatVtt } = await import("../whisper/normalize.js");
-  const { words, format } = loadTranscript(inputPath);
-
-  if (words.length === 0) exitNoWords(json);
-
-  // A .srt/.vtt source is already phrase-level; keep its cue boundaries 1:1.
-  // --preserve-cues forces the same for an already-cued transcript.json whose
-  // entries have no internal whitespace (single-word or CJK captions), which
-  // the automatic whitespace heuristic in wordsToCues can't detect.
-  const preGrouped = preserveCues || format === "srt" || format === "vtt" || undefined;
-  const outPath = resolve(output ?? join(dir, `transcript.${to}`));
-  const content =
-    to === "srt" ? formatSrt(words, { preGrouped }) : formatVtt(words, { preGrouped });
-  writeFileSync(outPath, content);
-
-  if (json) {
-    console.log(
-      JSON.stringify({ ok: true, format: to, wordCount: words.length, outputPath: outPath }),
-    );
-  } else {
-    console.log(
-      `${c.success("◇")}  Exported ${c.accent(String(words.length))} words to ${c.accent(to.toUpperCase())} → ${c.accent(outPath)}`,
-    );
-  }
+function reportSidecar(to: CaptionFormat, wordCount: number, outPath: string): void {
+  console.log(
+    `${c.success("◇")}  Exported ${c.accent(String(wordCount))} words to ${c.accent(to.toUpperCase())} → ${c.accent(outPath)}`,
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Transcribe audio/video with whisper
-// ---------------------------------------------------------------------------
-
-// fallow-ignore-next-line complexity
-async function transcribeAudio(
-  inputPath: string,
-  dir: string,
-  opts: {
-    engine?: string;
-    model?: string;
-    language?: string;
-    json?: boolean;
-    optional?: boolean;
-    timeoutMs?: number;
-  },
-): Promise<void> {
-  const { transcribe } = await import("../whisper/transcribe.js");
-  const { loadTranscript, patchCaptionHtml, stripBeforeOnset } =
-    await import("../whisper/normalize.js");
-
-  // Engine: auto (Parakeet if installed, else whisper), or forced parakeet/whisper.
-  const engine = (opts.engine ?? "auto").toLowerCase();
-  if (engine !== "auto" && engine !== "parakeet" && engine !== "whisper") {
-    failWith(`Unknown --engine: ${opts.engine}. Use auto, parakeet, or whisper.`, !!opts.json);
-  }
-  const useParakeet = engine === "parakeet" || (engine === "auto" && !!findParakeet());
-
-  const model = opts.model ?? DEFAULT_MODEL;
-  // --model selects the whisper model only; Parakeet uses its own fixed model.
-  if (useParakeet && opts.model && !opts.json) {
-    console.error(
-      c.dim(`  Note: --model applies to the whisper engine only; ignored under Parakeet.`),
-    );
-  }
-  const label = useParakeet ? "Parakeet" : model;
-  const spin = opts.json ? null : clack.spinner();
-  spin?.start(`Transcribing with ${c.accent(label)}...`);
-
-  try {
-    const result = useParakeet
-      ? transcribeWithParakeet(inputPath, dir, {
-          language: opts.language,
-          onProgress: spin ? (msg) => spin.message(msg) : undefined,
-        })
-      : await transcribe(inputPath, dir, {
-          model,
-          language: opts.language,
-          onProgress: spin ? (msg) => spin.message(msg) : undefined,
-          timeoutMs: opts.timeoutMs,
-        });
-
-    let { words } = loadTranscript(result.transcriptPath);
-
-    if (result.speechOnsetSeconds != null) {
-      const before = words.length;
-      words = stripBeforeOnset(words, result.speechOnsetSeconds);
-      const stripped = before - words.length;
-      if (stripped > 0 && !opts.json) {
-        spin?.message(
-          `Stripped ${stripped} words before speech onset at ${result.speechOnsetSeconds.toFixed(1)}s`,
-        );
-      }
-    }
-
-    writeFileSync(result.transcriptPath, JSON.stringify(words, null, 2));
-    patchCaptionHtml(dir, words);
-
-    if (opts.json) {
+function reportResult(result: TranscribeResult, json: boolean, spin: Spinner | null): void {
+  if (result.kind === "imported") {
+    const { format, wordCount, transcriptPath } = result;
+    if (json) {
+      console.log(JSON.stringify({ ok: true, format, wordCount, transcriptPath }));
+    } else {
       console.log(
-        JSON.stringify({
-          ok: true,
-          engine: useParakeet ? "parakeet" : "whisper",
-          model: useParakeet ? "parakeet-tdt-0.6b-v3" : model,
-          wordCount: words.length,
-          durationSeconds: result.durationSeconds,
-          speechOnsetSeconds: result.speechOnsetSeconds,
-          transcriptPath: result.transcriptPath,
-        }),
-      );
-    } else {
-      const onsetNote =
-        result.speechOnsetSeconds != null
-          ? ` — speech detected at ${result.speechOnsetSeconds.toFixed(1)}s`
-          : "";
-      spin?.stop(
-        c.success(
-          `Transcribed ${c.accent(String(words.length))} words (${result.durationSeconds.toFixed(1)}s${onsetNote})`,
-        ),
+        `${c.success("◇")}  Imported ${c.accent(String(wordCount))} words from ${c.accent(format)} format → ${c.accent("transcript.json")}`,
       );
     }
-  } catch (err) {
-    // Surface the last few lines of the ASR subprocess's stderr, which
-    // execFileSync captures but otherwise drops on the floor — that's where
-    // parakeet-mlx / whisper report the actual failure cause.
-    const stderr =
-      err && typeof err === "object" && "stderr" in err && err.stderr
-        ? String(err.stderr).trim().split("\n").slice(-3).join("\n")
-        : "";
-    const base = err instanceof Error ? err.message : String(err);
-    const message = stderr ? `${base}\n${stderr}` : base;
-
-    // whisper-cpp is an optional prerequisite, not part of the CLI. When it is
-    // simply unavailable (no binary, no toolchain to build one), that is a setup
-    // condition, not a command crash — report it on its own metric so it does
-    // not inflate the cli_error budget, and let `--optional` callers continue.
-    if (isWhisperUnavailable(err)) {
-      trackTranscribeUnavailable({ optional: opts.optional === true });
-      if (opts.json) {
-        console.log(JSON.stringify({ ok: false, skipped: true, reason: "whisper_unavailable" }));
-      } else {
-        spin?.stop(c.warn(`Captions skipped — ${message}`));
-      }
-      // Optional callers (pipelines) treat a missing prerequisite as a clean
-      // skip; explicit runs still surface non-zero. Set the status and return
-      // rather than guarding a process.exit() on the flag.
-      setCommandExitCode(opts.optional ? 0 : 1);
-      return;
-    }
-
-    trackCommandFailure("transcribe", err);
-    if (opts.json) {
-      console.log(JSON.stringify({ ok: false, error: message }));
-    } else {
-      spin?.stop(c.error(`Transcription failed: ${message}`));
-    }
-    failCommand();
+    return;
   }
+
+  if (result.kind === "exported") {
+    const { format, wordCount, outputPath } = result;
+    if (json) console.log(JSON.stringify({ ok: true, format, wordCount, outputPath }));
+    else reportSidecar(format, wordCount, outputPath);
+    return;
+  }
+
+  const { captions } = result;
+  if (json) {
+    console.log(
+      JSON.stringify({
+        ok: true,
+        engine: result.engine,
+        model: result.model,
+        detectedLanguage: result.detectedLanguage,
+        wordCount: result.wordCount,
+        durationSeconds: result.durationSeconds,
+        speechOnsetSeconds: result.speechOnsetSeconds,
+        transcriptPath: result.transcriptPath,
+        ...captions,
+      }),
+    );
+    return;
+  }
+  const onsetNote =
+    result.speechOnsetSeconds != null
+      ? ` — speech detected at ${result.speechOnsetSeconds.toFixed(1)}s`
+      : "";
+  spin?.stop(
+    c.success(
+      `Transcribed ${c.accent(String(result.wordCount))} words (${result.durationSeconds.toFixed(1)}s${onsetNote})`,
+    ),
+  );
+  if (captions) reportSidecar(captions.format, result.wordCount, captions.outputPath);
 }

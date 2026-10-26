@@ -27,42 +27,42 @@ details (timing, transitions, etc.).
 
 See [sequencing.md](sequencing.md) for nesting and stagger details.
 
-| Remotion                                   | HyperFrames                                                                                               |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `<Sequence from={F} durationInFrames={D}>` | `<div data-start="<F/fps>" data-duration="<D/fps>" data-track-index="N">`                                 |
-| `<Series>` + `<Series.Sequence>`           | siblings with sequential `data-start` values                                                              |
-| `<Loop durationInFrames={D}>`              | not a primitive — emit a bounded GSAP repeat from the available duration                                  |
-| `<Freeze frame={F}>`                       | drop the wrapper; HF doesn't have running animation outside the seek-driven timeline so freeze is a no-op |
+| Remotion                                   | HyperFrames                                                                                                                                                                                                                 |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<Sequence from={F} durationInFrames={D}>` | a host `<div data-composition-src="compositions/<name>.html" data-start="<F/fps>" data-duration="<D/fps>" data-track-index="N">` in the root, its content in that sub-composition file (see [sequencing.md](sequencing.md)) |
+| `<Series>` + `<Series.Sequence>`           | sibling scene hosts with sequential `data-start` values                                                                                                                                                                     |
+| `<Loop durationInFrames={D}>`              | not a primitive — emit a bounded GSAP repeat from the available duration                                                                                                                                                    |
+| `<Freeze frame={F}>`                       | drop the wrapper; HF doesn't have running animation outside the seek-driven timeline so freeze is a no-op                                                                                                                   |
 
 ## Timing
 
 See [timing.md](timing.md) — this is the highest-leverage section.
 
-| Remotion                                                   | HyperFrames                                                                                                        |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `useCurrentFrame()`                                        | drop — HF seeks the timeline. The math derived from `frame` becomes an animatable property of a paused GSAP tween. |
-| `useVideoConfig()` for `fps` / `durationInFrames`          | drop — read from `data-fps` / `data-duration` on `#stage`                                                          |
-| `interpolate(frame, [a,b], [x,y])` (linear)                | `gsap.fromTo(t, {p:x}, {p:y, duration:(b-a)/fps, ease:"none"})` at offset `a/fps`                                  |
-| `interpolate(frame, [a,b,c,d], [x,y,y,z])` (multi-segment) | three `gsap.to` calls at offsets `a/fps`, `b/fps`, `c/fps`                                                         |
-| `interpolate(..., {easing: Easing.bezier})`                | GSAP `CustomEase.create("c", "M0,0 C${a},${b} ${c},${d} 1,1")`                                                     |
-| `spring({frame, fps, config: {damping, stiffness, mass}})` | GSAP `back.out(N)` — see [timing.md](timing.md) for damping → overshoot table                                      |
-| `interpolateColors(frame, range, colors)`                  | `gsap.to({...}, { backgroundColor, color, duration, ease })` — GSAP handles color tweens natively                  |
-| `Easing.in / .out / .inOut(power)`                         | GSAP `power<N>.in` / `power<N>.out` / `power<N>.inOut`                                                             |
+| Remotion                                                   | HyperFrames                                                                                                                    |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `useCurrentFrame()`                                        | drop — HF seeks the timeline. The math derived from `frame` becomes an animatable property of a paused GSAP tween.             |
+| `useVideoConfig()` for `fps` / `durationInFrames`          | drop — read from `data-fps` / `data-duration` on `#stage`                                                                      |
+| `interpolate(frame, [a,b], [x,y])` (linear)                | `gsap.fromTo(t, {p:x}, {p:y, duration:(b-a)/fps, ease:"none"})` at offset `a/fps`                                              |
+| `interpolate(frame, [a,b,c,d], [x,y,y,z])` (multi-segment) | three `gsap.to` calls at offsets `a/fps`, `b/fps`, `c/fps`                                                                     |
+| `interpolate(..., {easing: Easing.bezier})`                | GSAP `CustomEase.create("c", "M0,0 C${a},${b} ${c},${d} 1,1")`                                                                 |
+| `spring({frame, fps, config: {damping, stiffness, mass}})` | GSAP `back.out(N)` — see [timing.md](timing.md) for damping → overshoot table                                                  |
+| `interpolateColors(frame, range, colors)`                  | `gsap.to({...}, { backgroundColor, color, duration, ease })` — GSAP handles color tweens natively                              |
+| `Easing.in / .out / .inOut(Easing.poly(N))`                | GSAP `power<N-1>.in` / `power<N-1>.out` / `power<N-1>.inOut` for integer N=1–5; see [timing.md](timing.md) for other exponents |
 
 ## Media
 
 See [media.md](media.md) for trim, volume ramps, and decoder notes.
 
-| Remotion                               | HyperFrames                                                                 |
-| -------------------------------------- | --------------------------------------------------------------------------- |
-| `<Audio src volume>`                   | `<audio data-start data-duration data-track-index data-volume src>`         |
-| `<Audio playbackRate startFrom endAt>` | `data-playback-rate`, `data-trim-start`, `data-trim-end`                    |
-| `<Video src>`                          | `<video muted playsinline data-start data-duration data-track-index src>`   |
-| `<OffthreadVideo>`                     | `<video>` — HF doesn't need the off-thread variant (uses headless Chrome)   |
-| `<Img src>`                            | `<img>`                                                                     |
-| `<IFrame src>`                         | `<iframe>` — HF auto-falls back to screenshot mode for nested iframes       |
-| `staticFile("x.png")`                  | `"assets/x.png"` — copy the file into `hf-src/assets/` next to `index.html` |
-| `delayRender()` / `continueRender()`   | drop — HF waits on asset readiness via the Frame Adapter pattern            |
+| Remotion                               | HyperFrames                                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<Audio src volume>`                   | `<audio data-start data-duration data-track-index data-volume src>`                                                                                                                                                                                                                                                                          |
+| `<Audio playbackRate startFrom endAt>` | `data-playback-rate`, `data-trim-start`, `data-trim-end`                                                                                                                                                                                                                                                                                     |
+| `<Video src>`                          | `<video playsinline data-has-audio="true" data-start data-duration data-track-index src>` only when the file has an audio stream (check with `ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 <file>`: non-empty means it has audio) and the source is not `muted` or `volume={0}`; otherwise `muted` instead |
+| `<OffthreadVideo>`                     | `<video>` — HF doesn't need the off-thread variant (uses headless Chrome)                                                                                                                                                                                                                                                                    |
+| `<Img src>`                            | `<img>`                                                                                                                                                                                                                                                                                                                                      |
+| `<IFrame src>`                         | `<iframe>` — HF auto-falls back to screenshot mode for nested iframes                                                                                                                                                                                                                                                                        |
+| `staticFile("x.png")`                  | `"assets/x.png"` in the root, `"../assets/x.png"` inside a `compositions/` scene file — copy the file into `hf-src/assets/` next to `index.html`                                                                                                                                                                                             |
+| `delayRender()` / `continueRender()`   | drop — HF waits on asset readiness via the Frame Adapter pattern                                                                                                                                                                                                                                                                             |
 
 ## Transitions
 

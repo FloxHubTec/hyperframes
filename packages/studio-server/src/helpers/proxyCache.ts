@@ -8,6 +8,10 @@ const DEFAULT_MIN_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const PROXY_EXTENSIONS: ReadonlySet<string> = new Set(
   Object.values(PROXY_VARIANT_CONFIG).map(({ extension }) => extension),
 );
+const TRANSCODER_PROXY_NAME = /^[0-9a-f]{64}\.\w+$/;
+const TRANSCODER_TEMP_NAME = /^\.tmp-[0-9a-f-]{36}-(?:\.part-[0-9a-f]{64}-\d+|[0-9a-f]{64})\.\w+$/;
+const TRANSCODER_PIECE_NAME = /^\.part-([0-9a-f]{64})-\d+(\.\w+)$/;
+const STALE_PIECE_MS = 60 * 60 * 1000;
 
 export interface ProxyCacheCleanupOptions {
   maxBytes?: number;
@@ -16,6 +20,7 @@ export interface ProxyCacheCleanupOptions {
   minSweepIntervalMs?: number;
   protectedPaths?: ReadonlySet<string>;
   now?: number;
+  dryRun?: boolean;
 }
 
 export interface ProxyCacheCleanupResult {
@@ -60,6 +65,24 @@ function shouldSkipSweep(cacheDir: string, now: number, minSweepIntervalMs: numb
   return false;
 }
 
+function isLeftoverName(name: string): boolean {
+  return TRANSCODER_TEMP_NAME.test(name) || TRANSCODER_PIECE_NAME.test(name);
+}
+
+function leftoverIsDead(
+  cacheDir: string,
+  name: string,
+  modifiedAt: number,
+  protectedPaths: ReadonlySet<string>,
+  now: number,
+  staleTempMs: number,
+): boolean {
+  const piece = TRANSCODER_PIECE_NAME.exec(name);
+  if (!piece) return now - modifiedAt >= staleTempMs;
+  const copyIsRunning = protectedPaths.has(join(cacheDir, `${piece[1]}${piece[2]}`));
+  return !copyIsRunning && now - modifiedAt >= STALE_PIECE_MS;
+}
+
 function readCacheInventory(
   cacheDir: string,
   protectedPaths: ReadonlySet<string>,
@@ -78,9 +101,14 @@ function readCacheInventory(
       modifiedAt: stat.mtimeMs,
       protected: protectedPaths.has(path),
     };
-    if (dirent.name.startsWith(".tmp-")) {
-      if (now - stat.mtimeMs >= staleTempMs) staleTemps.push(entry);
-    } else if (PROXY_EXTENSIONS.has(extname(dirent.name))) {
+    if (isLeftoverName(dirent.name)) {
+      if (leftoverIsDead(cacheDir, dirent.name, stat.mtimeMs, protectedPaths, now, staleTempMs)) {
+        staleTemps.push(entry);
+      }
+    } else if (
+      TRANSCODER_PROXY_NAME.test(dirent.name) &&
+      PROXY_EXTENSIONS.has(extname(dirent.name))
+    ) {
       entries.push(entry);
     }
   }
@@ -97,21 +125,24 @@ function evictCacheEntries(
   now: number,
   maxIdleMs: number,
   maxBytes: number,
+  dryRun: boolean,
 ): Omit<ProxyCacheCleanupResult, "skipped"> {
   const bytesBefore = entries.reduce((total, entry) => total + entry.size, 0);
   let bytesAfter = bytesBefore;
   const removed: string[] = [];
   const remove = (entry: CacheEntry, countsTowardBudget: boolean): void => {
-    unlinkSync(entry.path);
+    if (!dryRun) unlinkSync(entry.path);
     removed.push(entry.path);
     if (countsTowardBudget) bytesAfter -= entry.size;
   };
 
   for (const entry of staleTemps) remove(entry, false);
+  const kept: CacheEntry[] = [];
   for (const entry of entries) {
     if (!entry.protected && now - entry.modifiedAt >= maxIdleMs) remove(entry, true);
+    else kept.push(entry);
   }
-  for (const entry of entries) {
+  for (const entry of kept) {
     if (bytesAfter <= maxBytes) break;
     if (!entry.protected && existsSync(entry.path)) remove(entry, true);
   }
@@ -145,7 +176,7 @@ export function cleanupProxyCache(
   const protectedPaths = options.protectedPaths ?? new Set<string>();
   const { entries, staleTemps } = readCacheInventory(cacheDir, protectedPaths, now, staleTempMs);
   return {
-    ...evictCacheEntries(entries, staleTemps, now, maxIdleMs, maxBytes),
+    ...evictCacheEntries(entries, staleTemps, now, maxIdleMs, maxBytes, options.dryRun ?? false),
     skipped: false,
   };
 }

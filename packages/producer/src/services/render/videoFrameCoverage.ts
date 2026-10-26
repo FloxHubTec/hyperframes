@@ -45,7 +45,13 @@
  */
 
 import { parseHTML } from "linkedom";
-import { fpsToNumber, normalizePlaybackRate, toFps, type FpsInput } from "@hyperframes/core";
+import {
+  fpsToNumber,
+  normalizeRateSpec,
+  sourceTimeAt,
+  toFps,
+  type FpsInput,
+} from "@hyperframes/core";
 import {
   extractionFrameCountForDuration,
   resolvePlayableVideoDuration,
@@ -128,9 +134,9 @@ export function resolveVideoCoverageThreshold(
 }
 
 /**
- * Count frames in a clip's authored `[start,end)` window. CFR extraction uses
- * FFmpeg's `-vf fps=<fps>` and rounds to the nearest output-frame boundary;
- * VFR extraction uses `-fps_mode cfr -r <fps>` and rounds up. Missing entries
+ * Count frames in a clip's authored `[start,end)` window. CFR extraction
+ * rounds to the nearest output-frame boundary and VFR extraction rounds up,
+ * as `extractionFrameCountForDuration` does. Missing entries
  * retain the fail-closed `ceil` default. Positive sub-frame clips emit one.
  */
 export function expectedFramesForClip(
@@ -166,8 +172,10 @@ function expectedFramesForVideo(
   fps: FpsInput,
 ): number {
   const rounding = entry && !entry.metadata.isVFR ? "nearest" : "ceil";
-  const playbackRate = normalizePlaybackRate(video.playbackRate ?? 1);
-  const slotSourceDuration = Math.max(0, video.end - video.start) * playbackRate;
+  const slotSourceDuration = sourceTimeAt(
+    normalizeRateSpec(video.playbackRate),
+    Math.max(0, video.end - video.start),
+  );
   const slotFrames = expectedFramesForClip(0, slotSourceDuration, fps, rounding);
   if (!entry) return slotFrames;
 
@@ -243,7 +251,7 @@ export function assertVideoFrameCoverage(
   throw new VideoFrameCoverageError(
     `Video "${worst.videoId}" captured ${worst.capturedFrames} of expected ${worst.expectedFrames} frames ` +
       `(coverage ${pct}%, threshold ${thresholdPct}%). ` +
-      `check/snapshot may pass while the encoded MP4 renders this clip blank — aborting render ` +
+      `check/snapshot may pass while the encoded MP4 renders this clip blank, so the render is aborted ` +
       `to prevent shipping a wrong MP4.${suffix} ` +
       `Set HF_VIDEO_COVERAGE_THRESHOLD=0 to disable this gate.`,
     { threshold, worst, failedReports: sorted },

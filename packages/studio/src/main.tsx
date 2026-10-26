@@ -1,35 +1,26 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { IconContext } from "@phosphor-icons/react";
 import { StudioApp } from "./App";
+import { ShowThemeToggle } from "./components/ThemeToggle";
 import { StudioErrorBoundary } from "./components/StudioErrorBoundary";
+import { readIconTokens } from "./styles/iconTokens";
 import { trackStudioEvent } from "./utils/studioTelemetry";
+import {
+  errorProps,
+  isCompositionAssetError,
+  isExtensionOnlyStack,
+} from "./utils/rejectionTelemetry";
+import { prefetchPreviewForHash } from "./utils/previewPrefetch";
+import { bindThumbnailPageLifecycle } from "./player/lib/thumbnailPageLifecycle";
 import "./styles/studio.css";
 
+const unbindThumbnailPageLifecycle = bindThumbnailPageLifecycle(window, document);
+import.meta.hot?.dispose(unbindThumbnailPageLifecycle);
+
+prefetchPreviewForHash(window.location.hash);
+window.addEventListener("hashchange", () => prefetchPreviewForHash(window.location.hash));
 trackStudioEvent("session_start");
-
-function errorProps(value: unknown): {
-  error_message: string;
-  error_name: string | null;
-  stack_trace: string | null;
-} {
-  if (value instanceof Error) {
-    return {
-      error_message: value.message,
-      error_name: value.name,
-      stack_trace: value.stack?.slice(0, 4000) ?? null,
-    };
-  }
-  return { error_message: String(value), error_name: null, stack_trace: null };
-}
-
-// fallow-ignore-next-line complexity
-function isCompositionAssetError(msg: string, name: string | null): boolean {
-  if (msg.includes("Error fetching") && (msg.includes("404") || msg.includes("Not Found")))
-    return true;
-  if (name === "EncodingError" || msg.includes("unsupported or unrecognizable format")) return true;
-  if (msg.includes("MEDIA_ERR_SRC_NOT_SUPPORTED")) return true;
-  return false;
-}
 
 const ERROR_CAP = 50;
 let errorCount = 0;
@@ -63,6 +54,10 @@ window.addEventListener("error", (event) => {
 });
 
 let filteredAssetErrorCount = 0;
+let filteredAbortCount = 0;
+// Bounded so a hostile extension cannot grow it; a novel abort message still surfaces once.
+const seenAbortMessages = new Set<string>();
+const MAX_SEEN_ABORT_MESSAGES = 20;
 
 // fallow-ignore-next-line complexity
 window.addEventListener("unhandledrejection", (event) => {
@@ -78,6 +73,30 @@ window.addEventListener("unhandledrejection", (event) => {
     }
     return;
   }
+  // An AbortError rejection is a cancellation we asked for, not a failure. Our own
+  // fetch chains handle it; the unhandled copies come from browser extensions that
+  // wrap window.fetch and derive a promise from each request without a rejection
+  // handler, so they reject with our abort reason whenever a thumbnail lease is
+  // released mid-fetch. Filtered before the cap so a scroll burst cannot exhaust
+  // ERROR_CAP and silence the session's real rejections. Sampled per distinct
+  // message, so an abort we have not seen before (e.g. our own "Aborted") is
+  // recorded once instead of drowning in the extension flood.
+  if (props.error_name === "AbortError") {
+    filteredAbortCount++;
+    const message = props.error_message.slice(0, 200);
+    const novel =
+      !seenAbortMessages.has(message) && seenAbortMessages.size < MAX_SEEN_ABORT_MESSAGES;
+    if (novel) seenAbortMessages.add(message);
+    if (novel || filteredAbortCount % 100 === 0) {
+      trackStudioEvent("abort_rejection_filtered", {
+        error_message: message,
+        total_filtered: filteredAbortCount,
+      });
+    }
+    return;
+  }
+  // Not ours: an extension's own promise. Dropped before the cap so it cannot silence ours.
+  if (isExtensionOnlyStack(props.stack_trace)) return;
 
   rejectionCount++;
   if (rejectionCount > ERROR_CAP) {
@@ -93,8 +112,14 @@ window.addEventListener("unhandledrejection", (event) => {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <StudioErrorBoundary>
-      <StudioApp />
-    </StudioErrorBoundary>
+    {/* One icon size and weight for the whole app, taken from the theme file.
+        Icons that pass their own size or weight still win. */}
+    <IconContext.Provider value={readIconTokens()}>
+      <StudioErrorBoundary>
+        <ShowThemeToggle.Provider value>
+          <StudioApp />
+        </ShowThemeToggle.Provider>
+      </StudioErrorBoundary>
+    </IconContext.Provider>
   </StrictMode>,
 );

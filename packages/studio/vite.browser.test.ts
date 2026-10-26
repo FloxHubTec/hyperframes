@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
 
 const browserMocks = vi.hoisted(() => {
   const page = {
@@ -22,7 +23,9 @@ import { findSystemChrome, generateThumbnail, type GenerateThumbnailOptions } fr
 
 const originalBrowserPath = process.env["HYPERFRAMES_BROWSER_PATH"];
 
-function options(signal = new AbortController().signal): GenerateThumbnailOptions {
+const controllers: AbortController[] = [];
+
+function options(signal = trackedSignal()): GenerateThumbnailOptions {
   return {
     project: { dir: process.cwd() },
     compPath: "index.html",
@@ -37,15 +40,28 @@ function options(signal = new AbortController().signal): GenerateThumbnailOption
   };
 }
 
+function trackedSignal(): AbortSignal {
+  const controller = new AbortController();
+  controllers.push(controller);
+  return controller.signal;
+}
+
 describe("generateThumbnail", () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env["HYPERFRAMES_BROWSER_PATH"] = process.execPath;
-  });
+    // generateThumbnail loads puppeteer lazily; the first load is slow on a cold Windows runner.
+    await import("puppeteer-core");
+  }, 60_000);
 
   beforeEach(() => {
     browserMocks.launch.mockReset().mockResolvedValue(browserMocks.sharedBrowser);
     browserMocks.newPage.mockClear();
     for (const mock of Object.values(browserMocks.page)) mock.mockClear();
+  });
+
+  afterEach(() => {
+    // Cancel any request a timed-out test left running, so it cannot close pages in the next test.
+    for (const controller of controllers.splice(0)) controller.abort();
   });
 
   afterAll(() => {
@@ -127,6 +143,64 @@ describe("findSystemChrome", () => {
     const chromePath = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
     const pathExists = vi.fn((path: string) => path === chromePath);
 
-    expect(findSystemChrome({}, pathExists, "win32")).toBe(chromePath);
+    expect(findSystemChrome({}, pathExists, "win32", () => "Chrome/140.0.1")).toBe(chromePath);
+  });
+
+  it("prefers the newest Puppeteer cache entry over a compatible system Chrome", () => {
+    const cachePath = join(
+      "/tmp/puppeteer",
+      "chrome",
+      "chrome-152.0.1",
+      "chrome-linux64",
+      "chrome",
+    );
+    const systemPath = "/usr/bin/google-chrome";
+    const pathExists = vi.fn((path: string) => path === cachePath || path === systemPath);
+
+    expect(
+      findSystemChrome(
+        { PUPPETEER_CACHE_DIR: "/tmp/puppeteer" },
+        pathExists,
+        "linux",
+        () => "Chrome/113.0.1",
+        () => ["chrome-152.0.1"],
+      ),
+    ).toBe(cachePath);
+  });
+
+  it("uses Puppeteer's Windows cache executable layout", () => {
+    const cachePath = join(
+      "C:\\puppeteer",
+      "chrome",
+      "chrome-152.0.1",
+      "chrome-win64",
+      "chrome.exe",
+    );
+    const pathExists = vi.fn((path: string) => path === cachePath);
+
+    expect(
+      findSystemChrome(
+        { PUPPETEER_CACHE_DIR: "C:\\puppeteer" },
+        pathExists,
+        "win32",
+        () => "Chrome/113.0.1",
+        () => ["chrome-152.0.1"],
+      ),
+    ).toBe(cachePath);
+  });
+
+  it("rejects a system Chrome older than the Puppeteer-supported major", () => {
+    const systemPath = "/usr/bin/google-chrome";
+    const pathExists = vi.fn((path: string) => path === systemPath);
+
+    expect(
+      findSystemChrome(
+        {},
+        pathExists,
+        "linux",
+        () => "Google Chrome 113.0.1",
+        () => [],
+      ),
+    ).toBe(undefined);
   });
 });

@@ -1,11 +1,25 @@
-import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
+import { runCommand } from "citty";
 import type { ArgsDef } from "citty";
 import { ensureDOMParser } from "../utils/dom.js";
 import keyframesCommand from "./keyframes.js";
-import { collectShotSelectors, resolveScope, surfaceComposition } from "./keyframes.js";
+import {
+  collectCompositions,
+  collectShotSelectors,
+  resolveScope,
+  surfaceComposition,
+} from "./keyframes.js";
 import { ensureShotOutputDir } from "./motionShot.js";
 
 // citty types `args` as Resolvable<ArgsDef> (object | promise | thunk); this
@@ -25,9 +39,31 @@ beforeAll(() => ensureDOMParser());
 const wrap = (script: string) =>
   `<!doctype html><html><body><div id="root" data-composition-id="main" data-duration="4"><div id="dot" class="clip"></div></div><script>${script}</script></body></html>`;
 
+describe("keyframes JSON output", () => {
+  it.each(["css", "anime"])("emits parseable JSON with --runtime %s", async (runtime) => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-keyframes-json-"));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    const source = join(dir, "index.html");
+    writeFileSync(source, wrap(""));
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    onTestFinished(() => log.mockRestore());
+
+    await runCommand(keyframesCommand, { rawArgs: [source, "--runtime", runtime, "--json"] });
+
+    const output = log.mock.calls.map((args) => args.join(" ")).join("\n");
+    const result: unknown = JSON.parse(output);
+    expect(result).toMatchObject({
+      project: "index.html",
+      runtime,
+      compositions: [{ composition: "index.html", tweens: [], cssKeyframes: [], anime: [] }],
+    });
+  });
+});
+
 describe("keyframes direct composition scope", () => {
   it("keeps the project root and passes the nested HTML entry to --shot", () => {
     const projectDir = mkdtempSync(join(tmpdir(), "hf-keyframes-target-"));
+    onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
     const compositionsDir = join(projectDir, "compositions");
     mkdirSync(compositionsDir);
     writeFileSync(join(projectDir, "index.html"), wrap(""));
@@ -44,6 +80,7 @@ describe("keyframes direct composition scope", () => {
 describe("keyframes shot output", () => {
   it("rejects an output path that would overwrite the composition source", () => {
     const projectDir = mkdtempSync(join(tmpdir(), "hf-keyframes-shot-source-"));
+    onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
     const sourcePath = join(projectDir, "index.html");
     writeFileSync(sourcePath, wrap(""));
 
@@ -55,6 +92,7 @@ describe("keyframes shot output", () => {
 
   it("rejects an existing output alias that refers to the composition source", () => {
     const projectDir = mkdtempSync(join(tmpdir(), "hf-keyframes-shot-alias-"));
+    onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
     const sourcePath = join(projectDir, "index.html");
     const aliasPath = join(projectDir, "shot.png");
     writeFileSync(sourcePath, wrap(""));
@@ -67,6 +105,7 @@ describe("keyframes shot output", () => {
 
   it("creates a missing parent directory before writing --shot", () => {
     const projectDir = mkdtempSync(join(tmpdir(), "hf-keyframes-shot-dir-"));
+    onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
     const outputDir = join(projectDir, "nested", "proofs");
     ensureShotOutputDir(join(outputDir, "shot.png"));
     expect(existsSync(outputDir)).toBe(true);
@@ -140,6 +179,81 @@ describe("keyframes composed-ancestor surfacing (nested elements)", () => {
     `);
     const { tweens } = surfaceComposition(html, "index.html", "index.html");
     expect(tweens.find((t) => t.target === "#core")?.composedWith).toBeUndefined();
+  });
+
+  it.each(["template", "nested template"])(
+    "keeps the parent motion of a child authored in a %s",
+    (mode) => {
+      const content = `<div id="hero"><div id="core" class="clip"></div></div><script>
+        const tl = gsap.timeline({ paused: true });
+        tl.to("#hero", { keyframes: { "0%": { x: -300 }, "100%": { x: 300 } }, duration: 4 }, 0);
+        tl.to("#core", { keyframes: { "0%": { scale: 1 }, "100%": { scale: 1.5 } }, duration: 4 }, 0);
+        window.__timelines = { beat: tl };
+      </script>`;
+      const html =
+        mode === "template"
+          ? `<template>${content}</template>`
+          : `<template><div><template>${content}</template></div></template>`;
+      const { tweens } = surfaceComposition(html, "beat.html", "beat.html");
+      expect(tweens).toHaveLength(2);
+      expect(tweens.find((t) => t.target === "#core")?.composedWith).toEqual([
+        { selector: "#hero", summary: "x -300..300" },
+      ]);
+    },
+  );
+
+  it("keeps animated ancestors ordered from the parent to the outer group", () => {
+    const html = `<template><div id="stage"><div id="hero"><div id="core"></div></div></div><script>
+      const tl = gsap.timeline({ paused: true });
+      tl.fromTo("#stage", { y: 0 }, { y: 100, duration: 4 }, 0);
+      tl.fromTo("#hero", { x: 0 }, { x: 300, duration: 4 }, 0);
+      tl.fromTo("#core", { scale: 1 }, { scale: 1.5, duration: 4 }, 0);
+      window.__timelines = { beat: tl };
+    </script></template>`;
+    const { tweens } = surfaceComposition(html, "beat.html", "beat.html");
+    expect(tweens.find((t) => t.target === "#core")?.composedWith).toEqual([
+      { selector: "#hero", summary: "x 0..300" },
+      { selector: "#stage", summary: "y 0..100" },
+    ]);
+  });
+
+  it("keeps implicit parent starting values unresolved inside a template", () => {
+    const html = `<template><div id="hero"><div id="core"></div></div><script>
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#hero", { x: 300, duration: 4 }, 0);
+      tl.to("#core", { scale: 1.5, duration: 4 }, 0);
+      window.__timelines = { beat: tl };
+    </script></template>`;
+    const { tweens } = surfaceComposition(html, "beat.html", "beat.html");
+    const hero = tweens.find((t) => t.target === "#hero");
+    expect(hero?.keyframes[0]?.properties.x).toBeUndefined();
+    expect(hero?.unresolved).toContain("endpointProperties");
+    expect(tweens.find((t) => t.target === "#core")?.composedWith).toEqual([
+      { selector: "#hero", summary: "(no resolved variation; runtime verification required)" },
+    ]);
+  });
+
+  it("uses document matches before template matches for a repeated selector", () => {
+    const html = `<div id="core"></div><template><div id="hero"><div id="core"></div></div><script>
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#hero", { x: 300, duration: 4 }, 0);
+      tl.to("#core", { scale: 1.5, duration: 4 }, 0);
+      window.__timelines = { beat: tl };
+    </script></template>`;
+    const { tweens } = surfaceComposition(html, "beat.html", "beat.html");
+    expect(tweens.find((t) => t.target === "#core")?.composedWith).toBeUndefined();
+  });
+
+  it("does not treat an animated sibling as a template child's ancestor", () => {
+    const html = `<template><div id="hero"></div><div id="core"></div><script>
+      const tl = gsap.timeline({ paused: true });
+      tl.to("#hero", { x: 300, duration: 4 }, 0);
+      tl.to("#core", { scale: 1.5, duration: 4 }, 0);
+      window.__timelines = { beat: tl };
+    </script></template>`;
+    const { tweens } = surfaceComposition(html, "beat.html", "beat.html");
+    expect(tweens).toHaveLength(2);
+    expect(tweens.every((tween) => tween.composedWith === undefined)).toBe(true);
   });
 });
 
@@ -352,5 +466,19 @@ describe("--layout strip help text", () => {
     const description = layoutArgDescription();
     expect(description).toContain("SVG");
     expect(description.toLowerCase()).toContain("only when");
+  });
+});
+
+describe("keyframes project compositions", () => {
+  it("skips a data-composition-src that points at a folder instead of crashing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-keyframes-folder-src-"));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    mkdirSync(join(dir, "compositions", "intro"), { recursive: true });
+    writeFileSync(
+      join(dir, "index.html"),
+      `<!doctype html><html><body><div data-composition-id="main" data-duration="4"><div data-composition-id="intro" data-composition-src="compositions/intro"></div></div></body></html>`,
+    );
+
+    expect(collectCompositions(join(dir, "index.html"))).toHaveLength(1);
   });
 });

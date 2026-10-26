@@ -374,7 +374,7 @@ The skeleton handles most structural rules. These are the runtime rules the skel
 | `Math.random()`                   | Seeded PRNG (only if you need randomness)      |
 | `Date.now()`, `performance.now()` | Hard-coded timing or `tl.time()` in `onUpdate` |
 | `setInterval`, `setTimeout`       | Timeline tweens + `onUpdate`                   |
-| `repeat: -1`                      | `repeat: Math.max(0, Math.floor(duration / cycle) - 1)` |
+| `repeat: -1` without root `data-duration` | a finite root `data-duration` (export clips to it), or `repeat: Math.max(0, Math.floor(duration / cycle) - 1)` |
 | `stagger: { from: "random" }`     | `from: "start"`, `"center"`, `"end"`           |
 | Async timeline construction       | Synchronous at page load                       |
 
@@ -383,8 +383,9 @@ The skeleton handles most structural rules. These are the runtime rules the skel
 | Never                           | Use instead                 |
 | ------------------------------- | --------------------------- |
 | `video.play()`, `audio.play()`  | Framework owns playback     |
-| `<video>` without `muted`       | Always `muted playsinline`  |
-| Audio on `<video>`              | Separate `<audio>` element  |
+| `<video>` with sound            | `data-has-audio="true"`, no `muted` |
+| Music, voiceover, or replacement audio | separate `<audio>` element |
+| Silent footage and b-roll       | `muted` |
 | Base64 media                    | File reference or HTTPS URL |
 | Placeholder URLs (placehold.co) | Real assets                 |
 
@@ -415,7 +416,7 @@ Run before delivering. Check with actual code, not assumptions.
 - [ ] Shader transitions have boundary INSIDE the window: `time < boundary < time + duration`
 - [ ] No transition shorter than 0.3s
 - [ ] No exit tweens except on the final scene
-- [ ] No `Date.now()`, unseeded `Math.random()`, `repeat: -1`
+- [ ] No `Date.now()`, unseeded `Math.random()`, or `repeat: -1` without a finite root `data-duration`
 - [ ] No SVG filter data URLs as `background-image`
 - [ ] `window.__timelines["main"] = tl` matches `data-composition-id`
 
@@ -1231,8 +1232,7 @@ tl.to("#s5-headline", { backgroundSize: "100% 30%", duration: 0.6, ease: "power2
 Everything critical is inlined above. These are for edge cases:
 
 - Core composition contract (data attributes, sub-comp wiring): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/SKILL.md
-- Motion theory (easing as emotion, direction rules): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes-creative/references/motion-principles.md
-- Typography (full banned list, weight contrast, OpenType): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes-creative/references/typography.md
-- Transitions (shader catalog, CSS transition patterns): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes-animation/transitions/overview.md
-- Captions synced to audio: https://github.com/heygen-com/hyperframes/blob/main/skills/embedded-captions/SKILL.md
+- Motion and transitions (timings, eases, cuts, title entrances): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/references/motion.md
+- Look (colours, type, presets, frame.md): https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/references/look.md
+- Captions synced to audio: https://github.com/heygen-com/hyperframes/blob/main/skills/hyperframes/references/captions.md
 - Full docs: https://hyperframes.heygen.com/

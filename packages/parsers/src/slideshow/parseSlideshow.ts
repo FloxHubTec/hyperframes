@@ -2,6 +2,7 @@
 import type {
   SlideshowManifest,
   SlideRef,
+  SlideHotspot,
   ResolvedSlide,
   ResolvedSlideshow,
   ResolvedSlideSequence,
@@ -20,7 +21,12 @@ export function slideshowIslandRegex(flags = "i"): RegExp {
   // Escape ALL regex metacharacters in the constant (CodeQL flags the incomplete
   // `\` escape). The constant has none today, but a complete escape is correct.
   const escaped = SLIDESHOW_ISLAND_TYPE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`<script[^>]*type=["']${escaped}["'][^>]*>([\\s\\S]*?)<\\/script>`, flags);
+  // `type = "..."` is valid HTML; spacing must not make present lose the deck.
+  const htmlWhitespace = "[\\t\\n\\f\\r ]*";
+  return new RegExp(
+    `<script[^>]*type${htmlWhitespace}=${htmlWhitespace}["']${escaped}["'][^>]*>([\\s\\S]*?)<\\/script>`,
+    flags,
+  );
 }
 
 interface SceneRange {
@@ -31,7 +37,6 @@ interface SceneRange {
 
 /** Extract the JSON island from composition HTML. Returns null if absent. */
 export function parseSlideshowManifest(html: string): SlideshowManifest | null {
-  // Match <script type="application/hyperframes-slideshow+json"> ... </script>
   const re = slideshowIslandRegex("i");
   const match = re.exec(html);
   if (!match || match[1] === undefined) return null;
@@ -52,12 +57,39 @@ function isOptionalBoolean(v: unknown): v is boolean | undefined {
   return v === undefined || typeof v === "boolean";
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isHotspotRegion(v: unknown): boolean {
+  return (
+    isRecord(v) &&
+    [v["x"], v["y"], v["w"], v["h"]].every(
+      (coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate),
+    )
+  );
+}
+
+function isSlideHotspot(v: unknown): v is SlideHotspot {
+  return (
+    isRecord(v) &&
+    typeof v["id"] === "string" &&
+    typeof v["label"] === "string" &&
+    typeof v["target"] === "string" &&
+    (v["region"] === undefined || isHotspotRegion(v["region"]))
+  );
+}
+
 function isSlideRef(v: unknown): v is SlideRef {
-  if (typeof v !== "object" || v === null) return false;
-  const r = v as Record<string, unknown>;
+  if (!isRecord(v)) return false;
+  const r = v;
   if (typeof r["sceneId"] !== "string") return false;
   if (!isOptionalNumberArray(r["fragments"])) return false;
-  if (r["hotspots"] !== undefined && !Array.isArray(r["hotspots"])) return false;
+  if (
+    r["hotspots"] !== undefined &&
+    (!Array.isArray(r["hotspots"]) || !r["hotspots"].every(isSlideHotspot))
+  )
+    return false;
   if (!isOptionalBoolean(r["autoplay"])) return false;
   return true;
 }
@@ -165,7 +197,7 @@ export function resolveSlideshow(
   for (const seq of manifest.slideSequences ?? []) {
     // Flag duplicate sequence ids rather than silently overwriting the earlier one.
     if (Object.prototype.hasOwnProperty.call(sequences, seq.id)) {
-      errors.push(`duplicate slideSequence id "${seq.id}" — only the last definition is kept`);
+      errors.push(`duplicate slideSequence id "${seq.id}": only the last definition is kept`);
     }
     sequences[seq.id] = {
       id: seq.id,

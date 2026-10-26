@@ -11,15 +11,16 @@
  * output (and the golden baselines) only change where a fade is actually applied.
  *
  * The prepared tracks are always `pcm_s16le`, 48 kHz, stereo (see
- * `prepareAudioTrack` / `extractAudioFromVideo`). Anything else is rejected so
+ * `extractAudioSegment`). Anything else is rejected so
  * the caller can fall back to the expression path rather than corrupting audio.
  */
 
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { renameWithRetry } from "../utils/renameWithRetry.js";
 import { dirname, join } from "path";
 import type { AudioVolumeKeyframe } from "./audioMixer.types.js";
 import { normaliseEnvelope } from "@hyperframes/core/media-volume-envelope";
-import { riffChunks } from "./wavChunks.js";
+import { riffChunks, wavFormatTag } from "./wavChunks.js";
 
 const PCM_FORMAT = 1; // WAVE_FORMAT_PCM
 const FLOAT_FORMAT = 3; // WAVE_FORMAT_IEEE_FLOAT
@@ -51,8 +52,8 @@ interface WavFmt {
 }
 
 /** The `fmt ` chunk, or null for a format this cannot safely edit in place. */
-function readFmtChunk(buffer: Buffer, body: number): WavFmt | null {
-  const format = buffer.readUInt16LE(body);
+function readFmtChunk(buffer: Buffer, body: number, size: number): WavFmt | null {
+  const format = wavFormatTag(buffer, body, size);
   const bits = buffer.readUInt16LE(body + 14);
   const float = format === FLOAT_FORMAT;
   if (!float && format !== PCM_FORMAT) return null;
@@ -78,7 +79,7 @@ function parseWavLayout(buffer: Buffer): WavLayout | null {
 
   for (const { id, body, size } of riffChunks(buffer)) {
     if (id === "fmt " && body + 16 <= buffer.length) {
-      fmt = readFmtChunk(buffer, body);
+      fmt = readFmtChunk(buffer, body, size);
     } else if (id === "data") {
       data = { offset: body, size: Math.min(size, buffer.length - body) };
     }
@@ -179,7 +180,7 @@ export function applyVolumeEnvelopeToWav(
     stagingDir = mkdtempSync(join(dirname(wavPath), ".hf-volume-"));
     const tempPath = join(stagingDir, "audio.wav");
     writeFileSync(tempPath, buffer, { flag: "wx" });
-    renameSync(tempPath, wavPath);
+    renameWithRetry(tempPath, wavPath);
     return true;
   } catch {
     // Any read/parse/write failure → leave the file untouched and let the

@@ -3,8 +3,24 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { rewriteAssetPath } from "@hyperframes/parsers/asset-paths";
+import { spansOverlap } from "@hyperframes/parsers/time-spans";
+import {
+  compositionOriginSeconds,
+  cutToHostSlots,
+  MEDIA_START_BASIS_ATTR,
+  resolveMediaStartSeconds,
+  type HostSlot,
+} from "@hyperframes/parsers/media-timing";
+import { parseNumeric } from "@hyperframes/parsers/composition-contract";
+import {
+  resolveReferencedDuration,
+  resolveReferencedStart,
+  type RefResolverDoc,
+  type RefResolverEl,
+} from "@hyperframes/parsers/reference-resolver";
 import { checkSubCompositionUsability } from "@hyperframes/parsers/sub-composition-validity";
 import { parseHTML } from "linkedom";
+import postcss from "postcss";
 import {
   cleanAssetUrl,
   collectSubCompositionSrcs,
@@ -12,19 +28,34 @@ import {
   isUnresolvedAssetPlaceholder,
   isWithinProjectRoot,
   maskNonScannableRanges,
+  readProjectFile,
   resolveExistingLocalAsset,
   resolveLocalAssetCandidates,
+  resolveProjectRelativeSrc,
 } from "@hyperframes/parsers/asset-resolution";
-import { collectLocalVideoCandidates, lintHevcPreviewCodec } from "./hevcPreviewLint.js";
+import {
+  collectLocalVideoCandidates,
+  lintHevcPreviewCodec,
+  lintVideoMediaStartPastEof,
+} from "./hevcPreviewLint.js";
 import { lintHyperframeHtml } from "./hyperframeLinter.js";
-import type { HyperframeLintFinding, HyperframeLintResult } from "./types.js";
+import { lintProjectShaderScripts } from "./projectShaders.js";
+import type {
+  HyperframeLintFinding,
+  HyperframeLintResult,
+  HyperframeLinterOptions,
+} from "./types.js";
 import type { ParsableDocumentLike } from "@hyperframes/parsers/sub-composition-validity";
-import { mediaSrcTagRe } from "./utils";
+import { isAudibleVideo, isAudibleVideoTag, mediaSrcOf, mediaSrcTagRe } from "./utils";
 
 /** Adapts linkedom's `parseHTML` to the `checkSubCompositionUsability` contract. */
 function parseSubCompHtml(html: string): ParsableDocumentLike {
   return parseHTML(html).document as unknown as ParsableDocumentLike;
 }
+
+/** The file a source was read from, as per-file findings carry it. */
+const sourceFile = (projectDir: string, compSrcPath?: string) =>
+  resolve(projectDir, compSrcPath ?? "index.html");
 
 interface HtmlSource {
   html: string;
@@ -68,11 +99,16 @@ function contentDigest(html: string): string {
 }
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".aac", ".ogg", ".m4a", ".flac", ".opus"]);
+const CSS_URL_RE = /\burl\(\s*(?:"([^"]+)"|'([^']+)'|([^"')\s]+))\s*\)/gi;
 const MASK_IMAGE_URL_RE =
   /\b(?:-webkit-)?mask-image\s*:\s*[^;{}]*url\(\s*(?:"([^"]+)"|'([^']+)'|([^"')\s]+))\s*\)/gi;
 
 function isLocalStylesheetHref(href: string): boolean {
   return !!href && !/^(https?:|data:|blob:|\/\/)/i.test(href);
+}
+
+function staysInsideProjectRoot(href: string): boolean {
+  return !href.startsWith("/") && !href.split("/").includes("..");
 }
 
 function collectLocalStylesheets(
@@ -86,14 +122,16 @@ function collectLocalStylesheets(
     if (!rel.split(/\s+/).some((part) => part.toLowerCase() === "stylesheet")) continue;
     const href = link.getAttribute("href") ?? "";
     if (!isLocalStylesheetHref(href)) continue;
-    const rootRelative = compSrcPath ? join(dirname(compSrcPath), href) : href;
-    const stylesheet = resolveExistingLocalAsset(projectDir, rootRelative);
+    const besideFile = compSrcPath ? join(dirname(compSrcPath), href) : href;
+    const stylesheet =
+      resolveExistingLocalAsset(projectDir, besideFile) ??
+      (compSrcPath && staysInsideProjectRoot(href)
+        ? resolveExistingLocalAsset(projectDir, href)
+        : null);
     if (!stylesheet) continue;
-    styles.push({
-      href,
-      content: readFileSync(stylesheet.resolved, "utf-8"),
-      rootRelativePath: stylesheet.rootRelativePath,
-    });
+    const read = readProjectFile(stylesheet.resolved);
+    if (read.kind !== "file") continue;
+    styles.push({ href, content: read.text, rootRelativePath: stylesheet.rootRelativePath });
   }
   return styles;
 }
@@ -102,11 +140,15 @@ function collectExternalStyles(
   projectDir: string,
   html: string,
   compSrcPath?: string,
-): Array<{ href: string; content: string }> {
-  const styles: Array<{ href: string; content: string }> = [];
+): NonNullable<HyperframeLinterOptions["externalStyles"]> {
+  const styles: NonNullable<HyperframeLinterOptions["externalStyles"]> = [];
   const { document } = parseHTML(html);
-  for (const { href, content } of collectLocalStylesheets(projectDir, document, compSrcPath)) {
-    styles.push({ href, content });
+  for (const { href, content, rootRelativePath } of collectLocalStylesheets(
+    projectDir,
+    document,
+    compSrcPath,
+  )) {
+    styles.push({ href, content, file: join(projectDir, rootRelativePath), rootRelativePath });
   }
   return styles;
 }
@@ -158,6 +200,7 @@ function resolveCssAssetCandidates(
 export async function lintProject(
   projectDir: string,
   entryFile?: string,
+  hostOptions: Pick<HyperframeLinterOptions, "host" | "isSubComposition"> = {},
 ): Promise<ProjectLintResult> {
   const indexPath = entryFile ? resolve(entryFile) : resolve(projectDir, "index.html");
   if (entryFile && !isWithinProjectRoot(projectDir, indexPath)) {
@@ -172,7 +215,9 @@ export async function lintProject(
 
   const rootHtml = readFileSync(indexPath, "utf-8");
   const rootResult = await lintHyperframeHtml(rootHtml, {
+    ...hostOptions,
     filePath: indexPath,
+    compSrcPath: rootFile,
     externalStyles: collectExternalStyles(projectDir, rootHtml, rootCompSrcPath),
   });
   results.push({ file: rootFile, result: rootResult, contentHash: contentDigest(rootHtml) });
@@ -211,8 +256,10 @@ export async function lintProject(
       // inlines snippet markup (or mentions the token in text) is still linted.
       if (isSnippetFragment(html)) continue;
       const result = await lintHyperframeHtml(html, {
+        ...hostOptions,
         filePath,
         isSubComposition: true,
+        compSrcPath,
         externalStyles: collectExternalStyles(projectDir, html, compSrcPath),
       });
       results.push({
@@ -227,30 +274,33 @@ export async function lintProject(
   }
 
   const projectFindings = [
+    ...lintProjectShaderScripts(projectDir, allHtmlSources),
     ...lintProjectAudioFiles(projectDir, allHtmlSources),
     ...lintAudioSrcNotFound(projectDir, allHtmlSources),
     ...lintMissingLocalAsset(projectDir, allHtmlSources),
     ...lintTextureMaskAssetNotFound(projectDir, allHtmlSources),
     ...(!entryFile ? lintMultipleRootCompositions(projectDir) : []),
     ...(!entryFile ? lintBlankRootWithStandaloneComposition(rootHtml, allHtmlSources) : []),
-    ...lintDuplicateAudioTracks(allHtmlSources),
+    ...lintDuplicateAudioTracks(projectDir, rootHtml),
     ...lintMissingOrEmptySubComposition(projectDir, rootHtml),
+    ...(await lintVideoMediaStartPastEof(projectDir, allHtmlSources)),
     ...(await lintHevcPreviewCodec(collectLocalVideoCandidates(projectDir, allHtmlSources))),
   ];
-  if (projectFindings.length > 0) {
-    for (const finding of projectFindings) {
-      rootResult.findings.push(finding);
-      if (finding.severity === "error") {
-        rootResult.errorCount++;
-        rootResult.ok = false;
-        totalErrors++;
-      } else if (finding.severity === "warning") {
-        rootResult.warningCount++;
-        totalWarnings++;
-      } else {
-        rootResult.infoCount++;
-        totalInfos++;
-      }
+  for (const finding of projectFindings) {
+    const ownFile = finding.file && resolve(projectDir, finding.file);
+    const owner =
+      results.find((entry) => resolve(projectDir, entry.file) === ownFile)?.result ?? rootResult;
+    owner.findings.push(finding);
+    if (finding.severity === "error") {
+      owner.errorCount++;
+      owner.ok = false;
+      totalErrors++;
+    } else if (finding.severity === "warning") {
+      owner.warningCount++;
+      totalWarnings++;
+    } else {
+      owner.infoCount++;
+      totalInfos++;
     }
   }
 
@@ -316,8 +366,11 @@ function lintProjectAudioFiles(
   if (audioFiles.length === 0) return findings;
 
   const hasAudioElement = htmlSources.some(({ html }) => /<audio\b/i.test(html));
+  const hasAudibleVideo = htmlSources.some(({ html }) =>
+    (html.match(/<video\b[^>]*>/gi) ?? []).some(isAudibleVideoTag),
+  );
 
-  if (!hasAudioElement) {
+  if (!hasAudioElement && !hasAudibleVideo) {
     findings.push({
       code: "audio_file_without_element",
       severity: "warning",
@@ -340,27 +393,30 @@ function lintAudioSrcNotFound(
 
   const audioSrcRe = mediaSrcTagRe("audio");
 
-  const missingSrcs: string[] = [];
+  const missingByFile = new Map<string, Set<string>>();
   for (const { html, compSrcPath } of htmlSources) {
+    const scannable = maskNonScannableRanges(html);
     let match: RegExpExecArray | null;
-    while ((match = audioSrcRe.exec(html)) !== null) {
-      const src = match[2]!;
+    while ((match = audioSrcRe.exec(scannable)) !== null) {
+      const src = mediaSrcOf(match);
       if (/^(https?:|data:|blob:)/i.test(src)) continue;
       if (isUnresolvedAssetPlaceholder(src)) continue;
       const rootRelative = compSrcPath
         ? rewriteAssetPath(compSrcPath, src, (path) => existsSync(join(projectDir, path)))
         : src;
-      if (!resolveLocalAssetCandidates(projectDir, rootRelative).some(existsSync)) {
-        missingSrcs.push(src);
+      if (!existsSync(resolveProjectRelativeSrc(rootRelative, projectDir))) {
+        const file = sourceFile(projectDir, compSrcPath);
+        missingByFile.set(file, (missingByFile.get(file) ?? new Set()).add(src));
       }
     }
   }
 
-  if (missingSrcs.length > 0) {
-    const unique = [...new Set(missingSrcs)];
+  for (const [file, srcs] of missingByFile) {
+    const unique = [...srcs];
     findings.push({
       code: "audio_src_not_found",
       severity: "error",
+      file,
       message: `<audio> element references file(s) not found in the project: ${unique.join(", ")}. The rendered video will be silent.`,
       fixHint:
         unique.length === 1
@@ -381,7 +437,10 @@ function lintMissingLocalAsset(
 
   const localAssetSrcRe = mediaSrcTagRe("video|img|source");
 
-  const missingByTag = new Map<string, Map<string, string>>();
+  const missingByTag = new Map<
+    string,
+    { file: string; tagName: string; byResolved: Map<string, string> }
+  >();
 
   for (const { html, compSrcPath } of htmlSources) {
     const scannable = maskNonScannableRanges(html);
@@ -389,7 +448,7 @@ function lintMissingLocalAsset(
     let match: RegExpExecArray | null;
     while ((match = re.exec(scannable)) !== null) {
       const tagName = (match[1] ?? "").toLowerCase();
-      const rawSrc = match[2] ?? "";
+      const rawSrc = mediaSrcOf(match);
       // Placeholder check runs on the RAW value: cleanAssetUrl() splits on ?/# and would chop inside a ${...} token.
       if (isUnresolvedAssetPlaceholder(rawSrc)) continue;
       const src = cleanAssetUrl(rawSrc);
@@ -402,20 +461,23 @@ function lintMissingLocalAsset(
       if (resolvedAsset) continue;
 
       const resolvedKey = resolve(projectDir, rootRelative);
-      let bucket = missingByTag.get(tagName);
+      const file = sourceFile(projectDir, compSrcPath);
+      const bucketKey = `${file}\0${tagName}`;
+      let bucket = missingByTag.get(bucketKey);
       if (!bucket) {
-        bucket = new Map<string, string>();
-        missingByTag.set(tagName, bucket);
+        bucket = { file, tagName, byResolved: new Map<string, string>() };
+        missingByTag.set(bucketKey, bucket);
       }
-      if (!bucket.has(resolvedKey)) bucket.set(resolvedKey, src);
+      if (!bucket.byResolved.has(resolvedKey)) bucket.byResolved.set(resolvedKey, src);
     }
   }
 
-  for (const [tagName, byResolved] of missingByTag) {
+  for (const { file, tagName, byResolved } of missingByTag.values()) {
     const unique = [...byResolved.values()];
     findings.push({
       code: "missing_local_asset",
       severity: "error",
+      file,
       message:
         `<${tagName}> element references local file(s) not found in the project: ${unique.join(", ")}. ` +
         "The renderer will silently skip these and produce a video with missing visuals.",
@@ -425,7 +487,7 @@ function lintMissingLocalAsset(
             "Common cause: captured asset filenames are unreliable (heygen-logo.svg often contains Google, nvidia-logo.svg may contain Autodesk, etc.). " +
             "Open the contact sheets and verify the file actually exists at this path before referencing it."
           : "Add the missing files to the project directory, or update the src attributes to point to existing files. " +
-            "Captured asset filenames are unreliable — verify against capture/contact-sheets/ and capture/extracted/asset-descriptions.md.",
+            "Captured asset filenames are unreliable. Verify against capture/contact-sheets/ and capture/extracted/asset-descriptions.md.",
     });
   }
 
@@ -436,13 +498,21 @@ function lintTextureMaskAssetNotFound(
   projectDir: string,
   htmlSources: HtmlSource[],
 ): HyperframeLintFinding[] {
-  const missing = new Map<string, string>();
+  const missingByFile = new Map<string, Set<string>>();
 
   for (const { html, compSrcPath } of htmlSources) {
+    const file = sourceFile(projectDir, compSrcPath);
     for (const cssSource of collectCssSources(projectDir, html, compSrcPath)) {
-      let match: RegExpExecArray | null;
-      const pattern = new RegExp(MASK_IMAGE_URL_RE.source, MASK_IMAGE_URL_RE.flags);
-      while ((match = pattern.exec(cssSource.content)) !== null) {
+      let matches: RegExpExecArray[] = [];
+      try {
+        postcss.parse(cssSource.content).walkDecls(/^(?:-webkit-)?mask-image$/i, (declaration) => {
+          matches.push(...declaration.value.matchAll(CSS_URL_RE));
+        });
+      } catch (error) {
+        if (!(error instanceof postcss.CssSyntaxError)) throw error;
+        matches = [...cssSource.content.matchAll(MASK_IMAGE_URL_RE)];
+      }
+      for (const match of matches) {
         const rawUrl = match[1] ?? match[2] ?? match[3] ?? "";
         // Placeholder check runs on the RAW value: cleanAssetUrl() splits on ?/# and would chop inside a ${...} token.
         if (isUnresolvedAssetPlaceholder(rawUrl)) continue;
@@ -456,24 +526,24 @@ function lintTextureMaskAssetNotFound(
           cssSource.rootRelativePath,
         );
         if (candidates.some(existsSync)) continue;
-        missing.set(url, candidates[0] ?? resolve(projectDir, url));
+        missingByFile.set(file, (missingByFile.get(file) ?? new Set()).add(url));
       }
     }
   }
 
-  if (missing.size === 0) return [];
-  const urls = [...missing.keys()];
-  return [
-    {
+  return [...missingByFile].map(([file, found]): HyperframeLintFinding => {
+    const urls = [...found];
+    return {
       code: "texture_mask_asset_not_found",
       severity: "error",
+      file,
       message: `CSS mask-image references file(s) not found in the project: ${urls.join(", ")}.`,
       fixHint:
         urls.length === 1
           ? `Add "${urls[0]}" to the project, or update the mask-image URL to point to an existing texture mask.`
           : "Add the missing texture mask files to the project, or update the mask-image URLs to point to existing files.",
-    },
-  ];
+    };
+  });
 }
 
 function lintMultipleRootCompositions(projectDir: string): HyperframeLintFinding[] {
@@ -505,49 +575,120 @@ function lintMultipleRootCompositions(projectDir: string): HyperframeLintFinding
   return findings;
 }
 
-function lintDuplicateAudioTracks(htmlSources: HtmlSource[]): HyperframeLintFinding[] {
-  const findings: HyperframeLintFinding[] = [];
-  function extractAttr(tag: string, name: string): string | null {
-    const re = new RegExp(`\\b${name}\\s*=\\s*["']([^"']+)["']`, "i");
-    const m = tag.match(re);
-    return m?.[1] ?? null;
-  }
+interface AudioSpan {
+  trackIndex: number;
+  start: number;
+  end: number;
+  src: string;
+}
 
-  const tracks: Array<{ trackIndex: number; start: number; end: number; src: string }> = [];
-  const seen = new Set<string>();
+/** One parsed file: reference starts resolve within it, memoised. */
+interface TimingFile {
+  doc: RefResolverDoc;
+  starts: Map<RefResolverEl, number>;
+}
 
-  for (const { html } of htmlSources) {
-    const audioTagRe = /<audio\b[^>]*>/gi;
-    let match: RegExpExecArray | null;
-    while ((match = audioTagRe.exec(html)) !== null) {
-      const tag = match[0];
-      const trackStr = extractAttr(tag, "data-track-index");
-      const startStr = extractAttr(tag, "data-start");
-      const durStr = extractAttr(tag, "data-duration");
-      const src = extractAttr(tag, "src") ?? "unknown";
-      if (!trackStr || !startStr) continue;
+const timingFile = (doc: RefResolverDoc): TimingFile => ({ doc, starts: new Map() });
+const localStart = (file: TimingFile, el: Element) =>
+  resolveReferencedStart(file.doc, el, file.starts, new Set());
+const localDuration = (file: TimingFile, el: Element) =>
+  resolveReferencedDuration(file.doc, el, file.starts, new Set());
 
-      const trackIndex = parseInt(trackStr, 10);
-      const start = parseFloat(startStr);
-      const duration = durStr ? parseFloat(durStr) : Infinity;
-      const key = `${src}:${start}:${duration}:${trackIndex}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      tracks.push({ trackIndex, start, end: start + duration, src });
+/** Audible media on the main timeline, walked from the root through the scenes it mounts. */
+function collectMainTimelineAudio(projectDir: string, rootHtml: string): AudioSpan[] {
+  const spans: AudioSpan[] = [];
+  type Placement = { file: TimingFile; origin: number; slots: HostSlot[]; mounting: string[] };
+  const mount = (html: string, at: Omit<Placement, "file">) => {
+    const { document } = parseHTML(html);
+    const root = querySelectorAllIncludingTemplates(document, "[data-composition-id]")[0];
+    if (root) visit(root, { ...at, file: timingFile(document) });
+  };
+  const visit = (parent: ParentNode, at: Placement) => {
+    for (const el of parent.children) {
+      if (el.tagName === "TEMPLATE") {
+        visit((el as HTMLTemplateElement).content, at);
+        continue;
+      }
+      const span = audioSpanOf(el, at.file, at.origin, at.slots);
+      if (span) spans.push(span);
+      const scope = nestedScopeOf(el, at.file, at.origin, at.slots);
+      if (!scope) {
+        visit(el, at);
+        continue;
+      }
+      const inner = { ...at, ...scope };
+      const src = el.getAttribute("data-composition-src")?.trim();
+      const file = src && !isUnresolvedAssetPlaceholder(src) && !isRemoteOrInlineUrl(src);
+      const filePath = file ? resolve(projectDir, src) : null;
+      if (filePath && !at.mounting.includes(filePath)) {
+        const read = readProjectFile(filePath);
+        if (read.kind === "file")
+          mount(read.text, { ...inner, mounting: [...at.mounting, filePath] });
+      }
+      visit(el, inner);
     }
-  }
+  };
+  const { document } = parseHTML(rootHtml);
+  visit(document, { file: timingFile(document), origin: 0, slots: [], mounting: [] });
+  return spans;
+}
 
+/** A composition or scene host: its children's local t=0 sits at the host's start, cut to its window. */
+function nestedScopeOf(
+  el: Element,
+  file: TimingFile,
+  origin: number,
+  slots: HostSlot[],
+): { origin: number; slots: HostSlot[] } | null {
+  if (!el.hasAttribute("data-composition-id") && !el.hasAttribute("data-composition-src")) {
+    return null;
+  }
+  const start = origin + localStart(file, el);
+  const duration = localDuration(file, el);
+  const window = duration === null ? [] : [{ start, end: start + duration }];
+  return { origin: compositionOriginSeconds(start, el), slots: [...slots, ...window] };
+}
+
+function audioSpanOf(
+  el: Element,
+  file: TimingFile,
+  origin: number,
+  slots: HostSlot[],
+): AudioSpan | null {
+  const tag = el.tagName.toLowerCase();
+  if (tag !== "audio" && !(tag === "video" && isAudibleVideo((name) => el.getAttribute(name)))) {
+    return null;
+  }
+  const trackStr = el.getAttribute("data-track-index");
+  if (!trackStr || !el.hasAttribute("data-start")) return null;
+  const start = resolveMediaStartSeconds({
+    authoredStart: parseNumeric(el.getAttribute("data-start")),
+    hostStart: origin,
+    hasAutoStart: el.hasAttribute("data-hf-auto-start"),
+    basis: el.getAttribute(MEDIA_START_BASIS_ATTR),
+    ordinaryStart: () => origin + localStart(file, el),
+  });
+  const duration = parseNumeric(el.getAttribute("data-duration")) ?? localDuration(file, el);
+  const kept = cutToHostSlots({ start, end: start + (duration ?? Infinity) }, slots);
+  if (kept.end <= kept.start) return null;
+  return { trackIndex: parseInt(trackStr, 10), ...kept, src: el.getAttribute("src") || "unknown" };
+}
+
+const formatSeconds = (t: number) => (Number.isFinite(t) ? String(Number(t.toFixed(2))) : "end");
+
+function lintDuplicateAudioTracks(projectDir: string, rootHtml: string): HyperframeLintFinding[] {
+  const findings: HyperframeLintFinding[] = [];
+  const tracks = collectMainTimelineAudio(projectDir, rootHtml);
   for (let i = 0; i < tracks.length; i++) {
     for (let j = i + 1; j < tracks.length; j++) {
       const a = tracks[i]!;
       const b = tracks[j]!;
       if (a.trackIndex !== b.trackIndex) continue;
-      if (a.start < b.end && b.start < a.end) {
+      if (spansOverlap(a.start, a.end, b.start, b.end)) {
         findings.push({
           code: "duplicate_audio_track",
           severity: "warning",
-          message: `Multiple <audio> elements on track ${a.trackIndex} overlap (${a.src} at ${a.start}-${Number.isFinite(a.end) ? a.end.toFixed(1) : "end"}s, ${b.src} at ${b.start}-${Number.isFinite(b.end) ? b.end.toFixed(1) : "end"}s). This causes layered audio playback.`,
+          message: `Multiple audible <audio>/<video> elements on track ${a.trackIndex} overlap (${a.src} at ${formatSeconds(a.start)}-${formatSeconds(a.end)}s, ${b.src} at ${formatSeconds(b.start)}-${formatSeconds(b.end)}s). This causes layered audio playback.`,
           fixHint: "Use non-overlapping time windows or different track indices.",
         });
       }
@@ -584,7 +725,7 @@ function lintMissingOrEmptySubComposition(
   rootHtml: string,
 ): HyperframeLintFinding[] {
   // Dedup by src path — the same reference can appear from nested sub-comps.
-  const checked = new Map<string, { srcPath: string; problem: string }>();
+  const checked = new Map<string, { srcPath: string; problem: string; folder?: true }>();
   const visited = new Set<string>();
 
   // fallow-ignore-next-line complexity
@@ -605,14 +746,25 @@ function lintMissingOrEmptySubComposition(
       if (visited.has(filePath)) continue;
       visited.add(filePath);
 
-      if (!existsSync(filePath)) {
+      const read = readProjectFile(filePath);
+      if (read.kind === "missing") {
         if (!checked.has(srcPath)) {
           checked.set(srcPath, { srcPath, problem: "the file does not exist" });
         }
         continue;
       }
+      if (read.kind === "folder") {
+        if (!checked.has(srcPath)) {
+          checked.set(srcPath, {
+            srcPath,
+            problem: "it is a folder, not an HTML file",
+            folder: true,
+          });
+        }
+        continue;
+      }
 
-      const fileHtml = readFileSync(filePath, "utf-8");
+      const fileHtml = read.text;
       const validity = checkSubCompositionUsability(fileHtml, parseSubCompHtml);
       if (!validity.ok) {
         if (!checked.has(srcPath)) {
@@ -633,17 +785,18 @@ function lintMissingOrEmptySubComposition(
   walk(rootHtml);
 
   const findings: HyperframeLintFinding[] = [];
-  for (const { srcPath, problem } of checked.values()) {
+  for (const { srcPath, problem, folder } of checked.values()) {
     findings.push({
       code: "missing_or_empty_sub_composition",
       severity: "error",
       message: `data-composition-src references "${srcPath}", but ${problem}.`,
-      fixHint:
-        `Fix this before rendering — the render pre-flight rejects unusable sub-compositions. ` +
-        `Write valid HTML into "${srcPath}" — it needs a <template> or <body> containing an element with ` +
-        `data-composition-id, data-width, and data-height. Preview/studio still tolerates and skips the ` +
-        "scene while you author it. If a scene-authoring step is still running, wait for it to finish " +
-        "before referencing the file, or re-run the step that generates it.",
+      fixHint: folder
+        ? `Point data-composition-src at the HTML file inside the folder, such as "${srcPath}/index.html".`
+        : `Fix this before rendering: the render pre-flight rejects unusable sub-compositions. ` +
+          `Write valid HTML into "${srcPath}". It needs a <template> or <body> containing an element with ` +
+          `data-composition-id, data-width, and data-height. Preview/studio still tolerates and skips the ` +
+          "scene while you author it. If a scene-authoring step is still running, wait for it to finish " +
+          "before referencing the file, or re-run the step that generates it.",
     });
   }
 

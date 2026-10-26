@@ -5,8 +5,10 @@
  * Saves 50-65% tokens vs. AI agents reading images individually.
  */
 
-import sharp, { type OverlayOptions } from "sharp";
-import { readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
+import type { OverlayOptions } from "sharp";
+import { readdirSync, readFileSync, unlinkSync, existsSync } from "node:fs";
+import { loadSharp } from "../utils/optionalPackages.js";
+import { writeCaptureFileSync } from "./captureFile.js";
 import { join, extname, basename, dirname } from "node:path";
 
 interface ContactSheetOptions {
@@ -45,11 +47,12 @@ export async function createContactSheet(
 
   const files = imagePaths.slice(0, maxImages);
   if (files.length === 0) return null;
+  const sharp = await loadSharp("contact sheets");
 
   // Read first image to determine aspect ratio
   const firstMeta = await sharp(files[0]!).metadata();
-  const srcW = firstMeta.width || 1920;
-  const srcH = firstMeta.height || 1080;
+  const srcW = firstMeta.autoOrient.width || 1920;
+  const srcH = firstMeta.autoOrient.height || 1080;
 
   // Scale to target cell width, maintain aspect ratio
   const scale = cellWidth / srcW;
@@ -71,6 +74,7 @@ export async function createContactSheet(
 
     // Resize image to cell size — contain keeps full image visible (no cropping)
     const resized = await sharp(files[i]!)
+      .autoOrient()
       .resize(cellW, cellH, { fit: "contain", background: { r: 26, g: 26, b: 26 } })
       .toBuffer();
 
@@ -106,11 +110,13 @@ export async function createContactSheet(
     },
   }).composite(overlays);
 
-  if (extname(outputPath).toLowerCase() === ".png") {
-    await sheet.png().toFile(outputPath);
-  } else {
-    await sheet.jpeg({ quality }).toFile(outputPath);
-  }
+  // Encode to a buffer and write through the capture writer rather than
+  // `toFile`, which opens the path itself and would follow a planted link.
+  const encoded =
+    extname(outputPath).toLowerCase() === ".png"
+      ? await sheet.png().toBuffer()
+      : await sheet.jpeg({ quality }).toBuffer();
+  writeCaptureFileSync(outputPath, encoded);
 
   return outputPath;
 }
@@ -208,22 +214,15 @@ export async function createScrollContactSheet(
  * Returns array of written file paths.
  */
 export async function createSnapshotContactSheet(
-  snapshotsDir: string,
+  paths: string[],
   outputPath: string,
   budget: Pick<ContactSheetOptions, "remainingMs"> = {},
 ): Promise<string[]> {
-  if (!existsSync(snapshotsDir)) return [];
+  if (paths.length === 0) return [];
 
-  const snapshotFiles = readdirSync(snapshotsDir)
-    .filter((f) => f.startsWith("frame-") && f.endsWith(".png"))
-    .sort();
-
-  if (snapshotFiles.length === 0) return [];
-
-  const paths = snapshotFiles.map((f) => join(snapshotsDir, f));
-  const labels = snapshotFiles.map((f) => {
-    const m = f.match(/at-([\d.]+)s/);
-    return m ? `${m[1]}s` : f;
+  const labels = paths.map((path) => {
+    const m = basename(path).match(/at-([\d.]+)s/);
+    return m ? `${m[1]}s` : basename(path);
   });
 
   // 3 cols, 9 per page (3×3)
@@ -248,7 +247,7 @@ export async function createAssetContactSheet(
 ): Promise<string[]> {
   if (!existsSync(assetsDir)) return [];
 
-  const imageExts = new Set([".png", ".jpg", ".jpeg", ".webp"]);
+  const imageExts = new Set([".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif", ".heic", ".tiff"]);
   const assetFiles = readdirSync(assetsDir)
     .filter((f) => imageExts.has(extname(f).toLowerCase()) && !f.includes("contact-sheet"))
     .sort();
@@ -303,6 +302,7 @@ export async function createSvgContactSheet(
   }
 
   if (svgPaths.length === 0) return [];
+  const sharp = await loadSharp("contact sheets");
 
   const svgFileNames = svgPaths.map((p) => p.split("/").pop()!);
 
@@ -326,7 +326,7 @@ export async function createSvgContactSheet(
         .flatten({ background: { r: 245, g: 245, b: 245 } })
         .png()
         .toBuffer();
-      writeFileSync(tmpPath, thumb);
+      writeCaptureFileSync(tmpPath, thumb);
       tmpPaths.push(tmpPath);
       labels.push(svgFileNames[i]!.replace(".svg", ""));
     } catch {

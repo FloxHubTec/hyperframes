@@ -6,16 +6,18 @@
  * that appears across audioMixer and chunkEncoder into a single helper.
  */
 
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import { getFfmpegBinary } from "./ffmpegBinaries.js";
 import { trackChildProcess } from "./processTracker.js";
 import {
   ManagedChildProcess,
+  type ManagedChildProcessOutcome,
   type ManagedProcessTerminationReason,
 } from "./managedChildProcess.js";
 
 export interface RunFfmpegOptions {
   signal?: AbortSignal;
+  /** Stop after this long without a higher frame count or output time (counted from spawn until one). */
   timeout?: number;
   onStderr?: (line: string) => void;
 }
@@ -47,6 +49,33 @@ export function isExternalFfmpegInterruption(
   if (result.terminationReason !== "exit" || result.exitCode === 0) return false;
   if (result.signal === "SIGTERM") return true;
   return result.exitCode === 255 && FFMPEG_SIGTERM_EXIT_LINE.test(result.stderr);
+}
+
+/** ffmpeg's stats line as it writes: frames encoded so far and seconds of output written. */
+export interface FfmpegStats {
+  frames?: number;
+  seconds?: number;
+}
+
+/** Reads stderr chunks, which split stats lines anywhere, and reports each complete stats line. */
+export function ffmpegStatsReader(onStats: (stats: FfmpegStats) => void): (chunk: string) => void {
+  let rest = "";
+  return (chunk) => {
+    const lines = (rest + chunk).split(/[\r\n]/);
+    rest = lines.pop() ?? "";
+    for (const line of lines) {
+      const frame = /frame=\s*(\d+)/.exec(line)?.[1];
+      const time = /time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(line);
+      if (frame === undefined && !time) continue;
+      onStats({
+        frames: frame === undefined ? undefined : Number(frame),
+        seconds: time
+          ? Math.round((Number(time[1]) * 3600 + Number(time[2]) * 60 + Number(time[3])) * 100) /
+            100
+          : undefined,
+      });
+    }
+  };
 }
 
 const DEFAULT_TIMEOUT = 300_000;
@@ -110,25 +139,46 @@ export function formatFfmpegError(
     : `FFmpeg exited with code ${exitCode}`;
 }
 
-export async function runFfmpeg(args: string[], opts?: RunFfmpegOptions): Promise<RunFfmpegResult> {
-  const timeout = opts?.timeout ?? DEFAULT_TIMEOUT;
+/** formatFfmpegError, led by the timeout when this process was killed for making no progress. */
+export function describeFfmpegFailure(
+  result: Pick<RunFfmpegResult, "exitCode" | "signal" | "stderr" | "terminationReason">,
+  timeoutMs: number,
+): string {
+  const error = formatFfmpegError(result.exitCode, result.stderr);
+  if (result.terminationReason === "inactivity") {
+    return (
+      `FFmpeg timed out after ${timeoutMs} ms without progress (ffmpegProcessTimeout, ` +
+      `FFMPEG_PROCESS_TIMEOUT_MS). ${error}`
+    );
+  }
+  if (result.exitCode !== null) return error;
+  const signalOrRequestedStop =
+    result.terminationReason === "exit" ? result.signal : result.terminationReason;
+  return signalOrRequestedStop
+    ? `FFmpeg ended without an exit code (${signalOrRequestedStop}). ${error}`
+    : error;
+}
+
+function spawnFfmpeg(args: string[]): ChildProcess {
   // windowsHide: ffmpeg/ffprobe are console-subsystem binaries, so without
   // this Node opens a visible console window per spawn on Windows. A render
   // shells out dozens of times across parallel workers, which flashes a burst
   // of windows across the user's desktop. No-op on macOS and Linux.
   const ffmpeg = spawn(getFfmpegBinary(), args, { windowsHide: true });
   trackChildProcess(ffmpeg);
-  const managed = new ManagedChildProcess(ffmpeg, {
-    signal: opts?.signal,
-    deadlineAtMs: Date.now() + timeout,
-    onStderr: opts?.onStderr,
-  });
-  const outcome = await managed.wait();
+  return ffmpeg;
+}
+
+function succeeded(outcome: ManagedChildProcessOutcome): boolean {
+  return outcome.reason === "exit" && outcome.exitCode === 0;
+}
+
+function toResult(outcome: ManagedChildProcessOutcome, stderr = outcome.stderr): RunFfmpegResult {
   const result: RunFfmpegResult = {
-    success: outcome.reason === "exit" && outcome.exitCode === 0,
+    success: succeeded(outcome),
     exitCode: outcome.exitCode,
     signal: outcome.signal,
-    stderr: outcome.stderr,
+    stderr,
     durationMs: outcome.durationMs,
     terminationReason: outcome.reason,
     error: outcome.error,
@@ -137,4 +187,35 @@ export async function runFfmpeg(args: string[], opts?: RunFfmpegOptions): Promis
     result.failureReason = "external_interruption";
   }
   return result;
+}
+
+/** A run whose signal had already aborted starts no process. */
+const ABORTED_BEFORE_START: RunFfmpegResult = {
+  success: false,
+  exitCode: null,
+  signal: null,
+  stderr: "",
+  durationMs: 0,
+  terminationReason: "abort",
+};
+
+export async function runFfmpeg(args: string[], opts?: RunFfmpegOptions): Promise<RunFfmpegResult> {
+  if (opts?.signal?.aborted) return { ...ABORTED_BEFORE_START };
+  let framesWritten = 0;
+  let secondsWritten = 0;
+  const readStats = ffmpegStatsReader(({ frames = 0, seconds = 0 }) => {
+    if (frames <= framesWritten && seconds <= secondsWritten) return;
+    framesWritten = Math.max(frames, framesWritten);
+    secondsWritten = Math.max(seconds, secondsWritten);
+    managed.markActivity();
+  });
+  const managed = new ManagedChildProcess(spawnFfmpeg(args), {
+    signal: opts?.signal,
+    inactivityTimeoutMs: opts?.timeout ?? DEFAULT_TIMEOUT,
+    onStderr: (chunk) => {
+      readStats(chunk);
+      opts?.onStderr?.(chunk);
+    },
+  });
+  return toResult(await managed.wait());
 }

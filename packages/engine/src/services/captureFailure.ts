@@ -19,12 +19,14 @@ export class CaptureFailure extends Error {
   readonly kind: CaptureFailureKind;
   readonly cause: unknown;
   readonly workerDiagnostics: readonly CaptureWorkerDiagnostic[];
+  readonly pageErrorLines: readonly string[];
 
   constructor(input: {
     kind: CaptureFailureKind;
     message: string;
     cause?: unknown;
     workerDiagnostics?: readonly CaptureWorkerDiagnostic[];
+    pageErrorLines?: readonly string[];
   }) {
     super(input.message);
     this.name = "CaptureFailure";
@@ -35,6 +37,7 @@ export class CaptureFailure extends Error {
         Object.freeze({ ...diagnostic, lines: Object.freeze([...diagnostic.lines]) }),
       ),
     );
+    this.pageErrorLines = Object.freeze([...(input.pageErrorLines ?? [])]);
     if (input.cause instanceof Error && input.cause.stack) this.stack = input.cause.stack;
   }
 }
@@ -52,6 +55,11 @@ const TRANSIENT_BROWSER_ERROR_PATTERNS = [
   /ECONNREFUSED/i,
   /net::ERR_NETWORK_CHANGED/i,
   /Composition has zero duration[\s\S]*Runtime ready: false/,
+  // CDP can refuse a capture call outright with this exact wording; timed-out
+  // variants of the same call hit PROTOCOL_TIMEOUT_PATTERNS, checked first.
+  // Anchored to this literal reason (not just the CDP method) so an unrelated,
+  // genuinely deterministic Page.captureScreenshot error isn't swept in too.
+  /Protocol error \(Page\.captureScreenshot\): Unable to capture screenshot/i,
 ];
 
 const PROTOCOL_TIMEOUT_PATTERNS = [
@@ -120,12 +128,54 @@ function hasIoOperationFailure(message: string): boolean {
   );
 }
 
+/**
+ * A write to a pipe whose reader has gone: EPIPE on darwin/linux, EOF on
+ * win32 (libuv reports a closed named pipe as UV_EOF), ECONNRESET on a
+ * socket. All three mean the streaming encoder died under us, which is an io
+ * fact about the host, not an authoring defect in the composition.
+ */
+const BROKEN_PIPE_MESSAGE = /\bwrite (?:EPIPE|EOF|ECONNRESET)\b/;
+
 function ioError(error: unknown, message: string): boolean {
   const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
   return (
-    Boolean(code && /^(?:EACCES|EEXIST|EIO|EMFILE|ENFILE|ENOENT|ENOSPC|EPERM|EROFS)$/.test(code)) ||
+    Boolean(
+      code &&
+      /^(?:EACCES|ECONNRESET|EEXIST|EIO|EMFILE|ENFILE|ENOENT|ENOSPC|EOF|EPERM|EPIPE|EROFS)$/.test(
+        code,
+      ),
+    ) ||
+    BROKEN_PIPE_MESSAGE.test(message) ||
     hasIoOperationFailure(message)
   );
+}
+
+const ORDERED_KIND_RULES: readonly (readonly [CaptureFailureKind, (message: string) => boolean])[] =
+  [
+    [
+      "memory_exhaustion",
+      (message) =>
+        BUN_MEMORY_EXHAUSTION_EXACT_MESSAGE.test(message.trim()) ||
+        BUN_MEMORY_EXHAUSTION_WRAPPED_WORKER_MESSAGE.test(message) ||
+        matchesAny(message, MEMORY_EXHAUSTION_ERROR_PATTERNS),
+    ],
+    ["verification", (message) => matchesAny(message, VERIFICATION_ERROR_PATTERNS)],
+    ["protocol_timeout", (message) => matchesAny(message, PROTOCOL_TIMEOUT_PATTERNS)],
+    ["transient_browser", (message) => matchesAny(message, TRANSIENT_BROWSER_ERROR_PATTERNS)],
+    ["authoring", (message) => matchesAny(message, AUTHORING_ERROR_PATTERNS)],
+  ];
+
+function classifyKind(
+  error: unknown,
+  message: string,
+  signal: AbortSignal | undefined,
+): CaptureFailureKind {
+  if (signal?.aborted || /(?:render|capture)?_?cancelled|AbortError/i.test(message)) {
+    return "cancelled";
+  }
+  const rule = ORDERED_KIND_RULES.find(([, matches]) => matches(message));
+  if (rule) return rule[0];
+  return ioError(error, message) ? "io" : "authoring";
 }
 
 export function classifyCaptureFailure(
@@ -133,39 +183,21 @@ export function classifyCaptureFailure(
   options: {
     signal?: AbortSignal;
     workerDiagnostics?: readonly CaptureWorkerDiagnostic[];
+    pageErrorLines?: readonly string[];
   } = {},
 ): CaptureFailure {
-  if (error instanceof CaptureFailure && !options.workerDiagnostics && !options.signal?.aborted) {
-    return error;
+  const prior = error instanceof CaptureFailure ? error : undefined;
+  if (prior && !(options.workerDiagnostics || options.pageErrorLines || options.signal?.aborted)) {
+    return prior;
   }
   const message = messageOf(error);
-  let kind: CaptureFailureKind;
-  if (options.signal?.aborted || /(?:render|capture)?_?cancelled|AbortError/i.test(message)) {
-    kind = "cancelled";
-  } else if (
-    BUN_MEMORY_EXHAUSTION_EXACT_MESSAGE.test(message.trim()) ||
-    BUN_MEMORY_EXHAUSTION_WRAPPED_WORKER_MESSAGE.test(message) ||
-    matchesAny(message, MEMORY_EXHAUSTION_ERROR_PATTERNS)
-  ) {
-    kind = "memory_exhaustion";
-  } else if (matchesAny(message, VERIFICATION_ERROR_PATTERNS)) {
-    kind = "verification";
-  } else if (matchesAny(message, PROTOCOL_TIMEOUT_PATTERNS)) {
-    kind = "protocol_timeout";
-  } else if (matchesAny(message, TRANSIENT_BROWSER_ERROR_PATTERNS)) {
-    kind = "transient_browser";
-  } else if (matchesAny(message, AUTHORING_ERROR_PATTERNS)) {
-    kind = "authoring";
-  } else {
-    kind = ioError(error, message) ? "io" : "authoring";
-  }
+  const kind = classifyKind(error, message, options.signal);
   return new CaptureFailure({
     kind,
     message,
     cause: error,
-    workerDiagnostics:
-      options.workerDiagnostics ??
-      (error instanceof CaptureFailure ? error.workerDiagnostics : undefined),
+    workerDiagnostics: options.workerDiagnostics ?? prior?.workerDiagnostics,
+    pageErrorLines: options.pageErrorLines ?? prior?.pageErrorLines,
   });
 }
 

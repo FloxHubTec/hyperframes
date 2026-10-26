@@ -1,3 +1,5 @@
+import { resolveConfig, usesSoftwareWebGpu, type GpuProbeLifecycle } from "@hyperframes/engine";
+
 export type BrowserGpuMode = "auto" | "hardware" | "software";
 export type ResolvedBrowserGpuMode = Exclude<BrowserGpuMode, "auto">;
 
@@ -14,30 +16,23 @@ export function resolveLocalBrowserGpuMode(
 export async function resolveCaptureBrowserGpuMode(
   requestedMode: BrowserGpuMode,
   chromePath?: string,
+  probeLifecycle?: GpuProbeLifecycle,
 ): Promise<ResolvedBrowserGpuMode> {
   const { resolveBrowserGpuMode } = await import("@hyperframes/engine");
-  return resolveBrowserGpuMode(requestedMode, { chromePath });
+  return resolveBrowserGpuMode(requestedMode, { chromePath, probeLifecycle });
 }
 
-export function compositionRequiresWebGpu(html: string): boolean {
-  const compositionRoot = html.match(
-    /<[^>]*\bdata-composition-id(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]+))?[^>]*>/i,
-  );
-  return compositionRoot ? /\bdata-requires-webgpu(?:\s|=|>)/i.test(compositionRoot[0]) : false;
-}
+// `compositionRequiresWebGpu` and the launch-time WebGPU guard now live in
+// @hyperframes/engine (browserManager.ts) — the shared choke point every
+// buildChromeArgs caller goes through, CLI included. Re-exported here so
+// existing CLI imports don't need to change their module path.
+export { compositionRequiresWebGpu, assertWebGpuAdapterAvailable } from "@hyperframes/engine";
 
-export function assertWebGpuRequirement(
-  html: string,
-  requestedMode: BrowserGpuMode,
-  resolvedMode: ResolvedBrowserGpuMode,
-): void {
-  if (requestedMode !== "auto" || resolvedMode !== "software" || !compositionRequiresWebGpu(html)) {
-    return;
-  }
-  throw new Error(
-    "This composition declares data-requires-webgpu, but browser GPU auto-detection found no hardware GPU. " +
-      "Run on a WebGPU-capable host or set PRODUCER_BROWSER_GPU_MODE=hardware " +
-      "(or pass --browser-gpu on commands that support it) to require hardware explicitly; " +
-      "use --no-browser-gpu only when intentionally testing the composition's software fallback.",
-  );
+/** The launch config and adapter check for a local capture, honouring PRODUCER_ALLOW_SOFTWARE_WEBGPU as render does. */
+export function resolveLocalWebGpu(
+  browserGpuMode: ResolvedBrowserGpuMode,
+  requiresWebGpu: boolean,
+) {
+  const gpuConfig = { browserGpuMode, allowSoftwareWebGpu: resolveConfig().allowSoftwareWebGpu };
+  return { gpuConfig, softwareWebGpu: usesSoftwareWebGpu(requiresWebGpu, gpuConfig) };
 }

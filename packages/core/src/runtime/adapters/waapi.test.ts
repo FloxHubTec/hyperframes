@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { createWaapiAdapter } from "./waapi";
+import { PendingPauseAnimation } from "./pendingPauseAnimation.test-helpers";
 
 describe("waapi adapter", () => {
   const originalDocument = (globalThis as { document?: unknown }).document;
@@ -66,6 +67,53 @@ describe("waapi adapter", () => {
 
     expect(mockAnim.pause).toHaveBeenCalled();
     expect(mockAnim.currentTime).toBe(2500); // seconds → ms
+  });
+
+  it("holds the sought time on the first frame of a running animation", () => {
+    const animation = new PendingPauseAnimation();
+    document.getAnimations = vi.fn(() => [animation as unknown as Animation]);
+
+    createWaapiAdapter().seek({ time: 1 });
+    animation.nextFrame();
+
+    expect(animation.currentTime).toBe(1000);
+    expect(animation.pauseCalls).toBe(1);
+  });
+
+  describe("an animation that went idle", () => {
+    class FakeCssAnimation {}
+    const idleScenario = (make: () => ReturnType<typeof makeAnimation> & { playState: string }) => {
+      const old = make();
+      const fresh = makeAnimation();
+      const live: unknown[] = [old, fresh];
+      (document as any).getAnimations = vi.fn(() => live);
+      const adapter = createWaapiAdapter();
+      adapter.seek({ time: 1 });
+      old.playState = "idle";
+      live.shift();
+      old.pause.mockClear();
+      adapter.seek({ time: 2 });
+      return { old, fresh };
+    };
+
+    it("drops a browser-created CSS animation: it is not revived, a fresh one is driven", () => {
+      vi.stubGlobal("CSSAnimation", FakeCssAnimation);
+      const { old, fresh } = idleScenario(() =>
+        Object.assign(new FakeCssAnimation(), makeAnimation(), { playState: "running" }),
+      );
+      expect(old.pause).not.toHaveBeenCalled();
+      expect(old.currentTime).toBe(1000);
+      expect(fresh.currentTime).toBe(2000);
+      vi.unstubAllGlobals();
+    });
+
+    it("still drives an idle script-created animation, as before", () => {
+      vi.stubGlobal("CSSAnimation", FakeCssAnimation);
+      const { old } = idleScenario(() => ({ ...makeAnimation(), playState: "running" }));
+      expect(old.pause).toHaveBeenCalled();
+      expect(old.currentTime).toBe(2000);
+      vi.unstubAllGlobals();
+    });
   });
 
   it("seek clamps negative time to 0", () => {
@@ -162,6 +210,21 @@ describe("waapi adapter", () => {
     adapter.seek({ time: 0.3 });
 
     expect(getAnimations).toHaveBeenCalledTimes(1);
+  });
+
+  it("seek takes new animations from the pass's shared page list instead of scanning", () => {
+    const existing = makeAnimation();
+    const getAnimations = setAnimations([existing]);
+    const adapter = createWaapiAdapter();
+    adapter.discover();
+    getAnimations.mockClear();
+
+    const late = makeAnimation();
+    adapter.seek({ time: 0.5, pageAnimations: () => [existing, late] as unknown as Animation[] });
+
+    expect(getAnimations).not.toHaveBeenCalled();
+    expect(existing.currentTime).toBe(500);
+    expect(late.pause).toHaveBeenCalled();
   });
 
   it("tracks WAAPI animations created after an empty discover via Element.animate", () => {

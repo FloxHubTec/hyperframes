@@ -1,3 +1,7 @@
+import { declareClipRevealAware } from "@hyperframes/core/runtime/clip-reveal";
+
+declareClipRevealAware();
+
 export { init, type HyperShaderConfig, type TransitionConfig } from "./hyper-shader.js";
 export { isHtmlInCanvasCaptureSupported } from "./capture.js";
 export { SHADER_NAMES, type ShaderName } from "./shaders/registry.js";
@@ -7,3 +11,9 @@ export {
   PAGE_COMPOSITOR_BUILD_CANARY,
   PAGE_COMPOSITOR_CANVAS_ID,
 } from "./engineModePageComposite.js";
+export {
+  playSeamTransitionLoop,
+  type SeamTransitionFrameSource,
+  type SeamTransitionLoopHandle,
+  type SeamTransitionLoopOptions,
+} from "./seamTransitionLoop.js";

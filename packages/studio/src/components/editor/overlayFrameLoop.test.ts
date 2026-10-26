@@ -3,10 +3,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   IDLE_POLL_MS,
+  IDLE_SLICE_MS,
   requestOverlayFrames,
   resetOverlayFrameLoopForTests,
+  runWhenInputIdle,
   subscribeOverlayFrame,
 } from "./overlayFrameLoop";
+import { usePlayerStore } from "../../player/store/playerStore";
 
 /**
  * The editor's overlay polls run on one shared, parkable frame loop. The two
@@ -37,6 +40,7 @@ describe("overlay frame loop", () => {
   };
 
   beforeEach(() => {
+    usePlayerStore.setState({ previewBooted: true });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance", "Date"] });
     queued = [];
     window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
@@ -53,6 +57,45 @@ describe("overlay frame loop", () => {
     vi.useRealTimers();
     window.requestAnimationFrame = originalRaf;
     window.cancelAnimationFrame = originalCancelRaf;
+  });
+
+  it("does not poll the preview before it boots, and wakes when it does", () => {
+    usePlayerStore.setState({ previewBooted: false });
+    let runs = 0;
+    subscribeOverlayFrame(() => {
+      runs += 1;
+    });
+    framesOver(1000);
+    expect(runs).toBe(0);
+
+    usePlayerStore.getState().markPreviewBooted();
+    framesOver(32);
+    expect(runs).toBeGreaterThan(0);
+  });
+
+  it("runs idle work in capped slices, only while no input arrives", () => {
+    const budgets: number[] = [];
+    requestOverlayFrames();
+    runWhenInputIdle((timeLeft) => {
+      budgets.push(timeLeft());
+      return budgets.length === 3;
+    });
+    vi.advanceTimersByTime(300);
+    expect(budgets).toEqual([]);
+    vi.advanceTimersByTime(200);
+    expect(budgets).toHaveLength(3);
+    expect(Math.max(...budgets)).toBeLessThanOrEqual(IDLE_SLICE_MS);
+
+    // Input during a slice holds the next one until the loop has been idle again.
+    const slices: number[] = [];
+    runWhenInputIdle(() => {
+      slices.push(performance.now());
+      if (slices.length === 1) requestOverlayFrames();
+      return slices.length === 2;
+    });
+    vi.advanceTimersByTime(1000);
+    expect(slices).toHaveLength(2);
+    expect(slices[1] - slices[0]).toBeGreaterThanOrEqual(400);
   });
 
   it("runs every subscriber on one frame, not one frame each", () => {
@@ -76,6 +119,48 @@ describe("overlay frame loop", () => {
     // A second of silence is four idle polls, not sixty frames.
     expect(runsWhileAwake).toBeGreaterThan(10);
     expect(runs).toBeLessThanOrEqual(Math.ceil(1000 / IDLE_POLL_MS) + 1);
+  });
+
+  it("polls less often the longer nothing happens, and fast again after a wake", () => {
+    let runs = 0;
+    subscribeOverlayFrame(() => {
+      runs += 1;
+    });
+    framesOver(10_000);
+    runs = 0;
+    // Backed off: a 4 s wait between polls, where a steady quarter-second poll would run 48 times.
+    framesOver(12_000);
+    expect(runs).toBeLessThanOrEqual(4);
+
+    window.dispatchEvent(new Event("pointermove"));
+    framesOver(500);
+    runs = 0;
+    framesOver(IDLE_POLL_MS * 2);
+    expect(runs).toBeGreaterThan(0);
+  });
+
+  it("does not poll while the page is hidden, and wakes when it shows", () => {
+    let hidden = false;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+    try {
+      let runs = 0;
+      subscribeOverlayFrame(() => {
+        runs += 1;
+      });
+      framesOver(500);
+      hidden = true;
+      runs = 0;
+      framesOver(8_000);
+      // At most the one poll armed before the page hid; none is armed after it.
+      expect(runs).toBeLessThanOrEqual(1);
+
+      hidden = false;
+      window.dispatchEvent(new Event("visibilitychange"));
+      framesOver(200);
+      expect(runs).toBeGreaterThan(5);
+    } finally {
+      delete (document as { hidden?: boolean }).hidden;
+    }
   });
 
   it("wakes to full rate on a pointer event", () => {

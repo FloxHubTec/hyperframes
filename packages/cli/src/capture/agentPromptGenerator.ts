@@ -6,11 +6,12 @@
  *   - CLAUDE.md  — Claude Code convention
  *
  * This file generates a DATA INVENTORY that tells the AI agent what files
- * exist and what they contain. The actual workflow lives in the
- * product-launch-video skill — this file points agents there.
+ * exist and what they contain. How to make a film from it lives in the
+ * hyperframes skill's references/film.md and references/types/launch.md — this file points agents there.
  */
 
-import { writeFileSync, readdirSync, existsSync } from "node:fs";
+import { readdirSync, existsSync } from "node:fs";
+import { writeCaptureFileSync } from "./captureFile.js";
 import { join } from "node:path";
 import type { DesignTokens } from "./types.js";
 import type { AnimationCatalog } from "./animationCataloger.js";
@@ -52,9 +53,9 @@ export function generateAgentPrompt(
   _detectedLibraries?: string[],
 ): void {
   const prompt = buildPrompt(outputDir, url, tokens, hasScreenshot, hasLottie, hasShaders);
-  writeFileSync(join(outputDir, "AGENTS.md"), prompt, "utf-8");
-  writeFileSync(join(outputDir, "CLAUDE.md"), prompt, "utf-8");
-  writeFileSync(join(outputDir, ".cursorrules"), prompt, "utf-8");
+  writeCaptureFileSync(join(outputDir, "AGENTS.md"), prompt, "utf-8");
+  writeCaptureFileSync(join(outputDir, "CLAUDE.md"), prompt, "utf-8");
+  writeCaptureFileSync(join(outputDir, ".cursorrules"), prompt, "utf-8");
 }
 
 // fallow-ignore-next-line complexity
@@ -198,7 +199,7 @@ function buildPrompt(
 
 Source: ${url}
 
-To create a video from this capture, use the \`product-launch-video\` skill.
+To create a video from this capture, use the \`hyperframes\` skill and read its \`references/film.md\` (From a website) and \`references/types/launch.md\`.
 
 ## What's in This Capture
 

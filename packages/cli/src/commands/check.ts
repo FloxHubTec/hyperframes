@@ -1,17 +1,35 @@
+import { captureArtifactRevision } from "../utils/artifactCapture.js";
+import { pngDimensions } from "../utils/pngDimensions.js";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import {
+  recordArtifacts,
+  type ArtifactCapture,
+  type ArtifactInput,
+  type ArtifactRecord,
+} from "@hyperframes/studio-server/history";
+import { formatFindingTimes } from "../utils/checkFindings.js";
+import { withProjectLock } from "../utils/projectLock.js";
+import { reportArtifacts } from "../utils/toolContext.js";
 import { defineCommand, parseArgs } from "citty";
 import type { ArgsDef } from "citty";
 import type { Example } from "./_examples.js";
 import { parseAt } from "./layout.js";
 import { c } from "../ui/colors.js";
+import { registerBrowserSessionCleanup } from "../browser/launch.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { setCommandExitCode } from "../utils/commandResult.js";
+import { swallowedFlagUsageError } from "../utils/reject-unknown-flags.js";
 import { formatLayoutIssue } from "../utils/layoutAudit.js";
 import { resolveProject, type ProjectDir } from "../utils/project.js";
 import { withMeta } from "../utils/updateCheck.js";
 import {
   DEFAULT_CHECK_OPTIONS,
   checkExitCode,
+  prelaunchBrowserForNextCheck,
   runCheckPipeline,
+  selectFindingCropRequests,
   type CheckFinding,
   type CheckOptions,
   type CheckReport,
@@ -19,25 +37,124 @@ import {
 } from "../utils/checkPipeline.js";
 import type { CaptionZoneOptions, FrameCheckOptions, LayoutOptions } from "../utils/checkTypes.js";
 import { resolveLocalBrowserGpuMode } from "../browser/gpuPolicy.js";
+import { preResolveHostileMediaProxies, type PreparedMediaFile } from "../utils/checkBrowser.js";
 
 export const examples: Example[] = [
   ["Run the full verification gate", "hyperframes check"],
   ["Output one agent-readable envelope", "hyperframes check --json"],
   ["Persist the five audited contrast frames", "hyperframes check --snapshots"],
   ["Also fail on warnings", "hyperframes check --strict"],
+  ["Make only the browser-playable video copies, then exit", "hyperframes check --prepare-media"],
 ];
+
+type SavedCheck = Pick<ArtifactRecord, "id" | "revision" | "report" | "attribution">;
+type SavedCheckReport = CheckReport & { saved?: SavedCheck };
 
 export interface CheckCommandDependencies {
   resolveProject(dir: string | undefined): ProjectDir;
-  runPipeline(project: ProjectDir, options: CheckOptions): Promise<CheckReport>;
+  runPipeline(project: ProjectDir, options: CheckOptions): Promise<SavedCheckReport>;
+  prepareMedia(project: ProjectDir, options: CheckOptions): Promise<PreparedMediaFile[]>;
   withMeta(value: object): object;
 }
 
 const DEFAULT_COMMAND_DEPENDENCIES: CheckCommandDependencies = {
   resolveProject,
-  runPipeline: runCheckPipeline,
+  async runPipeline(project, options) {
+    const capturing = captureArtifactRevision(project.dir).catch(warnNotRecorded);
+    const report = await runCheckPipeline(project, options);
+    const images = (files: readonly string[]) => files.map((file) => resolve(project.dir, file));
+    reportArtifacts("check", "frame", images(report.snapshots.files));
+    reportArtifacts("check", "finding", images(report.snapshots.findingFiles));
+    const capture = await capturing;
+    if (!capture) return report;
+    try {
+      return { ...report, saved: await saveCheckReport(project, options, report, capture) };
+    } catch (error) {
+      warnNotRecorded(error);
+      return report;
+    }
+  },
+  async prepareMedia(project, options) {
+    const { bundleWithLocalizedFonts } = await import("../utils/bundleWithLocalizedFonts.js");
+    const html = await bundleWithLocalizedFonts(project.dir);
+    return (await preResolveHostileMediaProxies(project.dir, html, options.autoProxy)).files;
+  },
   withMeta,
 };
+
+function warnNotRecorded(error: unknown): undefined {
+  console.warn(`${c.warn("⚠")}  Check report was not recorded: ${normalizeErrorMessage(error)}`);
+  return undefined;
+}
+
+async function saveCheckReport(
+  project: ProjectDir,
+  options: CheckOptions,
+  report: CheckReport,
+  capture: ArtifactCapture,
+): Promise<SavedCheck> {
+  const id = randomUUID();
+  const directory = join(project.dir, ".hyperframes", "artifacts", "checks");
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, `${id}.json`);
+  writeFileSync(path, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
+  const reportScope =
+    "scope" in report && typeof report.scope === "object" && report.scope !== null
+      ? report.scope
+      : undefined;
+  const artifacts: ArtifactInput[] = [
+    {
+      kind: "check",
+      id,
+      scope: reportScope ? "scoped" : "project",
+      report: resolve(path),
+      metadata: {
+        ok: report.ok,
+        browserSkipped: report.browserSkipped,
+        scope: reportScope,
+        options,
+      },
+    },
+  ];
+  for (const [index, image] of report.snapshots.files.entries()) {
+    artifacts.push({
+      kind: "snapshot",
+      id: `${id}-${index}`,
+      scope: "full",
+      image: resolve(project.dir, image),
+      time: report.snapshots.times[index],
+      metadata: {
+        checkId: id,
+        ...pngDimensions(resolve(project.dir, image)),
+      },
+    });
+  }
+  const crops = selectFindingCropRequests(report);
+  for (const [index, image] of report.snapshots.findingFiles.entries()) {
+    const crop = crops.find((request) => image.endsWith(request.filename));
+    artifacts.push({
+      kind: "snapshot",
+      id: `${id}-crop-${index}`,
+      scope: "finding",
+      image: resolve(project.dir, image),
+      time: crop?.time,
+      metadata: {
+        checkId: id,
+        finding: crop,
+        ...pngDimensions(resolve(project.dir, image)),
+      },
+    });
+  }
+  const [saved] = await recordArtifacts(project.dir, capture, artifacts);
+  if (!saved) throw new Error("no history record was written");
+  reportArtifacts("check", "check-report", [resolve(path)]);
+  return {
+    id: saved.id,
+    revision: saved.revision,
+    report: saved.report,
+    attribution: saved.attribution,
+  };
+}
 
 const CHECK_COMMAND_ARGS = {
   dir: { type: "positional", description: "Project directory", required: false },
@@ -46,6 +163,16 @@ const CHECK_COMMAND_ARGS = {
     type: "string",
     description: "Number of midpoint samples across the duration (default: 9)",
     default: "9",
+  },
+  range: {
+    type: "string",
+    description:
+      "Runtime sample interval in global seconds: start,end. Static lint remains project-wide.",
+  },
+  components: {
+    type: "string",
+    description:
+      "CSS selector list: filter findings involving these components or descendants; preserve full-check status.",
   },
   at: {
     type: "string",
@@ -93,6 +220,12 @@ const CHECK_COMMAND_ARGS = {
     description: "Exit non-zero on warnings too",
     default: false,
   },
+  "prepare-media": {
+    type: "boolean",
+    description:
+      "Only make the browser-playable copies of videos Chrome cannot decode, then exit (no browser, no report). Stopped copies resume on the next run",
+    default: false,
+  },
   proxy: {
     type: "boolean",
     description:
@@ -107,7 +240,7 @@ const CHECK_COMMAND_ARGS = {
   },
   snapshots: {
     type: "boolean",
-    description: "Save the five contrast-pass PNGs under snapshots/",
+    description: "Save contrast-pass PNGs under .hyperframes/artifacts/snapshots/",
     default: false,
   },
   "caption-zone": {
@@ -137,20 +270,33 @@ export function createCheckCommand(
     },
     args: CHECK_COMMAND_ARGS,
     async run({ rawArgs }) {
-      const args = parseArgs(normalizeFrameCheckRawArgs(rawArgs), CHECK_COMMAND_ARGS);
+      const args = parseArgs(rawArgs, CHECK_COMMAND_ARGS);
       const asJson = args.json === true;
 
+      const reported = untilReported();
       try {
         const project = dependencies.resolveProject(args.dir);
         const options = parseCheckOptions(args);
         if (!asJson) {
           console.log(`${c.accent("◆")}  Checking ${c.accent(project.name)}`);
         }
-        const report = await dependencies.runPipeline(project, options);
+        if (args["prepare-media"] === true) {
+          await runPrepareMedia(dependencies, project, options, asJson);
+          return;
+        }
+        const report = await withProjectLock(project.dir, "check", () =>
+          dependencies.runPipeline(project, options),
+        );
         if (asJson) {
           console.log(JSON.stringify(dependencies.withMeta(report), null, 2));
         } else {
           printHumanReport(report);
+          if (report.saved) {
+            console.log(`Report: ${report.saved.report}`);
+            console.log(
+              `Revision: ${report.saved.revision ?? "none"} (${report.saved.attribution})`,
+            );
+          }
         }
         setCommandExitCode(checkExitCode(report));
       } catch (error) {
@@ -163,23 +309,78 @@ export function createCheckCommand(
           console.error(`${c.error("✗")} Check failed: ${message}`);
         }
         setCommandExitCode(1);
+      } finally {
+        reported.done();
       }
     },
   });
 }
 
-function normalizeFrameCheckRawArgs(rawArgs: string[]): string[] {
-  return rawArgs.map((arg, index) => {
-    if (arg !== "--frame-check") return arg;
-    const next = rawArgs[index + 1];
-    return next === undefined || next.startsWith("-") ? "--frame-check=" : arg;
+const REPORT_GRACE_MS = 5_000;
+
+function untilReported(): { done: () => void } {
+  let done = (): void => undefined;
+  const printed = new Promise<void>((resolve) => {
+    done = resolve;
   });
+  const forget = registerBrowserSessionCleanup(
+    () =>
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, REPORT_GRACE_MS);
+        void printed.then(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      }),
+  );
+  return {
+    done: () => {
+      done();
+      forget();
+    },
+  };
+}
+
+async function runPrepareMedia(
+  dependencies: CheckCommandDependencies,
+  project: ProjectDir,
+  options: CheckOptions,
+  asJson: boolean,
+): Promise<void> {
+  const files = await withProjectLock(project.dir, "check", () =>
+    dependencies.prepareMedia(project, options),
+  );
+  const failed = files.filter((file) => file.state === "failed");
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        dependencies.withMeta({
+          ok: failed.length === 0,
+          prepared: files,
+          total: files.length,
+          ready: files.length - failed.length,
+          failed: failed.length,
+        }),
+        null,
+        2,
+      ),
+    );
+  } else {
+    const mark = failed.length === 0 ? c.success("✓") : c.error("✗");
+    console.log(
+      `${mark}  Browser-playable copies: ${files.length - failed.length}/${files.length} ready`,
+    );
+    for (const file of failed) console.log(`   ${file.file}: ${file.reason}`);
+  }
+  setCommandExitCode(failed.length === 0 ? 0 : 1);
 }
 
 function parseCheckOptions(args: Record<string, unknown>): CheckOptions {
   const maxTransitionSamples = positiveInteger(args["max-transition-samples"], 0);
   return {
     samples: positiveInteger(args.samples, DEFAULT_CHECK_OPTIONS.samples),
+    range: parseCheckRange(args.range),
+    components: typeof args.components === "string" ? [args.components] : undefined,
     at: parseAt(args.at),
     atTransitions: args["at-transitions"] === true,
     maxTransitionSamples: maxTransitionSamples > 0 ? maxTransitionSamples : undefined,
@@ -198,6 +399,28 @@ function parseCheckOptions(args: Record<string, unknown>): CheckOptions {
   };
 }
 
+export function prelaunchBrowserForCheck(rawArgs: string[]) {
+  const args = parseArgs(rawArgs, CHECK_COMMAND_ARGS);
+  return prelaunchBrowserForNextCheck(resolveProject(args.dir), parseCheckOptions(args));
+}
+
+export function parseCheckRange(value: unknown): [number, number] | undefined {
+  if (value === undefined) return undefined;
+  const parts = String(value).split(/[,:]/);
+  const start = Number(parts[0]),
+    end = Number(parts[1]);
+  if (
+    parts.length !== 2 ||
+    parts.some((p) => !p.trim()) ||
+    !Number.isFinite(start) ||
+    !Number.isFinite(end) ||
+    start < 0 ||
+    end <= start
+  )
+    throw new Error("Invalid --range: use non-negative start,end with end > start");
+  return [start, end];
+}
+
 const CAPTION_ZONE_FIELDS = new Set(["x0", "y0", "x1", "y1", "severity", "seek"]);
 
 const FRAME_CHECK_FIELDS = new Set(["severity", "seek", "tol"]);
@@ -211,7 +434,7 @@ export function parseFrameCheck(value: unknown): FrameCheckOptions | undefined {
   if (value === undefined || value === null || value === false) return undefined;
   if (value === true || value === "") return {};
   if (typeof value !== "string") throw frameCheckError();
-  if (value.startsWith("-")) throw swallowedOptionError("frame-check", value);
+  if (value.startsWith("-")) throw swallowedFlagUsageError("frame-check", value);
   const fields = parseFrameCheckFields(value);
   const severity = captionSeverity(fields.get("severity"), frameCheckError);
   const seek = captionSeeks(fields.get("seek"), frameCheckError);
@@ -243,12 +466,6 @@ function parseFrameCheckTolerance(raw: string | undefined): number | undefined {
 function frameCheckError(): Error {
   return new Error(
     'Invalid --frame-check: use bare --frame-check or "severity=warning|error;seek=.25,.75;tol=4" (all fields optional)',
-  );
-}
-
-function swallowedOptionError(flag: string, value: string): Error {
-  return new Error(
-    `Invalid --${flag}: value "${value}" appears to have swallowed the next option; use --${flag}= or move --${flag} to the end`,
   );
 }
 
@@ -404,21 +621,41 @@ function nonNegativeNumber(value: unknown, fallback: number): number {
 }
 
 function printHumanReport(report: CheckReport): void {
+  if (report.scope) {
+    console.log(
+      `Scope: ${report.scope.range ? report.scope.range.join("–") + "s" : "full timeline"}; ${report.scope.hiddenFindings} findings hidden by component filter. Counts/status include hidden findings.`,
+    );
+    for (const note of report.scope.notes) console.log(note);
+  }
   printSection("Lint", report.lint);
+  if (report.browserSkipped) {
+    console.log();
+    console.log(
+      `  ${c.warn("⚠")} Browser session never ran — layout, motion, and contrast below are empty placeholders, not a clean pass.`,
+    );
+  }
   printSection("Runtime", report.runtime);
   printLayoutSection("Layout", report.layout);
   printSection("Motion", report.motion);
   printContrastSection(report);
+  printCraftSection(report);
   printSnapshotSection(report);
   console.log();
   const label = report.ok ? c.success("Check passed") : c.error("Check failed");
   console.log(`${report.ok ? c.success("◇") : c.error("◇")}  ${label}`);
 }
 
+function isEmptySection(section: CheckSection): boolean {
+  return (
+    section.findings.length === 0 &&
+    section.errorCount + section.warningCount + section.infoCount === 0
+  );
+}
+
 function printSection(title: string, section: CheckSection): void {
   console.log();
   console.log(c.bold(title));
-  if (section.findings.length === 0) {
+  if (isEmptySection(section)) {
     console.log(`  ${c.success("◇")} 0 errors, 0 warnings`);
     return;
   }
@@ -429,7 +666,7 @@ function printSection(title: string, section: CheckSection): void {
 function printLayoutSection(title: string, section: CheckReport["layout"]): void {
   console.log();
   console.log(c.bold(title));
-  if (section.findings.length === 0) {
+  if (isEmptySection(section)) {
     console.log(`  ${c.success("◇")} 0 issues across ${section.samples.length} sample(s)`);
   } else {
     for (const finding of section.findings) {
@@ -453,7 +690,7 @@ function printContrastSection(report: CheckReport): void {
     console.log(`  ${c.dim("◇")} skipped`);
     return;
   }
-  if (section.findings.length === 0) {
+  if (isEmptySection(section)) {
     console.log(
       `  ${c.success("◇")} ${section.passed}/${section.checked} text checks pass WCAG AA`,
     );
@@ -461,11 +698,22 @@ function printContrastSection(report: CheckReport): void {
   }
   for (const finding of section.findings) {
     console.log(
-      `  ${c.error("✗")} ${finding.selector} ${finding.ratio}:1 (need ${finding.requiredRatio}:1, t=${finding.time}s)`,
+      `  ${c.error("✗")} ${finding.selector} ${finding.ratio}:1 (need ${finding.requiredRatio}:1, ${formatFindingTimes(finding)})`,
     );
     console.log(`    ${c.dim(`Try ${finding.suggestedColor}; source ${finding.sourceFile}`)}`);
   }
   printCounts(section);
+}
+
+function printCraftSection(report: CheckReport): void {
+  const section = report.craft;
+  if (!section.enabled) {
+    console.log();
+    console.log(c.bold("Craft"));
+    console.log(`  ${c.dim("◇")} skipped`);
+    return;
+  }
+  printSection("Craft", section);
 }
 
 function printSnapshotSection(report: CheckReport): void {
@@ -486,7 +734,7 @@ function printSnapshotSection(report: CheckReport): void {
 }
 
 function printFinding(finding: CheckFinding): void {
-  const where = `${finding.sourceFile} ${finding.selector} t=${finding.time}s`;
+  const where = `${finding.sourceFile} ${finding.selector} ${formatFindingTimes(finding)}`;
   console.log(`  ${findingIcon(finding)} ${finding.code}: ${finding.message}`);
   console.log(`    ${c.dim(where)}`);
   if (finding.fixHint) console.log(`    ${c.dim(`Fix: ${finding.fixHint}`)}`);

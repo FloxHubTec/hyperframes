@@ -162,7 +162,7 @@ function classifyDownloadFailure(error: unknown): UrlDownloadError {
       return new UrlDownloadError(
         "network",
         true,
-        "Download failed due to a transient network error",
+        `Download failed due to a transient network error${describeCause(current)}`,
       );
     }
     current =
@@ -173,8 +173,18 @@ function classifyDownloadFailure(error: unknown): UrlDownloadError {
   return new UrlDownloadError(
     "filesystem",
     false,
-    "Download failed while writing the local artifact",
+    `Download failed while writing the local artifact${describeCause(error)}`,
   );
+}
+
+// Only the error's name and code: its message can carry the signed request URL.
+function describeCause(error: unknown): string {
+  const name = error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : "";
+  const rawCode =
+    typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+  const code = typeof rawCode === "string" && /^[A-Z0-9_]{1,40}$/.test(rawCode) ? rawCode : "";
+  const tag = [name, code].filter(Boolean).join(" ");
+  return tag ? ` (${tag})` : "";
 }
 
 const RETRYABLE_NETWORK_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"]);
@@ -776,6 +786,7 @@ async function fetchToPartial(
   partialPath: string,
   controller: AbortController,
   options: UrlDownloadOptions,
+  onSizedBodyBytes: () => void,
 ): Promise<PartialIntegrity> {
   const { response, finalUrl } = await fetchWithValidatedRedirects(url, controller);
   const finalIdentity = safeDownloadUrlIdentity(finalUrl);
@@ -852,6 +863,7 @@ async function fetchToPartial(
   const inspector = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (declaredLength !== undefined) onSizedBodyBytes();
       receivedBytes += bytes.length;
       sha256.update(bytes);
       md5.update(bytes);
@@ -868,7 +880,11 @@ async function fetchToPartial(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const readableStream = Readable.fromWeb(response.body as any);
   const fileStream = createWriteStream(partialPath, { flags: "wx" });
-  await pipeline(readableStream, inspector, fileStream);
+  // The signal makes the attempt's deadline authoritative. Without it, the abort only
+  // reaches the fetch, and the pipeline depends on the web-to-Node bridge to pass it on:
+  // Bun 1.3.9's Readable.fromWeb can stop reading and never settle, and Bun 1.4.2's ends an
+  // aborted body as if it were complete, which a chunked response would publish truncated.
+  await pipeline(readableStream, inspector, fileStream, { signal: controller.signal });
   const localSize = statSync(partialPath).size;
   const sha256Bytes = sha256.digest();
   const localSha256 = sha256Bytes.toString("hex");
@@ -1011,17 +1027,27 @@ async function runDownloadAttempt(
     controller.abort();
   };
   signal?.addEventListener("abort", onCallerAbort, { once: true });
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const armTimeout = (): void => {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  };
+  armTimeout();
+  let sizedBodyStarted = false;
+  const extendTimeout = (): void => {
+    sizedBodyStarted = true;
+    armTimeout();
+  };
   const identity = safeDownloadUrlIdentity(url);
 
   try {
     if (callerAborted) {
       throw new UrlDownloadError("cancelled", false, "Download cancelled");
     }
-    const integrity = await fetchToPartial(url, partialPath, controller, options);
+    const integrity = await fetchToPartial(url, partialPath, controller, options, extendTimeout);
     let outcome = syncAndPublishPartial(partialPath, localPath);
     let publishedIntegrity = integrity;
     if (outcome === "race_reused") {
@@ -1080,7 +1106,9 @@ async function runDownloadAttempt(
       const classified = new UrlDownloadError(
         "timeout",
         true,
-        `Download timeout after ${timeoutMs / 1000}s`,
+        sizedBodyStarted
+          ? `Download stalled: no data for ${timeoutMs / 1000}s`
+          : `Download timeout after ${timeoutMs / 1000}s`,
       );
       emitDownloadTelemetry(options, {
         urlFingerprint: identity.urlFingerprint,

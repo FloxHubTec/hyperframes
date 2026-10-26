@@ -12,6 +12,7 @@
 import { HF_AUDIO_FX_ATTR } from "./audioFx.js";
 import { AUDIO_GROUP_RENDER_ID_ATTR, MEDIA_RENDER_ID_ATTR } from "./compiler/mediaRenderIds.js";
 import { HF_AUDIO_AUTOMATION_ATTR } from "./audioAutomation.js";
+import { isAudibleVideoElement } from "./audibleVideo.js";
 
 export const HF_AUDIO_GROUP_TAG = "hf-audio-group";
 export const HF_AUDIO_GROUP_ATTR = "data-audio-group";
@@ -127,9 +128,27 @@ export function isMemberGroupHidden(
   return resolveGroupElement(doc, groupId)?.hasAttribute("data-hidden") ?? false;
 }
 
+/**
+ * The top-level composition root, the only element the master bus is read from;
+ * a sub-composition's root is skipped, so repeating one cannot stack chains.
+ */
+export function resolveMasterBusElement(root: ParentNode): Element | null {
+  const first = root.querySelector("[data-composition-id]");
+  return first && !first.parentElement?.closest("[data-composition-id]") ? first : null;
+}
+
+/** The master bus chain: the top-level root's `data-fx-chain`, if it carries one. */
+export function readMasterFxChain(root: ParentNode): string | undefined {
+  return resolveMasterBusElement(root)?.getAttribute(HF_AUDIO_FX_ATTR) || undefined;
+}
+
 export function resolveAudioGroups(root: ParentNode): HfAudioGroup[] {
   const membersByGroup = new Map<string, string[]>();
-  for (const member of root.querySelectorAll(`audio[${HF_AUDIO_GROUP_ATTR}]`)) {
+  const candidates = root.querySelectorAll(
+    `audio[${HF_AUDIO_GROUP_ATTR}], video[${HF_AUDIO_GROUP_ATTR}]`,
+  );
+  for (const member of candidates) {
+    if (!isGroupableMember(member)) continue;
     // The render-stamped instance key when the compiler has been through
     // (`assignMediaRenderIds`), else the author id. An author id is unique only
     // per composition FILE, so a sub-composition declaring a bus AND its members
@@ -195,8 +214,8 @@ export function resolveCarveSourceIds(doc: Document, ids: readonly string[]): st
   return out;
 }
 
-/** The group an audio member belongs to, or null. Membership is audio-only in
- * v1, matching `resolveAudioGroups` and the render mixer; video and group-bus
+/** The group an audio or audible-video member belongs to, or null, matching
+ * `resolveAudioGroups` and the render mixer; muted video and group-bus
  * attributes are inert.
  *
  * Tolerant of objects that only partially implement `Element` (test doubles
@@ -204,21 +223,22 @@ export function resolveCarveSourceIds(doc: Document, ids: readonly string[]): st
  * `getAttribute` simply has no group, mirroring `readChain`'s style in
  * `runtime/audioFx.ts`. */
 export function audioGroupOf(el: Element): string | null {
-  if (typeof el.tagName !== "string" || el.tagName.toLowerCase() !== "audio") return null;
-  if (typeof el.getAttribute !== "function") return null;
+  if (typeof el.tagName !== "string" || typeof el.getAttribute !== "function") return null;
+  if (!isGroupableMember(el)) return null;
   return el.getAttribute(HF_AUDIO_GROUP_ATTR) || null;
+}
+
+function isGroupableMember(el: Element): boolean {
+  if (el.tagName.toLowerCase() === "audio") return true;
+  return typeof el.hasAttribute === "function" && isAudibleVideoElement(el);
 }
 
 /**
  * Make `<hf-audio-group>` inert, once per document.
  *
- * The element is metadata — an id, a label, a chain, an automation lane — and
- * carries no content, but "no content" is not "no box": it is still an unknown
- * custom element, so in a flex or grid composition root it counts as an item
- * (taking a `gap`, shifting `justify-content`, moving every `:nth-child` after
- * it), and in inline formatting it can still open a line box. Authored layout
- * would shift by adding a group, which is not something a mixing decision is
- * allowed to do.
+ * An unknown custom element still makes a box (a flex or grid item, a line box), and a
+ * mixing decision must not shift authored layout. `contents`, not `none`: what sits
+ * inside one (a self-closed `<hf-audio-group />` takes in every later sibling) still renders, unless muted.
  *
  * `!important` because an author rule can outrank a bare type selector on
  * specificity — inertness here is a contract, not a default. Emitted from the
@@ -229,6 +249,6 @@ export function ensureAudioGroupInertStyle(doc: Document): void {
   if (!doc?.head || doc.getElementById(styleId)) return;
   const style = doc.createElement("style");
   style.id = styleId;
-  style.textContent = `${HF_AUDIO_GROUP_TAG}{display:none!important}`;
+  style.textContent = `${HF_AUDIO_GROUP_TAG}{display:contents!important}${HF_AUDIO_GROUP_TAG}[data-hidden]{display:none!important}`;
   doc.head.appendChild(style);
 }

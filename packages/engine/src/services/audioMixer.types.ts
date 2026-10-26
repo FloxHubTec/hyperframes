@@ -1,3 +1,5 @@
+import type { RateSpec } from "@hyperframes/core";
+
 export interface AudioVolumeKeyframe {
   time: number;
   volume: number;
@@ -9,11 +11,15 @@ export interface AudioElement {
   start: number;
   end: number;
   mediaStart: number;
-  /** Constant normalized source-time multiplier (0.1..5). */
-  playbackRate?: number;
+  /** Normalized source-time multiplier: a constant, or the clip's `rate` lane. */
+  playbackRate?: RateSpec;
+  loop?: boolean;
   layer: number;
   volume?: number;
   volumeKeyframes?: AudioVolumeKeyframe[];
+  /** Clip-edge fades from `data-fade-in` / `data-fade-out`, seconds; absent means none. */
+  fadeIn?: number;
+  fadeOut?: number;
   /** Serialised FX chain JSON from `data-fx-chain`, when set. */
   fxChain?: string;
   /** Serialised automation JSON from `data-automation`, when set. */
@@ -42,6 +48,9 @@ export interface AudioTrack {
   duration: number;
   volume: number;
   volumeKeyframes?: AudioVolumeKeyframe[];
+  /** Clip-edge fades in seconds, applied by `afade` after the volume filter. Fade-out ends at `end`. */
+  fadeIn?: number;
+  fadeOut?: number;
   /**
    * Seconds of FX tail past `end` that the mix should let through — a reverb or
    * delay still decaying when the clip's own audio stops. Absent means cut at
@@ -74,11 +83,24 @@ export type AudioFailureReason =
   | "cancelled"
   | "internal";
 
+export interface AudioSubprocessEvidence {
+  exitCode?: number;
+  signal?: string;
+  terminationReason?: "exit" | "abort" | "deadline" | "inactivity" | "spawn_error";
+  code?: string;
+}
+
+export type AudioFailureDiagnostic = Pick<
+  AudioProcessingFailure,
+  "stage" | "reason" | "owner" | "retryable" | "subprocess"
+>;
+
 export interface AudioProcessingFailure {
   stage: AudioFailureStage;
   reason: AudioFailureReason;
   owner: "user" | "system";
   retryable: boolean;
+  subprocess?: AudioSubprocessEvidence;
   elementId?: string;
   /** Bounded diagnostic text; never includes the authored source URL/path. */
   detail: string;
@@ -91,4 +113,5 @@ export interface MixResult {
   tracksProcessed: number;
   error?: string;
   failures?: AudioProcessingFailure[];
+  phaseMs?: Partial<Record<"prepare" | "groups" | "mix" | "master" | "encode", number>>;
 }

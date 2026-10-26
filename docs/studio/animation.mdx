@@ -45,12 +45,11 @@ To change existing motion:
 
 - drag a diamond earlier or later to retime it;
 - change the property value at that keyframe;
-- press **Delete** to remove a selected keyframe;
-- press **H** to switch selected keyframes between hold and bezier behavior;
-- press **U** to expand or collapse the selected element's keyframe properties.
+- press **Delete** to remove a selected keyframe.
 
-`K` is context-sensitive: it adds a keyframe when an editable animated
-selection can use it; otherwise it remains the playback stop shortcut.
+`K` is context-sensitive: with a canvas element selected it adds or removes a
+keyframe at the playhead, starting an animation on a static element; with
+nothing selected it remains the playback stop shortcut.
 
 ## Use auto-keyframe deliberately
 
@@ -123,7 +122,7 @@ runtime expression, but it cannot always rewrite that source safely.
 
 - **Unroll to edit** rewrites supported helper- or loop-generated motion as
   explicit tweens that Studio can edit.
-- **Computed value — edit it in the Code tab** means the value must be changed
+- **Computed value. Edit it in the Code tab.**: the value must be changed
   in source.
 - When the intent is easier to state than the implementation, copy the element
   context to your agent and describe the result you want preserved.

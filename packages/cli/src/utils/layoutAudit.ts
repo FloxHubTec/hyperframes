@@ -1,3 +1,4 @@
+import { formatFindingTimes } from "./checkFindings.js";
 export interface LayoutRect {
   left: number;
   top: number;
@@ -15,13 +16,16 @@ export type LayoutIssueCode =
   | "canvas_overflow"
   | "container_overflow"
   | "content_overlap"
+  | "visibility_escapes_segment"
   | "text_occluded"
+  | "video_alpha_unread"
   | "text_not_painted"
   | "caption_zone_collision"
   | "frame_out_of_frame"
   // Coordinate-frame findings — geometry computed in one frame, rendered in another.
   | "escaped_container"
   | "panel_out_of_canvas"
+  | "canvas_content_at_edge"
   | "connector_detached"
   | "connector_orphan"
   // Cross-sample rotation finding — a spinning element whose bbox center drifts
@@ -47,6 +51,7 @@ export interface LayoutIssue {
   code: LayoutIssueCode;
   severity: LayoutIssueSeverity;
   time: number;
+  times?: number[];
   firstSeen?: number;
   lastSeen?: number;
   occurrences?: number;
@@ -58,8 +63,8 @@ export interface LayoutIssue {
   rect: LayoutRect;
   containerRect?: LayoutRect;
   overflow?: LayoutOverflow;
-  /** `text_occluded` only: approximate fraction (0-1) of the occlusion probe
-   * grid that hit an opaque occluder — see layout-audit.browser.js. */
+  /** `text_occluded` only (0-1): probe-grid share hit by an opaque occluder, or behind a
+   * transparent video the most covered word's share under its alpha (layout-audit.browser.js). */
   coveredFraction?: number;
   fixHint?: string;
 }
@@ -117,12 +122,9 @@ export function computeOverflow(
 }
 
 /**
- * Whether a computed `overflow*` value clips its box. Mirrors the rule the
- * browser audit (layout-audit.browser.js) uses to decide that text spilling
- * past such an ancestor is intentionally masked (odometer/ticker reels) rather
- * than a `text_box_overflow` defect. Kept here as the one unit-testable seam of
- * that suppression: only `visible` (and the `clip visible` no-op) must NOT clip
- * — every clipping value must, or real masked overflow gets reported as a bug.
+ * Whether a computed `overflow*` value clips its box. Mirrors
+ * `clipsOverflowValue` in layout-audit.browser.js. `visible` and `clip visible`
+ * do not clip.
  */
 export function overflowValueClips(value: string | null | undefined): boolean {
   return !!value && value !== "visible" && value !== "clip visible";
@@ -143,10 +145,12 @@ export function summarizeLayoutIssues(issues: LayoutIssue[]): LayoutSummary {
 }
 
 export function formatLayoutIssue(issue: LayoutIssue): string {
-  const timeLabel =
-    issue.occurrences && issue.occurrences > 1
-      ? `t=${formatNumber(issue.firstSeen ?? issue.time)}-${formatNumber(issue.lastSeen ?? issue.time)}s (${issue.occurrences} samples)`
-      : `t=${formatNumber(issue.time)}s`;
+  let timeLabel = `t=${formatNumber(issue.time)}s`;
+  if (issue.times) {
+    timeLabel = formatFindingTimes(issue);
+  } else if (issue.occurrences && issue.occurrences > 1) {
+    timeLabel = `t=${formatNumber(issue.firstSeen ?? issue.time)}-${formatNumber(issue.lastSeen ?? issue.time)}s (${issue.occurrences} samples)`;
+  }
   const parts = [
     timeLabel,
     issue.code,
@@ -166,6 +170,7 @@ export function dedupeLayoutIssues(issues: LayoutIssue[]): LayoutIssue[] {
 
   for (const issue of issues) {
     const key = [
+      Reflect.get(issue, "sourceFile") ?? "",
       issue.code,
       issue.severity,
       issue.time.toFixed(3),
@@ -184,7 +189,7 @@ export function dedupeLayoutIssues(issues: LayoutIssue[]): LayoutIssue[] {
 }
 
 // Persistence-tier thresholds (#U10): occurrences>=2 alone can't imply the 500ms floor under dense 8fps sampling, so content_overlap promotion requires a literal firstSeen..lastSeen span >= 500ms — stricter for sparse callers too.
-const CONTENT_OVERLAP_HELD_ERROR_MS = 500;
+export const CONTENT_OVERLAP_HELD_ERROR_MS = 500;
 const HELD_ACROSS_SAMPLES_MIN_OCCURRENCES = 2;
 
 // Tiering only applies to layout-audit.browser.js's own per-sample seek-grid
@@ -200,9 +205,11 @@ const PERSISTENCE_TIERED_CODES: ReadonlySet<LayoutIssueCode> = new Set([
   "canvas_overflow",
   "container_overflow",
   "content_overlap",
+  "visibility_escapes_segment",
   "text_occluded",
   "escaped_container",
   "panel_out_of_canvas",
+  "canvas_content_at_edge",
   "connector_detached",
   "connector_orphan",
 ]);
@@ -259,18 +266,18 @@ export function collapseStaticLayoutIssues(
     applyPersistenceTier(
       {
         ...issue,
-        time: firstSeen,
         firstSeen,
         lastSeen,
         occurrences,
         heldMs: longestContiguousRunMs(times),
+        times: [...new Set(times)].sort((a, b) => a - b),
       },
       multiSampleRun,
     ),
   );
 }
 
-function longestContiguousRunMs(times: number[]): number {
+export function longestContiguousRunMs(times: number[]): number {
   const sorted = [...new Set(times)].sort((a, b) => a - b);
   const first = sorted[0];
   const last = sorted.at(-1);
@@ -376,6 +383,7 @@ function severityRank(severity: LayoutIssueSeverity): number {
 
 function staticIssueKey(issue: LayoutIssue): string {
   return [
+    Reflect.get(issue, "sourceFile") ?? "",
     issue.code,
     issue.severity,
     issue.selector,

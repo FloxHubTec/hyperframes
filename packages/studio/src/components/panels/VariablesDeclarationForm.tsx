@@ -6,7 +6,7 @@
 
 import { useState } from "react";
 import type { CompositionVariable, CompositionVariableType } from "@hyperframes/sdk";
-import { VARIABLES_INPUT_CLASS } from "./VariablesValueControls";
+import { variableDefaultText, VARIABLES_INPUT_CLASS } from "./VariablesValueControls";
 
 const VARIABLE_TYPES: CompositionVariableType[] = [
   "string",
@@ -19,6 +19,7 @@ const VARIABLE_TYPES: CompositionVariableType[] = [
 ];
 
 export interface DeclarationDraft {
+  original?: CompositionVariable;
   id: string;
   label: string;
   type: CompositionVariableType;
@@ -48,10 +49,11 @@ export function draftFromDeclaration(decl: CompositionVariable): DeclarationDraf
   const numeric = decl.type === "number" ? decl : null;
   return {
     ...EMPTY_DRAFT,
+    original: decl,
     id: decl.id,
     label: decl.label,
     type: decl.type,
-    defaultRaw: String(decl.default),
+    defaultRaw: variableDefaultText(decl),
     description: decl.description ?? "",
     min: numeric?.min !== undefined ? String(numeric.min) : "",
     max: numeric?.max !== undefined ? String(numeric.max) : "",
@@ -153,8 +155,24 @@ export function declarationFromDraft(draft: DeclarationDraft): CompositionVariab
       return { ...base, type: "boolean", default: draft.defaultRaw.trim() === "true" };
     case "enum":
       return enumDeclFromDraft(base, draft);
+    case "font": {
+      const value = draft.original?.type === "font" ? draft.original.default : undefined;
+      return {
+        ...base,
+        type: "font",
+        default:
+          typeof value === "object" ? { ...value, name: draft.defaultRaw } : draft.defaultRaw,
+      };
+    }
+    case "image": {
+      const value = draft.original?.type === "image" ? draft.original.default : undefined;
+      return {
+        ...base,
+        type: "image",
+        default: typeof value === "object" ? { ...value, url: draft.defaultRaw } : draft.defaultRaw,
+      };
+    }
     default:
-      // string / color / font / image — string default, verbatim.
       return { ...base, type: draft.type, default: draft.defaultRaw };
   }
 }
@@ -299,19 +317,19 @@ export function DeclarationForm({
           className={VARIABLES_INPUT_CLASS}
         />
       </Field>
-      {error && <p className="text-[10px] text-red-400">{error}</p>}
+      {error && <p className="text-[10px] text-danger-ink">{error}</p>}
       <div className="flex items-center justify-end gap-2 pt-1">
         <button
           type="button"
           onClick={onCancel}
-          className="h-6 rounded px-2 text-[10px] text-neutral-500 hover:text-neutral-300"
+          className="h-6 rounded-sm px-2 text-[10px] text-neutral-500 hover:text-neutral-300"
         >
           Cancel
         </button>
         <button
           type="button"
           onClick={submit}
-          className="h-6 rounded bg-neutral-800 px-2 text-[10px] font-medium text-neutral-200 hover:bg-neutral-700"
+          className="h-6 rounded-sm bg-neutral-800 px-2 text-[10px] font-medium text-neutral-200 hover:bg-neutral-700"
         >
           {submitLabel}
         </button>

@@ -7,7 +7,8 @@
 
 import { cpus, freemem } from "os";
 import { existsSync, mkdirSync, readdirSync } from "fs";
-import { copyFile, readFile, rename } from "fs/promises";
+import { copyFile, readFile } from "fs/promises";
+import { renameWithRetryAsync } from "../utils/renameWithRetry.js";
 import { join } from "path";
 import { getHeapStatistics } from "v8";
 
@@ -78,6 +79,8 @@ export interface WorkerResult {
   perf?: CapturePerfSummary;
   error?: string;
   diagnostics?: string[];
+  /** The worker session's `[Browser:PAGEERROR]` console lines, kept so the render's error count sees them. */
+  pageErrorLines?: string[];
   failure?: CaptureFailure;
 }
 
@@ -88,6 +91,14 @@ export interface ParallelProgress {
   workerProgress: Map<number, number>;
   /** Latest lifecycle transition; absent on ordinary completed-frame updates. */
   latestWorkerPhase?: ParallelWorkerPhaseDiagnostic;
+  /** Disk capture only: the frame file this update finished writing, readable from now on. */
+  landedFrame?: LandedFrame;
+}
+
+/** A captured frame file: `index` is its file index (`frame_<index>`), `path` where it was written. */
+export interface LandedFrame {
+  index: number;
+  path: string;
 }
 
 export type ParallelWorkerPhase =
@@ -123,11 +134,6 @@ export interface WorkerSizingConfig extends Partial<
 
 type WorkerBrowserPoolDecision = {
   parallel?: boolean;
-  platform: NodeJS.Platform;
-  // Deliberately accepted but not used: forceScreenshot is not an exclusion.
-  forceScreenshot?: boolean;
-  deviceScaleFactor?: number;
-  headlessShellPath?: string;
 };
 
 // System-memory budget per parallel worker. Each worker is a full Chrome
@@ -141,10 +147,8 @@ const MEMORY_PER_WORKER_MB = 1536;
 const HEAP_RESERVED_MB = 1024;
 // Parent-process V8 heap consumed per worker (protocol buffers + in-flight
 // frame buffers). Derived from the field OOM: 6 workers exhausted a ~4GB
-// default heap ⇒ >~500MB/worker + base. ponytail: advisory-only until the
-// workers_heap_* telemetry added alongside this constant validates the figure
-// — enforcing a guessed budget could silently cut worker counts fleet-wide.
-// TODO(PRINFRA-341): decide enforcement after ~2 weeks of fleet soak.
+// default heap ⇒ >~500MB/worker + base. Caps auto sizing; an explicit
+// `--workers N` is still the operator's call.
 const HEAP_PER_WORKER_MB = 640;
 const MIN_WORKERS = 1;
 const MAX_WORKER_DIAGNOSTIC_LINES = 8;
@@ -167,19 +171,13 @@ function defaultSafeMaxWorkers(): number {
 }
 const MIN_FRAMES_PER_WORKER = 30;
 
-// Linux/headless parallel workers need isolated browser processes: BeginFrame
-// crashes when shared, while forceScreenshot is safe but serializes
-// Page.captureScreenshot per browser. Supersampling keeps the existing path
-// until browser-pool compatibility is keyed by DPR.
+// Every parallel worker gets its own browser: pages in one browser share six
+// connections to the file server, which a media-heavy page holds (#5548), and
+// sharing also crashes BeginFrame and serializes screenshots.
 export function shouldDisableBrowserPoolForParallelWorker({
   parallel,
-  platform,
-  deviceScaleFactor,
-  headlessShellPath,
 }: WorkerBrowserPoolDecision): boolean {
-  return Boolean(
-    parallel && platform === "linux" && headlessShellPath && (deviceScaleFactor ?? 1) <= 1,
-  );
+  return Boolean(parallel);
 }
 
 export function selectWorkerDiagnostics(
@@ -231,7 +229,7 @@ export function synthesizeSilentWorkerExitError(
     `worker ${result.workerId} exited without terminal error string ` +
     `(framesCaptured=${result.framesCaptured}, expected=${expectedFrames}, ` +
     `range=[${result.startFrame}, ${result.endFrame})). ` +
-    `Field signal ts=1784042064 — this class of failure has been reported; ` +
+    `Field signal ts=1784042064: this class of failure has been reported; ` +
     `consider re-run with --workers=1 to isolate.`
   );
 }
@@ -275,7 +273,8 @@ export type WorkerSizingBound =
   | "frames"
   | "max_workers"
   | "min_parallel_floor"
-  | "contention";
+  | "contention"
+  | "heap";
 
 /**
  * Full provenance of a worker-sizing decision. Threaded into render
@@ -290,9 +289,8 @@ export interface WorkerSizing {
   frameBasedWorkers: number;
   effectiveMaxWorkers: number;
   /**
-   * ADVISORY, not enforced (see HEAP_PER_WORKER_MB): how many workers the
-   * parent process's V8 heap could feed. Compare against `workers` in
-   * telemetry to validate the budget before enforcement.
+   * How many workers the parent process's V8 heap can feed (see
+   * HEAP_PER_WORKER_MB); auto sizing never exceeds it.
    */
   heapBasedWorkers: number;
   /** V8 `heap_size_limit` for the parent process, MB. */
@@ -300,7 +298,7 @@ export interface WorkerSizing {
   totalMemoryMb: number;
   cpuCount: number;
   captureCostMultiplier: number;
-  /** true when the chosen count exceeds the advisory heap budget. */
+  /** true when the chosen count exceeds the heap budget (only an explicit request can). */
   exceedsHeapAdvisory: boolean;
 }
 
@@ -403,6 +401,11 @@ export function computeWorkerSizing(
       finalWorkers = cpuScaledMax;
       boundBy = "contention";
     }
+  }
+
+  if (finalWorkers > heapBasedWorkers) {
+    finalWorkers = heapBasedWorkers;
+    boundBy = "heap";
   }
 
   return finish(finalWorkers, boundBy, effectiveMaxWorkers);
@@ -544,6 +547,8 @@ export function withParallelWorkerDeadline<T>(
   });
 }
 
+const LATE_LAUNCH_CLOSE_WAIT_MS = 10_000;
+
 function resolveParallelWorkerTimeoutMs(enabled: boolean): number {
   if (!enabled) return 0;
   const raw = process.env.HF_DE_PARALLEL_PHASE_TIMEOUT_MS;
@@ -558,7 +563,9 @@ async function captureFrameRange(
   task: WorkerTask,
   captureOptions: CaptureOptions,
   signal: AbortSignal | undefined,
-  onFrameCaptured: ((workerId: number, frameIndex: number) => void) | undefined,
+  onFrameCaptured:
+    | ((workerId: number, frameIndex: number, landedFrame?: LandedFrame) => void)
+    | undefined,
   onFrameBuffer:
     | ((frameIndex: number, buffer: Buffer, session: CaptureSession) => Promise<void>)
     | undefined,
@@ -604,7 +611,7 @@ async function captureFrameRange(
       if (signal?.aborted) throw new Error("Parallel worker cancelled");
       const time = (i * captureOptions.fps.den) / captureOptions.fps.num;
       if (dbg && i < task.startFrame + dbgWin) {
-        console.log(`[par:w${task.workerId}] +${Date.now() - dbgT0}ms produce ${i} start`);
+        console.error(`[par:w${task.workerId}] +${Date.now() - dbgT0}ms produce ${i} start`);
       }
       const { encodeResult } = await runCaptureOperation("frame_capture", i, () =>
         captureFrameToBufferPipelined(session, i - outputOffset, time),
@@ -616,23 +623,25 @@ async function captureFrameRange(
       // and would otherwise surface as an unhandled rejection during teardown.
       encodeResult.catch(() => {});
       if (dbg && i < task.startFrame + dbgWin) {
-        console.log(`[par:w${task.workerId}] +${Date.now() - dbgT0}ms produce ${i} kicked`);
+        console.error(`[par:w${task.workerId}] +${Date.now() - dbgT0}ms produce ${i} kicked`);
       }
       if (prev) {
         if (dbg && prev.idx < task.startFrame + dbgWin) {
-          console.log(
+          console.error(
             `[par:w${task.workerId}] +${Date.now() - dbgT0}ms drain ${prev.idx} await-encode`,
           );
         }
         const buf = await awaitEncode(prev.idx, prev.encodeResult);
         if (dbg && prev.idx < task.startFrame + dbgWin) {
-          console.log(
+          console.error(
             `[par:w${task.workerId}] +${Date.now() - dbgT0}ms drain ${prev.idx} encoded ${buf.length}B`,
           );
         }
         await onFrameBuffer(prev.idx, buf, session);
         if (dbg && prev.idx < task.startFrame + dbgWin) {
-          console.log(`[par:w${task.workerId}] +${Date.now() - dbgT0}ms drain ${prev.idx} written`);
+          console.error(
+            `[par:w${task.workerId}] +${Date.now() - dbgT0}ms drain ${prev.idx} written`,
+          );
         }
         framesCaptured++;
         if (onFrameCaptured) onFrameCaptured(task.workerId, prev.idx);
@@ -651,18 +660,20 @@ async function captureFrameRange(
     const time = (i * captureOptions.fps.den) / captureOptions.fps.num;
     const fileFrameIdx = i - outputOffset;
 
+    let landedFrame: LandedFrame | undefined;
     if (onFrameBuffer) {
       const { buffer } = await runCaptureOperation("frame_capture", i, () =>
         captureFrameToBuffer(session, fileFrameIdx, time),
       );
       await onFrameBuffer(i, buffer, session);
     } else {
-      await runCaptureOperation("frame_capture", i, () =>
+      const { path } = await runCaptureOperation("frame_capture", i, () =>
         captureFrame(session, fileFrameIdx, time),
       );
+      landedFrame = { index: fileFrameIdx, path };
     }
     framesCaptured++;
-    if (onFrameCaptured) onFrameCaptured(task.workerId, i);
+    if (onFrameCaptured) onFrameCaptured(task.workerId, i, landedFrame);
   }
   return framesCaptured;
 }
@@ -705,7 +716,7 @@ export function selectVerifySampleIndicesForTask(
  */
 /** HF_DE_PAR_DEBUG=1 gated per-worker trace line (message built lazily). */
 function logParDebug(message: () => string): void {
-  if (process.env.HF_DE_PAR_DEBUG === "1") console.log(message());
+  if (process.env.HF_DE_PAR_DEBUG === "1") console.error(message());
 }
 
 /**
@@ -727,7 +738,7 @@ function assertDiskSampleAboveFloor(
       { kind: "psnr", frameIndex: idx, failedDb: db, verifyThresholdDb: verifyMinDb },
     );
   }
-  console.log(
+  console.error(
     `[Parallel] drawElement disk self-verify passed (worker ${workerId}, frame ${idx}, ` +
       `${db === Infinity ? "inf" : db.toFixed(1)}dB)`,
   );
@@ -778,7 +789,7 @@ async function psnrForDiskSample(
       const detail = err instanceof Error ? err.message : String(err);
       throw new Error(
         `[Parallel] drawElement disk self-verify aborted (worker ${workerId}, frame ${idx}): ` +
-          `ffmpeg or the \`psnr\` filter is unavailable — ${detail}. The preflight in ` +
+          `ffmpeg or the \`psnr\` filter is unavailable (${detail}). The preflight in ` +
           "initDrawElementOrTransparentBackground normally catches this at bootstrap; if you " +
           "hit this after a successful preflight, ffmpeg was replaced mid-render or " +
           "HYPERFRAMES_FFMPEG_PATH now points at a different binary.",
@@ -830,7 +841,7 @@ async function executeWorkerTask(
   captureOptions: CaptureOptions,
   createBeforeCaptureHook: () => BeforeCaptureHook | null,
   signal?: AbortSignal,
-  onFrameCaptured?: (workerId: number, frameIndex: number) => void,
+  onFrameCaptured?: (workerId: number, frameIndex: number, landedFrame?: LandedFrame) => void,
   onFrameBuffer?: (frameIndex: number, buffer: Buffer, session: CaptureSession) => Promise<void>,
   config?: Partial<EngineConfig>,
   parallel?: boolean,
@@ -845,13 +856,7 @@ async function executeWorkerTask(
   let session: CaptureSession | null = null;
   let perf: CapturePerfSummary | undefined;
 
-  const needsSeparateBrowsers = shouldDisableBrowserPoolForParallelWorker({
-    parallel,
-    platform: process.platform,
-    forceScreenshot: config?.forceScreenshot,
-    deviceScaleFactor: captureOptions.deviceScaleFactor,
-    headlessShellPath: resolveHeadlessShellPath(config),
-  });
+  const needsSeparateBrowsers = shouldDisableBrowserPoolForParallelWorker({ parallel });
   const workerConfig: Partial<EngineConfig> | undefined = needsSeparateBrowsers
     ? { ...config, enableBrowserPool: false }
     : config;
@@ -881,15 +886,22 @@ async function executeWorkerTask(
   };
 
   try {
-    session = await runPhase("browser_launch", () =>
-      createCaptureSession(
-        serverUrl,
-        task.outputDir,
-        captureOptions,
-        createBeforeCaptureHook(),
-        workerConfig,
-      ),
+    const launch = createCaptureSession(
+      serverUrl,
+      task.outputDir,
+      captureOptions,
+      createBeforeCaptureHook(),
+      workerConfig,
     );
+    session = await runPhase("browser_launch", () => launch).catch(async (error: unknown) => {
+      // Close a launch that lost to cancel or its deadline before settling: Puppeteer's exit hook skips browsers.
+      const closing = launch.then(closeCaptureSession).catch(() => {});
+      await Promise.race([
+        closing,
+        new Promise((settle) => setTimeout(settle, LATE_LAUNCH_CLOSE_WAIT_MS).unref()),
+      ]);
+      throw error;
+    });
     const activeSession = session;
     browserExecutable = activeSession.browser?.process?.()?.spawnfile || browserExecutable;
     logParDebug(() => `[par:w${task.workerId}] session created`);
@@ -933,6 +945,7 @@ async function executeWorkerTask(
       frameStride: task.frameStride,
       durationMs: Date.now() - startTime,
       perf,
+      pageErrorLines: pageErrorLinesOf(activeSession),
     };
   } catch (error) {
     const diagnostics = session ? selectWorkerDiagnostics(session.browserConsoleBuffer) : [];
@@ -946,6 +959,7 @@ async function executeWorkerTask(
     const failure = classifyCaptureFailure(error, {
       signal,
       workerDiagnostics: [workerDiagnostic],
+      pageErrorLines: session ? pageErrorLinesOf(session) : undefined,
     });
     onFailure?.(failure);
     return {
@@ -958,6 +972,7 @@ async function executeWorkerTask(
       perf,
       error: failure.message,
       diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
+      pageErrorLines: session ? pageErrorLinesOf(session) : undefined,
       failure,
     };
   } finally {
@@ -983,6 +998,72 @@ export function resolveParallelDeVerifySamples(
   return Math.min(8, 4 + 2 * (workerCount - 1));
 }
 
+/**
+ * Whether one worker's failure ends the whole pool. On the disk path a
+ * transient death (Target closed, Page crashed) is not fatal: the
+ * orchestrator's adaptive retry re-captures that worker's missing frames. On
+ * the streaming path (`onFrameBuffer` present) there is no per-worker retry
+ * and the dead worker's frames are gone, so its peers would park in the
+ * ordered writer waiting for a frame that never comes until the producer's
+ * no-progress watchdog relabelled the death as a stall a minute later.
+ * Every non-cancelled failure is therefore pool-fatal there; `cancelled`
+ * means the pool was already aborted and there is nothing left to propagate.
+ */
+export function isPoolFatalWorkerFailure(failure: CaptureFailure, streaming: boolean): boolean {
+  if (streaming) return failure.kind !== "cancelled";
+  return isFatalCaptureFailure(failure);
+}
+
+export interface ParallelCaptureHooks {
+  /**
+   * The first pool-fatal worker failure, delivered BEFORE peers are aborted
+   * so a streaming caller can release anything parked on the dead worker's
+   * frame (the ordered writer) with the original error, not a stall.
+   */
+  onWorkerFailure?: (failure: CaptureFailure) => void;
+}
+
+function pageErrorLinesOf(session: CaptureSession): string[] {
+  return session.browserConsoleBuffer.filter((line) => line.includes("PAGEERROR"));
+}
+
+/**
+ * The pool's single failure gate. Both halves of the contract the streaming
+ * stage relies on live here so they can be pinned without a browser: the
+ * first pool-fatal failure reaches `hooks.onWorkerFailure` with the ORIGINAL
+ * `CaptureFailure` before the peers are aborted, and a hook that throws cannot
+ * skip that abort (the pool still rejects with its own classified failure,
+ * not the hook's error). Later failures are ignored: the first one owns the
+ * abort reason. `onFailure` runs synchronously at the tail of a worker's
+ * catch, before that worker's promise settles, so the hook always precedes
+ * the pool's rejection. Exported for tests.
+ */
+export function createPoolFailureHandler(args: {
+  streaming: boolean;
+  peerController: AbortController;
+  hooks?: ParallelCaptureHooks;
+}): {
+  onFailure: (failure: CaptureFailure) => void;
+  firstFatalFailure: () => CaptureFailure | undefined;
+} {
+  let firstFatalFailure: CaptureFailure | undefined;
+  return {
+    firstFatalFailure: () => firstFatalFailure,
+    onFailure: (failure) => {
+      if (firstFatalFailure || !isPoolFatalWorkerFailure(failure, args.streaming)) return;
+      firstFatalFailure = failure;
+      try {
+        args.hooks?.onWorkerFailure?.(failure);
+      } catch {
+        // A caller-supplied hook must not be able to disable the pool abort;
+        // the worker's classified failure is what the pool reports.
+      } finally {
+        args.peerController.abort(failure);
+      }
+    },
+  };
+}
+
 export async function executeParallelCapture(
   serverUrl: string,
   workDir: string,
@@ -993,6 +1074,7 @@ export async function executeParallelCapture(
   onProgress?: (progress: ParallelProgress) => void,
   onFrameBuffer?: (frameIndex: number, buffer: Buffer, session: CaptureSession) => Promise<void>,
   config?: Partial<EngineConfig>,
+  hooks?: ParallelCaptureHooks,
 ): Promise<WorkerResult[]> {
   // `endFrame - startFrame` is the correct per-task frame count for contiguous
   // tasks (stride 1), but for interleaved tasks (stride = workerCount) each
@@ -1008,7 +1090,7 @@ export async function executeParallelCapture(
 
   for (const task of tasks) workerProgress.set(task.workerId, 0);
 
-  const onFrameCaptured = (workerId: number, _frameIndex: number) => {
+  const onFrameCaptured = (workerId: number, _frameIndex: number, landedFrame?: LandedFrame) => {
     const current = workerProgress.get(workerId) || 0;
     workerProgress.set(workerId, current + 1);
 
@@ -1019,6 +1101,7 @@ export async function executeParallelCapture(
         capturedFrames,
         activeWorkers: tasks.length,
         workerProgress: new Map(workerProgress),
+        ...(landedFrame && { landedFrame }),
       });
     }
   };
@@ -1040,20 +1123,21 @@ export async function executeParallelCapture(
     captureOptions.deVerifySamples,
     tasks.length,
   );
-  const workerCaptureOptions: CaptureOptions =
-    deVerifySamples === captureOptions.deVerifySamples
-      ? captureOptions
-      : { ...captureOptions, deVerifySamples };
+  const workerCaptureOptions: CaptureOptions = {
+    ...captureOptions,
+    deVerifySamples,
+    deFrameFallback: false,
+  };
   const peerController = new AbortController();
   const workerSignal = signal
     ? AbortSignal.any([signal, peerController.signal])
     : peerController.signal;
-  let firstFatalFailure: CaptureFailure | undefined;
-  const onFailure = (failure: CaptureFailure): void => {
-    if (firstFatalFailure || !isFatalCaptureFailure(failure)) return;
-    firstFatalFailure = failure;
-    peerController.abort(failure);
-  };
+  const failureHandler = createPoolFailureHandler({
+    streaming: Boolean(onFrameBuffer),
+    peerController,
+    hooks,
+  });
+  const onFailure = failureHandler.onFailure;
   const results = await Promise.all(
     tasks.map((task) =>
       executeWorkerTask(
@@ -1077,13 +1161,15 @@ export async function executeParallelCapture(
   const errors = results.filter((r) => r.failure || r.error);
   if (errors.length > 0) {
     const errorMessages = errors.map(formatWorkerFailure).join("; ");
-    const representative = firstFatalFailure ?? errors.find((result) => result.failure)?.failure;
+    const representative =
+      failureHandler.firstFatalFailure() ?? errors.find((result) => result.failure)?.failure;
     const workerDiagnostics = errors.flatMap((result) => result.failure?.workerDiagnostics ?? []);
     throw new CaptureFailure({
       kind: representative?.kind ?? "io",
       message: `[Parallel] Capture failed: ${errorMessages}`,
       cause: representative,
       workerDiagnostics,
+      pageErrorLines: [...new Set(results.flatMap((result) => result.pageErrorLines ?? []))],
     });
   }
 
@@ -1112,7 +1198,7 @@ export async function mergeWorkerFrames(
       const sourcePath = join(task.outputDir, file);
       const targetPath = join(outputDir, file);
       try {
-        await rename(sourcePath, targetPath);
+        await renameWithRetryAsync(sourcePath, targetPath);
       } catch {
         await copyFile(sourcePath, targetPath);
       }

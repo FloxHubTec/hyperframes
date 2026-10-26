@@ -22,7 +22,10 @@ import {
 const FAKE_FFPROBE_PATH = process.execPath;
 
 function makeRunner(
-  codecByPath: Record<string, string | { codecName: string; pixFmt?: string }>,
+  codecByPath: Record<
+    string,
+    string | { codecName: string; pixFmt?: string; tags?: Record<string, string> }
+  >,
 ): FfprobeRunner {
   return (_command, args) => {
     const filePath = args[args.length - 1] ?? "";
@@ -34,6 +37,7 @@ function makeRunner(
             codec_type: "video",
             codec_name: normalized.codecName,
             pix_fmt: normalized.pixFmt,
+            tags: normalized.tags,
           },
         ]
       : [];
@@ -164,6 +168,23 @@ describe("probeAssetCodec", () => {
     });
   });
 
+  it("flags a VP9 whose alpha is only in the ALPHA_MODE tag, so it gets the VP8 proxy", async () => {
+    const project = tmpProject();
+    const videoPath = join(project, "cutout.webm");
+    writeFileSync(videoPath, "fake video bytes");
+
+    // What ffprobe prints for a libvpx-vp9 yuva420p encode.
+    const facts = await probeAssetCodec(
+      videoPath,
+      makeRunner({
+        [videoPath]: { codecName: "vp9", pixFmt: "yuv420p", tags: { ALPHA_MODE: "1" } },
+      }),
+    );
+
+    expect(facts?.hasAlpha).toBe(true);
+    expect(proxyVariantFor(facts!)).toBe("vp8");
+  });
+
   it("returns null (never throws) when ffprobe is unresolvable", async () => {
     const project = tmpProject();
     const videoPath = join(project, "clip.mp4");
@@ -171,6 +192,19 @@ describe("probeAssetCodec", () => {
     process.env.HYPERFRAMES_FFPROBE_PATH = join(project, "missing-ffprobe");
 
     await expect(probeAssetCodec(videoPath)).resolves.toBeNull();
+  });
+
+  it("probes again after ffprobe failed instead of caching the failure", async () => {
+    const project = tmpProject();
+    const videoPath = join(project, "clip.mp4");
+    writeFileSync(videoPath, "fake video bytes");
+    const cache = createMediaCodecProbeCache();
+    process.env.HYPERFRAMES_FFPROBE_PATH = join(project, "missing-ffprobe");
+    await expect(probeAssetCodec(videoPath, undefined, cache)).resolves.toBeNull();
+
+    const facts = await probeAssetCodec(videoPath, makeRunner({ [videoPath]: "hevc" }), cache);
+
+    expect(facts?.codecName).toBe("hevc");
   });
 });
 
@@ -193,7 +227,7 @@ describe("shouldPrewarmProxy", () => {
     return { codecName, browserHostile: true, representativeMime: null, hasAlpha: false };
   }
 
-  it.each(["hevc", "prores"])(
+  it.each(["hevc", "prores", "theora"])(
     "pre-warms %s, which has no cross-platform browser decode",
     (codecName) => {
       expect(shouldPrewarmProxy(facts(codecName))).toBe(true);
@@ -321,6 +355,17 @@ describe("resolveProxyVariantRequest", () => {
 });
 
 describe("scanProjectMediaCodecMap", () => {
+  it("probes the actual quoted source with mixed literal and escaped percent spelling", async () => {
+    const project = tmpProject();
+    const videoPath = join(project, "it's 100%.mp4");
+    writeFileSync(videoPath, "fake video bytes");
+    const html = `<video title="src='fake.mp4'" data-src="lazy.mp4" src="it&#39;s%20100%.mp4"></video>`;
+    const map = await scanProjectMediaCodecMap(project, [{ html }], {
+      runner: makeRunner({ [videoPath]: "hevc" }),
+    });
+    expect(Object.keys(map)).toEqual(["/it's 100%.mp4"]);
+  });
+
   it("omits an asset from the map (no throw) when ffprobe is unresolvable", async () => {
     const project = tmpProject();
     writeFileSync(join(project, "clip.mp4"), "fake video bytes");

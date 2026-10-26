@@ -1,6 +1,6 @@
 // fallow-ignore-file code-duplication
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -41,6 +41,12 @@ vi.mock("../utils/runFfmpeg.js", async (importOriginal) => {
   return { ...actual, runFfmpeg: runFfmpegMock };
 });
 
+// The AAC encode is aacEncode.test.ts's subject; here the mix only has to hand it the float sum.
+vi.mock("./aacEncode.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./aacEncode.js")>()),
+  encodeAac: vi.fn(async () => ({ success: true, durationMs: 1, stderr: "", exitCode: 0 })),
+}));
+
 // The FX render drives a headless browser; the mix only needs to know the
 // processed file exists and how long a tail the chain asked for.
 const { applyAudioFxChainMock } = vi.hoisted(() => ({
@@ -60,12 +66,25 @@ vi.mock("./audioFxRender.js", async (importOriginal) => {
   return { ...actual, applyAudioFxChain: applyAudioFxChainMock };
 });
 
+// The real default CA bundle paths do not exist on Windows runners.
+vi.mock("../utils/urlInput.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../utils/urlInput.js")>();
+  return {
+    ...actual,
+    urlInputArgs: (input: string, options?: Parameters<typeof actual.urlInputArgs>[1]) =>
+      actual.urlInputArgs(input, { ...options, caBundles: [process.execPath] }),
+  };
+});
+
 vi.mock("../utils/ffprobe.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../utils/ffprobe.js")>();
   return { ...actual, extractAudioMetadata: extractAudioMetadataMock };
 });
 
-import { parseAudioElements, processCompositionAudio } from "./audioMixer.js";
+import { RATE_RANGE } from "@hyperframes/core/audio-automation";
+import { AudioFxRenderError } from "./audioFxRender.js";
+import { MAX_MIX_INPUTS, parseAudioElements, processCompositionAudio } from "./audioMixer.js";
+import { encodeAac } from "./aacEncode.js";
 
 describe("parseAudioElements strict literal timing", () => {
   it.each(["", "   ", "0s", "0abc", "0px", "-1s", "Infinity", "NaN", "0x10"])(
@@ -78,6 +97,31 @@ describe("parseAudioElements strict literal timing", () => {
       ).toHaveLength(1);
     },
   );
+});
+
+describe("parseAudioElements clip end", () => {
+  const endOf = (attrs: string) =>
+    parseAudioElements(`<audio id="vo" src="vo.wav" ${attrs}></audio>`)[0]?.end;
+
+  it("ends a clip at start + data-duration when it has no data-end", () => {
+    expect(endOf('data-start="773.1" data-duration="6.909"')).toBeCloseTo(780.009, 6);
+  });
+
+  it("lets data-end win over data-duration", () => {
+    expect(endOf('data-start="10" data-duration="6" data-end="12"')).toBe(12);
+  });
+
+  it("leaves the end unknown (0) when neither is authored", () => {
+    expect(endOf('data-start="10"')).toBe(0);
+  });
+
+  it("measures data-duration from a relative data-start", () => {
+    const [, second] = parseAudioElements(
+      '<audio id="a" src="a.wav" data-start="2" data-end="5"></audio>' +
+        '<audio id="b" src="b.wav" data-start="a" data-duration="4"></audio>',
+    );
+    expect(second?.end).toBe(9);
+  });
 });
 
 describe("parseAudioElements — <source> children", () => {
@@ -104,6 +148,10 @@ describe("parseAudioElements — <source> children", () => {
 });
 describe("processCompositionAudio", () => {
   const tempDirs: string[] = [];
+  const gainChain = JSON.stringify({
+    version: 1,
+    nodes: [{ type: "gain", id: "g", params: { gain: -3 } }],
+  });
 
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -154,6 +202,25 @@ describe("processCompositionAudio", () => {
     },
   );
 
+  it("warns, naming the clip, when a clip's length is unknown and it plays to its source end", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "tone.wav"), Buffer.from("RIFF0000WAVEfmt "));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await processCompositionAudio(
+      parseAudioElements('<audio id="open-ended" src="tone.wav" data-start="0"></audio>'),
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      10,
+    );
+    expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+      expect.stringContaining("open-ended has no data-duration or data-end"),
+    ]);
+    warn.mockRestore();
+  });
+
   it("classifies an HTML-as-200 audio source as deterministic user input", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
     const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
@@ -188,6 +255,49 @@ describe("processCompositionAudio", () => {
         stage: "download",
         owner: "user",
         retryable: false,
+      }),
+    ]);
+  });
+
+  it.each([
+    {
+      src: "assets/music.mp3",
+      detail:
+        'Source not found for audio element bed: src="assets/music.mp3" resolved to assets/music.mp3',
+    },
+    {
+      src: "/assets/music.mp3",
+      detail: "Source not found for audio element bed: resolved to assets/music.mp3",
+    },
+  ])("names where a missing local audio file was looked for ($src)", async ({ src, detail }) => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-missing-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+
+    const result = await processCompositionAudio(
+      [
+        {
+          id: "bed",
+          src,
+          start: 0,
+          end: 2,
+          mediaStart: 0,
+          layer: 0,
+          volume: 1,
+          type: "audio",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+    );
+
+    expect(result.failures).toEqual([
+      expect.objectContaining({
+        reason: "source_not_found",
+        elementId: "bed",
+        detail,
       }),
     ]);
   });
@@ -317,10 +427,10 @@ describe("processCompositionAudio", () => {
     const filter = capturedFilterScripts[1];
 
     expect(filter).toContain("volume=0");
-    expect(filter).toContain("[mixed]volume=1[out]");
+    expect(filter).toContain("[mixed]volume=1,apad,asetpts=N/SR/TB,atrim=0:2[out]");
     expect(filter).toContain("apad,asetpts=N/SR/TB,atrim=0:2");
     expect(filter).not.toContain("whole_dur");
-    expect(filter).not.toContain("normalize=");
+    expect(filter).toContain("normalize=0");
     expect(filter).not.toContain("weights=");
   });
 
@@ -389,6 +499,95 @@ describe("processCompositionAudio", () => {
     expect(runFfmpegMock.mock.calls[0]?.[0]).toEqual(expect.arrayContaining(["-af", filter]));
   });
 
+  it("bakes a rate lane as concatenated source slices whose tempo is the mean rate over each slice", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "timecode.wav"), "stub");
+    const rate = {
+      target: "rate",
+      points: [
+        { t: 0, v: 2 },
+        { t: 1, v: 2 },
+      ],
+    };
+
+    await processCompositionAudio(
+      [
+        {
+          id: "timecode",
+          src: "timecode.wav",
+          start: 0,
+          end: 1,
+          mediaStart: 0,
+          playbackRate: rate,
+          layer: 0,
+          volume: 1,
+          type: "audio",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      1,
+    );
+
+    const args: string[] = runFfmpegMock.mock.calls[0]?.[0] ?? [];
+    const graph = args[args.indexOf("-filter_complex") + 1] ?? "";
+    // a constant 2x lane: 1s of composition consumes 2s of source, in 4 quarter-second slices
+    expect(args).toEqual(expect.arrayContaining(["-t", "2", "-map", "[out]"]));
+    expect(graph).toContain("asplit=4");
+    expect(graph).toContain(
+      "[s0]atrim=start=0:end=0.5,asetpts=PTS-STARTPTS,atempo=2,apad,asetpts=N/SR/TB,atrim=0:0.25[t0]",
+    );
+    expect(graph).toContain(
+      "[s3]atrim=start=1.5:end=2,asetpts=PTS-STARTPTS,atempo=2,apad,asetpts=N/SR/TB,atrim=0:0.25[t3]",
+    );
+    expect(graph).toContain("concat=n=4:v=0:a=1");
+  });
+
+  it("stretches each slice of a non-constant lane by its mean rate, and trims a video's audio to the consumed span", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "clip.mp4"), "stub");
+    const rate = {
+      target: "rate",
+      points: [
+        { t: 0, v: 1 },
+        { t: 1, v: 3 },
+      ],
+    };
+
+    await processCompositionAudio(
+      [
+        {
+          id: "clip",
+          src: "clip.mp4",
+          start: 0,
+          end: 1,
+          mediaStart: 0,
+          playbackRate: rate,
+          layer: 0,
+          volume: 1,
+          type: "video",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      1,
+    );
+
+    const args: string[] = runFfmpegMock.mock.calls[0]?.[0] ?? [];
+    const graph = args[args.indexOf("-filter_complex") + 1] ?? "";
+    // geometric 1x to 3x over 1s consumes (3-1)/ln 3 = 1.8205 source seconds; quarter-second 0 has mean tempo 1.1508
+    expect(Number(args[args.indexOf("-t") + 1])).toBeCloseTo(1.8205, 2);
+    expect(
+      Number(graph.match(/\[s0\]atrim=[^,]*,asetpts=PTS-STARTPTS,atempo=([\d.]+)/)?.[1]),
+    ).toBeCloseTo(1.1508, 2);
+  });
+
   it("keeps automation on authored timeline time after constant retiming", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
     const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
@@ -445,6 +644,215 @@ describe("processCompositionAudio", () => {
         trackStart: 0,
       },
     });
+  });
+
+  it.each([
+    {
+      gain: 0.5,
+      level: 1,
+      points: [
+        { time: 0, volume: 0 },
+        { time: 2, volume: 1 },
+      ],
+    },
+    {
+      gain: 2,
+      level: 3,
+      points: [
+        { time: 0, volume: 0 },
+        { time: expect.closeTo(1.3270239018, 8), volume: expect.closeTo(1.9905358528, 8) },
+        { time: 2, volume: expect.closeTo(1.9905358528, 8) },
+      ],
+    },
+  ])(
+    "applies pre-FX clip gain $gain with a ceiling-aware lane",
+    async ({ gain, level, points }) => {
+      const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+      const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+      tempDirs.push(baseDir, workDir);
+      writeFileSync(join(baseDir, "vo.wav"), "stub");
+      const automation = JSON.stringify({
+        version: 1,
+        lanes: [
+          {
+            target: "volume",
+            points: [
+              { t: 0, v: 0 },
+              { t: 2, v: level },
+            ],
+          },
+        ],
+      });
+
+      await processCompositionAudio(
+        [
+          {
+            id: "vo",
+            src: "vo.wav",
+            start: 0,
+            end: 2,
+            mediaStart: 0,
+            layer: 0,
+            volume: gain,
+            automation,
+            fxChain: gainChain,
+            type: "audio",
+          },
+        ],
+        baseDir,
+        workDir,
+        join(baseDir, "out.m4a"),
+        2,
+      );
+
+      const fxOptions = applyAudioFxChainMock.mock.calls[0]?.[3];
+      expect(fxOptions?.inputGain).toBe(gain);
+      expect(fxOptions?.envelope?.keyframes).toEqual(points);
+    },
+  );
+
+  it("reports how long each phase of the mix took", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "bed.wav"), "stub");
+
+    const result = await processCompositionAudio(
+      [
+        {
+          id: "bed",
+          src: "bed.wav",
+          start: 0,
+          end: 2,
+          mediaStart: 0,
+          layer: 0,
+          volume: 1,
+          type: "audio",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+      undefined,
+      { masterFxChain: gainChain },
+    );
+
+    expect(result.success).toBe(true);
+    expect(Object.keys(result.phaseMs ?? {}).sort()).toEqual([
+      "encode",
+      "groups",
+      "master",
+      "mix",
+      "prepare",
+    ]);
+  });
+
+  it.each([
+    ["the master pass", {}, { masterFxChain: gainChain }],
+    ["a group bus", { groupId: "bus", groupFxChain: gainChain }, {}],
+  ])("removes its work directory when %s fails fatally", async (_label, extra, config) => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "bed.wav"), "stub");
+    applyAudioFxChainMock.mockRejectedValueOnce(new AudioFxRenderError("browser would not start"));
+
+    await expect(
+      processCompositionAudio(
+        [
+          {
+            id: "bed",
+            src: "bed.wav",
+            start: 0,
+            end: 2,
+            mediaStart: 0,
+            layer: 0,
+            volume: 1,
+            type: "audio",
+            ...extra,
+          },
+        ],
+        baseDir,
+        workDir,
+        join(baseDir, "out.m4a"),
+        2,
+        undefined,
+        config,
+      ),
+    ).rejects.toThrow(AudioFxRenderError);
+    expect(existsSync(workDir)).toBe(false);
+  });
+
+  const groupedEffects = (baseDir: string) => {
+    const track = (id: string, start: number) => ({
+      id,
+      src: `${id}.wav`,
+      start,
+      end: start + 1,
+      mediaStart: 0,
+      layer: 0,
+      volume: 1,
+      type: "audio" as const,
+      groupId: "sfx",
+    });
+    for (const id of ["hit", "whoosh", "pop"]) writeFileSync(join(baseDir, `${id}.wav`), "stub");
+    return [track("hit", 0), track("whoosh", 1), track("pop", 8)];
+  };
+
+  it("pads a group's members once after summing them, not each member to the film length", async () => {
+    // Per-member padding made the sub-mix cost members x film length: ~680 effects in a
+    // 10-minute film ran past the ffmpeg deadline.
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+
+    await processCompositionAudio(
+      groupedEffects(baseDir),
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      600,
+    );
+
+    const groupMix = capturedFilterScripts.find((script) => script.includes("normalize=0"));
+    expect(groupMix).toContain("amix=inputs=3:duration=longest:dropout_transition=0:normalize=0");
+    expect(groupMix).not.toMatch(/adelay=[^;]*,apad/);
+    expect((groupMix?.match(/apad/g) ?? []).length).toBe(1);
+    expect(groupMix).toContain("apad,asetpts=N/SR/TB,atrim=0:600[out]");
+  });
+
+  it("names the timeout when a group sub-mix is killed for making no progress", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    runFfmpegMock.mockImplementation(async (args: string[]) =>
+      args.includes("-filter_complex_script")
+        ? {
+            success: false,
+            durationMs: 300_000,
+            stderr: "Stream mapping:\n  Stream #0:0 -> #0:0 (pcm_s16le (native))",
+            exitCode: 255,
+            terminationReason: "inactivity",
+          }
+        : { success: true, durationMs: 1, stderr: "", exitCode: 0 },
+    );
+
+    const result = await processCompositionAudio(
+      groupedEffects(baseDir),
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      600,
+      undefined,
+      { ffmpegProcessTimeout: 300_000 },
+    );
+
+    expect(result.success).toBe(false);
+    const failure = result.failures?.find((f) => f.elementId === "sfx");
+    expect(failure?.reason).toBe("ffmpeg_timeout");
+    expect(failure?.detail).toContain("FFmpeg timed out after 300000 ms");
+    expect(failure?.detail).toContain("FFMPEG_PROCESS_TIMEOUT_MS");
   });
 
   it("lets an FX tail run past the clip, still bounded by the composition", async () => {
@@ -578,7 +986,7 @@ describe("processCompositionAudio", () => {
     expect(filter).toContain("atrim=0:2,");
   });
 
-  it("compensates amix normalization so multi-track master gain equals track count", async () => {
+  it("sums unpadded tracks at authored gain and pads the mixed output once", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
     const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
     tempDirs.push(baseDir, workDir);
@@ -633,9 +1041,66 @@ describe("processCompositionAudio", () => {
     const filter = capturedFilterScripts[3];
 
     expect(filter).toContain("amix=inputs=3");
-    expect(filter).not.toContain("normalize=");
-    // masterOutputGain(1) × tracks(3) = 3
-    expect(filter).toContain("[mixed]volume=3[out]");
+    expect(filter).toContain("amix=inputs=3:duration=longest:dropout_transition=0:normalize=0");
+    expect(filter).toContain("[mixed]volume=1,apad,asetpts=N/SR/TB,atrim=0:2[out]");
+    expect((filter.match(/apad,/g) ?? []).length).toBe(1);
+  });
+
+  it("retries the padded graph when ffmpeg does not support amix normalize", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "voice.wav"), "stub");
+
+    runFfmpegMock
+      .mockImplementationOnce(async () => ({
+        success: true,
+        durationMs: 1,
+        stderr: "",
+        exitCode: 0,
+      }))
+      .mockImplementationOnce(async (args: string[]) => {
+        capturedFilterScripts.push(
+          readFileSync(args[args.indexOf("-filter_complex_script") + 1]!, "utf8"),
+        );
+        return {
+          success: false,
+          durationMs: 1,
+          stderr: "Error applying option 'normalize' to filter 'amix': Option not found",
+          exitCode: 1,
+        };
+      })
+      .mockImplementationOnce(async (args: string[]) => {
+        capturedFilterScripts.push(
+          readFileSync(args[args.indexOf("-filter_complex_script") + 1]!, "utf8"),
+        );
+        return { success: true, durationMs: 1, stderr: "", exitCode: 0 };
+      });
+
+    const result = await processCompositionAudio(
+      [
+        {
+          id: "voice",
+          src: "voice.wav",
+          start: 0,
+          end: 2,
+          mediaStart: 0,
+          layer: 0,
+          volume: 1,
+          type: "audio",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+    );
+
+    expect(result.success).toBe(true);
+    expect(runFfmpegMock).toHaveBeenCalledTimes(3);
+    expect(capturedFilterScripts[0]).toContain("normalize=0");
+    expect(capturedFilterScripts[1]).toContain("apad,asetpts=N/SR/TB,atrim=0:2[a0]");
+    expect(capturedFilterScripts[1]).not.toContain("normalize=");
   });
 
   it("fails the audio result instead of silently mixing after one track preparation fails", async () => {
@@ -707,6 +1172,140 @@ describe("processCompositionAudio", () => {
       }),
     ]);
     expect(runFfmpegMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps how long a killed group mix ran and ffmpeg's last words", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "voice.wav"), "stub");
+
+    const streamLines = Array.from(
+      { length: 400 },
+      (_, i) =>
+        `  Stream #${i}:0 -> #0:${i} (pcm_s16le (native) -> atrim (graph 0 input from stream ${i}:0))`,
+    );
+    runFfmpegMock
+      .mockResolvedValueOnce({
+        success: true,
+        durationMs: 1,
+        stderr: "",
+        exitCode: 0,
+        terminationReason: "exit",
+      })
+      .mockResolvedValueOnce({
+        success: false,
+        durationMs: 530_000,
+        stderr: [...streamLines, "Exiting normally, received signal 15."].join("\n"),
+        exitCode: 255,
+        signal: null,
+        terminationReason: "exit",
+        failureReason: "external_interruption",
+      });
+
+    const result = await processCompositionAudio(
+      [
+        {
+          id: "voice",
+          src: "voice.wav",
+          start: 0,
+          end: 2,
+          mediaStart: 0,
+          layer: 0,
+          volume: 1,
+          type: "audio",
+          groupId: "sfx",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+    );
+
+    const failure = result.failures?.find((f) => f.elementId === "sfx");
+    expect(failure?.reason).toBe("external_interruption");
+    expect(failure?.subprocess).toMatchObject({ exitCode: 255 });
+    expect(failure?.detail).toContain("ran 530000 ms");
+    expect(failure?.detail).toContain("Exiting normally, received signal 15.");
+  });
+
+  it.each([
+    ["ungrouped", undefined],
+    ["grouped", "sfx"],
+  ])(
+    "never hands one ffmpeg more inputs than a graph holds, %s",
+    async (_name, groupId) => {
+      const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+      const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+      tempDirs.push(baseDir, workDir);
+      const trackCount = 2_000;
+      const elements = Array.from({ length: trackCount }, (_, i) => {
+        writeFileSync(join(baseDir, `clip-${i}.wav`), "stub");
+        return {
+          id: `clip-${i}`,
+          src: `clip-${i}.wav`,
+          start: i * 0.1,
+          end: i * 0.1 + 0.5,
+          mediaStart: 0,
+          layer: i,
+          volume: 1,
+          type: "audio" as const,
+          ...(groupId ? { groupId } : {}),
+        };
+      });
+      runFfmpegMock.mockClear();
+
+      const result = await processCompositionAudio(
+        elements,
+        baseDir,
+        workDir,
+        join(baseDir, "out.m4a"),
+        trackCount * 0.1 + 0.5,
+      );
+
+      // The mocked ffmpeg writes no files, so only the ungrouped mix runs to the end.
+      if (!groupId) expect(result.success).toBe(true);
+      const inputsPerCall = runFfmpegMock.mock.calls.map(
+        (call) => (call[0] as string[]).filter((arg) => arg === "-i").length,
+      );
+      expect(Math.max(...inputsPerCall)).toBeLessThanOrEqual(MAX_MIX_INPUTS);
+    },
+    60_000,
+  );
+
+  it("gives a long film's mix the configured no-progress timeout, unscaled", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "voice.wav"), "stub");
+    const voice = {
+      id: "voice",
+      src: "voice.wav",
+      start: 0,
+      end: 2,
+      mediaStart: 0,
+      layer: 0,
+      volume: 1,
+      type: "audio" as const,
+    };
+    const mixTimeout = async (totalDuration: number) => {
+      runFfmpegMock.mockClear();
+      await processCompositionAudio(
+        [voice],
+        baseDir,
+        workDir,
+        join(baseDir, "out.m4a"),
+        totalDuration,
+      );
+      const mixCall = runFfmpegMock.mock.calls.find((call) =>
+        (call[0] as string[]).includes("-filter_complex_script"),
+      );
+      return (mixCall?.[1] as { timeout?: number } | undefined)?.timeout;
+    };
+
+    expect(await mixTimeout(60)).toBe(300_000);
+    expect(await mixTimeout(36_000)).toBe(300_000);
   });
 
   it("preserves and classifies unsupported FFmpeg filter failures", async () => {
@@ -1082,34 +1681,30 @@ describe("processCompositionAudio", () => {
     expect(result.success).toBe(true);
     expect(result.tracksProcessed).toBe(trackCount);
 
-    const mixArgs = runFfmpegMock.mock.calls.at(-1)?.[0] as string[];
-    expect(mixArgs).toContain("-filter_complex_script");
-    expect(mixArgs).not.toContain("-filter_complex");
+    // 150 tracks exceed one graph: two slice sums, the fold of those two, then the final mix.
+    const mixCalls = runFfmpegMock.mock.calls.slice(-4).map((call) => call[0] as string[]);
+    for (const mixArgs of mixCalls) {
+      expect(mixArgs).toContain("-filter_complex_script");
+      expect(mixArgs).not.toContain("-filter_complex");
+      // Only the -i pairs and the filter script's content scale with track count.
+      expect(mixArgs.join(" ").length).toBeLessThan(20_000);
+    }
 
-    // The only things that scale with track count are the -i pairs (short,
-    // fixed-size each) and the filter SCRIPT FILE's content (off the command
-    // line entirely) — not the args array's own total character length.
-    const argsLength = mixArgs.join(" ").length;
-    expect(argsLength).toBeLessThan(20_000);
-
-    const filter = capturedFilterScripts.at(-1);
-    expect(filter).toContain(`amix=inputs=${trackCount}`);
-    // Each track is trimmed once to its authored clip and once after portable
-    // indefinite `apad` to cap the padded stream at composition duration.
-    expect((filter?.match(/atrim=/g) ?? []).length).toBe(trackCount * 2);
-    expect((filter?.match(/apad,/g) ?? []).length).toBe(trackCount);
+    const [first, second, folded, last] = capturedFilterScripts.slice(-4);
+    expect(first).toContain(`amix=inputs=${MAX_MIX_INPUTS}`);
+    expect(second).toContain(`amix=inputs=${trackCount - MAX_MIX_INPUTS}`);
+    expect(folded).toContain("amix=inputs=2");
+    expect(last).toContain("amix=inputs=1");
+    // Each track is trimmed to its authored clip; only the mixed output is padded.
+    expect((last?.match(/apad,/g) ?? []).length).toBe(1);
     // 150 real files + 150 existence checks: ~60ms on Linux, but well past the 5s
     // default on the Windows lane, where each file create is orders slower.
   }, 30_000);
 
-  it("renumbers timestamps between apad and atrim on every mixed branch", async () => {
-    // Regression: `apad` then `atrim` is the portable pad-to-length shape --
+  it("renumbers timestamps between apad and atrim on the mixed output", async () => {
     // #2769 moved off `apad=whole_dur=` because some builds reject that option.
-    // But on FFmpeg 5.x-8.0.x the padded samples carry timestamps `atrim`
-    // misreads, so a delayed branch sounds at t=0 and, past three branches, the
-    // last one vanishes from the mix. `asetpts=N/SR/TB` between the two rebuilds
-    // the timestamps from the sample count and costs no portability, since all
-    // three filters exist in every build we support.
+    // Keep the portable apad/asetpts/atrim shape on the mixed output so the
+    // final stream has the requested duration and consistent timestamps.
     const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
     const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
     tempDirs.push(baseDir, workDir);
@@ -1148,10 +1743,8 @@ describe("processCompositionAudio", () => {
 
     const filter = capturedFilterScripts.at(-1) ?? "";
     const branches = filter.match(/apad[^;]*/g) ?? [];
-    expect(branches).toHaveLength(2);
-    for (const branch of branches) {
-      expect(branch).toMatch(/^apad,asetpts=N\/SR\/TB,atrim=0:/);
-    }
+    expect(branches).toHaveLength(1);
+    expect(branches[0]).toMatch(/^apad,asetpts=N\/SR\/TB,atrim=0:/);
     // The portability constraint #2769 established still holds.
     expect(filter).not.toContain("whole_dur");
   });
@@ -1245,6 +1838,43 @@ describe("processCompositionAudio", () => {
     expect(prepareArgs).toContain(join(baseDir, "assets", filename));
   });
 
+  it("keeps the float mix the AAC was encoded from when asked to", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    writeFileSync(join(baseDir, "a.wav"), "stub");
+    writeFileSync(join(baseDir, "b.wav"), "stub");
+    runFfmpegMock.mockImplementation(async (args: string[]) => {
+      if (args.at(-1)?.endsWith("master-sum.wav")) writeFileSync(args.at(-1)!, "float mix");
+      return { success: true, durationMs: 1, stderr: "", exitCode: 0 };
+    });
+    const track = (id: string, layer: number) => ({
+      id,
+      src: `${id}.wav`,
+      start: 0,
+      end: 2,
+      mediaStart: 0,
+      layer,
+      volume: 1,
+      type: "audio" as const,
+    });
+    const kept = join(baseDir, "kept.wav");
+
+    const result = await processCompositionAudio(
+      [track("a", 0), track("b", 1)],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+      undefined,
+      { keepEncoderInputAt: kept },
+    );
+
+    expect(result.success).toBe(true);
+    expect(vi.mocked(encodeAac).mock.calls.at(-1)?.[0]).toBe(join(workDir, "master-sum.wav"));
+    expect(readFileSync(kept, "utf8")).toBe("float mix");
+  });
+
   it("prepares browser root-absolute audio srcs from the project root", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
     const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
@@ -1275,6 +1905,88 @@ describe("processCompositionAudio", () => {
     expect(result.success).toBe(true);
     expect(result.error).toBeUndefined();
     expect(runFfmpegMock.mock.calls[0]?.[0]).toContain(join(baseDir, ".media", "tone.wav"));
+  });
+
+  it("cuts a cloud-held project file's audio from its URL without downloading the file", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    const fetchMock = vi.fn().mockRejectedValue(new Error("downloaded"));
+    vi.stubGlobal("fetch", fetchMock);
+    const url = "https://bucket.s3.amazonaws.com/cas/take.mov?X-Amz-Signature=s";
+
+    const result = await processCompositionAudio(
+      [
+        {
+          id: "take-audio",
+          src: "takes/take.mov",
+          start: 0,
+          end: 2,
+          mediaStart: 600,
+          layer: 0,
+          volume: 1,
+          type: "video",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+      undefined,
+      { urlByAbsentLocalPath: new Map([[join(baseDir, "takes", "take.mov"), url]]) },
+    );
+
+    expect(result.success).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const extractArgs = runFfmpegMock.mock.calls[0]?.[0] ?? [];
+    expect(extractArgs.indexOf("-tls_verify")).toBeGreaterThanOrEqual(0);
+    expect(extractArgs.indexOf("-tls_verify")).toBeLessThan(extractArgs.indexOf("-i"));
+    expect(extractArgs.indexOf("-xerror")).toBeGreaterThanOrEqual(0);
+    expect(extractArgs.indexOf("-xerror")).toBeLessThan(extractArgs.indexOf("-i"));
+    expect(extractArgs.slice(extractArgs.indexOf("-ss"), extractArgs.indexOf(url) + 1)).toEqual([
+      "-ss",
+      "600",
+      "-t",
+      "2",
+      "-i",
+      url,
+    ]);
+  });
+
+  it("fails a cloud-held file's audio when its URL probe fails twice instead of mixing it unprobed", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "hf-audio-base-"));
+    const workDir = mkdtempSync(join(tmpdir(), "hf-audio-work-"));
+    tempDirs.push(baseDir, workDir);
+    extractAudioMetadataMock.mockRejectedValue(new Error("Server returned 503"));
+    const url = "https://bucket.s3.amazonaws.com/cas/take.mov?X-Amz-Signature=s";
+
+    const result = await processCompositionAudio(
+      [
+        {
+          id: "take-audio",
+          src: "takes/take.mov",
+          start: 0,
+          end: 2,
+          mediaStart: 600,
+          layer: 0,
+          volume: 1,
+          type: "video",
+        },
+      ],
+      baseDir,
+      workDir,
+      join(baseDir, "out.m4a"),
+      2,
+      undefined,
+      { urlByAbsentLocalPath: new Map([[join(baseDir, "takes", "take.mov"), url]]) },
+    );
+
+    expect(extractAudioMetadataMock).toHaveBeenCalledTimes(2);
+    expect(extractAudioMetadataMock).toHaveBeenCalledWith(url, {
+      signal: expect.any(AbortSignal),
+    });
+    expect(result.success).toBe(false);
+    expect(runFfmpegMock.mock.calls.some(([args]) => args.includes(url))).toBe(false);
   });
 
   it("preserves authored clip gain above unity for quiet-source boosting", async () => {
@@ -1395,8 +2107,8 @@ describe("parseAudioElements — relative data-start resolution", () => {
     const tracks = parseAudioElements(html);
 
     expect(tracks.find((track) => track.id === "fast")?.playbackRate).toBe(2);
-    expect(tracks.find((track) => track.id === "low")?.playbackRate).toBe(0.1);
-    expect(tracks.find((track) => track.id === "high")?.playbackRate).toBe(5);
+    expect(tracks.find((track) => track.id === "low")?.playbackRate).toBe(RATE_RANGE.min);
+    expect(tracks.find((track) => track.id === "high")?.playbackRate).toBe(RATE_RANGE.max);
     expect(tracks.find((track) => track.id === "invalid")?.playbackRate).toBe(1);
   });
 
@@ -1485,6 +2197,11 @@ describe("parseAudioElements — hidden tracks", () => {
       `</div>`;
 
     expect(parseAudioElements(html).map((track) => track.id)).toEqual(["master"]);
+  });
+
+  it("does not mix a muted video that still declares data-has-audio", () => {
+    const html = `<video id="v" src="v.mp4" muted data-has-audio="true" data-start="0" data-duration="3"></video>`;
+    expect(parseAudioElements(html)).toEqual([]);
   });
 });
 

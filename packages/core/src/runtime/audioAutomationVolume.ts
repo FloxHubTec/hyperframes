@@ -1,11 +1,9 @@
 /**
  * The volume lane's gain for an element at a moment in its clip.
  *
- * Volume is not scheduled onto the gain AudioParam the way FX parameters are.
- * The runtime rewrites that gain every tick from `data-volume` and the GSAP
- * seeked value, which would erase a scheduled envelope within a frame — so the
- * lane feeds the same per-tick path the probed `volumeKeyframes` already use,
- * and the render still bakes it into the samples.
+ * Read per tick for a clip that sounds through `el.volume`. A clip the Web Audio
+ * transport routes plays its lane scheduled on a gain of its own
+ * (`attachClipStages`), out of reach of the per-tick gain write.
  */
 
 import {
@@ -24,18 +22,20 @@ import {
 const cache = new Map<string, HfAutomationLane | null>();
 const CACHE_LIMIT = 64;
 
-function laneFromAttr(raw: string): HfAutomationLane | null {
-  const hit = cache.get(raw);
+/** The lane for `target` inside a `data-automation` value, or null when absent or unreadable. */
+export function laneFromAttr(raw: string, target: string = VOLUME_TARGET): HfAutomationLane | null {
+  const key = `${target}\0${raw}`;
+  const hit = cache.get(key);
   if (hit !== undefined) return hit;
   let lane: HfAutomationLane | null = null;
   try {
-    lane = parseAutomation(raw).lanes.find((l) => l.target === VOLUME_TARGET) ?? null;
+    lane = parseAutomation(raw).lanes.find((l) => l.target === target) ?? null;
   } catch {
     // Unreadable automation plays the track flat rather than silencing it.
     lane = null;
   }
   if (cache.size > CACHE_LIMIT) cache.clear();
-  cache.set(raw, lane);
+  cache.set(key, lane);
   return lane;
 }
 

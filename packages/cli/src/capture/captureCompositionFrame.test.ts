@@ -1,10 +1,12 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AUDIT_SEEK_OPTIONS,
   DENSE_GEOMETRY_SEEK_OPTIONS,
+  SCREENSHOT_SEEK_OPTIONS,
   captureRegionCrop,
   clampCropRegion,
   installPageFunctionGuard,
@@ -14,6 +16,9 @@ import {
   resolveCropRegion,
   runFfmpegOnce,
   seekCompositionTimeline,
+  seekCompositionTimelineOnly,
+  settleCompositionSeek,
+  waitForRuntimeReady,
   type CompositionSeekPage,
 } from "./captureCompositionFrame.js";
 
@@ -25,7 +30,7 @@ function fakeSeekPage() {
   const evaluate = vi.fn(
     async (
       _pageFunction: Parameters<CompositionSeekPage["evaluate"]>[0],
-      _value?: number,
+      _value?: Parameters<CompositionSeekPage["evaluate"]>[1],
       _fallbackToBridgeAndTimelines?: boolean,
     ): Promise<unknown> => undefined,
   );
@@ -48,6 +53,55 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("waitForRuntimeReady", () => {
+  it("waits for the runtime's render-ready flag and reports a timeout as not ready", async () => {
+    const { waitForFunction, evaluate } = fakeSeekPage();
+
+    await expect(waitForRuntimeReady({ waitForFunction, evaluate }, 123)).resolves.toBe(true);
+    expect(waitForFunction).toHaveBeenCalledWith(expect.any(Function), { timeout: 123 });
+    const ready = waitForFunction.mock.calls[0]![0];
+    vi.stubGlobal("window", { __timelines: {} });
+    expect(ready()).toBe(false);
+    vi.stubGlobal("window", { __timelines: {}, __renderReady: true });
+    expect(ready()).toBe(true);
+
+    waitForFunction.mockRejectedValueOnce(new Error("Waiting failed: 1ms exceeded"));
+    await expect(waitForRuntimeReady({ waitForFunction, evaluate }, 1)).resolves.toBe(false);
+  });
+
+  it("fails with the runtime's start-up error instead of reporting the page ready", async () => {
+    const { waitForFunction, evaluate } = fakeSeekPage();
+    const startupError = "HyperFrames runtime failed: TypeError: boom";
+    evaluate.mockResolvedValue(startupError);
+
+    const ready = waitForFunction.mock.calls.length;
+    await expect(waitForRuntimeReady({ waitForFunction, evaluate }, 123)).rejects.toThrow(
+      startupError,
+    );
+    const predicate = waitForFunction.mock.calls[ready]![0];
+    vi.stubGlobal("window", { __hfStartupError: startupError });
+    expect(predicate()).toBe(true);
+    vi.stubGlobal("window", { __hfStartupError: { message: "not a string" } });
+    expect(predicate()).toBe(false);
+  });
+
+  it("is what layout, motion-shot and validate wait on before they sample the page", () => {
+    const commands = join(dirname(fileURLToPath(import.meta.url)), "../commands");
+    const firstSample = {
+      layout: "getCompositionDuration(page)",
+      motionShot: "installSeekHelper(page)",
+      validate: "auditClipDurations(page,",
+    };
+    for (const [name, sample] of Object.entries(firstSample)) {
+      const source = readFileSync(join(commands, `${name}.ts`), "utf8");
+      const wait = source.indexOf("await waitForRuntimeReady(page, ");
+      expect(wait, name).toBeGreaterThan(-1);
+      expect(source.indexOf(sample), name).toBeGreaterThan(wait);
+      expect(source, name).not.toContain("__timelines?: unknown }).__timelines");
+    }
+  });
+});
+
 describe("seekCompositionTimeline", () => {
   it("keeps the raced double-frame settle and adds a bounded font wait by default", async () => {
     const { page, evaluate, waitForFunction } = fakeSeekPage();
@@ -56,12 +110,24 @@ describe("seekCompositionTimeline", () => {
 
     expect(waitForFunction).not.toHaveBeenCalled();
     expect(evaluate).toHaveBeenCalledTimes(4);
-    expect(evaluate).toHaveBeenNthCalledWith(1, expect.any(Function), 1.25, false);
-    expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function));
+    expect(evaluate).toHaveBeenNthCalledWith(1, expect.any(Function), 1.25, false, false, false);
+    expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function), { videoFrames: true });
     expect(evaluate.mock.calls[2]?.[0]).toContain("window.setTimeout(finish, 100)");
     // Post-seek font settle: a seek can reveal glyphs whose unicode-range
     // subsets only start loading after the next layout (CJK snapshot reports).
-    expect(evaluate).toHaveBeenNthCalledWith(4, expect.any(Function), 500);
+    expect(evaluate).toHaveBeenNthCalledWith(4, expect.any(Function), { ms: 500, frames: 1 });
+  });
+
+  it("can seek without finishing the frame, so overlays land before a blurred frame is drawn", async () => {
+    const { page, evaluate } = fakeSeekPage();
+
+    await seekCompositionTimelineOnly(page, 1.25);
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(evaluate).toHaveBeenNthCalledWith(1, expect.any(Function), 1.25, false, false, false);
+
+    await settleCompositionSeek(page);
+    expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function), { videoFrames: true });
+    expect(evaluate).toHaveBeenCalledTimes(4);
   });
 
   it("waitForFontsMs: 0 disables the post-seek font wait", async () => {
@@ -91,6 +157,17 @@ describe("seekCompositionTimeline", () => {
     expect(bridgeSeek).not.toHaveBeenCalled();
     expect(playerSeek).not.toHaveBeenCalled();
     expect(timelineSeek).not.toHaveBeenCalled();
+  });
+
+  it("asks renderSeek for the exact instant when exactTime is set", async () => {
+    const { page, evaluate } = fakeSeekPage();
+    const renderSeek = vi.fn();
+    vi.stubGlobal("window", { __player: { renderSeek } });
+
+    await seekCompositionTimeline(page, 19.019018, { exactTime: true });
+    runBrowserSeek(evaluate);
+
+    expect(renderSeek).toHaveBeenCalledWith(19.019018, { exact: true });
   });
 
   function fakeBridgeOnlySeekPage() {
@@ -150,10 +227,10 @@ describe("seekCompositionTimeline", () => {
 
     expect(waitForFunction).toHaveBeenCalledWith(expect.any(Function), { timeout: 500 });
     expect(evaluate).toHaveBeenCalledTimes(2);
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), 3, true);
+    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), 3, true, false, false);
   });
 
-  it("supports layout's ordered double-frame, bounded font, and sleep settles", async () => {
+  it("checks fonts on the double settle's second frame instead of waiting a third", async () => {
     vi.useFakeTimers();
     const { page, evaluate } = fakeSeekPage();
 
@@ -166,11 +243,34 @@ describe("seekCompositionTimeline", () => {
     await vi.advanceTimersByTimeAsync(120);
     await pending;
 
-    expect(evaluate).toHaveBeenCalledTimes(4);
-    expect(evaluate).toHaveBeenNthCalledWith(1, expect.any(Function), 4, true);
-    expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function));
-    expect(evaluate).toHaveBeenNthCalledWith(3, expect.any(Function));
-    expect(evaluate).toHaveBeenNthCalledWith(4, expect.any(Function), 500);
+    expect(evaluate).toHaveBeenCalledTimes(3);
+    expect(evaluate).toHaveBeenNthCalledWith(1, expect.any(Function), 4, true, false, false);
+    expect(evaluate).toHaveBeenNthCalledWith(2, expect.any(Function), { videoFrames: true });
+    expect(evaluate).toHaveBeenNthCalledWith(3, expect.any(Function), { ms: 500, frames: 2 });
+
+    const frames: (() => void)[] = [];
+    const statusReadAt: number[] = [];
+    let frame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: () => void) => frames.push(callback));
+    vi.stubGlobal("document", {
+      body: { offsetHeight: 0 },
+      fonts: {
+        get status() {
+          statusReadAt.push(frame);
+          return "loaded";
+        },
+        ready: Promise.resolve(),
+      },
+    });
+    const fontWait = evaluate.mock.calls[2]?.[0];
+    if (typeof fontWait !== "function") throw new Error("Expected the font wait page function");
+    const waited = Reflect.apply(fontWait, undefined, [{ ms: 500, frames: 2 }]);
+    while (frames.length > 0) {
+      frame += 1;
+      frames.shift()?.();
+    }
+    await waited;
+    expect(statusReadAt).toEqual([2]);
   });
 
   it("awaits GPU completion registered by the seek event before settling", async () => {
@@ -199,7 +299,7 @@ describe("seekCompositionTimeline", () => {
     }).then(() => {
       settled = true;
     });
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(evaluateCall).toBe(2);
     expect(settled).toBe(false);
     completeGpu?.();
@@ -225,10 +325,10 @@ describe("screenshot Chrome arguments", () => {
     );
     const layoutSource = readFileSync(new URL("../commands/layout.ts", import.meta.url), "utf8");
 
-    expect(captureSource).toContain("resolveCaptureBrowserGpuMode(");
-    expect(captureSource).toContain("{ browserGpuMode: resolvedGpuMode }");
-    expect(layoutSource).toContain("resolveCaptureBrowserGpuMode(");
-    expect(layoutSource).toContain("{ browserGpuMode: resolvedGpuMode }");
+    expect(captureSource).toContain("resolveManagedGpuMode(");
+    expect(captureSource).toContain("resolveLocalWebGpu(resolvedGpuMode, requiresWebGpu)");
+    expect(layoutSource).toContain("resolveManagedGpuMode(");
+    expect(layoutSource).toContain("resolveLocalWebGpu(resolvedGpuMode, requiresWebGpu)");
   });
 });
 
@@ -408,14 +508,54 @@ describe("installPageFunctionGuard", () => {
   });
 });
 
+describe("SCREENSHOT_SEEK_OPTIONS", () => {
+  it("waits for image decodes before a screenshot, not for a fixed sleep", async () => {
+    vi.useFakeTimers();
+    const { page, evaluate } = fakeSeekPage();
+    let done = false;
+    void seekCompositionTimeline(page, 2, SCREENSHOT_SEEK_OPTIONS).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(done).toBe(true);
+    expect(evaluate).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      SCREENSHOT_SEEK_OPTIONS.waitForImagesMs,
+    );
+  });
+});
+
 describe("DENSE_GEOMETRY_SEEK_OPTIONS", () => {
+  // A 79 s project of 1080p H.264 clips: each of the 600 dense seeks waited ~185 ms for a video frame it never reads,
+  // so `check` ran past its deadline. Frame sources and hf-seek work can move the DOM, so those still hold it.
+  it("skips only the seek barrier's video-frame holds, while the audit seek waits for all", async () => {
+    const barrierCalls = async (options: Parameters<typeof seekCompositionTimeline>[2]) => {
+      const { page, evaluate } = fakeSeekPage();
+      const barrier = vi.fn(async (_options?: { videoFrames?: boolean }) => {});
+      vi.stubGlobal("window", { __hfWaitForSeekCompletion: barrier });
+      evaluate.mockImplementation(async (pageFunction, value) =>
+        typeof pageFunction === "function" && typeof value === "object"
+          ? Reflect.apply(pageFunction, undefined, [value])
+          : undefined,
+      );
+      await seekCompositionTimeline(page, 3, options);
+      return barrier.mock.calls;
+    };
+
+    expect(await barrierCalls(DENSE_GEOMETRY_SEEK_OPTIONS)).toEqual([[{ videoFrames: false }]]);
+    expect(await barrierCalls(AUDIT_SEEK_OPTIONS)).toEqual([[{ videoFrames: true }]]);
+  });
+
   it("is genuinely geometry-only — no post-seek settle waits at the 600-sample cap", () => {
     // Dense pass must not inherit AUDIT's post-seek waits — geometry is valid synchronously after setTime, and waits multiply by sample count.
     expect(DENSE_GEOMETRY_SEEK_OPTIONS.animationFrameSettle).toBe("none");
     expect(DENSE_GEOMETRY_SEEK_OPTIONS.waitForFontsMs).toBe(0);
     expect(DENSE_GEOMETRY_SEEK_OPTIONS.settleMs).toBe(0);
-    // AUDIT (the full-settle path used by the base grid) must still carry the waits.
+    // AUDIT (the base grid) keeps the frame and font waits; only a screenshot seek adds the paint sleep.
     expect(AUDIT_SEEK_OPTIONS.animationFrameSettle).toBe("double");
-    expect(AUDIT_SEEK_OPTIONS.settleMs).toBeGreaterThan(0);
+    expect("settleMs" in AUDIT_SEEK_OPTIONS).toBe(false);
+    expect(SCREENSHOT_SEEK_OPTIONS.waitForImagesMs).toBeGreaterThan(0);
+    expect("settleMs" in SCREENSHOT_SEEK_OPTIONS).toBe(false);
   });
 });

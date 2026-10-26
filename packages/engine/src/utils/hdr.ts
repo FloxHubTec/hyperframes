@@ -106,9 +106,44 @@ export function getHdrEncoderColorParams(
   };
 }
 
+export function hdrFrameTagsFilter(transfer: HdrTransfer): string {
+  const { colorPrimaries, colorTrc, colorspace } = getHdrEncoderColorParams(transfer);
+  return `setparams=color_primaries=${colorPrimaries}:color_trc=${colorTrc}:colorspace=${colorspace}:range=tv`;
+}
+
 export interface CompositionHdrInfo {
   hasHdr: boolean;
   dominantTransfer: HdrTransfer | null;
+}
+
+export const HDR_AUTO_PROMOTION_PIPELINE = {
+  colorSpace: "BT.2020",
+  codec: "HEVC Main10",
+} as const;
+
+export interface HdrAutoPromotion {
+  triggeringAsset: string;
+  output: typeof HDR_AUTO_PROMOTION_PIPELINE;
+}
+
+export function sanitizeHdrAutoPromotionAsset(asset: string): string {
+  return asset.split(/[\r\n?#]/, 1)[0] ?? "";
+}
+
+export function findHdrAutoPromotion(
+  sources: readonly { asset: string; colorSpace: VideoColorSpace | null }[],
+): HdrAutoPromotion | null {
+  const source = sources.find(({ colorSpace }) => isHdrColorSpace(colorSpace));
+  return source
+    ? {
+        triggeringAsset: sanitizeHdrAutoPromotionAsset(source.asset),
+        output: HDR_AUTO_PROMOTION_PIPELINE,
+      }
+    : null;
+}
+
+export function formatHdrAutoPromotionWarning(promotion: HdrAutoPromotion): string {
+  return `[Render] HDR auto-promotion triggered by "${promotion.triggeringAsset}", output: ${promotion.output.colorSpace} / ${promotion.output.codec}`;
 }
 
 /**

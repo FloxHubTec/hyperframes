@@ -80,6 +80,24 @@
       "types": "./dist/compositionContract.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./media-duration": {
+      "source": "./src/mediaDuration.ts",
+      "runtime": "./dist/mediaDuration.js",
+      "types": "./dist/mediaDuration.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./media-duration-fixtures": {
+      "source": "./src/mediaDurationFixtures.ts",
+      "runtime": "./dist/mediaDurationFixtures.js",
+      "types": "./dist/mediaDurationFixtures.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./top-level-elements": {
+      "source": "./src/topLevelElements.ts",
+      "runtime": "./dist/topLevelElements.js",
+      "types": "./dist/topLevelElements.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./color-grading-contract": {
       "source": "./src/colorGradingContract.ts",
       "runtime": "./dist/colorGradingContract.js",
@@ -98,11 +116,47 @@
       "types": "./dist/ffBinaries.d.ts",
       "environments": ["bun", "node"]
     },
+    "./media-alpha": {
+      "source": "./src/mediaAlpha.ts",
+      "runtime": "./dist/mediaAlpha.js",
+      "types": "./dist/mediaAlpha.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./asset-resolution": {
       "source": "./src/assetResolution.ts",
       "runtime": "./dist/assetResolution.js",
       "types": "./dist/assetResolution.d.ts",
       "environments": ["bun", "node"]
+    },
+    "./html-attribute-spans": {
+      "source": "./src/htmlAttributeSpans.ts",
+      "runtime": "./dist/htmlAttributeSpans.js",
+      "types": "./dist/htmlAttributeSpans.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./time-spans": {
+      "source": "./src/timeSpans.ts",
+      "runtime": "./dist/timeSpans.js",
+      "types": "./dist/timeSpans.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./media-timing": {
+      "source": "./src/mediaTiming.ts",
+      "runtime": "./dist/mediaTiming.js",
+      "types": "./dist/mediaTiming.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./reference-resolver": {
+      "source": "./src/referenceResolver.ts",
+      "runtime": "./dist/referenceResolver.js",
+      "types": "./dist/referenceResolver.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./composition-duration": {
+      "source": "./src/compositionDuration.ts",
+      "runtime": "./dist/compositionDuration.js",
+      "types": "./dist/compositionDuration.d.ts",
+      "environments": ["browser", "bun", "node"]
     }
   }
 }

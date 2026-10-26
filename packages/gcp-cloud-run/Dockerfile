@@ -21,14 +21,14 @@
 # Unlike the AWS Lambda adapter there is no ZIP-size ceiling and no runtime
 # Chrome decompression step — the binary lives in the image at a fixed path.
 
-FROM node:22-bookworm-slim AS beginframe-contract
+FROM node:22.23.3-bookworm-slim AS beginframe-contract
 
 # ── System dependencies (identical set to the producer's render image) ───────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     unzip \
-    ffmpeg \
+    xz-utils \
     libgbm1 \
     libnss3 \
     libatk-bridge2.0-0 \
@@ -54,11 +54,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && fc-cache -fv
 
+# ── FFmpeg (pinned) ──────────────────────────────────────────────────────────
+# One pinned static build (BtbN n8.0.1) instead of Debian's apt ffmpeg, so
+# regression baselines and the shipped images use the same FFmpeg version.
+# Bump the URL and sha256 together, and keep in sync with the other Dockerfiles
+# and .github/actions/install-ffmpeg-linux/action.yml.
+ARG TARGETARCH
+ARG FFMPEG_RELEASE=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-02-28-12-59
+ARG FFMPEG_BUILD=ffmpeg-n8.0.1-66-g27b8d1a017
+ARG FFMPEG_SHA256_AMD64=26d2ecd0cefba99f9d1ea92252a3a4f743a58df4c1c3cf9f8bbaaa40b1fca5b0
+ARG FFMPEG_SHA256_ARM64=d72cc324cb65dd92a9ffe699cc95ccbacfef4def8d3ad9fe2b5164a6a71b9595
+RUN case "$TARGETARCH" in \
+      amd64) FF_ARCH=linux64; FF_SHA256="$FFMPEG_SHA256_AMD64" ;; \
+      arm64) FF_ARCH=linuxarm64; FF_SHA256="$FFMPEG_SHA256_ARM64" ;; \
+      *) echo "unsupported TARGETARCH '$TARGETARCH'" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/ffmpeg.tar.xz "$FFMPEG_RELEASE/$FFMPEG_BUILD-$FF_ARCH-gpl-8.0.tar.xz" \
+    && echo "$FF_SHA256  /tmp/ffmpeg.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/ffmpeg.tar.xz -C /usr/local/bin --strip-components=2 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe' \
+    && rm /tmp/ffmpeg.tar.xz \
+    && ffmpeg -version | grep -F "ffmpeg version ${FFMPEG_BUILD#ffmpeg-}" \
+    && ffprobe -version | grep -F "ffprobe version ${FFMPEG_BUILD#ffmpeg-}"
+
 # ── chrome-headless-shell (deterministic BeginFrame capture) ─────────────────
 # Pinned deliberately. The build-stage contract probe below launches this
 # exact executable and requires a renderer-ready warm-up plus a PNG-returning
 # HeadlessExperimental.beginFrame before the image can build.
-RUN npx --yes @puppeteer/browsers install chrome-headless-shell@148.0.7778.167 \
+RUN npx --yes @puppeteer/browsers install chrome-headless-shell@152.0.7977.30 \
       --path /opt/puppeteer \
     && CHS="$(find /opt/puppeteer/chrome-headless-shell -name chrome-headless-shell -type f | head -n1)" \
     && mkdir -p /opt/chrome \
@@ -78,7 +100,7 @@ WORKDIR /app
 # the container runs `bun dist/server.js` and relies on bun's ESM `require`
 # interop to load the producer bundle, so a future bun release changing that
 # behaviour shouldn't silently break the next image rebuild. Bump deliberately.
-RUN curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.9"
+RUN curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.2"
 ENV PATH="/root/.bun/bin:$PATH"
 
 # Install workspace dependencies. Copy manifests first for layer caching.
@@ -96,15 +118,22 @@ COPY packages/lint/package.json packages/lint/package.json
 COPY packages/parsers/package.json packages/parsers/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/sdk-playground/package.json packages/sdk-playground/package.json
+COPY packages/inspector/package.json packages/inspector/package.json
 COPY packages/studio-server/package.json packages/studio-server/package.json
 COPY scripts/package-subpaths.mjs scripts/package-subpaths.mjs
-RUN bun install --frozen-lockfile
+# A corrupt tarball extraction can print an error and then hang instead of
+# exiting (seen in Dockerfile.test, run 35468046055). Bound each attempt and
+# retry once, so a prod deploy build fails fast instead of hanging.
+RUN timeout 300 bun install --frozen-lockfile \
+    || timeout 300 bun install --frozen-lockfile
 
 # Fail the image build closed if the packaged executable cannot perform the
 # same BeginFrame operation the distributed renderer relies on. Generate the
 # argument list with the production engine helper so a launcher-flag regression
 # invalidates this layer and fails the contract instead of testing a duplicate
 # hard-coded profile.
+COPY packages/core/ packages/core/
+COPY packages/parsers/ packages/parsers/
 COPY packages/engine/ packages/engine/
 COPY packages/aws-lambda/scripts/probe-beginframe.ts packages/aws-lambda/scripts/probe-beginframe.ts
 RUN bun -e 'import { buildChromeArgs } from "./packages/engine/src/services/browserManager.ts"; await Bun.write("/tmp/hf-gcp-chrome-args.json", JSON.stringify(buildChromeArgs({ width: 800, height: 600, captureMode: "beginframe", platform: "linux" }, { browserGpuMode: "software" })))' \
@@ -112,12 +141,22 @@ RUN bun -e 'import { buildChromeArgs } from "./packages/engine/src/services/brow
       --executable-path /opt/chrome/chrome-headless-shell \
       --launch-args-json /tmp/hf-gcp-chrome-args.json
 
+# Reports whether this exact pinned binary gets a hardware WebGPU adapter. A software-only
+# host reports "no usable adapter" without failing the build; its WebGPU compositions refuse
+# to render at run time. A real script file, not an inline `bun -e` eval: the eval's
+# synthetic `/app/[eval]` path can't resolve the workspace-hoisted `puppeteer-core`.
+COPY packages/aws-lambda/scripts/probe-webgpu-adapter.ts packages/aws-lambda/scripts/probe-webgpu-adapter.ts
+RUN bun packages/aws-lambda/scripts/probe-webgpu-adapter.ts \
+      --executable-path /opt/chrome/chrome-headless-shell
+
 # CI targets `beginframe-contract` directly, so pin/probe changes do not need
 # the full monorepo build merely to verify browser capability. The deployable
 # image continues from the already-proven binary and installed workspaces.
 FROM beginframe-contract AS runtime
 
-# Copy source for the packages the render path needs.
+# Copy source for the packages the render path needs, plus the shared post-emit
+# import rewrite their builds run.
+COPY scripts/rewrite-relative-import-extensions.mjs scripts/rewrite-relative-import-extensions.mjs
 COPY packages/core/ packages/core/
 COPY packages/engine/ packages/engine/
 COPY packages/producer/ packages/producer/
@@ -130,8 +169,8 @@ COPY packages/studio-server/ packages/studio-server/
 
 # Build workspace dependencies before the producer bundle. The published
 # workspace packages are not prebuilt in a fresh clone, so producer's esbuild
-# resolution otherwise fails on parsers/core compiler entrypoints. Generate
-# embedded font data so glyph layout matches production.
+# resolution otherwise fails on parsers/core compiler entrypoints. Core's build
+# also generates the embedded font data, so glyph layout matches production.
 RUN bun run --cwd packages/parsers build \
     && bun run --cwd packages/lint build \
     && bun run --cwd packages/studio-server build \
@@ -140,7 +179,6 @@ RUN bun run --cwd packages/parsers build \
     && bun run --cwd packages/sdk build \
     && bun run --cwd packages/sdk-playground build \
     && bun run --cwd packages/engine build \
-    && (cd packages/producer && bunx tsx scripts/generate-font-data.ts) \
     && bun run --cwd packages/producer build \
     && bun run --cwd packages/gcp-cloud-run build
 

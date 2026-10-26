@@ -1,9 +1,11 @@
 /** @vitest-environment jsdom */
-import { describe, expect, it } from "vitest";
+import gsap from "gsap";
+import { describe, expect, it, vi } from "vitest";
 import {
   interpolateVolumeGain,
   probeAndCacheElementVolume,
   probeElementVolumeKeyframes,
+  volumeMoversOf,
 } from "./mediaVolumeEnvelope";
 
 describe("probeElementVolumeKeyframes", () => {
@@ -113,7 +115,69 @@ describe("probeElementVolumeKeyframes", () => {
   });
 });
 
+describe("volumeMoversOf", () => {
+  it("lists the elements a tween names volume on, and only those", () => {
+    const [a, b, title] = [
+      document.createElement("audio"),
+      document.createElement("audio"),
+      document.createElement("h1"),
+    ];
+    const movers = volumeMoversOf({
+      getChildren: () => [
+        { targets: () => [a], vars: { volume: 0.2 } },
+        { targets: () => [b], vars: { playbackRate: 2 } },
+        { targets: () => [title], vars: { opacity: 1 } },
+      ],
+    });
+    expect([...movers.elements]).toEqual([a]);
+    expect(movers.anySetter).toBe(false);
+    expect(movers.unknown).toBe(false);
+  });
+
+  it("marks a tweened setter on a plain object, and a timeline that cannot list its tweens", () => {
+    const gain = { set level(_v: number) {} };
+    expect(
+      volumeMoversOf({ getChildren: () => [{ targets: () => [gain], vars: { level: 0 } }] })
+        .anySetter,
+    ).toBe(true);
+    expect(volumeMoversOf({}).unknown).toBe(true);
+    expect(
+      volumeMoversOf({
+        getChildren: () => {
+          throw new Error("no");
+        },
+      }).unknown,
+    ).toBe(true);
+  });
+});
+
 describe("probeAndCacheElementVolume", () => {
+  it("walks the timeline's tweens once for a pass that shares its movers", () => {
+    let walks = 0;
+    const els = Array.from({ length: 50 }, () => {
+      const audio = document.createElement("audio");
+      audio.dataset.start = "0";
+      audio.dataset.duration = "5";
+      document.body.append(audio);
+      return audio;
+    });
+    const timeline = {
+      totalTime: () => 0,
+      getChildren: () => {
+        walks += 1;
+        return [{ targets: () => [document.createElement("h1")], vars: { opacity: 1 } }];
+      },
+    };
+    const cache = new WeakMap<HTMLMediaElement, { time: number; volume: number }[]>();
+    let movers: ReturnType<typeof volumeMoversOf> | undefined;
+    const shared = () => (movers ??= volumeMoversOf(timeline));
+    for (const el of els) probeAndCacheElementVolume(el, timeline, 5, cache, { movers: shared });
+    expect(walks).toBe(1);
+    // without a shared index each probe walks on its own, as before
+    for (const el of els) probeAndCacheElementVolume(el, timeline, 5, cache);
+    expect(walks).toBe(51);
+  });
+
   it("does not seek or cache when live timeline probing is disabled", () => {
     const audio = document.createElement("audio");
     audio.dataset.volume = "1";
@@ -138,6 +202,120 @@ describe("probeAndCacheElementVolume", () => {
     expect(seekCount).toBe(0);
     expect(audio.volume).toBe(1);
     expect(cache.has(audio)).toBe(false);
+  });
+
+  it("does not seek to probe an element whose volume no tween names", () => {
+    const audio = document.createElement("audio");
+    audio.dataset.start = "0";
+    audio.dataset.duration = "25";
+    document.body.append(audio);
+    const title = document.createElement("h1");
+
+    let seekCount = 0;
+    const timeline = {
+      totalTime(next?: number) {
+        if (next !== undefined) seekCount += 1;
+        return 0;
+      },
+      getChildren: () => [
+        { targets: () => [title], vars: { volume: 0, opacity: 1 } },
+        { targets: () => [audio], vars: { playbackRate: 2 } },
+      ],
+    };
+    const cache = new WeakMap<HTMLMediaElement, { time: number; volume: number }[]>();
+
+    // What a rebind does for every bound media element: 25 s at 60 samples/s on main.
+    probeAndCacheElementVolume(audio, timeline, 25, cache);
+
+    expect(seekCount).toBe(0);
+    expect(cache.has(audio)).toBe(false);
+  });
+
+  it("samples a gain tweened through a plain-object proxy that writes the element's volume", () => {
+    const audio = document.createElement("audio");
+    audio.dataset.start = "0";
+    audio.dataset.duration = "1";
+    audio.dataset.volume = "0";
+    document.body.append(audio);
+    const proxy = {
+      get gain() {
+        return audio.volume;
+      },
+      set gain(value: number) {
+        audio.volume = value;
+      },
+    };
+    const timeline = gsap.timeline({ paused: true });
+    timeline.fromTo(proxy, { gain: 0 }, { gain: 0.75, duration: 1, ease: "none" }, 0);
+    const cache = new WeakMap<HTMLMediaElement, { time: number; volume: number }[]>();
+
+    probeAndCacheElementVolume(audio, timeline, 1, cache);
+
+    const envelope = cache.get(audio);
+    expect(envelope).toBeDefined();
+    expect(interpolateVolumeGain(envelope!, 0.5)).toBeCloseTo(0.375, 3);
+  });
+
+  it.each([
+    ["a {} spacer", (tl: gsap.core.Timeline) => tl.to({}, { duration: 25 })],
+    ["a tl.call", (tl: gsap.core.Timeline) => tl.call(() => {}, [], 3)],
+    ["a plain counter", (tl: gsap.core.Timeline) => tl.to({ n: 0 }, { n: 100, duration: 5 })],
+  ])("does not seek for %s", (_name, add) => {
+    const audio = document.createElement("audio");
+    audio.dataset.start = "0";
+    audio.dataset.duration = "25";
+    document.body.append(audio);
+    const timeline = gsap.timeline({ paused: true });
+    add(timeline);
+    const seek = vi.spyOn(timeline, "totalTime");
+
+    probeAndCacheElementVolume(audio, timeline, 25, new WeakMap());
+
+    expect(seek.mock.calls.filter((args) => args.length > 0)).toHaveLength(0);
+  });
+
+  it("samples a class instance whose volume setter writes the element", () => {
+    const audio = document.createElement("audio");
+    audio.dataset.start = "0";
+    audio.dataset.duration = "1";
+    audio.dataset.volume = "0";
+    document.body.append(audio);
+    class Fader {
+      get volume() {
+        return audio.volume;
+      }
+      set volume(value: number) {
+        audio.volume = value;
+      }
+    }
+    const timeline = gsap.timeline({ paused: true });
+    timeline.fromTo(new Fader(), { volume: 0 }, { volume: 0.5, duration: 1, ease: "none" }, 0);
+    const cache = new WeakMap<HTMLMediaElement, { time: number; volume: number }[]>();
+
+    probeAndCacheElementVolume(audio, timeline, 1, cache);
+
+    expect(interpolateVolumeGain(cache.get(audio) ?? [], 0.5)).toBeCloseTo(0.25, 3);
+  });
+
+  it("still samples a keyframed volume tween on the element", () => {
+    const audio = document.createElement("audio");
+    audio.dataset.volume = "1";
+    document.body.append(audio);
+
+    const timeline = {
+      totalTime(next?: number) {
+        if (next !== undefined) audio.volume = next >= 1 ? 0 : 1;
+        return 0;
+      },
+      getChildren: () => [{ targets: () => [audio], vars: { keyframes: [{ volume: 0 }] } }],
+    };
+    const cache = new WeakMap<HTMLMediaElement, { time: number; volume: number }[]>();
+
+    probeAndCacheElementVolume(audio, timeline, 2, cache);
+
+    expect(cache.get(audio)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ volume: 0 })]),
+    );
   });
 
   it("restores the timeline playhead after sampling volume automation", () => {

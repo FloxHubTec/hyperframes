@@ -19,7 +19,88 @@ ${rootContent}
 </html>`;
 }
 
+/** A portrait root inside a document whose scaffold copies of the resolution
+ *  are supplied by the caller, so they can be aligned or left stale. */
+function portraitCompositionWithScaffold(bodyCss: string, viewportContent: string): string {
+  return `
+<html>
+<head>
+  <meta name="viewport" content="${viewportContent}" />
+  <style>
+    html, body { ${bodyCss} overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div id="root" data-composition-id="c1" data-width="1080" data-height="1920"></div>
+  <script>window.__timelines = {};</script>
+</body>
+</html>`;
+}
+
+describe("inline script syntax attribute semantics", () => {
+  it.each([
+    ["type=module", `import value from "pkg"; await value;`],
+    ['TYPE="module"', `import value from "pkg"; await value;`],
+    ['type=" MODULE "', `import value from "pkg"; await value;`],
+    ['type="mod&#117;le"', `import value from "pkg"; await value;`],
+    ["type=application/json", `{"value":1}`],
+    ["type=importmap", `{"imports":{"pkg":"./pkg.js"}}`],
+    ["type=application/hyperframes-slideshow+json", `{"slides":[]}`],
+    ['type="module" type="text/javascript"', `import value from "pkg"; await value;`],
+  ])("recognizes the exempt script type in %s", async (attrs, content) => {
+    const result = await lintHyperframeHtml(`<script ${attrs}>${content}</script>`);
+    expect(result.findings.filter((f) => f.code === "invalid_inline_script_syntax")).toEqual([]);
+  });
+
+  it.each([
+    'data-type="module"',
+    'data-src="external.js"',
+    `data-note='type="module"'`,
+    `data-note='src="external.js"'`,
+    `data-note=">" data-src="external.js"`,
+    'type="text/javascript" type="module"',
+    'type=""',
+  ])("checks classic inline syntax despite metadata in %s", async (attrs) => {
+    const result = await lintHyperframeHtml(`<script ${attrs}>const = broken;</script>`);
+    expect(result.findings.filter((f) => f.code === "invalid_inline_script_syntax")).toHaveLength(
+      1,
+    );
+  });
+
+  it.each(['src="external.js"', 'SRC="external.js"', "src"])(
+    "skips inline text when a real external src attribute is present: %s",
+    async (attrs) => {
+      const result = await lintHyperframeHtml(`<script ${attrs}>const = broken;</script>`);
+      expect(result.findings.filter((f) => f.code === "invalid_inline_script_syntax")).toEqual([]);
+    },
+  );
+});
+
 describe("core rules", () => {
+  it("does not invent a composition host from an attribute mentioned in a title", async () => {
+    const html = `<html><body>
+      <div id="root" data-composition-id="main" data-no-timeline data-width="640" data-height="360">
+        <span id="example" title='data-composition-src="ghost.html"'>Example</span>
+      </div>
+    </body></html>`;
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.map((finding) => finding.code)).not.toContain(
+      "host_missing_composition_id",
+    );
+  });
+
+  it("does not invent timing from attributes mentioned in a title", async () => {
+    const html = `<html><body>
+      <div id="root" data-composition-id="main" data-no-timeline data-width="640" data-height="360">
+        <span id="example" title='data-start="0" data-duration="1"'>Example</span>
+      </div>
+    </body></html>`;
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.map((finding) => finding.code)).not.toContain(
+      "timed_element_missing_clip_class",
+    );
+  });
+
   it("does not lint scripts embedded inside an iframe srcdoc attribute", async () => {
     const html = `
 <html><body>
@@ -60,19 +141,110 @@ describe("core rules", () => {
     ).toBeUndefined();
   });
 
-  it("warns when an id starts with a digit and is unsafe in a hash selector", async () => {
+  it.each([
+    ["no selector uses it", "", "", "warning"],
+    ["a CSS rule targets it", "#123-frame { opacity: 0; }", "", "error"],
+    ["a GSAP string targets it", "", 'gsap.to("#123-frame", { x: 1 });', "error"],
+    ["querySelector targets it", "", 'document.querySelector(".a #123-frame");', "error"],
+    ["gsap.utils.toArray targets it", "", 'gsap.utils.toArray("#123-frame");', "error"],
+    [
+      "a scrollTrigger trigger targets it",
+      "",
+      'gsap.to(".box", { x: 10, scrollTrigger: { trigger: "#123-frame" } });',
+      "error",
+    ],
+    [
+      "ScrollTrigger.create triggers on it",
+      "",
+      'ScrollTrigger.create({ trigger: "#123-frame", pin: true });',
+      "error",
+    ],
+    [
+      "a ScrollTrigger pin targets it",
+      "",
+      'ScrollTrigger.create({ trigger: ".a", pin: "#123-frame" });',
+      "error",
+    ],
+    [
+      "a ScrollTrigger endTrigger targets it",
+      "",
+      'ScrollTrigger.create({ trigger: ".a", endTrigger: "#123-frame" });',
+      "error",
+    ],
+    [
+      "the scrollTrigger shorthand targets it",
+      "",
+      'gsap.to(".box", { scrollTrigger: "#123-frame" });',
+      "error",
+    ],
+    [
+      "a ScrollTrigger scroller targets it",
+      "",
+      'ScrollTrigger.create({ trigger: ".a", scroller: "#123-frame" });',
+      "error",
+    ],
+    [
+      "a ScrollTrigger pinnedContainer targets it",
+      "",
+      'ScrollTrigger.create({ trigger: ".a", pinnedContainer: "#123-frame" });',
+      "error",
+    ],
+    [
+      "a ScrollTrigger pinSpacer targets it",
+      "",
+      'ScrollTrigger.create({ trigger: ".a", pinSpacer: "#123-frame" });',
+      "error",
+    ],
+    [
+      "a quoted ScrollTrigger key targets it",
+      "",
+      'ScrollTrigger.create({ "trigger": "#123-frame" });',
+      "error",
+    ],
+    [
+      "a $-prefixed key ending in pin holds it",
+      "",
+      'const meta = { $pin: "#123-frame" };',
+      "warning",
+    ],
+    ["a key ending in pin holds it", "", 'const meta = { spin: "#123-frame" };', "warning"],
+    ["a non-selector key holds it", "", 'const meta = { label: "#123-frame" };', "warning"],
+    [
+      "a hyphenated key ending in pin holds it",
+      "",
+      'const meta = { "data-pin": "#123-frame" };',
+      "warning",
+    ],
+    ["only url(#id) references it", ".a { mask: url(#123-frame); }", "", "warning"],
+    ["only a longer id is selected", "#123-frame-2 { opacity: 0; }", "", "warning"],
+    ["getElementById looks it up", "", 'document.getElementById("123-frame");', "warning"],
+    ["the CSS selector is escaped", "#\\31 23-frame { opacity: 0; }", "", "warning"],
+    [
+      "the script selector is escaped",
+      "",
+      'document.querySelector("#\\\\31 23-frame");',
+      "warning",
+    ],
+    [
+      "CSS.escape builds the selector",
+      "",
+      'document.querySelector(`#${CSS.escape("123-frame")}`);',
+      "warning",
+    ],
+  ])("rates a digit-leading id by selector use: %s", async (_case, css, js, severity) => {
     const html = `
 <html><body>
   <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <style>${css}</style>
     <div id="123-frame"></div>
   </div>
-  <script>window.__timelines = {};</script>
+  <script>window.__timelines = {}; ${js}</script>
 </body></html>`;
 
     const result = await lintHyperframeHtml(html);
     const finding = result.findings.find((item) => item.code === "id_requires_css_escape");
 
-    expect(finding?.severity).toBe("warning");
+    expect(finding?.severity).toBe(severity);
     expect(finding?.elementId).toBe("123-frame");
     expect(finding?.fixHint).toContain("CSS.escape");
   });
@@ -115,6 +287,114 @@ describe("core rules", () => {
     expect(finding?.severity).toBe("error");
   });
 
+  it("reports root_dimensions_mismatch when html/body CSS and the viewport meta are still the scaffolded landscape size", async () => {
+    // GH#4001: the root is edited to portrait without `hyperframes init
+    // --resolution`, the only thing that otherwise keeps the scaffold's copies
+    // of the resolution in sync. The stale landscape body (overflow: hidden)
+    // then clips the correctly-sized root at its old height.
+    const html = portraitCompositionWithScaffold(
+      "width: 1920px; height: 1080px;",
+      "width=1920, height=1080",
+    );
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "root_dimensions_mismatch");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("warning");
+    expect(finding?.message).toContain("html/body CSS is 1920x1080");
+    expect(finding?.message).toContain("the viewport meta is 1920x1080");
+  });
+
+  it("reads a stale html/body size authored height-before-width", async () => {
+    const html = portraitCompositionWithScaffold(
+      "height: 1080px; width: 1920px;",
+      "width=1080, height=1920",
+    );
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "root_dimensions_mismatch");
+    expect(finding?.message).toContain("html/body CSS is 1920x1080");
+    expect(finding?.message).not.toContain("viewport");
+  });
+
+  it("does not report root_dimensions_mismatch when the scaffold agrees with the root", async () => {
+    const html = portraitCompositionWithScaffold(
+      "width: 1080px; height: 1920px;",
+      "width=1080, height=1920",
+    );
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.find((f) => f.code === "root_dimensions_mismatch")).toBeUndefined();
+  });
+
+  it("does not report root_dimensions_mismatch for a sub-composition fragment with no html/body/viewport to compare", async () => {
+    const html = `<div data-composition-id="c1" data-width="1080" data-height="1920"></div>`;
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.find((f) => f.code === "root_dimensions_mismatch")).toBeUndefined();
+  });
+
+  it("does not report root_dimensions_mismatch for a full sub-composition document whose own viewport meta disagrees with its root", async () => {
+    // Matches the hf2550 flowchart-vertical fixture's shape: a full standalone
+    // document mounted as a sub-composition. See the rule's comment in core.ts
+    // for why its own <meta viewport> never reaches the rendering document.
+    const html = `
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=1440, height=2560" />
+</head>
+<body>
+  <div id="root" data-composition-id="c1" data-width="1080" data-height="1920"></div>
+  <script>window.__timelines = {};</script>
+</body>
+</html>`;
+    const result = await lintHyperframeHtml(html, { isSubComposition: true });
+    expect(result.findings.find((f) => f.code === "root_dimensions_mismatch")).toBeUndefined();
+  });
+
+  it("still reports root_dimensions_mismatch for the same shape linted as a top-level composition, with no-clipping-risk wording since there is no html/body CSS block at all", async () => {
+    const html = `
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=1440, height=2560" />
+</head>
+<body>
+  <div id="root" data-composition-id="c1" data-width="1080" data-height="1920"></div>
+  <script>window.__timelines = {};</script>
+</body>
+</html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "root_dimensions_mismatch");
+    expect(finding).toBeDefined();
+    // No html/body CSS block is present here at all (the real hf2550 fixture
+    // shape) -- distinct from the "present and matching" case covered below --
+    // so the "absent" and "matches" cases of describeSizeMismatch must both
+    // route to the same no-clipping-risk wording, not just the "matches" one.
+    expect(finding?.message).not.toContain("clips");
+    expect(finding?.message.toLowerCase()).toContain("no effect on capture");
+  });
+
+  it("uses no-clipping-risk wording when only the viewport meta disagrees and html/body CSS matches the root", async () => {
+    const html = portraitCompositionWithScaffold(
+      "width: 1080px; height: 1920px;",
+      "width=1440, height=2560",
+    );
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "root_dimensions_mismatch");
+    expect(finding).toBeDefined();
+    expect(finding?.message).toContain("the viewport meta is 1440x2560");
+    expect(finding?.message).not.toContain("clips");
+    expect(finding?.message.toLowerCase()).toContain("no effect on capture");
+  });
+
+  it("keeps the body-clipping wording when html/body CSS itself disagrees with the root", async () => {
+    const html = portraitCompositionWithScaffold(
+      "width: 1920px; height: 1080px;",
+      "width=1080, height=1920",
+    );
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "root_dimensions_mismatch");
+    expect(finding?.message).toContain("clips");
+  });
+
   it("accepts body as the composition root", async () => {
     const html = `
 <html><body data-composition-id="c1" data-width="1920" data-height="1080">
@@ -142,6 +422,26 @@ describe("core rules", () => {
   <script>window.__timelines = window.__timelines || {};</script>
 </body></html>`;
     const result = await lintHyperframeHtml(html);
+    expect(result.findings.find((f) => f.code === "root_missing_composition_id")).toBeUndefined();
+    expect(result.findings.find((f) => f.code === "root_missing_dimensions")).toBeUndefined();
+  });
+
+  it("does not ask a sub-composition for its own size: a mounted one fills its host", async () => {
+    const html = `<template id="scene-template">
+  <div id="scene" data-composition-id="scene"><p>Hi</p></div>
+</template>`;
+    const result = await lintHyperframeHtml(html, { isSubComposition: true });
+    expect(result.findings.find((f) => f.code === "root_missing_dimensions")).toBeUndefined();
+    expect(result.findings.find((f) => f.code === "root_missing_composition_id")).toBeUndefined();
+  });
+
+  it("finds a sub-composition's root inside <template> when <html> carries its variables", async () => {
+    const html = `<html lang="en" data-composition-variables='[{"id":"title","type":"string","label":"Title","default":"Hi"}]'>
+<template id="scene-template">
+  <div id="scene" data-composition-id="scene" data-width="1280" data-height="720"></div>
+</template>
+</html>`;
+    const result = await lintHyperframeHtml(html, { isSubComposition: true });
     expect(result.findings.find((f) => f.code === "root_missing_composition_id")).toBeUndefined();
     expect(result.findings.find((f) => f.code === "root_missing_dimensions")).toBeUndefined();
   });
@@ -673,6 +973,70 @@ describe("core rules", () => {
     expect(finding).toBeUndefined();
   });
 
+  describe("css_transition_used", () => {
+    it.each([
+      ["transition", "opacity 0.5s ease"],
+      ["transition-duration", "0.5s"],
+      ["transition-delay", "100ms"],
+      ["transition-property", "opacity"],
+      ["-webkit-transition", "opacity 0.5s ease"],
+      ["-webkit-transition-duration", "0.5s"],
+      ["transition", "opacity 0s linear 1s"],
+      ["transition-duration", "0s, .2s"],
+      ["transition-duration", "var(--speed)"],
+    ])("warns for %s declarations in style blocks", async (property, value) => {
+      const result = await lintHyperframeHtml(
+        compositionWithBodyPrefix(`<style>.card { ${property}: ${value}; }</style>`),
+      );
+      const finding = result.findings.find((item) => item.code === "css_transition_used");
+
+      expect(finding).toMatchObject({ severity: "warning", selector: ".card" });
+      expect(finding?.message).toContain(property);
+      expect(finding?.fixHint).toContain("paused GSAP timeline");
+    });
+
+    it("warns for an inline transition and identifies its element", async () => {
+      const result = await lintHyperframeHtml(
+        compositionWithBodyPrefix(
+          "",
+          '<div id="card" style="transition: opacity 0.5s ease"></div>',
+        ),
+      );
+      const finding = result.findings.find((item) => item.code === "css_transition_used");
+
+      expect(finding).toMatchObject({ severity: "warning", elementId: "card" });
+      expect(finding?.snippet).toContain('id="card"');
+    });
+
+    it.each([
+      ["transition", "none"],
+      ["transition-property", "none"],
+      ["-webkit-transition", "none"],
+      ["-webkit-transition-property", "NONE"],
+      ["transition-duration", "0s"],
+      ["transition-delay", "0ms, 0s"],
+      ["-webkit-transition-duration", "0s"],
+      ["transition", "opacity 0s ease 0s"],
+    ])("allows %s: %s", async (property, value) => {
+      const result = await lintHyperframeHtml(
+        compositionWithBodyPrefix(`<style>.card { ${property}: ${value} !important; }</style>`),
+      );
+
+      expect(result.findings.find((item) => item.code === "css_transition_used")).toBeUndefined();
+    });
+
+    it("ignores custom properties that contain transition in their name", async () => {
+      const result = await lintHyperframeHtml(
+        compositionWithBodyPrefix(
+          '<div id="card" style="--transition-speed: 0.5s"></div>',
+          "<style>.card { --transition-easing: ease; opacity: 1; }</style>",
+        ),
+      );
+
+      expect(result.findings.find((item) => item.code === "css_transition_used")).toBeUndefined();
+    });
+  });
+
   describe("non_deterministic_code", () => {
     it("gives randomness guidance for crypto and clock guidance for wall time", async () => {
       const result = await lintHyperframeHtml(`<html><body>
@@ -844,6 +1208,172 @@ describe("core rules", () => {
     });
   });
 
+  describe("non_deterministic_code — inlined GSAP library", () => {
+    // UMD wrapper, banner and internals excerpted from gsap@3.14.2 dist/gsap.min.js.
+    const banner = "/*! GSAP 3.14.2 | @license Copyright 2025, GreenSock. All rights reserved. */";
+    const gsapUmd =
+      '!function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):' +
+      '"function"==typeof define&&define.amd?define(["exports"],e):e((t=t||self).window=t.window||{})}' +
+      '(this,function(e){"use strict";function gb(t){return t.sort(function(){return.5-Math.random()})}' +
+      "function Ic(){var t=Date.now(),o=[];return o}});";
+    const pastedGsap = `${banner}\n${gsapUmd}`;
+    const producerInlinedGsap = `/* inlined: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js */\n${gsapUmd}`;
+    // Unminified builds carry the banner inside the factory.
+    const unminifiedGsap = gsapUmd.replace('"use strict";', `"use strict";${banner}`);
+    const inlinedUnminifiedGsap = `/* inlined: https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.js */\n(${unminifiedGsap.slice(1, -1)});`;
+    const separatedGsap = `${banner};${gsapUmd}`;
+    const umdBundle = (body: string) =>
+      `(function (root, factory) {\nif (typeof define === "function" && define.amd) define([], factory); else factory();\n})(this, function () {\n${body}\n});`;
+    // Rollup 4 `--format umd` output for `import { gsap } from "gsap"` plus author code, excerpted.
+    const rollupBundle = `(function (global, factory) {
+  typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
+  typeof define === 'function' && define.amd ? define(['exports'], factory) :
+  (global = typeof globalThis !== 'undefined' ? globalThis : global || self, factory(global.Composition = {}));
+})(this, (function (exports) { 'use strict';
+
+  ${banner}
+
+  var _config = {
+    autoSleep: 120,
+    force3D: "auto",
+    nullTargetWarn: 1,
+    units: {
+      lineHeight: ""
+    }
+  };
+
+  window.authorSeed = Math.random();
+  window.authorTime = Date.now();
+
+  exports.gsap = gsapWithCSS;
+
+}));`;
+    // The same import through Rollup UMD plus Terser, excerpted: the banner stays inside the factory.
+    const minifiedRollupBundle = `!function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"function"==typeof define&&define.amd?define(["exports"],e):e((t="undefined"!=typeof globalThis?globalThis:t||self).Composition={})}(this,function(t){"use strict";function r(t,e){t.prototype=Object.create(e.prototype),t.prototype.constructor=t,t.__proto__=e}\n${banner}\nvar Ji=Ar.registerPlugin($i)||Ar;Ji.core.Tween,window.authorSeed=Math.random(),window.authorTime=Date.now(),t.gsap=Ji});`;
+    const comp = (library: string, author = "") => `
+<html><body>
+  <div data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="5"></div>
+  <script>${library}</script>
+  <script>const tl = gsap.timeline({ paused: true }); ${author} window.__timelines = { main: tl };</script>
+</body></html>`;
+    const labels = async (html: string) =>
+      (await lintHyperframeHtml(html)).findings
+        .filter((f) => f.code === "non_deterministic_code")
+        .map((f) => f.message.match(/`(.+?)`/)?.[1]);
+
+    it.each([
+      ["pasted with its banner", pastedGsap],
+      ["inlined by the producer", producerInlinedGsap],
+      ["unminified and inlined by the producer", inlinedUnminifiedGsap],
+      [
+        "inlined by the producer from an unversioned dist URL with a query and hash",
+        inlinedUnminifiedGsap.replace(
+          "https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.js",
+          "https://unpkg.com/gsap/dist/gsap.js?module#top",
+        ),
+      ],
+      ["after a statement separator", separatedGsap],
+    ])("does not flag GSAP's own internals when %s", async (_shape, library) => {
+      expect(await labels(comp(library))).toEqual([]);
+    });
+
+    it("still flags the author's Math.random() in a script next to inlined GSAP", async () => {
+      expect(await labels(comp(pastedGsap, "const r = Math.random();"))).toEqual(["Math.random()"]);
+    });
+
+    it("still flags author calls before and after GSAP in the same script", async () => {
+      const library = `const a = Math.random();\n${pastedGsap}\nconst b = performance.now();`;
+      expect(await labels(comp(library))).toEqual(["Math.random()", "performance.now()"]);
+    });
+
+    it("checks an outer wrapper that only borrows define.amd from a nested library", async () => {
+      const library = `(function (root, factory) {\n${banner}\nwindow.seed = Math.random();\n${gsapUmd}\n})(this, function () {});`;
+      expect(await labels(comp(library))).toEqual(["Math.random()", "Date.now()"]);
+    });
+
+    it("checks a UMD wrapper whose GSAP banner is separated from it by other code", async () => {
+      expect(await labels(comp(`${banner}\nwindow.x = 1;\n${gsapUmd}`))).toEqual([
+        "Math.random()",
+        "Date.now()",
+      ]);
+    });
+
+    it.each([
+      [
+        "joined to it with a comma",
+        `${banner}\n${gsapUmd.slice(0, -1)}, window.seed = Math.random();`,
+      ],
+      [
+        "beside it inside an outer wrapper",
+        `(function () {\n${pastedGsap}\nwindow.seed = Math.random();\n})();`,
+      ],
+      [
+        "beside it inside an outer two-argument wrapper",
+        `(function (root, factory) {\n${pastedGsap}\nwindow.seed = Math.random();\n})(this, function () {});`,
+      ],
+      [
+        "beside it inside an outer UMD bundle",
+        umdBundle(`${pastedGsap}\nwindow.seed = Math.random();`),
+      ],
+      [
+        "beside producer-inlined unminified GSAP inside an outer UMD bundle",
+        umdBundle(`${inlinedUnminifiedGsap}\nwindow.seed = Math.random();`),
+      ],
+      [
+        "beside separated GSAP inside an outer UMD bundle",
+        umdBundle(`${separatedGsap}\nwindow.seed = Math.random();`),
+      ],
+      [
+        "beside a stray banner inside an outer UMD bundle",
+        umdBundle(`${banner}\nwindow.seed = Math.random();\n${pastedGsap}`),
+      ],
+    ])("still flags author code %s", async (_shape, library) => {
+      expect(await labels(comp(library))).toEqual(["Math.random()"]);
+    });
+
+    it("flags author code that Rollup bundles into one factory with GSAP's banner", async () => {
+      expect(await labels(comp(rollupBundle))).toEqual(["Math.random()", "Date.now()"]);
+    });
+
+    it.each([
+      "gsap-composition.js",
+      "composition.js",
+      "scene.js?vendor=gsap",
+      "https://example.com/gsap-demo/scene.js",
+    ])("flags author code in a minified bundle inlined from %s", async (src) => {
+      const library = `/* inlined: ${src} */\n${minifiedRollupBundle}`;
+      expect(await labels(comp(library))).toEqual(["Math.random()", "Date.now()"]);
+    });
+
+    // Known limit: a banner inside a factory cannot be told apart from a bundled one, so it exempts nothing.
+    it.each([
+      ["pasted unminified GSAP", unminifiedGsap],
+      [
+        "unminified GSAP beside author code in an outer UMD bundle",
+        umdBundle(`${unminifiedGsap}\nwindow.seed = Math.random();`),
+      ],
+    ])("checks %s, whose banner sits inside its factory", async (_shape, library) => {
+      expect(await labels(comp(library))).toEqual(["Math.random()", "Date.now()"]);
+    });
+
+    it.each([
+      ["a string", `const label = "GreenSock"; const x = Math.random();`],
+      ["a comment", `// eased like GreenSock\nconst x = Math.random();`],
+      ["a spoofed banner", `${banner}\nwindow.seed = Math.random();`],
+      ["a spoofed inlining comment", `/* inlined: gsap.min.js */\nwindow.seed = Math.random();`],
+      [
+        "a banner plus define.amd in a string",
+        `${banner}\nwindow.seed = ("define.amd", Math.random());`,
+      ],
+      [
+        "a banner plus define.amd in a comment",
+        `${banner}\nwindow.seed = /* define.amd */ Math.random();`,
+      ],
+    ])("still flags author code whose script mentions GSAP in %s", async (_where, author) => {
+      expect(await labels(comp("", author))).toEqual(["Math.random()"]);
+    });
+  });
+
   describe("timeline_id_mismatch — only top-level registry keys are composition ids", () => {
     const comp = (script: string) => `
 <html><body>
@@ -889,7 +1419,8 @@ describe("core rules", () => {
       expect(finding?.severity).toBe("error");
       expect(finding?.selector).toBe(`[style*="visibility: hidden"]`);
       expect(finding?.message).toContain("replacement frame");
-      expect(finding?.fixHint).toContain("data-composition-src");
+      expect(finding?.fixHint).not.toContain("[style");
+      expect(finding?.fixHint).toContain("class or data attribute");
     });
 
     it("errors when composition scoping still leaves the hidden-style selector on video", async () => {
@@ -938,6 +1469,125 @@ describe("core rules", () => {
 
       expect(
         result.findings.find((item) => item.code === "runtime_hidden_style_opacity"),
+      ).toBeUndefined();
+    });
+  });
+
+  describe("inline_style_attribute_selector", () => {
+    const findingsFor = async (css: string) =>
+      (
+        await lintHyperframeHtml(`
+<html><head><style>${css}</style></head><body>
+  <div id="root" data-composition-id="main" data-width="1920" data-height="1080"></div>
+  <script>window.__timelines = { main: gsap.timeline({ paused: true }) };</script>
+</body></html>`)
+      ).findings.filter((item) => item.code === "inline_style_attribute_selector");
+
+    it.each([
+      `[style] { color: red; }`,
+      `.scene[style*="visibility: hidden"] * { visibility: hidden !important; }`,
+      `div[style^="opacity"] { color: red; }`,
+      `div[style$="none;"] { color: red; }`,
+      `div[style~="x"] { color: red; }`,
+      `div[style|="x"] { color: red; }`,
+      `[STYLE*="hidden" i] { color: red; }`,
+      `.card:not([style*="opacity: 0"]) { color: red; }`,
+    ])("errors on a rule that selects on the inline style attribute: %s", async (css) => {
+      const [finding] = await findingsFor(css);
+      expect(finding?.severity).toBe("error");
+      expect(finding?.message).toContain("every frame");
+      expect(finding?.fixHint).toContain("class or data attribute");
+      expect(finding?.fixHint).not.toContain("[style");
+    });
+
+    it.each([
+      `.scene.is-hidden * { visibility: hidden; }`,
+      `[data-state="hidden"] { opacity: 0; }`,
+      `[data-style="bold"] { font-weight: 700; }`,
+      `[styles] { color: red; }`,
+      `[data-hf-style] { color: red; }`,
+    ])("allows a selector that does not read the inline style: %s", async (css) => {
+      expect(await findingsFor(css)).toEqual([]);
+    });
+
+    it("reports a selector once and each selector of a list on its own", async () => {
+      const findings = await findingsFor(
+        `[style*="a"], .x[style] { color: red; } [style*="a"] { color: blue; }`,
+      );
+      expect(findings.map((item) => item.selector)).toEqual([`[style*="a"]`, `.x[style]`]);
+    });
+  });
+
+  describe("id_override_reduced_specificity", () => {
+    const comp = (css: string) => `
+<html><head><style>${css}</style></head><body>
+  <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+    <div class="parent"><div id="line1" class="row">text</div></div>
+  </div>
+  <script>window.__timelines = { main: gsap.timeline({ paused: true }) };</script>
+</body></html>`;
+
+    it("warns when an attribute selector on id sets a position property", async () => {
+      const result = await lintHyperframeHtml(
+        comp(`.parent .row { position: absolute; left: 0; } [id="line1"] { left: 40px; }`),
+      );
+      const finding = result.findings.find((f) => f.code === "id_override_reduced_specificity");
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("warning");
+      expect(finding?.selector).toBe(`[id="line1"]`);
+      expect(finding?.fixHint).toContain("`#line1`");
+    });
+
+    it("warns when a :where()-wrapped id selector sets a position property", async () => {
+      const result = await lintHyperframeHtml(
+        comp(`.parent .row { position: absolute; top: 0; } :where(#line1) { top: 20px; }`),
+      );
+      const finding = result.findings.find((f) => f.code === "id_override_reduced_specificity");
+      expect(finding).toBeDefined();
+      expect(finding?.selector).toBe(`:where(#line1)`);
+    });
+
+    it("does not flag a bare #id selector, which always wins regardless of specificity", async () => {
+      const result = await lintHyperframeHtml(
+        comp(`.parent .row { position: absolute; left: 0; } #line1 { left: 40px; }`),
+      );
+      expect(
+        result.findings.find((f) => f.code === "id_override_reduced_specificity"),
+      ).toBeUndefined();
+    });
+
+    it("hints an escaped #id for a digit-leading id, where a bare #01-intro is invalid CSS", async () => {
+      const result = await lintHyperframeHtml(
+        comp(`.parent .row { position: absolute; left: 0; } [id="01-intro"] { left: 40px; }`),
+      );
+      const finding = result.findings.find((f) => f.code === "id_override_reduced_specificity");
+      expect(finding?.fixHint).toContain("`#\\30 1-intro`");
+    });
+
+    it("does not flag prefix-matching id selectors or !important position overrides", async () => {
+      const result = await lintHyperframeHtml(
+        comp(
+          `[id^="line"] { top: 0; } [id*="ine"] { left: 0; } [id="line1"] { left: 40px !important; }`,
+        ),
+      );
+      expect(
+        result.findings.find((f) => f.code === "id_override_reduced_specificity"),
+      ).toBeUndefined();
+    });
+
+    it("does not flag a compound that also carries a bare #id, or a nested rule's position", async () => {
+      const result = await lintHyperframeHtml(
+        comp(`#line1[id="line1"] { left: 40px; } [id="root"] { color: red; .row { left: 0; } }`),
+      );
+      expect(
+        result.findings.find((f) => f.code === "id_override_reduced_specificity"),
+      ).toBeUndefined();
+    });
+
+    it("does not flag an attribute selector on id for a non-position property", async () => {
+      const result = await lintHyperframeHtml(comp(`[id="line1"] { color: red; }`));
+      expect(
+        result.findings.find((f) => f.code === "id_override_reduced_specificity"),
       ).toBeUndefined();
     });
   });

@@ -34,9 +34,9 @@ export class CliRuntimeError extends Error {
 
   constructor(
     message = "Command failed",
-    options: { exitCode?: number; presented?: boolean } = {},
+    options: { exitCode?: number; presented?: boolean; cause?: unknown } = {},
   ) {
-    super(message);
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = "CliRuntimeError";
     this.result = {
       exitCode: options.exitCode ?? 1,
@@ -57,8 +57,8 @@ export class CliResultSignal extends Error {
   }
 }
 
-export function failCommand(exitCode = 1): never {
-  throw new CliRuntimeError("Command failed", { exitCode, presented: true });
+export function failCommand(exitCode = 1, cause?: unknown): never {
+  throw new CliRuntimeError("Command failed", { exitCode, presented: true, cause });
 }
 
 export function failUsage(exitCode = 1): never {
@@ -108,6 +108,12 @@ export function sanitizeSuccessfulExitCode(): void {
   rootExitCodeSanitizer?.();
 }
 
+export async function outputWritten(): Promise<void> {
+  const written = (stream: NodeJS.WriteStream) =>
+    new Promise<void>((resolve) => stream.write("", () => resolve()));
+  await Promise.all([written(process.stdout), written(process.stderr)]);
+}
+
 /** Ask cli.ts to finalize telemetry/output and then terminate the process. */
 export function requestCliExit(exitCode = 0): void {
   if (!rootExitRequester) {
@@ -119,4 +125,25 @@ export function requestCliExit(exitCode = 0): void {
     return;
   }
   rootExitRequester(exitCode);
+}
+
+type UnrefableTimer = {
+  unref: () => void;
+};
+
+function isUnrefableTimer(
+  timer: ReturnType<typeof setTimeout>,
+): timer is ReturnType<typeof setTimeout> & UnrefableTimer {
+  return (
+    typeof timer === "object" &&
+    timer !== null &&
+    "unref" in timer &&
+    typeof timer.unref === "function"
+  );
+}
+
+/** For a command whose result is out: ends the process if anything it started is still holding it. */
+export function scheduleCliExit(exitCode = 0): void {
+  const timer = setTimeout(() => requestCliExit(exitCode), 100);
+  if (isUnrefableTimer(timer)) timer.unref();
 }

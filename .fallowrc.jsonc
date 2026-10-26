@@ -1,10 +1,20 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/config-schema.json",
   "entry": [
+    // IconButton, Tabs and cn are exported before their first consumer exists.
+    "packages/studio/src/components/ui/index.ts",
     "packages/producer/src/**/*.test.ts",
+    // Studio's browser-journey helpers are plain .mjs under tests/e2e; their unit tests live beside them.
+    "packages/studio/tests/e2e/**/*.test.mjs",
     "packages/aws-lambda/src/**/*.test.ts",
     "packages/gcp-cloud-run/src/**/*.test.ts",
     "packages/gcp-cloud-run/terraform/*.test.ts",
+    // Inspector is a private Bun service with CLI-driven browser contract
+    // scripts; its runtime module is bundled by file path into the page.
+    "packages/inspector/src/{service,server,mcp}.ts",
+    "packages/inspector/src/liveRuntime.ts",
+    "packages/inspector/tests/*.ts",
+    "packages/core/src/runtime/inspection.ts",
     "packages/producer/src/regression-harness.ts",
     "packages/producer/src/regression-harness-distributed.test.ts",
     "packages/producer/src/regression-harness-lambda-local.ts",
@@ -14,12 +24,14 @@
     "packages/producer/src/perf-gate.ts",
     "packages/producer/src/runtime-conformance.ts",
     "packages/producer/src/benchmark.ts",
-    "packages/producer/scripts/generate-font-data.ts",
+    "packages/core/scripts/generate-font-data.ts",
     "packages/producer/we-render.mjs",
     "packages/producer/scripts/validate-fast-video.ts",
     "packages/cli/scripts/generate-font-data.ts",
     "packages/engine/scripts/test-fitTextFontSize-browser.ts",
     "packages/aws-lambda/scripts/*.ts",
+    // Run inside the arm64 video image by the lambda-arm64-image workflow.
+    "packages/aws-lambda/image/smoke-video.mjs",
     // Built as standalone IIFE for the browser-side sandbox runtime;
     // referenced by file path (not import) in build-hyperframes-runtime-artifact.ts.
     "packages/core/src/runtime/entry.ts",
@@ -29,21 +41,35 @@
     // Same arrangement for the audio FX graph builders, bundled by
     // build-audio-fx-runtime.ts for the offline render page.
     "packages/core/stubs/audio-fx-runtime-entry.ts",
+    // And for the SVG selector alias installer compiled scene scripts carry.
+    "packages/core/stubs/svg-selector-aliases-entry.ts",
     // In-page audit scripts read as raw strings and injected via
     // page.addScriptTag (see layout.ts / validate.ts) — referenced by file
     // path, never imported, so they have no import-graph referrer.
     "packages/cli/src/commands/layout-audit.browser.js",
     "packages/cli/src/commands/contrast-audit.browser.js",
     "packages/cli/src/commands/motion-sample.browser.js",
+    "packages/cli/src/commands/motion-signature.browser.js",
     // Worker entry points loaded dynamically by their *Pool.ts companions.
     "packages/producer/src/services/pngDecodeBlitWorker.ts",
     "packages/producer/src/services/shaderTransitionWorker.ts",
     // Off-main-thread /health endpoint, spawned by path from healthWorker.ts.
     "packages/producer/src/services/healthWorkerThread.ts",
+    // Render-setup worker, spawned by path from cancellableProcess.ts.
+    "packages/cli/src/renderSetupWorker.ts",
+    // Update/skills cache refresh, spawned detached by path from backgroundChecks.ts.
+    "packages/cli/src/backgroundChecksWorker.ts",
+    // Parakeet decode worker, spawned by path from whisper/sherpa.ts.
+    "packages/cli/src/whisper/sherpaWorker.ts",
+    // Warm-check client, spawned by path from warmCheck.process.test.ts.
+    "packages/cli/src/warmCheckClient.fixture.ts",
+    "packages/cli/src/browser/chromeOrphans.fixture.ts",
+    "packages/cli/src/capture/publicNetwork.fixture.ts",
+    "packages/cli/src/utils/commandResult.fixture.ts",
     // Test fixture worker, spawned by path via the pools' workerEntryPath
     // option from the crash-recovery tests; has no import-graph referrer.
     "packages/producer/src/services/__fixtures__/crashOnMessageWorker.mjs",
-    "scripts/*.{ts,mjs,js}",
+    "scripts/**/*.{ts,mjs,js}",
     "scripts/*/run.mjs",
     // Keyframe UI components — wired dynamically via EaseCurveSection/MotionPanel.
     "packages/studio/src/components/editor/KeyframeDiamond.tsx",
@@ -52,9 +78,6 @@
     "packages/studio/src/components/nle/TimelineEditorNotice.tsx",
     // Zoom hook extracted for downstream razor-blade PRs (#1330, #1331).
     "packages/studio/src/player/components/useTimelineZoom.ts",
-    // Cached O(1) GSAP target lookup, replacing O(n²) inline checks.
-    // Consumers migrate in a follow-up once useDomGeometryCommits adopts it.
-    "packages/studio/src/hooks/gsapTargetCache.ts",
     // Preview helper consumed dynamically from the studio iframe bridge.
     "packages/studio/src/hooks/gsapRuntimePreview.ts",
   ],
@@ -70,20 +93,18 @@
     "packages/engine/tests/**",
     "skills/**/test-corpus/**",
     "skills/**/scripts/**",
-    // Agent-invoked motion-graphics tools co-located with their docs (run via
-    // `node <path>` per grounding/PROTOCOL.md / categories/maps/module.md
-    // prose), not import-graph reachable.
-    "skills/motion-graphics/grounding/**",
-    "skills/motion-graphics/categories/**",
-    // Agent-invoked reference materials (template + motion-primitive HTML, catalogs),
-    // forked by path by the frame-worker per SKILL.md prose, not import-graph reachable.
-    "skills/music-to-video/references/**",
+    // The relocated media-use .mjs files are agent-invoked scripts outside the
+    // import graph; keep the exemption scoped to that shipped script type.
+    "packages/cli/src/media-use/**/*.mjs",
     // Bundled @font-face data (read at runtime via fs.readFileSync, invisible
     // to the import graph) + its manual rebuild tool.
     "skills/**/fonts/**",
     // Golden snapshot files: data consumed by toMatchFileSnapshot, not importable modules.
     "packages/**/__goldens__/**",
     "registry/**",
+    // Browser fixture HTML loads generated player bundles that exist only after the package build.
+    "packages/core/src/runtime/fixtures/deck-audio-demo.html",
+    // Browser test intentionally contains repeated inline scenarios for distinct failure paths.
     "examples/**",
     "packages/sdk/examples/**",
     ".github/workflows/fixtures/**",
@@ -96,6 +117,12 @@
     "packages/cli/bin/**",
   ],
   "ignoreExports": [
+    // Browser helper public API, paired with elementMap.d.ts and consumed by
+    // external harnesses rather than another workspace package.
+    {
+      "file": "packages/inspector/src/elementMap.js",
+      "exports": ["createElementMap"],
+    },
     // Public player-state types are consumed by package users outside this
     // workspace. Keep the barrel stable even when no in-repo import needs it.
     {
@@ -126,7 +153,7 @@
     },
     {
       "file": "packages/studio/src/player/lib/timelineElementHelpers.ts",
-      "exports": ["furthestClipEndFromDocument", "furthestClipEndFromSource"],
+      "exports": ["furthestClipEndFromDocument"],
     },
     {
       "file": "packages/studio/src/components/sidebar/AssetContextMenu.tsx",
@@ -222,9 +249,9 @@
     // CLI command files: every command exports a const `examples` per the
     // convention documented in CLAUDE.md. This is a namespace barrel, not a
     // collision.
-    { "file": "packages/cli/src/commands/*.ts", "exports": ["examples"] },
+    { "file": "packages/cli/src/commands/**/*.ts", "exports": ["examples"] },
     // Options type for the render-queue hook's public startRender callback —
-    // consumed structurally by callers (StudioRightPanel), not by import.
+    // consumed structurally by callers (StudioRightPanels), not by import.
     {
       "file": "packages/studio/src/components/renders/useRenderQueue.ts",
       "exports": ["StartRenderOptions"],
@@ -354,13 +381,6 @@
       "file": "packages/studio/src/player/lib/timelineDOM.ts",
       "exports": ["*"],
     },
-    // gsapTargetCache: cached O(1) GSAP target lookup, consumed by
-    // useDomEditCommits and intended to replace the local copy in
-    // useDomGeometryCommits once callers migrate.
-    {
-      "file": "packages/studio/src/hooks/gsapTargetCache.ts",
-      "exports": ["isElementGsapTargeted"],
-    },
     // Re-exports from useDomEditCommits: barrel-style re-exports
     // consumed by downstream studio code.
     {
@@ -417,6 +437,10 @@
     // as a direct dep to guarantee installation even when transitive
     // resolution fails (corrupted cache, dedup edge cases).
     "debug",
+    // @puppeteer/browsers' optional peer: its zip fallback when no system `unzip` exists.
+    "yauzl",
+    // Loaded through the optional package loader for Gemini vision captioning.
+    "@google/genai",
     "puppeteer",
     "puppeteer-core",
     "esbuild",
@@ -428,6 +452,8 @@
     "@hyperframes/core",
     "@hyperframes/studio",
     "@hyperframes/producer",
+    // Inspector's published declarations import it through the core sources they bundle.
+    "@hyperframes/parsers",
     "@fontsource/archivo-black",
     "@fontsource/eb-garamond",
     "@fontsource/ibm-plex-mono",
@@ -455,15 +481,15 @@
     // require intrusive middleware changes beyond this PR's scope.
     "minLines": 6,
     "ignore": [
-      // FileTree.tsx / LeftSidebar.tsx: pre-existing 8-line structural clone
-      // (shared sidebar node shape); surfaced by the UX-sweep line shifts.
-      "packages/studio/src/components/editor/FileTree.tsx",
-      "packages/studio/src/components/sidebar/LeftSidebar.tsx",
+      // Pre-existing clone with extractVideosStage.ffmpegTimeout.test.ts: both mock the engine's whole
+      // ExtractionResult. Touching the mock to record another option re-flags it.
+      "packages/producer/src/services/render/stages/extractVideosStage.timelineBound.test.ts",
       // AWS Lambda and GCP Cloud Run deliberately mirror the same distributed
       // rendering lifecycle while retaining provider-specific SDK, storage, and
       // retry semantics. The Plan v2 AWS adapter extends that existing symmetry;
       // extracting a shared cloud abstraction would couple independent packages.
       "packages/aws-lambda/src/handler.ts",
+      "packages/cli/src/registry/motionBlurShutter.browser.test.ts",
       "packages/aws-lambda/src/s3Transport.ts",
       // The GCP handler deliberately mirrors the AWS protocol lifecycle while
       // retaining provider-specific GCS, HTTP, and Cloud Workflows semantics.
@@ -488,6 +514,16 @@
       // new package makes fallow see it as a fresh finding; the underlying clone
       // predates this refactor.
       "packages/parsers/src/hfIds.ts",
+      // Font pipeline: pre-existing duplication moved from packages/producer/src/services/
+      // and producer/scripts/ to core/src/fonts/ and core/scripts/ (the generator mirrors
+      // CANONICAL_FONTS; the tests share arrange/act scaffolds).
+      "packages/core/scripts/generate-font-data.ts",
+      "packages/core/src/fonts/deterministicFonts-aliasSupplement.test.ts",
+      "packages/core/src/fonts/deterministicFonts-authoredResources.test.ts",
+      "packages/core/src/fonts/deterministicFonts-failClosed.test.ts",
+      "packages/core/src/fonts/deterministicFonts-googleSubsets.test.ts",
+      "packages/core/src/fonts/deterministicFonts-retries.test.ts",
+      "packages/core/src/fonts/fontCompression.test.ts",
       // Parser test files: parallel arrange/act/assert test cases — pre-existing
       // duplication moved from packages/core/src/parsers/.
       "packages/parsers/src/gsapParser.test.ts",
@@ -502,8 +538,25 @@
       "packages/studio-server/src/routes/files.test.ts",
       "packages/studio-server/src/routes/render.test.ts",
       "packages/studio-server/src/routes/lint.test.ts",
+      // Studio gesture tests: pre-existing parallel overlay-option setups and arrange/assert blocks.
+      "packages/studio/src/components/editor/domEditOverlayStartGesture.test.ts",
+      "packages/studio/src/components/editor/anchoredResizeCommitFeedsOffset.test.ts",
+      "packages/studio/src/components/editor/rotateInlineSave.test.ts",
+      // Waiting-press and drag tests: each case spells out its own press, reload and release; a shared
+      // helper would hide the sequence each one asserts.
+      "packages/studio/src/components/editor/domEditOverlayStartGesture.blocked.test.ts",
+      "packages/studio/src/components/editor/dragUndoPaint.test.ts",
+      "packages/studio/src/components/editor/manualOffsetDrag.test.ts",
+      "packages/studio/src/components/editor/gestureHoldsPreviewReload.test.tsx",
+      // Preview reload tests: each case spells out its own mount, reload and swap sequence.
+      "packages/studio/src/player/hooks/useTimelinePlayer.shadowReload.test.ts",
+      "packages/studio/src/components/nle/NLEContext.test.ts",
+      "packages/studio/src/hooks/useDomGeometryCommits.test.tsx",
+      // extractionCache.test.ts: pre-existing parallel describe setup and publish-case arrange/assert blocks.
+      "packages/engine/src/services/extractionCache.test.ts",
       "packages/studio-server/src/routes/preview.test.ts",
       "packages/studio-server/src/routes/projects.test.ts",
+      "packages/studio-server/src/helpers/applyFileMutations.test.ts",
       "packages/studio-server/src/helpers/backupJournal.test.ts",
       "packages/studio-server/src/helpers/finiteMutation.test.ts",
       "packages/studio-server/src/helpers/hfIdPersist.test.ts",
@@ -712,6 +765,13 @@
       "packages/studio/src/components/editor/propertyPanelFlatTextSection.test.tsx",
       "packages/studio/src/components/editor/propertyPanelFlatToggle.test.tsx",
       "packages/studio/src/components/editor/propertyPanelFxSection.test.tsx",
+      // Inspector browser contracts intentionally repeat setup at the script
+      // boundary, while htmlBundler keeps parallel module/classic-script paths.
+      "packages/inspector/tests/browser.ts",
+      "packages/inspector/tests/film.ts",
+      "packages/inspector/tests/timeline.ts",
+      "packages/inspector/tests/timelineCompositions.ts",
+      "packages/core/src/compiler/htmlBundler.ts",
     ],
   },
   "health": {
@@ -720,6 +780,9 @@
     // complexity pre-dates the computed-timeline work. Exempted at file level
     // rather than refactored as scope creep.
     "ignore": [
+      // generate-font-data.ts: the build-time font data generator moved from producer/scripts;
+      // its CRAP score is coverage-driven (a build script no unit test runs).
+      "packages/core/scripts/generate-font-data.ts",
       // audio-fx-runtime-entry.ts: the browser-side IIFE entry for the offline FX
       // render. It runs only inside the headless page the engine drives, so unit
       // coverage cannot reach it and its CRAP score is coverage-driven rather
@@ -892,13 +955,15 @@
       "packages/studio/src/components/sidebar/AudioRow.tsx",
       "packages/studio/src/components/sidebar/BlocksTab.tsx",
       "packages/studio/src/components/sidebar/CompositionsTab.tsx",
-      "packages/studio/src/components/sidebar/LeftSidebar.tsx",
-      "packages/studio/src/components/storyboard/StoryboardLoaded.tsx",
-      "packages/studio/src/components/StudioRightPanel.tsx",
+      "packages/studio/src/components/StudioRightPanels.tsx",
       "packages/studio/src/components/StudioToast.tsx",
       "packages/studio/src/components/ui/Tooltip.tsx",
       "packages/studio/src/components/ui/useDialogBehavior.ts",
       "packages/studio/src/hooks/useAppHotkeys.ts",
+      // dispatchModifierKey/dispatchPlainKey moved verbatim out of the
+      // already-suppressed useAppHotkeys.ts above, to keep that file under
+      // the 600-line cap. Same pre-existing complexity, new file path.
+      "packages/studio/src/hooks/appHotkeysDispatch.ts",
       "packages/studio/src/hooks/useCaptionDetection.ts",
       "packages/studio/src/hooks/useFileManager.ts",
       "packages/studio/src/hooks/useFrameCapture.ts",
@@ -910,7 +975,7 @@
       "packages/studio/src/player/components/TimelineClipDiamonds.tsx",
       // Sub-composition html/body scoping fix: these files carry pre-existing
       // CRITICAL/HIGH functions (inlineSubCompositions, bundleToSingleHtml,
-      // mountCompositionContent/loadExternalCompositions, scopeSelector/
+      // mountCompositionContent/loadCompositions, scopeSelector/
       // replaceAuthoredRootIdSelectors) that pre-date this PR. The change only
       // threads a scopeRootSelectors option through the existing scoping calls;
       // the line-shift fingerprint re-flags the inherited complexity.
@@ -962,6 +1027,31 @@
       // file-level fingerprint invalidation re-flags the inherited findings even at
       // unchanged line numbers.
       "packages/core/src/runtime/picker.ts",
+      // generate-catalog-payloads.ts: hostsOwnDirectory, parseArgs and generate (the
+      // former main body, moved unchanged) are untouched. buildPayload's canvas-draw-element branch now writes a marker
+      // via a small writePayload helper instead of dropping the payload, but at
+      // the same branch count — its flagged 14-branch CRAP score predates this PR.
+      "scripts/generate-catalog-payloads.ts",
+      // The inspector service and injected runtime are orchestration boundaries:
+      // protocol validation, browser lifecycle, and source mapping are kept
+      // together so cleanup and generation checks remain auditable.
+      "packages/inspector/src/service.ts",
+      "packages/inspector/src/sources.ts",
+      "packages/inspector/src/server.ts",
+      "packages/core/src/runtime/inspection.ts",
+      "packages/inspector/tests/film.ts",
+      "packages/inspector/src/mapInspection.ts",
+      "packages/inspector/src/live.ts",
+      "packages/inspector/src/elementMap.js",
+      "packages/inspector/src/sourceDependencies.ts",
+      "packages/core/src/runtime/timelineInspection.ts",
+      "packages/cli/src/commands/timeline.ts",
+      // Protocol validators and deterministic report formatters enumerate wire
+      // variants explicitly; splitting those branches would scatter one contract.
+      "packages/inspector/src/requests.ts",
+      "packages/inspector/src/timelineReport.ts",
+      "packages/inspector/src/pageQueries.ts",
+      "packages/core/src/runtime/timelineValues.ts",
     ],
   },
 }

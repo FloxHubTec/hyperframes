@@ -4,7 +4,12 @@
  * The engine's page contract. Any web page that wants to be rendered
  * as video must expose `window.__hf` implementing the HfProtocol interface.
  */
+import type { AudioFailureDiagnostic } from "./services/audioMixer.types.js";
 import type { Fps } from "@hyperframes/core";
+import type { ChromeMemoryStats } from "./services/chromeMemorySampler.js";
+import type { MotionBlurOptions } from "./services/motionBlur.js";
+
+export type PageMotionBlurOff = "off" | "hdr-render" | "layered-composite" | "distributed-render";
 
 /**
  * Outcome of waiting for a sub-composition's GSAP timelines to register.
@@ -13,12 +18,23 @@ import type { Fps } from "@hyperframes/core";
  */
 export type SubTimelineWaitOutcome = "ready" | "timeout" | "script_failure";
 
+/**
+ * Shared by every capture session of one render: timeline waits that already timed out
+ * (so later sessions skip the wait), and scene callback errors the render log already shows.
+ */
+export interface SubTimelineWaitMemo {
+  unregisteredIds?: readonly string[];
+  loggedSceneCallbackErrors?: string[];
+}
+
 export type CaptureWarningCode =
   | "media_readiness_timeout"
   | "media_load_failed"
   | "audio_processing_failed"
   | "sub_timeline_readiness_timeout"
   | "sub_timeline_script_failure"
+  | "script_error_isolated"
+  | "vfx_failure"
   | "live_map_detected";
 
 /** Structured correctness warning produced while preparing a capture session. */
@@ -28,7 +44,10 @@ export interface CaptureWarning {
   details?: {
     mediaType?: "image" | "video" | "audio";
     sources?: string[];
+    pendingCompositionIds?: string[];
+    isolatedElements?: Array<{ compositionId: string; elementId: string | null }>;
     timeoutMs?: number;
+    audioFailures?: AudioFailureDiagnostic[];
     failureReasons?: string[];
     failureStages?: string[];
     failureOwner?: "user" | "system";
@@ -96,11 +115,23 @@ export interface HfTransitionMeta {
  * GSAP, Framer Motion, CSS animations, Three.js — anything works as long
  * as `seek()` produces deterministic visual output for a given time.
  */
+/**
+ * Per-seek controls the page honours. Both default off, which is an ordinary frame seek.
+ *
+ * `suppressEvents` stops a composition's own timeline callbacks from firing, and
+ * `subFrameDivisions` refines the grid the page quantizes onto so a fractional time is
+ * not floored back onto the output frame. Motion-blur sampling sets both.
+ */
+export interface HfSeekOptions {
+  suppressEvents?: boolean;
+  subFrameDivisions?: number;
+}
+
 export interface HfProtocol {
   /** Total duration of the composition in seconds */
   duration: number;
   /** Seek to a specific time. Must produce deterministic visual output. */
-  seek(time: number): void;
+  seek(time: number, options?: HfSeekOptions): void;
   /** Optional: media elements the engine should handle */
   media?: HfMediaElement[];
   /** Optional: shader transition metadata, populated by @hyperframes/shader-transitions */
@@ -121,6 +152,15 @@ export interface CaptureOptions {
    * self-verification) MUST prefer this over `__hf.duration`.
    */
   compositionDurationSeconds?: number;
+  /** The composition declares `data-requires-webgpu`; skips createCaptureSession's own fetch. */
+  requiresWebGpu?: boolean;
+  /**
+   * Live Chrome memory samples during capture (browser/renderer RSS peaks,
+   * last total, GPU process presence). Invoked from an unref'd interval; must
+   * not throw. The producer forwards these to capture observability so a
+   * crash mid-render still reports the last known memory state.
+   */
+  onMemorySample?: (stats: ChromeMemoryStats) => void;
   /**
    * Frame rate as an exact rational. Integer fps is `{ num: 30, den: 1 }`;
    * NTSC is `{ num: 30000, den: 1001 }`. Captures are scheduled by the
@@ -129,7 +169,16 @@ export interface CaptureOptions {
    */
   fps: Fps;
   format?: "jpeg" | "png";
+  transparent?: boolean;
   quality?: number;
+  /**
+   * Opt into sub-frame multi-sample motion blur (issue #4010). Absent means off and the
+   * capture path is byte-identical to a render without it. Requires `format: "png"` and
+   * screenshot capture mode; see `services/motionBlur.ts`.
+   */
+  motionBlur?: MotionBlurOptions;
+  /** Why the page's capture motion blur stands down: the preview could not blur, or the route cannot host it. */
+  pageMotionBlur?: PageMotionBlurOff;
   deviceScaleFactor?: number;
   /**
    * Opt into Chrome's capture-beyond-viewport screenshot path. Leave undefined
@@ -156,6 +205,8 @@ export interface CaptureOptions {
    * intrinsic media dimensions.
    */
   skipReadinessVideoIds?: readonly string[];
+  /** Pass one object to every session of a render; see `SubTimelineWaitMemo`. */
+  subTimelineWaitMemo?: SubTimelineWaitMemo;
   /**
    * Render-time variable overrides for the composition. The engine injects
    * these as `window.__hfVariables` via `evaluateOnNewDocument` before any
@@ -191,6 +242,7 @@ export interface CaptureOptions {
    * Clamped to 0..8 like the env knob; HF_DE_VERIFY, when set, still wins.
    */
   deVerifySamples?: number;
+  deFrameFallback?: boolean;
 }
 
 export interface CaptureVideoMetadataHint {
@@ -332,6 +384,14 @@ export interface CapturePerfSummary {
    * see `classifyGpuRenderer`.
    */
   gpuRenderer?: string;
+  // ── Chrome process memory (spec: long-form render capture, Phase −1).
+  // Undefined when the sampler was disabled (HF_CHROME_MEMORY_SAMPLER=false)
+  // or never produced a successful sample. ──
+  chromeBrowserRssPeakMb?: number;
+  chromeRendererRssPeakMb?: number;
+  chromeRssLastMb?: number;
+  chromeGpuProcessSeenLastSample?: boolean;
+  chromeMemorySamples?: number;
   /**
    * Low-cardinality init-time gate that routed a drawElement-eligible session
    * to the baseline: `swiftshader` | `css_effect:<fx>` | `at_risk_timeline` |
@@ -359,6 +419,7 @@ export interface CapturePerfSummary {
   deVerifyInitMs: number;
   /** Clip-cut boundary frames routed to per-frame screenshot (Lim 6). */
   deBoundaryFrames: number;
+  deRiskFrames: number;
   /** Per-frame "No cached paint record" screenshot fallbacks during capture. */
   deNcprFallbacks: number;
   /**

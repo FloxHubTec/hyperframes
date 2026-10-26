@@ -3,6 +3,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { parseHTML } from "linkedom";
 import { type Page } from "puppeteer-core";
+import { installMediaRenderIdBridge } from "./mediaRenderIdBridge.js";
 import {
   pageScreenshotCapture,
   pageContentExceedsCaptureHeight,
@@ -13,8 +14,19 @@ import {
   injectVideoFramesBatch,
   syncVideoFrameVisibility,
   shouldDefaultCaptureBeyondViewport,
+  initTransparentBackground,
+  capturesAlpha,
   DOM_LAYER_MASK_STYLE_ID,
 } from "./screenshotService.js";
+
+// These DOM tests isolate layout/decode from the CDP transport, exercised in Chrome separately.
+vi.mock("./videoFrameTransport.js", () => ({
+  withVideoFrameSources: async (
+    _page: Page,
+    updates: Array<{ videoId: string; dataUri: string }>,
+    inject: (resolved: Array<{ videoId: string; dataUri: string }>) => Promise<string[]>,
+  ) => inject(updates),
+}));
 
 // Stub a Page + CDPSession just enough that pageScreenshotCapture can call
 // `client.send("Page.captureScreenshot", ...)` and we can inspect the args.
@@ -172,6 +184,129 @@ describe("pageContentExceedsCaptureHeight", () => {
   it("is true when the page genuinely overflows the requested height", async () => {
     const page = makeFakePageWithScrollHeight(2007);
     await expect(pageContentExceedsCaptureHeight(page, 1920)).resolves.toBe(true);
+  });
+});
+
+describe("capturesAlpha", () => {
+  it("follows the format unless the caller says otherwise", () => {
+    expect(capturesAlpha({ format: "png" })).toBe(true);
+    expect(capturesAlpha({ format: "jpeg" })).toBe(false);
+  });
+
+  it("keeps an opaque page for PNG frames captured only to be averaged", () => {
+    expect(capturesAlpha({ format: "png", transparent: false })).toBe(false);
+  });
+});
+
+describe("initTransparentBackground", () => {
+  // evaluate() runs against a linkedom document in globalThis; the cached CDP stub skips createCDPSession().
+  function makeFakePageWithDom() {
+    const { document } = parseHTML("<html><body></body></html>");
+    const send = vi.fn().mockResolvedValue({});
+    const fakeSession = { send } as unknown as import("puppeteer-core").CDPSession;
+    const fakePage = {
+      evaluate: async (fn: (...args: never[]) => void, ...args: never[]) => fn(...args),
+    } as unknown as Page;
+    cdpSessionCache.set(fakePage, fakeSession);
+    const globals = globalThis as unknown as { document?: Document };
+    const previousDocument = globals.document;
+    globals.document = document;
+    return {
+      page: fakePage,
+      document,
+      send,
+      restore: () => {
+        globals.document = previousDocument;
+      },
+    };
+  }
+
+  it("clears only html/body when clearCompositionRoot is false — an authored composition-root background must survive", async () => {
+    const { page, document, send, restore } = makeFakePageWithDom();
+    try {
+      await initTransparentBackground(page, { clearCompositionRoot: false });
+      const style = document.getElementById("__hf_transparent_bg__");
+      expect(style?.textContent).toContain("html,body{");
+      expect(style?.textContent).not.toContain("[data-composition-id]");
+      expect(send).toHaveBeenCalledWith("Emulation.setDefaultBackgroundColorOverride", {
+        color: { r: 0, g: 0, b: 0, a: 0 },
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("also clears the composition root when clearCompositionRoot is true (HDR layered DOM pass)", async () => {
+    const { page, document, restore } = makeFakePageWithDom();
+    try {
+      await initTransparentBackground(page, { clearCompositionRoot: true });
+      const style = document.getElementById("__hf_transparent_bg__");
+      expect(style?.textContent).toContain("[data-composition-id]");
+    } finally {
+      restore();
+    }
+  });
+
+  it("a later call replaces the earlier call's rule instead of no-op'ing on the existing style element", async () => {
+    const { page, document, restore } = makeFakePageWithDom();
+    try {
+      await initTransparentBackground(page, { clearCompositionRoot: false });
+      await initTransparentBackground(page, { clearCompositionRoot: true });
+      expect(document.querySelectorAll('style[id="__hf_transparent_bg__"]').length).toBe(1);
+      expect(document.getElementById("__hf_transparent_bg__")?.textContent).toContain(
+        "[data-composition-id]",
+      );
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("injectVideoFramesBatch load failures", () => {
+  it("rejects naming the video when an injected frame fails to decode", async () => {
+    const { window, document } = parseHTML(
+      '<html><body><div id="root"><video id="clip" style="position:absolute;width:100%;height:100%"></video></div></body></html>',
+    );
+    Object.defineProperty(window.HTMLImageElement.prototype, "decode", {
+      configurable: true,
+      value: async () => {
+        throw new Error("The source image cannot be decoded.");
+      },
+    });
+    const video = document.getElementById("clip") as HTMLVideoElement;
+    video.getBoundingClientRect = () => ({ width: 1920, height: 1080 }) as DOMRect;
+    const computedStyle = document.createElement("div").style;
+    computedStyle.opacity = "1";
+    Object.defineProperty(window, "getComputedStyle", {
+      configurable: true,
+      value: () => computedStyle,
+    });
+    const globals = globalThis as unknown as { window?: typeof window; document?: Document };
+    const previousWindow = globals.window;
+    const previousDocument = globals.document;
+    globals.window = window;
+    globals.document = document;
+    try {
+      const page = {
+        evaluate: async (
+          fn: (
+            updates: Array<{ videoId: string; dataUri: string }>,
+            visualProperties: string[],
+          ) => Promise<void>,
+          updates: Array<{ videoId: string; dataUri: string }>,
+          visualProperties: string[],
+        ) => fn(updates, visualProperties),
+      } as unknown as Page;
+
+      await expect(
+        injectVideoFramesBatch(page, [{ videoId: "clip", dataUri: "data:image/jpeg;base64,AAAA" }]),
+      ).rejects.toThrow(
+        'Video frame for "clip" failed to load (inline frame): The source image cannot be decoded.',
+      );
+    } finally {
+      globals.window = previousWindow;
+      globals.document = previousDocument;
+    }
   });
 });
 
@@ -435,6 +570,33 @@ describe("video-frame injection respects ancestor visibility", () => {
       globals.CSS = previousCSS;
     };
   }
+
+  it("switches frame visibility by render identity when scenes share an authored video id", async () => {
+    const { setup, teardown } = withGlobals(setupHostHiddenScenario({}));
+    try {
+      const first = setup.video.cloneNode() as HTMLVideoElement;
+      first.setAttribute("data-hf-render-id", "pip");
+      setup.video.setAttribute("data-hf-render-id", "pip__hf2");
+      const firstFrame = setup.document.createElement("img");
+      const secondFrame = setup.document.createElement("img");
+      firstFrame.className = secondFrame.className = "__render_frame__";
+      setup.video.before(first, firstFrame);
+      setup.video.after(secondFrame);
+      const page = {
+        ...passthroughPage(),
+        evaluateOnNewDocument: async (fn: (attr: string) => void, attr: string) => fn(attr),
+      } as unknown as Page;
+      await installMediaRenderIdBridge(page);
+      await syncVideoFrameVisibility(page, ["pip__hf2"]);
+      expect(firstFrame.style.visibility).toBe("hidden");
+      expect(secondFrame.style.visibility).toBe("visible");
+      await syncVideoFrameVisibility(page, ["pip"]);
+      expect(firstFrame.style.visibility).toBe("visible");
+      expect(secondFrame.style.visibility).toBe("hidden");
+    } finally {
+      teardown();
+    }
+  });
 
   it("skips replacement-frame creation when the video's host has visibility:hidden", async () => {
     const { teardown, setup } = withGlobals(setupHostHiddenScenario({ visibility: "hidden" }));

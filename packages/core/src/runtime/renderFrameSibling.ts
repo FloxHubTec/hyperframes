@@ -21,10 +21,10 @@ import { isImageElement } from "./domRealm";
 
 /**
  * The render id an element is addressed by: its stamped, document-unique id
- * when the producer compiled this document, else its author id. The two are
+ * when the compiler stamped this document, else its author id. The two are
  * the same string whenever no collision forced a suffix.
  */
-export function readMediaRenderId(media: Element): string | null {
+export function readMediaRenderId(media: Pick<Element, "getAttribute" | "id">): string | null {
   return media.getAttribute(MEDIA_RENDER_ID_ATTR) || media.id || null;
 }
 
@@ -50,11 +50,14 @@ export function renderFrameElementId(media: Element): string | null {
 
 /**
  * The injected render-frame `<img>` for a media element, or null in preview
- * (where the producer never creates one).
+ * (where the producer never creates one). Siblings first: a staged scene copy repeats the id.
  */
 export function findInjectedRenderFrame(media: Element): HTMLImageElement | null {
   const frameId = renderFrameElementId(media);
-  if (!frameId) return null;
-  const frame = document.getElementById(frameId);
+  const byId = frameId ? document.getElementById(frameId) : null;
+  if (!byId) return null;
+  let frame: Element | null = media.nextElementSibling;
+  while (frame && frame.id !== frameId) frame = frame.nextElementSibling;
+  frame ??= byId;
   return isImageElement(frame) ? frame : null;
 }

@@ -18,6 +18,7 @@ import { validRegistryName, validRegistryManifest, validRegistryItem } from "./v
  */
 
 import { join, basename } from "node:path";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import {
   ITEM_TYPE_DIRS,
@@ -88,6 +89,7 @@ function isFresh<T>(entry: CacheEntry<T>): boolean {
 
 function writeCache<T>(path: string, data: T): void {
   try {
+    mkdirSync(CACHE_DIR, { recursive: true });
     const root = registryRoot(CACHE_DIR);
     const entry: CacheEntry<T> = { fetchedAt: Date.now(), data };
     publishRegistryFile(root, basename(path), JSON.stringify(entry));
@@ -141,7 +143,7 @@ export async function fetchRegistryManifest(
 
 /**
  * Fetch a single item's `registry-item.json` manifest. Same freshness policy as
- * the top-level manifest: fresh from cache, else revalidate, else serve stale.
+ * the top-level manifest: fresh unless skipCache, else revalidate, else serve stale.
  * Throws on network failure only when nothing was ever cached for this item
  * (callers decide whether to degrade gracefully).
  */
@@ -149,6 +151,7 @@ export async function fetchItemManifest(
   name: string,
   type: ItemType,
   baseUrl: string = DEFAULT_REGISTRY_URL,
+  options?: { skipCache?: boolean; cacheOnly?: boolean },
 ): Promise<RegistryItem> {
   if (!validRegistryName(name) || !Object.hasOwn(ITEM_TYPE_DIRS, type))
     throw new Error("Invalid registry item name or type");
@@ -157,7 +160,9 @@ export async function fetchItemManifest(
   const url = registryPathUrl(baseUrl, dir, name, "registry-item.json");
   const cacheFile = cachePath(baseUrl, `${dir}__${name}`);
   const cached = readCacheEntry(cacheFile, validate);
-  if (cached && isFresh(cached)) return cached.data;
+  if (cached && (options?.cacheOnly || (!options?.skipCache && isFresh(cached))))
+    return cached.data;
+  if (options?.cacheOnly) throw new Error("not fetched after an earlier registry timeout");
 
   try {
     const item = await fetchJson(url, validate);

@@ -26,6 +26,7 @@ function readSchedule(): {
   timings?: Record<string, number>;
   excluded?: Record<string, string>;
   distributed?: Record<string, string>;
+  nightly?: Record<string, string>;
 } {
   return JSON.parse(readFileSync(join(TESTS_DIR, "shard-schedule.json"), "utf-8"));
 }
@@ -55,7 +56,7 @@ describe("shard planner fixture discovery", () => {
       .map((suite) => suite.id)
       .filter((id) => !excluded.has(id))
       .sort();
-    const scheduled = planShards()
+    const scheduled = planShards({ nightly: true })
       .include.flatMap((row) => row.args.split(" "))
       .sort();
     expect(scheduled).toEqual(harnessRunnable);
@@ -98,6 +99,19 @@ describe("shard planner fixture discovery", () => {
     }
   });
 
+  it("rejects a nightly fixture that is not scheduled", () => {
+    const schedule = readSchedule();
+    const tainted = join(mkdtempSync(join(tmpdir(), "hf-shard-schedule-")), "shard-schedule.json");
+    writeFileSync(
+      tainted,
+      JSON.stringify({
+        ...schedule,
+        nightly: { ...schedule.nightly, "not-a-real-fixture": "typo" },
+      }),
+    );
+    expect(() => planShards({ scheduleFile: tainted })).toThrow(/are not scheduled/);
+  });
+
   it("rejects a distributed fixture that is not scheduled", () => {
     const schedule = readSchedule();
     const tainted = join(mkdtempSync(join(tmpdir(), "hf-shard-schedule-")), "shard-schedule.json");
@@ -113,7 +127,7 @@ describe("shard planner fixture discovery", () => {
 
   it("only assigns distributed mode to fixtures the harness can actually run that way", () => {
     // The blocking gap: `checkDistributedSupport` refuses HDR, non-integer fps,
-    // and fps outside {24,30,60}, and the harness records a refusal as
+    // and fps outside DISTRIBUTED_FPS, and the harness records a refusal as
     // `passed: true` with `skipped`. Skipping was safe while in-process also
     // ran the fixture. It is not safe now — these fixtures run in distributed
     // mode and nowhere else, so a later `hdr: true` or fps edit would turn
@@ -145,12 +159,19 @@ describe("shard planner fixture discovery", () => {
     expect(hdr.supported).toBe(false);
     const ntsc = checkDistributedSupport({ fps: { num: 30000, den: 1001 } });
     expect(ntsc.supported).toBe(false);
-    const odd = checkDistributedSupport({ fps: { num: 25, den: 1 } });
+    const odd = checkDistributedSupport({ fps: { num: 50, den: 1 } });
     expect(odd.supported).toBe(false);
   });
 
   it("gives every distributed fixture a written reason", () => {
     for (const [fixture, reason] of Object.entries(readSchedule().distributed ?? {})) {
+      expect(typeof reason, `${fixture} needs a reason`).toBe("string");
+      expect((reason as string).length, `${fixture} needs a real reason`).toBeGreaterThan(20);
+    }
+  });
+
+  it("gives every nightly fixture a written reason", () => {
+    for (const [fixture, reason] of Object.entries(readSchedule().nightly ?? {})) {
       expect(typeof reason, `${fixture} needs a reason`).toBe("string");
       expect((reason as string).length, `${fixture} needs a real reason`).toBeGreaterThan(20);
     }
@@ -229,11 +250,25 @@ describe("planShards()", () => {
   });
 
   it("runs every fixture that is not explicitly excluded", () => {
-    const { include } = planShards();
+    const { include } = planShards({ nightly: true });
     const scheduled = new Set(include.flatMap((row) => row.args.split(" ")));
     const excluded = new Set(Object.keys(readSchedule().excluded ?? {}));
     for (const fixture of discoverFixtures(TESTS_DIR)) {
       expect(scheduled.has(fixture) || excluded.has(fixture)).toBe(true);
     }
+  });
+
+  it("keeps nightly fixtures out of the per-PR plan and runs them in the nightly one", () => {
+    const nightly = Object.keys(readSchedule().nightly ?? {});
+    expect(nightly.length).toBeGreaterThan(0);
+    const fixturesOf = (plan: ReturnType<typeof planShards>) =>
+      plan.include.flatMap((row) => row.args.split(" "));
+    const perPr = fixturesOf(planShards());
+    const full = fixturesOf(planShards({ nightly: true }));
+    for (const fixture of nightly) {
+      expect(perPr).not.toContain(fixture);
+      expect(full).toContain(fixture);
+    }
+    expect(full.length).toBe(perPr.length + nightly.length);
   });
 });

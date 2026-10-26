@@ -10,9 +10,8 @@
  * filenames, not composition paths, not chain JSON. Every property below is
  * either a fixed identifier from our own catalogue (a preset id, an effect
  * type, a parameter key), a number, or a boolean. `studioTelemetry.ts` already
- * strips the query string off `url_hash` for exactly this reason — the ids in
- * it are the author's own. The rack sees the same class of data and must hold
- * the same line.
+ * sends only a route kind in `url_hash` for the same reason. The rack sees
+ * the same class of data and must hold the same line.
  *
  * The second rule is about volume: **commit, not preview.** Every control in
  * the rack has a preview path that fires continuously while a slider moves and
@@ -199,7 +198,7 @@ export function trackEqChanged(band: string, value: number): void {
  *
  * This is how agent-applied effects become visible at all. An agent asked to
  * fix a mix does not drive the panel — it edits the composition HTML, or runs
- * `scripts/carve.mjs`, and the rack simply finds the result already present.
+ * `skills/media-use/audio/scripts/carve.mjs`, and the rack simply finds the result already present.
  * None of the events above will ever fire for that work.
  *
  * So the panel reports the shape of what it was handed, and how many edits this

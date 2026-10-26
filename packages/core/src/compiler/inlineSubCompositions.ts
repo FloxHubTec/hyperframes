@@ -1,4 +1,12 @@
+import { SVG_REFERENCE_ALIASES_ATTR, readSvgReferenceAliases } from "./svgSelectorAliases";
 import { readExternalScriptAttributes, type ExternalScriptAttributes } from "./externalScripts";
+import { parseImportMap, type ImportMap } from "./importMaps";
+import {
+  compositionStyle,
+  cssStyleMergeKey,
+  hasSameLink,
+  type CompositionStyle,
+} from "./scriptRuns";
 /**
  * Shared sub-composition inlining logic.
  *
@@ -18,12 +26,180 @@ import {
 } from "./rewriteSubCompPaths";
 import { warnUnknownEnumValues } from "../runtime/getVariables";
 import {
-  scopeCssToComposition,
+  createCompositionCssScoper,
   wrapInlineScriptWithErrorBoundary,
+  scopedModulePrelude,
   wrapScopedCompositionScript,
 } from "./compositionScoping";
-import { checkSubCompositionUsability } from "@hyperframes/parsers/sub-composition-validity";
-import { enumerateNestedCompositionHosts, planCompositionAssembly } from "./compositionAssembly";
+import {
+  namespaceCollidingSvgIds,
+  rewriteSvgIdReferencesInCss,
+  type SvgIdScope,
+} from "./svgIdNamespacing";
+import {
+  checkSubCompositionUsability,
+  resolveSubCompositionContent,
+} from "@hyperframes/parsers/sub-composition-validity";
+import {
+  enumerateNestedCompositionHosts,
+  planCompositionAssembly,
+  extractedCompositionAssets,
+} from "./compositionAssembly";
+import { SCENE_NO_SWAP_ATTR, SCENE_PART_ATTR } from "../sceneParts";
+
+// Anything a scene script can leave running, pending or registered outside its timeline, or that
+// throws when run again: only the timeline is torn down when a scene is swapped, so when unsure, refuse.
+const SIDE_EFFECT_RE =
+  /\b(addEventListener|requestAnimationFrame|requestIdleCallback|setTimeout|setInterval|queueMicrotask|getContext|WebGL\w*|WebGPU\w*|gpu|Worker|WebSocket|EventSource|Audio\w*|\w*Observer|fetch|import|eval|Function|Promise|async|await|delayedCall|ScrollTrigger|Draggable|anime|customElements|registerProperty|addListener|BroadcastChannel|pushState|replaceState|adoptedStyleSheets|documentElement|getElementsByTagName|lottie|THREE|__hf[A-Z]\w*)\b|\.then\s*\(|\.ticker\b|repeat\s*:\s*-1|\.repeat\s*\(\s*-1|defineProperty\s*\(\s*(window|globalThis|self|document)\b|\bfonts\s*\.\s*add\b|\.on[a-z]+\s*=(?!=)|\bon(resize|scroll|message|key\w+|click|pointer\w+|mouse\w+|wheel|visibilitychange|hashchange|popstate|error|load)\s*=(?!=)|\[\s*["']on[a-z]+["']\s*\]|document\s*\.\s*(head|body)\b|querySelector(All)?\(\s*["'](head|body)["']|\bgsap\s*\.\s*(?:to|from|fromTo)\s*\(|\bgsap\s*\.\s*timeline\s*\((?:[^()]|\([^()]*\))*\)\s*\.\s*(?:to|from|fromTo|set|add|call)\s*\(/;
+
+// npm packages that only define globals when loaded; lottie-web is absent because it scans the page on load.
+const SWAP_SAFE_LIBRARY_URL =
+  /^https:\/\/(cdn\.jsdelivr\.net\/npm|unpkg\.com)\/(gsap|three|d3|d3-[a-z-]+|topojson-client|clipper-lib)(@[^/]+)?\//;
+const isSwapSafeLibrary = (src: string) =>
+  URL.canParse(src) && SWAP_SAFE_LIBRARY_URL.test(new URL(src).href);
+// GSAP's published file copied into a project, known by its license banner: it only defines globals too.
+const GSAP_BANNER_RE = /^\s*\/\*!\s*\*\s*GSAP \d+\.\d+\.\d+\s*\*\s*https:\/\/gsap\.com\b/;
+export const isLibraryCopy = (script: string) => GSAP_BANNER_RE.test(script);
+
+// Waits on the page's fonts, ready or loading named faces: each settles once, leaving nothing behind.
+const STRING_ARG = String.raw`(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')`;
+const FONT_LOAD = String.raw`document\s*\.\s*fonts\s*\.\s*load\s*\(\s*${STRING_ARG}\s*(?:,\s*${STRING_ARG}\s*)?\)`;
+const FONT_PROMISE = String.raw`(?:document\s*\.\s*fonts\s*\.\s*ready\b|${FONT_LOAD}|Promise\s*\.\s*all\s*\(\s*\[\s*${FONT_LOAD}(?:\s*,\s*${FONT_LOAD})*\s*,?\s*\]\s*\))`;
+const FONT_WAIT_RE = new RegExp(
+  String.raw`\b${FONT_PROMISE}\s*\.\s*then\s*\(|\bawait\s+${FONT_PROMISE}`,
+  "g",
+);
+
+// A canvas made only to measure text: never named, so nothing attaches it to the page or draws on it there.
+const TEXT_MEASURE_CANVAS_RE =
+  /\bdocument\s*\.\s*createElement\s*\(\s*(["'])canvas\1\s*\)\s*\.\s*getContext\s*\(\s*(["'])2d\2\s*\)/g;
+// A timeline chained as it is registered: the registry holds it, so unmounting the scene stops it.
+const REGISTERED_CHAIN_RE =
+  /(\b(?:window\s*\.\s*)?__timelines\s*\[[^[\]]*\]\s*=\s*)gsap\s*\.\s*timeline\s*\(/g;
+
+/** Whether a call of the browser's Element.animate may leave an animation: it gets timing, its second argument. */
+function lastingAnimateCall(script: string): boolean {
+  for (const call of script.matchAll(/\.animate\s*\(/g)) {
+    if (topLevelArgs(script, call.index + call[0].length) !== 1) return true;
+  }
+  return false;
+}
+
+// Arguments of the call whose "(" ends before `from`; none, a spread or an unclosed call never count as one.
+function topLevelArgs(script: string, from: number): number {
+  let depth = 0;
+  let args = 1;
+  if (/^\s*(\.\.\.|\))/.test(script.slice(from))) return Number.POSITIVE_INFINITY;
+  for (let i = from; i < script.length; i++) {
+    const ch = script[i]!;
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const end = script.indexOf(ch, i + 1);
+      if (end < 0) return Number.POSITIVE_INFINITY;
+      i = end;
+    } else if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) {
+      if (depth === 0) return args;
+      depth--;
+    } else if (ch === "," && depth === 0) args++;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+/** Why an authored scene script cannot be swapped out cleanly, or null when it can. */
+function sceneScriptSwapRefusal(script: string): string | null {
+  const withoutFontWaits = script.replace(FONT_WAIT_RE, "");
+  const awaitedFontsOnly = /\bawait\b/.test(script) && !/\bawait\b/.test(withoutFontWaits);
+  let checked = (
+    awaitedFontsOnly ? withoutFontWaits.replace(/\basync\b/g, "") : withoutFontWaits
+  ).replace(REGISTERED_CHAIN_RE, "$1(");
+  // The context hands its canvas back through .canvas, which could then reach the page.
+  if (!/\.\s*canvas\b/.test(checked)) checked = checked.replace(TEXT_MEASURE_CANVAS_RE, "");
+  const match = SIDE_EFFECT_RE.exec(checked);
+  if (match) return `its script uses ${match[0].trim()}`;
+  return lastingAnimateCall(checked) ? "its script uses .animate(" : null;
+}
+
+const projectScriptRefusal = (text: string | null) =>
+  text === null
+    ? "it runs a script that is not a known library"
+    : isLibraryCopy(text)
+      ? null
+      : sceneScriptSwapRefusal(text);
+
+// A quoted string in a script, in any of the three quote styles.
+const STRING_LITERAL_RE = /(["'`])((?:\\.|(?!\1)[^\\\n])*?)\1/g;
+// Text ending where createElement takes its tag: that string makes a node, it selects none.
+const CREATES_ELEMENT_RE = /createElement\s*\(\s*$|createElementNS\s*\([^()]*,\s*$/;
+// A "*" after a comma is a later argument, like postMessage's target origin; selector calls take it first.
+const isNotASelector = (script: string, at: number, literal: string) =>
+  CREATES_ELEMENT_RE.test(script.slice(Math.max(0, at - 60), at)) ||
+  (literal.trim() === "*" && /,\s*$/.test(script.slice(Math.max(0, at - 20), at)));
+
+/** Marks each scene whose nodes a script outside it names by selector, id or class: a swap would strand it. */
+export function refuseSwapsReachedByRootScripts(document: Document, rootScripts: string[]): void {
+  const hosts = [...document.querySelectorAll(`[${SCENE_PART_ATTR}]`)];
+  const byName = new Map<string, Set<Element>>();
+  for (const host of hosts) {
+    for (const el of [host, ...host.querySelectorAll("*")]) {
+      for (const name of [
+        el.localName,
+        el.id && `#${el.id}`,
+        ...[...el.classList].map((c) => `.${c}`),
+      ]) {
+        if (name) byName.set(name, (byName.get(name) ?? new Set()).add(host));
+      }
+    }
+  }
+  // A selector naming a tag the document lacks cannot match, so it is not worth a query.
+  const namesKnown = (selector: string) =>
+    selector
+      .split(",")
+      .some((alt) =>
+        alt
+          .split(/[\s>+~]+/)
+          .every(
+            (part) =>
+              !/^[a-z][\w-]*$/i.test(part) ||
+              byName.has(part.toLowerCase()) ||
+              document.querySelector(part) !== null,
+          ),
+      );
+  const literals = new Set(
+    rootScripts.flatMap((s) =>
+      [...s.matchAll(STRING_LITERAL_RE)]
+        .filter((m) => !isNotASelector(s, m.index, m[2] ?? ""))
+        .map((m) => m[2] ?? ""),
+    ),
+  );
+  for (const literal of literals) {
+    const open = hosts.filter((host) => !host.hasAttribute(SCENE_NO_SWAP_ATTR));
+    if (open.length === 0) return;
+    // Tag names match in any case; ids and classes do not.
+    const reached =
+      literal.trim() === "*"
+        ? open
+        : /^[A-Za-z_][\w-]*$/.test(literal)
+          ? [literal.toLowerCase(), `#${literal}`, `.${literal}`].flatMap((name) => [
+              ...(byName.get(name) ?? []),
+            ])
+          : /[#.[:>]|[\w\]*] *[\s,]+ *[\w*]/.test(literal) &&
+              literal.length <= 120 &&
+              namesKnown(literal)
+            ? open.filter((host) => reaches(host, literal))
+            : [];
+    for (const host of reached)
+      if (!host.hasAttribute(SCENE_NO_SWAP_ATTR))
+        host.setAttribute(SCENE_NO_SWAP_ATTR, `a script outside the scene selects ${literal}`);
+  }
+}
+
+const reaches = (host: Element, selector: string) => {
+  try {
+    return host.matches(selector) || host.querySelector(selector) !== null;
+  } catch {
+    return false;
+  }
+};
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -123,23 +299,58 @@ export interface InlineSubCompositionsOptions {
    * Defaults to `console.warn`.
    */
   onMissingComposition?: (srcPath: string, reason?: string) => void;
+  /** Tag each top-level host with `data-hf-scene` and report every part's scene, for preview swaps. */
+  tagScenes?: boolean;
+  readProjectScript?: (path: string) => string | null;
+}
+
+export interface ExternalLink {
+  href: string;
+  rel: string;
+  crossorigin?: string;
+  media?: string;
+  title?: string;
+  type?: string;
+  disabled?: true;
+}
+
+/** Appends a hoisted link unless the document already has a live one it would duplicate. */
+export function ensureExternalLinkTag(doc: Document, link: ExternalLink): void {
+  const el = doc.createElement("link");
+  el.setAttribute("rel", link.rel);
+  el.setAttribute("href", link.href);
+  for (const name of ["crossorigin", "media", "title", "type"] as const) {
+    const value = link[name];
+    if (value != null) el.setAttribute(name, value);
+  }
+  if (link.disabled) el.setAttribute("disabled", "");
+  if (!hasSameLink(doc, el)) doc.head.appendChild(el);
 }
 
 export interface InlineSubCompositionsResult {
-  styles: string[];
+  styles: CompositionStyle[];
+  /** With `tagScenes`: the scene each entry of `styles` belongs to. */
+  styleScenes: string[];
   scripts: string[];
   externalScriptSrcs: string[];
   scriptItems: Array<
-    | { kind: "inline"; content: string }
-    | ({ kind: "external"; src: string } & ExternalScriptAttributes)
+    | { kind: "inline"; content: string; scene?: string }
+    | ({ kind: "external"; src: string; scene?: string } & ExternalScriptAttributes)
   >;
-  externalLinks: { href: string; rel: string; crossorigin?: string }[];
+  /** May list one link more than once; `ensureExternalLinkTag` dedupes. */
+  externalLinks: ExternalLink[];
   variablesByComp: Record<string, Record<string, unknown>>;
+  /** Mounted files' import maps, addresses rebased; emit with `emitMountedModuleScripts`. */
+  importMaps: ImportMap[];
+  /** Mounted files' inline module scripts, each already carrying its scoped `__hyperframes`. */
+  moduleScripts: string[];
 }
 
 // ---------------------------------------------------------------------------
 // Default helpers
 // ---------------------------------------------------------------------------
+
+const isDocument = (node: Node): node is Document => node.nodeType === 9;
 
 function defaultBuildScopeSelector(compId: string): string {
   const escaped = compId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -154,7 +365,7 @@ function defaultBuildScopeSelector(compId: string): string {
  * Inline sub-compositions into a document. For each host element in `hosts`:
  *
  * 1. Resolve the sub-composition HTML via `options.resolveHtml`
- * 2. Parse it, find `<template>` or `<body>` content
+ * 2. Parse it, resolve template, body, or bare-fragment content
  * 3. Find the inner `[data-composition-id]` root
  * 4. Extract `<style>` elements, scope CSS, collect them
  * 5. Extract `<script>` elements, wrap inline scripts, collect them
@@ -184,19 +395,48 @@ export function inlineSubCompositions(
     scriptErrorLabel = "[HyperFrames] composition script error:",
     onMissingComposition,
     assetExists,
+    tagScenes = false,
+    readProjectScript,
   } = options;
 
-  const styles: string[] = [];
+  const rootStyles = [...document.querySelectorAll("style")];
+  const styles: CompositionStyle[] = [];
+  const styleScenes: string[] = [];
   const scripts: string[] = [];
   const externalScriptSrcs: string[] = [];
   const scriptItems: InlineSubCompositionsResult["scriptItems"] = [];
-  const externalLinks: { href: string; rel: string; crossorigin?: string }[] = [];
-  const seenLinkHrefs = new Set<string>();
+  const importMaps: ImportMap[] = [];
+  const moduleScripts: string[] = [];
+  const externalLinks: ExternalLink[] = [];
   const variablesByComp: Record<string, Record<string, unknown>> = {};
+  const svgIdScopes: Array<SvgIdScope & { styleStart: number; styleEnd: number }> = [];
+  // A file mounted many times reads the same; only its scope, ids and variables differ per mount.
+  // Each file is parsed once and only read; a mount edits its own copy.
+  const parsed = new Map<string, Document>();
+  const parseOnce = (html: string): Document => {
+    let doc = parsed.get(html);
+    if (!doc) {
+      doc = parseHtml(html);
+      parsed.set(html, doc);
+    }
+    return doc;
+  };
+  const parseCopy = (html: string): Document => {
+    const copy = parseOnce(html).cloneNode(true);
+    return isDocument(copy) ? copy : parseHtml(html);
+  };
+  const usability = new Map<string, ReturnType<typeof checkSubCompositionUsability>>();
+  const sheetsWithAssetUrls = new Map<string, string>();
+  const scopeCssToComposition = createCompositionCssScoper();
 
-  const queue = hosts.map((element) => ({ element, ancestry: [] as string[] }));
+  const sceneHosts = new Map<string, Element>();
+  const queue = hosts.map((element) => ({
+    element,
+    ancestry: [] as string[],
+    scene: undefined as string | undefined,
+  }));
   for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
-    const { element: hostEl, ancestry } = queue[queueIndex]!;
+    const { element: hostEl, ancestry, scene: parentScene } = queue[queueIndex]!;
     const src = hostEl.getAttribute("data-composition-src");
     if (!src) continue;
 
@@ -207,7 +447,11 @@ export function inlineSubCompositions(
     // tolerant (skip, don't throw) — preview and studio must keep bundling
     // around a scene that's still being authored. Lint and the render
     // pre-flight check use the same helper to fail loudly instead.
-    const validity = checkSubCompositionUsability(compHtml, parseHtml);
+    let validity = compHtml == null ? undefined : usability.get(compHtml);
+    if (!validity) {
+      validity = checkSubCompositionUsability(compHtml, parseOnce);
+      if (compHtml != null) usability.set(compHtml, validity);
+    }
     if (!validity.ok) {
       onMissingComposition?.(src, validity.detail);
       continue;
@@ -220,7 +464,7 @@ export function inlineSubCompositions(
       continue;
     }
 
-    const compDoc = parseHtml(compHtml);
+    const compDoc = parseCopy(compHtml);
 
     // Determine composition IDs
     let compId: string | null;
@@ -234,14 +478,12 @@ export function inlineSubCompositions(
       runtimeCompId = compId || "";
     }
 
-    // Find content: prefer <template>, fall back to <body>
-    const contentRoot = compDoc.querySelector("template");
-    const contentHtml = contentRoot ? contentRoot.innerHTML || "" : compDoc.body?.innerHTML || "";
+    const { contentHtml, hasTemplate } = resolveSubCompositionContent(compHtml, compDoc);
     if (!contentHtml.trim()) {
       onMissingComposition?.(src);
       continue;
     }
-    const contentDoc = parseHtml(contentHtml);
+    const contentDoc = parseCopy(contentHtml);
     if (!contentDoc.documentElement) {
       onMissingComposition?.(src);
       continue;
@@ -255,7 +497,7 @@ export function inlineSubCompositions(
       contentNode: contentDoc,
       head: compDoc.head,
       documentElement: compDoc.documentElement,
-      hasTemplate: Boolean(contentRoot),
+      hasTemplate,
       compositionId: compId,
     });
     const innerRoot = plan.innerRoot;
@@ -263,6 +505,18 @@ export function inlineSubCompositions(
     const scopeCompId = plan.authoredCompositionId || "";
     const scriptCompositionId = plan.scriptCompositionId || "";
     const runtimeScope = runtimeCompId ? buildScopeSelector(runtimeCompId) : "";
+    const scene = tagScenes ? (parentScene ?? (runtimeCompId || src)) : undefined;
+    if (scene && !parentScene) {
+      hostEl.setAttribute(SCENE_PART_ATTR, scene);
+      sceneHosts.set(scene, hostEl);
+    }
+    // Lazy, so renders (no scene hosts) never run the refusal checks.
+    const refuseSwap = (why: () => string | null) => {
+      const host = scene ? sceneHosts.get(scene) : undefined;
+      if (!host || host.hasAttribute(SCENE_NO_SWAP_ATTR)) return;
+      const reason = why();
+      if (reason) host.setAttribute(SCENE_NO_SWAP_ATTR, reason);
+    };
 
     // Variable merging (bundler feature). Read declared defaults from the
     // document element (full-document sub-comps) AND the inner composition root
@@ -297,7 +551,12 @@ export function inlineSubCompositions(
     // sub-comp's html/body/:root rules from clobbering the host document (they
     // are remapped to the composition box); see compositionScoping.
     const scopeSubStyle = (raw: string): string => {
-      const css = rewriteCssAssetUrls(raw, src, assetExists);
+      const sheetKey = JSON.stringify([src, raw]);
+      let css = sheetsWithAssetUrls.get(sheetKey);
+      if (css === undefined) {
+        css = rewriteCssAssetUrls(raw, src, assetExists);
+        sheetsWithAssetUrls.set(sheetKey, css);
+      }
       return scopeCompId
         ? scopeCssToComposition(css, scopeCompId, runtimeScope || undefined, authoredRootId, {
             compoundAuthoredRoot: compoundAuthoredRoot === true,
@@ -308,34 +567,68 @@ export function inlineSubCompositions(
 
     // <link> hoisting is unconditional. A templated sub-composition's webfont
     // link is as load-bearing as a non-templated one's, and the mount path has
-    // always hoisted both; gating this on `!contentRoot` dropped a templated
+    // always hoisted both; gating this on `!hasTemplate` dropped a templated
     // composition's font from the render while preview kept it.
     for (const link of plan.linkSources) {
       const href = resolveSubAssetPath(link.getAttribute("href"));
-      if (href && !seenLinkHrefs.has(href)) {
-        seenLinkHrefs.add(href);
+      if (href) {
         const rel = (link.getAttribute("rel") || "").trim();
         const crossorigin = link.hasAttribute("crossorigin")
           ? link.getAttribute("crossorigin") || ""
           : undefined;
-        externalLinks.push({ href, rel, crossorigin });
+        const media = link.getAttribute("media") ?? undefined;
+        const title = link.getAttribute("title") ?? undefined;
+        const type = link.getAttribute("type") ?? undefined;
+        const disabled = link.hasAttribute("disabled") ? true : undefined;
+        externalLinks.push({ href, rel, crossorigin, media, title, type, disabled });
       }
     }
 
     // Head-sourced assets come first: a non-templated sub-composition's <head>
     // carries its backgrounds, positioning and fonts, and a <head> library tag
     // (GSAP from a CDN) has to run before the content scripts calling into it.
+    const styleStart = styles.length;
     for (const styleEl of plan.styleSources) {
-      styles.push(scopeSubStyle(styleEl.textContent || ""));
+      if (cssStyleMergeKey(styleEl) === undefined) continue;
+      styles.push(compositionStyle(styleEl, scopeSubStyle(styleEl.textContent || "")));
+      if (scene) styleScenes.push(scene);
       styleEl.remove();
     }
+    const styleEnd = styles.length;
 
-    // Head- and content-sourced scripts take the same branch. The head loop
-    // used to handle only `src`, so an inline <head> script was silently
-    // discarded on render while the mount path executed it.
+    // Head- and content-sourced scripts take the same branch.
     for (const scriptEl of plan.scriptSources) {
       const externalSrc = resolveSubAssetPath(scriptEl.getAttribute("src"));
-      if (externalSrc) {
+      const type = (scriptEl.getAttribute("type") || "").trim().toLowerCase();
+      // A swap never re-runs external or module scripts: only a known library that just defines globals is safe.
+      refuseSwap(() =>
+        type === "importmap" || type === "module"
+          ? "it runs a module script or import map"
+          : !externalSrc
+            ? sceneScriptSwapRefusal(scriptEl.textContent || "")
+            : isSwapSafeLibrary(externalSrc)
+              ? null
+              : projectScriptRefusal(readProjectScript?.(externalSrc) ?? null),
+      );
+      if (type === "importmap") {
+        const map = parseImportMap(scriptEl.textContent || "", (url) => {
+          // The rebase drops a leading "./" and a trailing "/"; an import map address needs both.
+          const authored = url.trim();
+          const rebased = resolveSubAssetPath(authored);
+          if (rebased === authored) return rebased;
+          const urlLike = /^(\/|\.\.?\/|[a-z][a-z\d+.-]*:)/i.test(rebased)
+            ? rebased
+            : `./${rebased}`;
+          return authored.endsWith("/") && !urlLike.endsWith("/") ? `${urlLike}/` : urlLike;
+        });
+        if (map) importMaps.push(map);
+        else console.warn(`[HyperFrames] ${src}: import map is not valid JSON, so it is skipped.`);
+      } else if (type === "module" && !externalSrc) {
+        const prelude = scriptCompositionId
+          ? scopedModulePrelude(runtimeCompId || scopeCompId || scriptCompositionId, src)
+          : "";
+        moduleScripts.push(prelude + (scriptEl.textContent || ""));
+      } else if (externalSrc) {
         if (!externalScriptSrcs.includes(externalSrc)) {
           externalScriptSrcs.push(externalSrc);
         }
@@ -343,6 +636,7 @@ export function inlineSubCompositions(
           kind: "external",
           src: externalSrc,
           ...readExternalScriptAttributes(scriptEl),
+          ...(scene ? { scene } : {}),
         });
       } else {
         const wrappedScript = scriptCompositionId
@@ -353,10 +647,11 @@ export function inlineSubCompositions(
               runtimeScope || undefined,
               runtimeCompId || scopeCompId || scriptCompositionId,
               authoredRootId,
+              src,
             )
           : wrapInlineScriptWithErrorBoundary(scriptEl.textContent || "", scriptErrorLabel);
         scripts.push(wrappedScript);
-        scriptItems.push({ kind: "inline", content: wrappedScript });
+        scriptItems.push({ kind: "inline", content: wrappedScript, ...(scene ? { scene } : {}) });
       }
       scriptEl.remove();
     }
@@ -408,7 +703,7 @@ export function inlineSubCompositions(
     // Inject content into the host element
     if (innerRoot) {
       innerRoot.setAttribute("data-composition-file", src);
-      for (const child of [...innerRoot.querySelectorAll("style, script")]) child.remove();
+      for (const child of extractedCompositionAssets(innerRoot)) child.remove();
       if (flattenInnerRoot) {
         const prepared = flattenInnerRoot(innerRoot);
         if (!compId && scopeCompId) {
@@ -432,13 +727,15 @@ export function inlineSubCompositions(
         }
       }
     } else {
-      for (const child of [...contentDoc.querySelectorAll("style, script")]) child.remove();
+      for (const child of extractedCompositionAssets(contentDoc)) child.remove();
       // linkedom fragment parsing: when content is `<div data-composition-id="X">...</div>`,
       // the div becomes documentElement and body is empty. Fall back to documentElement.outerHTML
       // to preserve the composition wrapper.
       const bodyHtml = contentDoc.body?.innerHTML || "";
       hostEl.innerHTML = bodyHtml || contentDoc.documentElement?.outerHTML || "";
     }
+    for (const el of plan.inertScriptsOutsideRoot)
+      hostEl.insertAdjacentHTML("beforeend", el.outerHTML);
 
     hostEl.setAttribute("data-composition-file", src);
     hostEl.removeAttribute("data-composition-src");
@@ -449,9 +746,78 @@ export function inlineSubCompositions(
       onMissingComposition?.(skipped.src, skipped.reason);
     }
     for (const nestedHost of nested.hosts) {
-      queue.push({ element: nestedHost.host, ancestry: nestedAncestry });
+      queue.push({ element: nestedHost.host, ancestry: nestedAncestry, scene });
     }
+
+    // Remember this instance for the SVG id pass below. Keyed on the
+    // document-unique runtime id (falling back to the authored id for an
+    // anonymous host with no duplicate instances) — the same identity CSS
+    // scoping and script scoping already key on. Nested hosts are excluded
+    // because each of them is recorded as its own scope when dequeued.
+    svgIdScopes.push({
+      root: hostEl,
+      namespace: runtimeCompId || scopeCompId,
+      exclude: nested.hosts.map((nestedHost) => nestedHost.host),
+      styleStart,
+      styleEnd,
+    });
   }
 
-  return { styles, scripts, externalScriptSrcs, scriptItems, externalLinks, variablesByComp };
+  // SVG ids (`<clipPath id="clip">`, `<symbol id="shape">`, `<filter
+  // id="fx">`, …) are namespaced only once EVERY instance is in the document:
+  // whether an id collides is a property of the assembled document, not of one
+  // composition file, and an id that stays unique must stay untouched so the
+  // author's own `#id` lookups keep working. Each instance's extracted
+  // `<style>` text gets the same substitution its DOM just received. See
+  // svgIdNamespacing.ts for why this is a rename, unlike the sibling
+  // getElementById/media-id fixes.
+  const svgIdMaps = namespaceCollidingSvgIds(document, [
+    ...svgIdScopes.map(({ root, namespace, exclude, styleStart, styleEnd }) => ({
+      root,
+      namespace,
+      exclude,
+      cssTexts: styles.slice(styleStart, styleEnd).map((style) => style.css),
+    })),
+    {
+      root: document.documentElement,
+      namespace: "",
+      referenceTarget: "document",
+      exclude: svgIdScopes.map(({ root }) => root),
+      cssTexts: rootStyles.map((style) => style.textContent ?? ""),
+    },
+  ]);
+  svgIdMaps.slice(0, svgIdScopes.length).forEach((idMap, index) => {
+    const { styleStart, styleEnd } = svgIdScopes[index]!;
+    const references = readSvgReferenceAliases(
+      svgIdScopes[index]!.root,
+      SVG_REFERENCE_ALIASES_ATTR,
+    );
+    for (let i = styleStart; i < styleEnd; i += 1) {
+      styles[i]!.css = rewriteSvgIdReferencesInCss(styles[i]!.css, idMap, references);
+    }
+  });
+
+  const rootReferences = readSvgReferenceAliases(
+    document.documentElement,
+    SVG_REFERENCE_ALIASES_ATTR,
+  );
+  for (const style of rootStyles) {
+    style.textContent = rewriteSvgIdReferencesInCss(
+      style.textContent ?? "",
+      svgIdMaps[svgIdScopes.length]!,
+      rootReferences,
+    );
+  }
+
+  return {
+    styles,
+    styleScenes,
+    scripts,
+    externalScriptSrcs,
+    scriptItems,
+    externalLinks,
+    variablesByComp,
+    importMaps,
+    moduleScripts,
+  };
 }

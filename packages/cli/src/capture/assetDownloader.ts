@@ -6,7 +6,8 @@
  */
 
 import { isBlockedNetworkHost } from "@hyperframes/engine";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { publicRequest } from "./publicNetwork.js";
+import { ensureCaptureDirSync, writeCaptureFileSync } from "./captureFile.js";
 import { join, extname } from "node:path";
 import { createHash } from "node:crypto";
 import type { DesignTokens, DownloadedAsset } from "./types.js";
@@ -21,6 +22,7 @@ import {
 } from "./readBoundedResponse.js";
 import { captureFontExtension, captureFontFilename } from "./captureFontValidation.js";
 import { captureImageExtension } from "./captureImageValidation.js";
+import { loadSharp } from "../utils/optionalPackages.js";
 
 interface DownloadBudgetOptions {
   byteBudget?: DownloadByteBudget;
@@ -40,6 +42,8 @@ interface DownloadBudgetOptions {
 export type AssetDropReason =
   /** Fetched, then judged too small to be a real asset rather than a spacer or tracking pixel. */
   | "size-floor"
+  /** Larger than any one asset may be; skipped whole, never cut. */
+  | "size-ceiling"
   /** The post-navigation clock ran out before this one was reached. */
   | "budget-exhausted"
   /** A per-run or per-family limit was already met. */
@@ -51,7 +55,13 @@ export type AssetDropCounts = Record<AssetDropReason, number>;
 
 /** A tally with every reason at zero — the shape a caller merges into. */
 export function noDrops(): AssetDropCounts {
-  return { "size-floor": 0, "budget-exhausted": 0, "cap-reached": 0, unavailable: 0 };
+  return {
+    "size-floor": 0,
+    "size-ceiling": 0,
+    "budget-exhausted": 0,
+    "cap-reached": 0,
+    unavailable: 0,
+  };
 }
 
 /** Sum two tallies. Used to fold the font pass and the asset pass into one capture-wide count. */
@@ -206,7 +216,7 @@ async function fetchAndInspectIcon(
   if (!ext) return null;
 
   const file = `assets/${stem}${ext}`;
-  writeFileSync(join(outputDir, file), buffer);
+  writeCaptureFileSync(join(outputDir, file), buffer);
   const verdict = await classifyIcon(buffer, ext);
   return {
     buffer,
@@ -235,7 +245,7 @@ function promoteHeadline(
   if (!chosen) return null;
 
   const file = `assets/favicon${extname(chosen.file)}`;
-  writeFileSync(join(outputDir, file), bytesByFile.get(chosen.file)!);
+  writeCaptureFileSync(join(outputDir, file), bytesByFile.get(chosen.file)!);
   manifest.headline = {
     file,
     source: chosen.file,
@@ -314,18 +324,20 @@ export async function downloadAssets(
   faviconLinks?: IconCandidate[],
   options: DownloadBudgetOptions = {},
 ): Promise<{ assets: DownloadedAsset[]; drops: AssetDropCounts; icons: IconManifest }> {
+  await loadSharp("website capture");
   options = { ...options, byteBudget: options.byteBudget ?? createCaptureDownloadBudget() };
   const assetsDir = join(outputDir, "assets");
-  mkdirSync(assetsDir, { recursive: true });
+  ensureCaptureDirSync(outputDir, assetsDir);
 
   const assets: DownloadedAsset[] = [];
   const drops = noDrops();
   const downloadedUrls = new Set<string>();
   let icons: IconManifest = emptyIconManifest();
 
-  mkdirSync(join(outputDir, "assets", "svgs"), { recursive: true });
+  ensureCaptureDirSync(outputDir, join(outputDir, "assets", "svgs"));
   const usedSvgNames = new Set<string>();
   const MAX_INLINE_SVGS = 30;
+  const MAX_INLINE_SVG_BYTES = 2 * 1024 * 1024;
   drops["cap-reached"] += Math.max(0, tokens.svgs.length - MAX_INLINE_SVGS);
   for (let i = 0; i < tokens.svgs.length && i < MAX_INLINE_SVGS; i++) {
     const svg = tokens.svgs[i]!;
@@ -335,6 +347,10 @@ export async function downloadAssets(
     }
     // Hash the bytes that actually land on disk, so the filename still can't drift from content.
     const svgFile = toStandaloneSvg(svg.outerHTML);
+    if (Buffer.byteLength(svgFile, "utf-8") > MAX_INLINE_SVG_BYTES) {
+      drops["size-ceiling"]++;
+      continue;
+    }
     const slug = svgContentHashSlug(svgFile, !!svg.isLogo);
     let finalSlug = slug;
     let suffix = 2;
@@ -346,7 +362,7 @@ export async function downloadAssets(
     const name = `${finalSlug}.svg`;
     const localPath = `assets/svgs/${name}`;
     try {
-      writeFileSync(join(outputDir, localPath), svgFile, "utf-8");
+      writeCaptureFileSync(join(outputDir, localPath), svgFile, "utf-8");
       assets.push({ url: "", localPath, type: "svg" });
     } catch {
       drops.unavailable++;
@@ -472,7 +488,7 @@ export async function downloadAssets(
         const name = `${slug}${ext}`;
         usedNames.add(slug);
         const localPath = `assets/${name}`;
-        writeFileSync(join(outputDir, localPath), buffer);
+        writeCaptureFileSync(join(outputDir, localPath), buffer);
         assets.push({ url, localPath, type: "image" });
         imgIdx++;
       } catch {
@@ -501,7 +517,7 @@ export async function downloadAssets(
           drops["size-floor"]++;
         } else {
           const localPath = `assets/og-image${ext}`;
-          writeFileSync(join(outputDir, localPath), buffer);
+          writeCaptureFileSync(join(outputDir, localPath), buffer);
           assets.push({ url: tokens.ogImage, localPath, type: "image" });
         }
       }
@@ -541,7 +557,7 @@ export async function downloadAndRewriteFonts(
 ): Promise<{ css: string; drops: AssetDropCounts }> {
   options = { ...options, byteBudget: options.byteBudget ?? createCaptureDownloadBudget() };
   const assetsDir = join(outputDir, "assets", "fonts");
-  mkdirSync(assetsDir, { recursive: true });
+  ensureCaptureDirSync(outputDir, assetsDir);
   const drops = noDrops();
 
   const fontUrlRegex = /url\(['"]?(https?:\/\/[^'")\s]+\.(?:woff2?|ttf|otf)[^'")\s]*?)['"]?\)/g;
@@ -580,7 +596,7 @@ export async function downloadAndRewriteFonts(
   });
 
   const usedFontNames = new Set<string>();
-  let rewritten = css;
+  const localFontPaths = new Map<string, string>();
   let count = 0;
 
   for (const [index, fontUrl] of sortedUrls.entries()) {
@@ -614,8 +630,8 @@ export async function downloadAndRewriteFonts(
         const filename = captureFontFilename(fontUrl, extension, usedFontNames);
         const localPath = join(assetsDir, filename);
         const relativePath = `assets/fonts/${filename}`;
-        writeFileSync(localPath, buffer);
-        rewritten = rewritten.split(fontUrl).join(relativePath);
+        writeCaptureFileSync(localPath, buffer);
+        localFontPaths.set(fontUrl, relativePath);
       } else {
         drops.unavailable++;
       }
@@ -624,6 +640,10 @@ export async function downloadAndRewriteFonts(
     }
   }
 
+  const rewritten = css.replace(fontUrlRegex, (match: string, url: string) => {
+    const localPath = localFontPaths.get(url);
+    return localPath ? match.replace(url, localPath) : match;
+  });
   return { css: rewritten, drops };
 }
 
@@ -657,10 +677,11 @@ export async function safeFetch(url: string, init?: RequestInit): Promise<Respon
   let current = url;
   for (let hop = 0; hop <= MAX_FETCH_REDIRECTS; hop++) {
     if (isPrivateUrl(current)) return null;
-    const res = await fetch(current, { ...init, redirect: "manual" });
+    const res = await publicRequest(current, { ...init, redirect: "manual" });
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get("location");
       if (!loc) return res;
+      await res.body?.cancel().catch(() => {});
       try {
         current = new URL(loc, current).toString();
       } catch {

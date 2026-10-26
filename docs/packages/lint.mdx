@@ -100,13 +100,20 @@ The browser entry exposes `lintHyperframeHtml`, `lintMediaUrls`, and `shouldBloc
 
 ## What the Linter Catches
 
+Every finding code — its severity, what it catches, and how to fix it — is documented on the [Lint rules](/reference/lint-rules) reference page.
+
 Detected issues include:
 
+- Invalid inline JavaScript syntax. GLSL data blocks with `type="x-shader/x-fragment"`,
+  `type="x-shader/x-vertex"`, or `type="text/glsl"` skip JavaScript syntax checks and
+  still receive shader warnings.
 - Missing timeline registration (`window.__timelines`)
-- Unmuted video elements (causes autoplay failures)
+- A timed `<video>` that declares neither `muted` (silent footage) nor `data-has-audio="true"` (has sound) — `video_missing_muted`
 - Missing `class="clip"` on timed visible elements
 - Deprecated attribute names
 - Missing composition dimensions (`data-width`, `data-height`)
+- CSS `zoom` on the composition root or its ancestors (`root_zoom_rescales_a_fixed_canvas`);
+  zoom on descendants is allowed, including scoped selectors such as `#root .badge`
 - Invalid `data-start` references to nonexistent clip IDs
 - Seek-order hazards that render differently on cold render workers: relative tween
   values (`"+=..."`) whose property has a second concurrent writer
@@ -116,6 +123,8 @@ Detected issues include:
   reachable from timeline callbacks (`gsap_callback_dom_measurement`), and
   non-deterministic values like `gsap.utils.random()` / `"random(...)"`
   (`non_deterministic_code`)
+- CSS `transition` declarations, which run on the browser clock and restart on a cold
+  render worker (`css_transition_used`, a warning); `none` and all-zero durations are allowed
 - SVG draw-on pitfalls: GSAP `strokeDasharray` writes on elements whose CSS declares a
   multi-component `stroke-dasharray` (`svg_drawon_css_dasharray_conflict`),
   `getTotalLength()` on paths with no `d` yet (`svg_measure_before_path_d`), and

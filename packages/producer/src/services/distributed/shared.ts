@@ -9,8 +9,9 @@ import { dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { type Fps } from "@hyperframes/core";
+import { type Fps, type RateSpec } from "@hyperframes/core";
 import {
+  getFfmpegBinary,
   MIXED_AUDIO_FILENAME,
   type VideoElement,
   type VideoFrameFormat,
@@ -96,7 +97,16 @@ export interface PlanVideosJson {
     fps: number;
     totalFrames: number;
     metadata: VideoMetadata;
+    /** Present when chunks extract their own frames from `sourcePath` (relative to the planDir). */
+    deferredRange?: PlanDeferredFrameRange;
   }>;
+}
+
+export interface PlanDeferredFrameRange {
+  sourcePath: string;
+  startTime: number;
+  durationSeconds: number;
+  format: "jpg" | "png";
 }
 
 export const INVALID_VIDEO_METADATA = "INVALID_VIDEO_METADATA" as const;
@@ -172,6 +182,36 @@ function readNonNegativeInteger(value: unknown, field: string): number {
   return value;
 }
 
+function readDeferredFrameRange(value: unknown, field: string): PlanDeferredFrameRange {
+  const range = readRecord(value, field);
+  const sourcePath = readNonEmptyString(range.sourcePath, `${field}.sourcePath`);
+  if (sourcePath.startsWith("/") || sourcePath.split(/[\\/]/).some((part) => part === "..")) {
+    metadataError(`${field}.sourcePath`, "must stay inside the plan directory");
+  }
+  const durationSeconds = readFiniteNumber(range.durationSeconds, `${field}.durationSeconds`);
+  if (durationSeconds <= 0) metadataError(`${field}.durationSeconds`, "must be positive");
+  if (range.format !== "jpg" && range.format !== "png") {
+    metadataError(`${field}.format`, 'must be "jpg" or "png"');
+  }
+  return {
+    sourcePath,
+    startTime: readFiniteNumber(range.startTime, `${field}.startTime`),
+    durationSeconds,
+    format: range.format,
+  };
+}
+
+function readRateSpec(value: unknown, field: string): RateSpec | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "number") return readFiniteNumber(value, field);
+  const lane = readRecord(value, field);
+  if (!Array.isArray(lane.points)) {
+    metadataError(`${field}.points`, "must be an array");
+  }
+  // The planner serialized this lane from the clip's parsed `data-automation` rate lane.
+  return lane as unknown as Exclude<RateSpec, number>;
+}
+
 function readVideoMetadata(
   value: unknown,
   field: string,
@@ -199,6 +239,10 @@ function readVideoMetadata(
       record.videoStreamStartSeconds === undefined
         ? 0
         : readFiniteNumber(record.videoStreamStartSeconds, `${field}.videoStreamStartSeconds`),
+    videoStreamLeadSeconds:
+      record.videoStreamLeadSeconds === undefined
+        ? 0
+        : readFiniteNumber(record.videoStreamLeadSeconds, `${field}.videoStreamLeadSeconds`),
     width: readPositiveInteger(record.width, `${field}.width`),
     height: readPositiveInteger(record.height, `${field}.height`),
     fps: readFiniteNumber(record.fps, `${field}.fps`),
@@ -206,6 +250,12 @@ function readVideoMetadata(
     hasAudio: readBoolean(record.hasAudio, `${field}.hasAudio`),
     isVFR: readBoolean(record.isVFR, `${field}.isVFR`),
     hasAlpha: readBoolean(record.hasAlpha, `${field}.hasAlpha`),
+    // Optional: plans from producers without the decode probe keep today's png for vp8/vp9.
+    ...(record.alphaPlaneDecoded === undefined
+      ? {}
+      : {
+          alphaPlaneDecoded: readBoolean(record.alphaPlaneDecoded, `${field}.alphaPlaneDecoded`),
+        }),
     colorSpace,
   };
 }
@@ -232,6 +282,7 @@ export function parsePlanVideosJson(value: unknown): PlanVideosJson {
       start: readFiniteNumber(video.start, `${field}.start`),
       end: readFiniteNumber(video.end, `${field}.end`),
       mediaStart: readFiniteNumber(video.mediaStart, `${field}.mediaStart`),
+      playbackRate: readRateSpec(video.playbackRate, `${field}.playbackRate`),
       loop: readBoolean(video.loop, `${field}.loop`),
       hasAudio: readBoolean(video.hasAudio, `${field}.hasAudio`),
     };
@@ -247,6 +298,9 @@ export function parsePlanVideosJson(value: unknown): PlanVideosJson {
       fps: readFiniteNumber(entry.fps, `${field}.fps`),
       totalFrames: readNonNegativeInteger(entry.totalFrames, `${field}.totalFrames`),
       metadata: readVideoMetadata(entry.metadata, `${field}.metadata`),
+      ...(entry.deferredRange === undefined
+        ? {}
+        : { deferredRange: readDeferredFrameRange(entry.deferredRange, `${field}.deferredRange`) }),
     };
   });
 
@@ -323,7 +377,7 @@ const execFile = promisify(execFileCallback);
  * same process (Cloud Run Jobs, Temporal activity workers) would otherwise
  * spawn ffmpeg once per chunk just to read the version — ~20-50ms each.
  */
-let cachedFfmpegVersion: string | null = null;
+const cachedFfmpegVersions = new Map<string, string>();
 
 /**
  * Read `ffmpeg -version` first line. The string is opaque — `planHash`
@@ -332,23 +386,36 @@ let cachedFfmpegVersion: string | null = null;
  * disagree with the plan's baked-in encoder args.
  */
 export async function readFfmpegVersion(): Promise<string> {
-  if (cachedFfmpegVersion !== null) return cachedFfmpegVersion;
-  const { stdout } = await execFile("ffmpeg", ["-version"], {
-    maxBuffer: 1024 * 1024,
-    // See runFfmpeg.ts: keeps a console window off the user's desktop on Windows.
-    windowsHide: true,
-  });
+  const binary = getFfmpegBinary();
+  const cached = cachedFfmpegVersions.get(binary);
+  if (cached !== undefined) return cached;
+  let stdout: string;
+  try {
+    ({ stdout } = await execFile(binary, ["-version"], {
+      maxBuffer: 1024 * 1024,
+      // See runFfmpeg.ts: keeps a console window off the user's desktop on Windows.
+      windowsHide: true,
+    }));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw Object.assign(
+      new Error(`ffmpeg not found at "${binary}": install FFmpeg or set HYPERFRAMES_FFMPEG_PATH.`, {
+        cause: error,
+      }),
+      { code: "ENOENT" },
+    );
+  }
   const firstLine = stdout.split(/\r?\n/)[0]?.trim() ?? "";
   if (!firstLine) {
     throw new Error("ffmpeg -version returned empty output");
   }
-  cachedFfmpegVersion = firstLine;
+  cachedFfmpegVersions.set(binary, firstLine);
   return firstLine;
 }
 
 /** Test-only: clear the cached ffmpeg version so a fresh probe runs. */
 function _resetFfmpegVersionCacheForTests(): void {
-  cachedFfmpegVersion = null;
+  cachedFfmpegVersions.clear();
 }
 
 /**
@@ -400,6 +467,7 @@ export function buildSyntheticRenderJob(input: SyntheticRenderJobInput): RenderJ
     strictness: input.strictness,
     producerConfig: input.producerConfig,
     variables: input.variables,
+    pageMotionBlur: "off",
   };
   return createRenderJob(renderConfig);
 }

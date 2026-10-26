@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { classifyMediaColor, pixelFormatHasAlpha, probeMediaMetadata } from "./mediaMetadata.js";
+import { classifyMediaColor, probeMediaMetadata } from "./mediaMetadata.js";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -82,6 +82,44 @@ describe("probeMediaMetadata", () => {
     });
   });
 
+  it("reports whether a video carries an audio stream", async () => {
+    const withAudio = await probeMediaMetadata("/tmp/clip.mp4", () => ({
+      status: 0,
+      stdout: JSON.stringify({
+        streams: [
+          { codec_type: "video", codec_name: "h264" },
+          { codec_type: "audio", codec_name: "aac" },
+        ],
+      }),
+      stderr: "",
+    }));
+    expect(withAudio).toMatchObject({ kind: "video", hasAudio: true });
+
+    const silent = await probeMediaMetadata("/tmp/silent.mp4", () => ({
+      status: 0,
+      stdout: JSON.stringify({ streams: [{ codec_type: "video", codec_name: "h264" }] }),
+      stderr: "",
+    }));
+    expect(silent).toMatchObject({ kind: "video", hasAudio: false });
+
+    // An audio file is not a video; the flag is a video question only.
+    const audioFile = await probeMediaMetadata("/tmp/music.wav", () => ({
+      status: 0,
+      stdout: "{}",
+      stderr: "",
+    }));
+    expect(audioFile).not.toHaveProperty("hasAudio");
+  });
+
+  it("reads a flac file as audio", async () => {
+    const flac = await probeMediaMetadata("/tmp/music.flac", () => ({
+      status: 0,
+      stdout: "{}",
+      stderr: "",
+    }));
+    expect(flac.kind).toBe("audio");
+  });
+
   it("ignores attached cover art and reads the real video stream", async () => {
     const metadata = await probeMediaMetadata("/tmp/clip.mp4", () => ({
       status: 0,
@@ -135,25 +173,5 @@ describe("probeMediaMetadata", () => {
       stderr: "",
     }));
     expect(metadata).toMatchObject({ kind: "video", color: { codecName: "h264" } });
-  });
-});
-
-describe("pixelFormatHasAlpha", () => {
-  it("detects alpha-bearing pixel formats", () => {
-    for (const pixFmt of [
-      "yuva420p",
-      "yuva444p10le",
-      "rgba",
-      "argb",
-      "bgra",
-      "abgr",
-      "gbrap12le",
-      "ya8",
-    ]) {
-      expect(pixelFormatHasAlpha(pixFmt)).toBe(true);
-    }
-    for (const pixFmt of ["yuv420p", "yuv422p10le", "rgb24", "gbrp", "gray", undefined]) {
-      expect(pixelFormatHasAlpha(pixFmt)).toBe(false);
-    }
   });
 });

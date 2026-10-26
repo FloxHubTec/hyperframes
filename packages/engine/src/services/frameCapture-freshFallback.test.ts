@@ -25,6 +25,7 @@ vi.mock("./browserManager.js", async (importOriginal) => ({
     browser: {
       version: async () => "Chrome/150.0.0.0",
       newPage: async () => ({
+        mainFrame: () => ({}),
         evaluateOnNewDocument: async () => {},
         setViewport: async () => {},
         evaluate: async () => undefined,
@@ -122,12 +123,88 @@ describe("fresh screenshot fallback", () => {
     expect(existsSync(join(s.outputDir, "diagnostics", "frame-error-7.json"))).toBe(true);
   });
 
+  // A BeginFrame page paints only when the engine sends a frame, so a diagnostic
+  // page.screenshot never resolves there and held the real error until the stall watchdog.
+  it.each(["beginframe", "drawelement"] as const)(
+    "rejects a %s capture failure on a BeginFrame launch with its own error, without a page screenshot",
+    async (captureMode) => {
+      const s = await session();
+      s.launchCaptureMode = "beginframe";
+      s.captureMode = captureMode;
+      s.onBeforeCapture = async () => {
+        throw new Error('Video frame for "clip" failed to load (inline frame)');
+      };
+      const screenshot = vi.fn(() => new Promise<Buffer>(() => {}));
+      Object.assign(s.page, { screenshot, content: async () => "<html></html>" });
+
+      await expect(captureFrameToBuffer(s, 7, 7 / 30)).rejects.toThrow(
+        'Video frame for "clip" failed to load',
+      );
+      expect(screenshot).not.toHaveBeenCalled();
+      expect(existsSync(join(s.outputDir, "diagnostics", "frame-error-7.json"))).toBe(true);
+    },
+  );
+
   it("rejects a suspect tiny frame without substituting a stale screenshot", async () => {
-    vi.mocked(captureDrawElementFrame).mockResolvedValueOnce(Buffer.alloc(100));
+    vi.mocked(captureDrawElementFrame)
+      .mockResolvedValueOnce(Buffer.alloc(100))
+      .mockResolvedValueOnce(Buffer.alloc(100, 1));
     await expect(captureFrameToBuffer(await session(), 7, 7 / 30)).rejects.toThrow(
       "suspect small frame",
     );
+    expect(captureDrawElementFrame).toHaveBeenCalledTimes(2);
     expect(pageScreenshotCapture).not.toHaveBeenCalled();
+  });
+
+  // GH #5685: segmented capture reaches only this guard. A flat frame is a small JPEG that redraws
+  // to the same bytes; the streaming drain guard keeps it, and this guard must keep it too.
+  describe("a small frame that redraws byte-identically", () => {
+    const flat = () => Buffer.alloc(13_000, 7);
+    afterEach(() => vi.mocked(captureDrawElementFrame).mockReset());
+
+    it("is kept, and the next identical frame is kept without a redraw", async () => {
+      vi.mocked(captureDrawElementFrame).mockImplementation(async () => flat());
+      const s = await session();
+      expect((await captureFrameToBuffer(s, 465, 465 / 30)).buffer.equals(flat())).toBe(true);
+      expect(captureDrawElementFrame).toHaveBeenCalledTimes(2);
+      expect((await captureFrameToBuffer(s, 466, 466 / 30)).buffer.equals(flat())).toBe(true);
+      expect(captureDrawElementFrame).toHaveBeenCalledTimes(3);
+      expect(pageScreenshotCapture).not.toHaveBeenCalled();
+    });
+
+    it("lowers the floor to half its size, so a similar flat frame is not redrawn", async () => {
+      const s = await session();
+      vi.mocked(captureDrawElementFrame).mockImplementation(async () => flat());
+      await captureFrameToBuffer(s, 465, 465 / 30);
+      expect(s.deAbsFloor).toBe(6_500);
+      vi.mocked(captureDrawElementFrame).mockClear();
+      vi.mocked(captureDrawElementFrame).mockResolvedValueOnce(Buffer.alloc(12_000, 3));
+      await captureFrameToBuffer(s, 466, 466 / 30);
+      expect(captureDrawElementFrame).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps a full-size redraw in place of a dropped small frame", async () => {
+      const full = Buffer.alloc(40_000, 9);
+      vi.mocked(captureDrawElementFrame)
+        .mockResolvedValueOnce(Buffer.alloc(100))
+        .mockResolvedValueOnce(full);
+      const s = await session();
+      expect((await captureFrameToBuffer(s, 7, 7 / 30)).buffer).toBe(full);
+      expect(s.deAcceptedSmall).toBeUndefined();
+      expect(s.deFrameSizes).toEqual([40_000]);
+    });
+
+    it("still throws under BeginFrame control, where a redraw reads the same snapshot", async () => {
+      vi.mocked(captureDrawElementFrame).mockImplementation(async () => flat());
+      const s = await session();
+      s.beginFrameTimeTicks = 1;
+      const send = vi.fn(async () => ({}));
+      Object.assign(s.page, {
+        createCDPSession: async () => ({ send, on: () => {}, off: () => {} }),
+      });
+      await expect(captureFrameToBuffer(s, 465, 465 / 30)).rejects.toThrow("suspect small frame");
+      expect(captureDrawElementFrame).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("returns a normal drawElement frame unchanged", async () => {

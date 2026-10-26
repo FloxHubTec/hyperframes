@@ -1,14 +1,21 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as clack from "@clack/prompts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCommand } from "citty";
+import { PreviewServerPortMismatchError } from "../utils/studioSelectionClient.js";
+import { PreviewPortUnavailableError } from "./previewLifecycle.js";
+import * as previewLifecycle from "./previewLifecycle.js";
 import {
   default as previewCommand,
+  backgroundStartFailureCode,
   foregroundPreviewReadyPayload,
+  prebuildPreview,
   handlePreviewKillAll,
   handlePreviewList,
+  previewHostAppError,
   previewLaunchMode,
   previewLaunchModeError,
   previewPortError,
@@ -17,10 +24,25 @@ import {
   reportPreviewShutdown,
   studioReadyUrl,
   studioDeepLink,
-  studioLandingSearch,
   studioSummaryUrls,
   waitForStudioChildClose,
 } from "./preview.js";
+
+const lint = vi.hoisted(() => ({ inProcess: vi.fn(), worker: vi.fn() }));
+vi.mock("../utils/lintProject.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../utils/lintProject.js")>()),
+  lintProject: lint.inProcess,
+}));
+vi.mock("../utils/cancellableProcess.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../utils/cancellableProcess.js")>()),
+  runRenderSetupWorker: lint.worker,
+}));
+// The real cleanup kills every orphaned Chrome the user owns, so no test may reach it.
+const killOrphanedProcesses = vi.hoisted(() => vi.fn(() => 0));
+vi.mock("../utils/orphanCleanup.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../utils/orphanCleanup.js")>()),
+  killOrphanedProcesses,
+}));
 
 const tempDirs: string[] = [];
 
@@ -30,70 +52,160 @@ afterEach(() => {
   process.exitCode = undefined;
 });
 
-function projectWith(storyboard: string | null, frameFiles: string[] = []): string {
-  const dir = mkdtempSync(join(tmpdir(), "hf-preview-landing-"));
+function tempProject(): string {
+  const dir = mkdtempSync(join(tmpdir(), "hf-preview-"));
   tempDirs.push(dir);
-  if (storyboard !== null) writeFileSync(join(dir, "STORYBOARD.md"), storyboard);
-  for (const file of frameFiles) {
-    mkdirSync(join(dir, file, ".."), { recursive: true });
-    writeFileSync(join(dir, file), "<div></div>");
-  }
   return dir;
 }
 
-const FRAME = (n: number, status: string) =>
-  `## Frame ${n} — F${n}\n- status: ${status}\n- src: compositions/frames/0${n}.html\n\nBeat.\n`;
+describe.each(["status", "stop"] as const)("preview --%s port scope", (operation) => {
+  it.each([undefined, 32521])("forwards the explicit port %s", async (port) => {
+    const dir = tempProject();
+    writeFileSync(join(dir, "index.html"), "<html></html>");
+    const readStatus = vi
+      .spyOn(previewLifecycle, "readBackgroundPreviewStatus")
+      .mockResolvedValue(null);
+    const stop = vi.spyOn(previewLifecycle, "stopBackgroundPreview").mockResolvedValue(false);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const rawArgs = [
+      dir,
+      `--${operation}`,
+      "--json",
+      ...(port === undefined ? [] : ["--port", String(port)]),
+    ];
+    const previousArgv = process.argv;
+    process.argv = [process.execPath, "cli.js", "preview", ...rawArgs];
+    try {
+      await runCommand(previewCommand, { rawArgs });
+    } finally {
+      process.argv = previousArgv;
+    }
 
-describe("studioLandingSearch", () => {
-  it("returns no search without a storyboard", () => {
-    expect(studioLandingSearch(projectWith(null))).toBe("");
+    const call = operation === "status" ? readStatus : stop;
+    expect(call).toHaveBeenCalledOnce();
+    const [project, startPort, options] = call.mock.calls[0] ?? [];
+    expect(project).toBe(dir);
+    expect(startPort).toBe(port ?? 3002);
+    expect(options?.preferredPort).toBe(port);
+    expect(operation === "status" ? stop : readStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("preview --status reporting", () => {
+  it("reports an unknown listener PID without borrowing the saved wrapper's PID", async () => {
+    const dir = tempProject();
+    writeFileSync(join(dir, "index.html"), "<html></html>");
+    vi.spyOn(previewLifecycle, "readBackgroundPreviewStatus").mockResolvedValue({
+      pid: null,
+      port: 32600,
+      projectDir: dir,
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await runCommand(previewCommand, { rawArgs: [dir, "--status", "--json"] });
+
+    const result = JSON.parse(log.mock.calls.flat().join("\n")).result;
+    expect(result).toMatchObject({ state: "running", pid: null, mode: "unknown" });
+    expect(result).not.toHaveProperty("logPath");
   });
 
-  it("lands on the board while sketches are under review (any built frame)", () => {
-    const dir = projectWith(`${FRAME(1, "built")}${FRAME(2, "outline")}`, [
-      "compositions/frames/01.html",
-    ]);
-    expect(studioLandingSearch(dir)).toBe("?view=storyboard");
+  it("lists an unverified endpoint without inventing its PID or background mode", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await handlePreviewList(3002, true, {
+      scan: async () => [],
+      listManaged: async () => [{ pid: null, port: 32600, projectDir: "/tmp/preview-unverified" }],
+    });
+
+    const result = JSON.parse(log.mock.calls.flat().join("\n")).result;
+    expect(result.sessions).toMatchObject([{ port: 32600, pid: null, mode: "unknown" }]);
   });
 
-  it("lands on the board during pure planning (srcs declared, none exist)", () => {
-    const dir = projectWith(`${FRAME(1, "outline")}${FRAME(2, "outline")}`);
-    expect(studioLandingSearch(dir)).toBe("?view=storyboard");
+  it("keeps existing stop targets when status cannot confirm a listener PID", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const stopManaged = vi.fn(async () => true);
+    await handlePreviewKillAll(3002, true, {
+      listManaged: async () => [{ pid: null, port: 32600, projectDir: "/tmp/preview-unverified" }],
+      stopManaged,
+      killScanned: async () => ({ killed: 0, unverified: [] }),
+    });
+
+    expect(stopManaged).toHaveBeenCalledExactlyOnceWith("/tmp/preview-unverified", 32600);
   });
 
-  it("lands on the timeline once frames exist without a built status", () => {
-    const dir = projectWith(`${FRAME(1, "outline")}`, ["compositions/frames/01.html"]);
-    expect(studioLandingSearch(dir)).toBe("");
+  it("retains scanned metadata when the same endpoint has an unknown saved-status PID", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await handlePreviewList(3002, true, {
+      scan: async () => [
+        {
+          pid: "9876",
+          pidSource: "os",
+          port: 32600,
+          host: "[::1]",
+          projectDir: "/tmp/preview-unverified",
+          projectName: "scanned-project",
+          version: "test",
+        },
+      ],
+      listManaged: async () => [{ pid: null, port: 32600, projectDir: "/tmp/preview-unverified" }],
+    });
+
+    const result = JSON.parse(log.mock.calls.flat().join("\n")).result;
+    expect(result.sessions).toHaveLength(1);
+    expect(result.sessions[0]).toMatchObject({
+      pid: 9876,
+      host: "[::1]",
+      projectName: "scanned-project",
+      mode: "unknown",
+    });
+    expect(result.sessions[0]).not.toHaveProperty("logPath");
   });
 
-  it("lands on the timeline for fully animated boards", () => {
-    const dir = projectWith(`${FRAME(1, "animated")}`, ["compositions/frames/01.html"]);
-    expect(studioLandingSearch(dir)).toBe("");
+  it.each([true, false])("reports log ownership in JSON=%s", async (json) => {
+    const dir = tempProject();
+    writeFileSync(join(dir, "index.html"), "<html></html>");
+    const readStatus = vi.spyOn(previewLifecycle, "readBackgroundPreviewStatus");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    for (const logPath of [undefined, "/tmp/owned-preview.log"]) {
+      readStatus.mockResolvedValue({ pid: 5555, port: 32530, projectDir: dir, logPath });
+      log.mockClear();
+      await runCommand(previewCommand, {
+        rawArgs: [dir, "--status", ...(json ? ["--json"] : [])],
+      });
+      const output = log.mock.calls.flat().join("\n");
+      if (json) {
+        const result = JSON.parse(output).result;
+        expect(result).toMatchObject({
+          state: "running",
+          pid: 5555,
+          port: 32530,
+          mode: logPath ? "background" : "unknown",
+        });
+        if (logPath) expect(result.logPath).toBe(logPath);
+        else expect(result).not.toHaveProperty("logPath");
+      } else if (logPath) {
+        expect(output).toContain(`Log: ${logPath}`);
+        expect(output).toContain("Background preview running");
+      } else {
+        expect(output).not.toContain("Log:");
+        expect(output).not.toContain("Background preview running");
+        expect(output).toContain("Preview running");
+      }
+    }
   });
 });
 
 describe("Studio handoff URLs", () => {
   it("hands off the exact timeline project route", () => {
-    const dir = projectWith(null);
-    expect(studioDeepLink("http://127.0.0.1:3002", "demo", dir)).toBe(
+    expect(studioDeepLink("http://127.0.0.1:3002", "demo")).toBe(
       "http://127.0.0.1:3002/#project/demo",
     );
-    expect(studioSummaryUrls("demo", "http://127.0.0.1:3002", dir)).toEqual({
+    expect(studioSummaryUrls("demo", "http://127.0.0.1:3002")).toEqual({
       serverUrl: "http://127.0.0.1:3002",
       studioUrl: "http://127.0.0.1:3002/#project/demo",
     });
   });
 
-  it("hands off the exact storyboard route while a project is still planning", () => {
-    const dir = projectWith(FRAME(1, "outline"));
-    expect(studioDeepLink("http://127.0.0.1:3002", "demo", dir)).toBe(
-      "http://127.0.0.1:3002/?view=storyboard#project/demo",
-    );
-  });
-
   it("URL-encodes project names that have hash-route metacharacters", () => {
-    const dir = projectWith(null);
-    expect(studioDeepLink("http://127.0.0.1:3002", "Launch #1? 50%", dir)).toBe(
+    expect(studioDeepLink("http://127.0.0.1:3002", "Launch #1? 50%")).toBe(
       "http://127.0.0.1:3002/#project/Launch%20%231%3F%2050%25",
     );
   });
@@ -365,7 +477,7 @@ describe("preview lifecycle JSON failures", () => {
   });
 
   it("wraps managed-start validation failures in one JSON document", async () => {
-    const dir = projectWith(null);
+    const dir = tempProject();
     writeFileSync(join(dir, "index.html"), "<html></html>");
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
@@ -403,6 +515,14 @@ describe("preview lifecycle JSON failures", () => {
     expect(error).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [new PreviewServerPortMismatchError(3500, []), "preview-port-mismatch"],
+    [new PreviewPortUnavailableError(3500, 3501), "preview-port-unavailable"],
+    [new Error("spawn failed"), "preview-start-failed"],
+  ])("maps a background start failure to its JSON code (%#)", (error, code) => {
+    expect(backgroundStartFailureCode(error)).toBe(code);
+  });
+
   it("wraps missing-project start failures without human stderr", async () => {
     const missing = join(tmpdir(), `hf-preview-missing-start-${process.pid}-${Date.now()}`);
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -421,9 +541,65 @@ describe("preview lifecycle JSON failures", () => {
   });
 });
 
+describe("prebuildPreview", () => {
+  it("asks the server for the opening film's preview document", async () => {
+    const fetchApp = vi.fn(async (_request: Request) => new Response(""));
+
+    await prebuildPreview(fetchApp, "http://localhost:3002", "Launch #1");
+
+    expect(fetchApp.mock.calls[0]![0].url).toBe(
+      "http://localhost:3002/api/projects/Launch%20%231/preview",
+    );
+  });
+
+  it("does not fail the start when the build throws", async () => {
+    const fetchApp = vi.fn(() => {
+      throw new Error("bundle failed");
+    });
+
+    await expect(prebuildPreview(fetchApp, "http://localhost:3002", "demo")).resolves.toBe(
+      undefined,
+    );
+  });
+});
+
+describe("startup lint", () => {
+  const neverSettles = () => new Promise<never>(() => {});
+
+  it("never lints for a --json start", async () => {
+    lint.inProcess.mockImplementation(neverSettles);
+    lint.worker.mockImplementation(neverSettles);
+    const dir = tempProject();
+    writeFileSync(join(dir, "index.html"), "<html></html>");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runCommand(previewCommand, {
+      rawArgs: [dir, "--background", "--json", "--user-data-dir", join(dir, "profile")],
+    });
+
+    expect(lint.inProcess).not.toHaveBeenCalled();
+    expect(lint.worker).not.toHaveBeenCalled();
+  });
+
+  it("does not hold a start behind a lint that has not finished", async () => {
+    lint.inProcess.mockImplementation(neverSettles);
+    lint.worker.mockImplementation(neverSettles);
+    const dir = tempProject();
+    writeFileSync(join(dir, "index.html"), "<html></html>");
+    const error = vi.spyOn(clack.log, "error").mockImplementation(() => {});
+
+    await runCommand(previewCommand, {
+      rawArgs: [dir, "--background", "--user-data-dir", join(dir, "profile")],
+    });
+
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("--user-data-dir"));
+    expect(lint.inProcess).not.toHaveBeenCalled();
+  }, 5_000);
+});
+
 describe("foreground preview JSON", () => {
   it("emits the same ready session contract before remaining attached", () => {
-    const dir = projectWith(null);
+    const dir = tempProject();
     expect(foregroundPreviewReadyPayload("Launch #1", "http://localhost:4567", dir, 4321)).toEqual({
       schemaVersion: 1,
       operation: "start",
@@ -463,8 +639,21 @@ describe("waitForStudioChildClose", () => {
 
     await expect(waitForStudioChildClose(child, signalTarget)).resolves.toBeUndefined();
     expect(child.once).not.toHaveBeenCalled();
-    expect(signalTarget.once).toHaveBeenCalledTimes(2);
-    expect(signalTarget.off).toHaveBeenCalledTimes(2);
+    expect(signalTarget.once).toHaveBeenCalledTimes(3);
+    expect(signalTarget.off).toHaveBeenCalledTimes(3);
+  });
+
+  it("reaps the dev server when the terminal closes (SIGHUP)", async () => {
+    const signalTarget = { once: vi.fn(), off: vi.fn() };
+    const child = { exitCode: 0, signalCode: null, once: vi.fn() } as unknown as Parameters<
+      typeof waitForStudioChildClose
+    >[0];
+
+    await waitForStudioChildClose(child, signalTarget);
+
+    const hupListener = signalTarget.once.mock.calls.find(([event]) => event === "SIGHUP")?.[1];
+    expect(hupListener).toBeTypeOf("function");
+    expect(signalTarget.off).toHaveBeenCalledWith("SIGHUP", hupListener);
   });
 
   it("reaps on process exit even when stdio never emits close", async () => {
@@ -490,6 +679,102 @@ describe("waitForStudioChildClose", () => {
     exit?.();
     await waiting;
     expect(resolved).toBe(true);
-    expect(signalTarget.off).toHaveBeenCalledTimes(2);
+    expect(signalTarget.off).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("studio dev-server spawns", () => {
+  function fakeStudioChild() {
+    return {
+      pid: 4321,
+      exitCode: 0,
+      signalCode: null,
+      stdout: { on: vi.fn(), removeListener: vi.fn() },
+      stderr: { on: vi.fn(), removeListener: vi.fn() },
+      on: vi.fn(),
+      once: vi.fn(),
+    };
+  }
+
+  // Returns the spawn spy. mkdirSync/existsSync are stubbed too, so
+  // linkProjectIntoStudioData never touches the real studio data directory.
+  function mockStudioSpawn() {
+    const spawn = vi.fn((_command: string, _args: string[], _options: unknown) =>
+      fakeStudioChild(),
+    );
+    vi.doMock("node:child_process", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:child_process")>();
+      return { ...actual, spawn };
+    });
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs")>();
+      return { ...actual, mkdirSync: () => undefined, existsSync: () => true };
+    });
+    vi.resetModules();
+    return spawn;
+  }
+
+  afterEach(() => {
+    vi.doUnmock("node:child_process");
+    vi.doUnmock("node:fs");
+    vi.resetModules();
+  });
+
+  it("runDevMode passes windowsHide to the studio dev-server spawn", async () => {
+    const spawn = mockStudioSpawn();
+
+    const { runDevMode } = await import("./preview.js");
+    await runDevMode("/tmp/hf-preview-devmode-test", { json: true });
+
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(spawn.mock.calls[0]?.[2]).toMatchObject({ windowsHide: true });
+  });
+
+  it("runLocalStudioMode passes windowsHide to the local Vite spawn", async () => {
+    const spawn = mockStudioSpawn();
+
+    // @hyperframes/studio is resolved for real, so the project dir has to sit
+    // inside the monorepo's node_modules tree.
+    const thisFile = fileURLToPath(import.meta.url);
+    const localStudioProjectDir = resolve(dirname(thisFile), "..", "..");
+    const { runLocalStudioMode } = await import("./preview.js");
+    await runLocalStudioMode(localStudioProjectDir, { json: true });
+
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(spawn.mock.calls[0]?.[2]).toMatchObject({ windowsHide: true });
+  });
+});
+
+describe("preview inside a host app's agent run", () => {
+  const hostRun = { HYPERFRAMES_DESKTOP_PROJECT: "/projects/demo" };
+
+  it("refuses a background preview, which would outlive the run", () => {
+    expect(previewHostAppError("background", hostRun)).toMatch(/host app .* owns its preview/);
+    expect(previewHostAppError("background", hostRun)).toContain("--foreground");
+  });
+
+  it("allows a preview attached to the run, and background outside a host app", () => {
+    expect(previewHostAppError("embedded", hostRun)).toBeNull();
+    expect(previewHostAppError("local", hostRun)).toBeNull();
+    expect(previewHostAppError("background", {})).toBeNull();
+  });
+
+  it("refuses before spawning anything", async () => {
+    vi.stubEnv("HYPERFRAMES_DESKTOP_PROJECT", "/projects/demo");
+    const project = mkdtempSync(join(tmpdir(), "hf-host-preview-"));
+    writeFileSync(join(project, "index.html"), "<html><body></body></html>");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    let printed = "";
+    try {
+      await runCommand(previewCommand, { rawArgs: [project, "--background", "--json"] });
+      printed = String(log.mock.calls.at(-1)?.[0]);
+    } finally {
+      log.mockRestore();
+      vi.unstubAllEnvs();
+      rmSync(project, { recursive: true, force: true });
+    }
+    const payload = JSON.parse(printed);
+    expect(payload).toMatchObject({ ok: false, error: { code: "host-app-owns-preview" } });
+    expect(killOrphanedProcesses).not.toHaveBeenCalled();
   });
 });

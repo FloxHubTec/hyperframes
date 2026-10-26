@@ -64,7 +64,7 @@ import {
 } from "../../hdrCompositor.js";
 import { type HdrPerfCollector, createHdrPerfCollector } from "../hdrPerf.js";
 import type { HdrDiagnostics, ProgressCallback, RenderJob } from "../../renderOrchestrator.js";
-import type { CompositionMetadata } from "../shared.js";
+import { reportEncodeProgress, type CompositionMetadata } from "../shared.js";
 import {
   decodeHdrImageBuffers,
   cleanupHdrVideoFrameSource,
@@ -222,7 +222,7 @@ export async function runCaptureHdrStage(
     await initializeSession(domSession);
     assertNotAborted();
     lastBrowserConsole = domSession.browserConsoleBuffer;
-    await initTransparentBackground(domSession.page);
+    await initTransparentBackground(domSession.page, { clearCompositionRoot: true });
 
     // ── Scene detection for shader transitions ──────────────────────────
     const transitionMeta: HdrTransitionMeta[] = await domSession.page.evaluate(() => {
@@ -267,6 +267,7 @@ export async function runCaptureHdrStage(
         width,
         height,
         codec: preset.codec,
+        useGpu: job.config.useGpu,
         preset: preset.preset,
         quality: effectiveQuality,
         bitrate: effectiveBitrate,
@@ -297,6 +298,7 @@ export async function runCaptureHdrStage(
       height,
       abortSignal,
       hdrDiagnostics,
+      maxResidentWindows: Math.max(1, workerCount) + 1,
     });
     releaseHdrExtractionReservation = extracted.releaseReservation;
     for (const [id, source] of extracted.sources) hdrVideoFrameSources.set(id, source);
@@ -428,12 +430,16 @@ export async function runCaptureHdrStage(
       domSessionClosed = true;
     }
 
-    const hdrEncodeResult = await hdrEncoder.close();
+    const encodeFrom = job.progress;
+    const hdrEncodeResult = await hdrEncoder.close((frames) =>
+      reportEncodeProgress(job, frames, totalFrames, onProgress, encodeFrom),
+    );
     hdrEncoderClosed = true;
     assertNotAborted();
     if (!hdrEncodeResult.success) {
       throw encoderFailureError("HDR encode failed", hdrEncodeResult);
     }
+    reportEncodeProgress(job, totalFrames, totalFrames, onProgress, encodeFrom);
     captureDurationMs = Date.now() - stageStart;
     encodeMs = hdrEncodeResult.durationMs;
   } catch (error) {

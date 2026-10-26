@@ -1,4 +1,9 @@
-import type { CompositionVariable, VariableValidationIssue } from "@hyperframes/core/variables";
+import type {
+  CompositionVariable,
+  FontValue,
+  ImageValue,
+  VariableValidationIssue,
+} from "@hyperframes/core/variables";
 
 /**
  * Cross-referenced variable usage for a whole composition: the per-script
@@ -111,6 +116,8 @@ export type EditOp =
       start?: number;
       duration?: number;
       trackIndex?: number;
+      /** Default true: start/duration also apply to `data-link` partners. `false` edits the target alone and unlinks it. */
+      linked?: boolean;
     }
   | { type: "setHold"; target: HfId | HfId[]; hold: ElasticHold }
   | { type: "moveElement"; target: HfId | HfId[]; x: number; y: number }
@@ -268,26 +275,7 @@ export interface ElasticHold {
   fill: "freeze" | "loop";
 }
 
-/**
- * Object value for a `font` variable (LOCKED §7 — object-valued, never a CSS string).
- * `name` is the CSS font-family value; `source` is the stylesheet URL to load.
- */
-export interface FontValue {
-  name: string;
-  source: string;
-}
-
-/**
- * Object value for an `image` variable (LOCKED §7 — object-valued, never a CSS string).
- * `url` is the image src. Add explicit optional fields here as consumers need them —
- * an open `[key: string]: unknown` index signature was dropped because it let any
- * `{url}`-shaped object through and swallowed key typos.
- */
-export interface ImageValue {
-  url: string;
-  alt?: string;
-  fit?: "cover" | "contain" | "fill" | "none" | "scale-down";
-}
+export type { FontValue, ImageValue } from "@hyperframes/core/variables";
 
 export interface GsapTweenSpec {
   method: "from" | "to" | "fromTo" | "set";
@@ -296,7 +284,7 @@ export interface GsapTweenSpec {
   ease?: string;
   fromProperties?: Record<string, unknown>;
   toProperties?: Record<string, unknown>;
-  /** For 'to' tweens — the properties to animate toward */
+  /** Tween values for 'from', 'to', and 'set'; destination values for 'fromTo'. */
   properties?: Record<string, unknown>;
   repeat?: number;
   yoyo?: boolean;
@@ -378,7 +366,10 @@ export interface SelectionProxy {
   setStyle(styles: Record<string, string | null>): void;
   setText(value: string): void;
   setAttribute(name: string, value: string | null): void;
-  setTiming(timing: { start?: number; duration?: number; trackIndex?: number }): void;
+  setTiming(
+    timing: { start?: number; duration?: number; trackIndex?: number },
+    opts?: { linked?: boolean },
+  ): void;
   removeElement(): void;
 }
 
@@ -391,7 +382,10 @@ export interface ElementHandle {
   setStyle(styles: Record<string, string | null>): void;
   setText(value: string): void;
   setAttribute(name: string, value: string | null): void;
-  setTiming(timing: { start?: number; duration?: number; trackIndex?: number }): void;
+  setTiming(
+    timing: { start?: number; duration?: number; trackIndex?: number },
+    opts?: { linked?: boolean },
+  ): void;
   removeElement(): void;
 }
 
@@ -421,7 +415,16 @@ export interface Composition {
   setStyle(id: HfId, styles: Record<string, string | null>): void;
   setText(id: HfId, value: string): void;
   setAttribute(id: HfId, name: string, value: string | null): void;
-  setTiming(id: HfId, timing: { start?: number; duration?: number; trackIndex?: number }): void;
+  /** Also moves `data-link` partners unless `{ linked: false }`, which edits `id` alone and unlinks it. */
+  setTiming(
+    id: HfId,
+    timing: { start?: number; duration?: number; trackIndex?: number },
+    opts?: { linked?: boolean },
+  ): void;
+  /** Frames `id` sits from its `data-sync-origin` partner, positive when late; null if unpaired or rates differ. */
+  syncOffset(id: HfId, fps?: number): number | null;
+  moveIntoSync(id: HfId): void;
+  slipIntoSync(id: HfId): void;
   removeElement(id: HfId): void;
   /**
    * Insert an HTML fragment as a child of `parent` at `index` (WS-D).

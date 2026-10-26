@@ -10,7 +10,7 @@ Almost every rule below is taught in context somewhere earlier in this guide; a 
 The skills enforce these automatically, but if you hand-edit compositions or debug issues, these are the rules that matter:
 
 1. **Register all timelines** on `window.__timelines` — the renderer can't seek animations it doesn't know about.
-2. **Video elements must be `muted`** — audio goes in separate `<audio>` elements so the renderer can mix it.
+2. **A video with sound keeps it on the `<video>`** — `data-has-audio="true"`, no `muted`. Use a separate `<audio>` for music, voiceover, replacement audio, J/L cuts, or audio detached in Studio. Silent footage and b-roll: `muted`.
 3. **No `Math.random()`** — random values produce different frames on each render, breaking determinism. Use a seeded PRNG (e.g. mulberry32) if you need pseudo-random values. And when you want a stepped, stop-motion hold, quantize it on the **integer frame index**, not on elapsed seconds — seek times don't land on exact 1/fps doubles, so second-domain arithmetic drifts and the hold length stutters. See [Handmade, still deterministic](/prompting/motion#handmade-still-deterministic).
 4. **Synchronous timeline construction** — no `async`/`await` or `fetch()` during GSAP timeline setup.
 5. **Timed elements need `class="clip"`** — plus `data-start`, `data-duration`, and `data-track-index`.
@@ -64,7 +64,10 @@ Two more ways an SVG "line draws itself" effect (animated `strokeDasharray` / `s
 `hyperframes check` flags a text block covered by another element as `text_occluded`, and
 two attributes waive it: `data-layout-allow-overlap` for intentional layering, and
 `data-layout-allow-occlusion` for something deliberately painted over type. Both are
-legitimate — a caption designed to sit behind a matted subject needs one.
+legitimate. A caption behind a transparent `<video>` cutout needs neither: `check` reads the
+cutout's decoded alpha at each sample, reports how much of each word the subject covers as
+info, and fails only a word that is 80% hidden or two neighbouring words that are each half
+hidden.
 
 Two things about them are worth knowing before you reach for either:
 
@@ -109,10 +112,6 @@ Each one causes friction or wrong output for a specific engine reason — with t
 **Don't assume the agent knows your assets.** It will look, but a path skips the search.
 - ❌ `use my logo`
 - ✅ `use assets/logo.svg`
-
-**Don't override a workflow's designed style.** Each workflow skill carries an art-directed preset; fighting it produces a compromise, not your theme.
-- ❌ `/pr-to-video ... dark theme`
-- ✅ let the preset carry the look, or use a freeform build when you need full style control
 
 **Don't hard-time a verbatim script.** With supplied narration text, duration follows the spoken words.
 - ❌ `a 60-second explainer from this script: ...`

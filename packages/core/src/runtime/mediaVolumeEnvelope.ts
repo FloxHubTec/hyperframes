@@ -202,7 +202,9 @@ function probeKeyframesInWindow(
   return hasAutomation ? keyframes : null;
 }
 
-export type RuntimeTimelineRef = Partial<Pick<RuntimeTimelineLike, "totalTime" | "seek">>;
+export type RuntimeTimelineRef = Partial<
+  Pick<RuntimeTimelineLike, "totalTime" | "seek" | "getChildren">
+>;
 
 export interface VolumeProbeOptions {
   /**
@@ -214,7 +216,58 @@ export interface VolumeProbeOptions {
    * Preview callers omit this option and retain live automation discovery.
    */
   allowLiveTimelineSeek?: boolean;
+  movers?: () => VolumeMovers;
 }
+
+function namesKey(vars: unknown, matches: (key: string) => boolean, depth = 0): boolean {
+  if (depth > 3 || vars === null || typeof vars !== "object") return false;
+  if (Array.isArray(vars)) return vars.some((item) => namesKey(item, matches, depth + 1));
+  if (Object.getPrototypeOf(vars) !== Object.prototype) return false;
+  return Object.entries(vars).some(
+    ([key, value]) => matches(key) || namesKey(value, matches, depth + 1),
+  );
+}
+
+const isDomNode = (target: unknown): boolean =>
+  typeof (target as { nodeType?: unknown } | null)?.nodeType === "number";
+
+function hasSetter(target: unknown, key: string): boolean {
+  for (let o = Object(target); o; o = Object.getPrototypeOf(o)) {
+    const descriptor = Object.getOwnPropertyDescriptor(o, key);
+    if (descriptor) return typeof descriptor.set === "function";
+  }
+  return false;
+}
+
+export interface VolumeMovers {
+  elements: Set<unknown>;
+  anySetter: boolean;
+  unknown: boolean;
+}
+
+export function volumeMoversOf(timeline: RuntimeTimelineRef): VolumeMovers {
+  const unknown: VolumeMovers = { elements: new Set(), anySetter: false, unknown: true };
+  if (typeof timeline.getChildren !== "function") return unknown;
+  try {
+    const movers: VolumeMovers = { elements: new Set(), anySetter: false, unknown: false };
+    for (const tween of timeline.getChildren(true, true, false)) {
+      const targets: unknown[] = tween.targets?.() ?? [];
+      for (const target of targets) {
+        if (isDomNode(target)) {
+          if (namesKey(tween.vars, (key) => key === "volume")) movers.elements.add(target);
+        } else if (!movers.anySetter && namesKey(tween.vars, (key) => hasSetter(target, key))) {
+          movers.anySetter = true;
+        }
+      }
+    }
+    return movers;
+  } catch {
+    return unknown;
+  }
+}
+
+const canMoveVolume = (movers: VolumeMovers, el: HTMLMediaElement): boolean =>
+  movers.unknown || movers.anySetter || movers.elements.has(el);
 
 /**
  * Probe a media element and, if volume automation is detected, store a
@@ -238,6 +291,8 @@ export function probeAndCacheElementVolume(
   if (!timeline) return;
   if (!isMediaElement(mediaEl)) return;
   if (compositionDuration <= 0) return;
+  // Sampling is ~60 whole-timeline seeks per second of clip, paid again on every rebind.
+  if (!canMoveVolume(options.movers?.() ?? volumeMoversOf(timeline), mediaEl)) return;
 
   const seekFn = (t: number) => {
     try {

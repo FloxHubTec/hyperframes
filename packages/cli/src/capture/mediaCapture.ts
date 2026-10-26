@@ -8,7 +8,9 @@
  */
 
 import type { Browser, Page } from "puppeteer-core";
-import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { ensureCaptureDirSync, writeCaptureFileSync } from "./captureFile.js";
 import { join, extname } from "node:path";
 import { isPrivateUrl, safeFetch } from "./assetDownloader.js";
 import { CAPTURE_USER_AGENT } from "./userAgent.js";
@@ -49,8 +51,10 @@ function liveRemainingMs(budget: RemainingBudget, fallbackMs: number): number {
 export async function saveLottieAnimations(
   discoveredLotties: DiscoveredLottie[],
   lottieDir: string,
+  outputDir: string,
   budget: RemainingBudget = {},
 ): Promise<number> {
+  ensureCaptureDirSync(outputDir, lottieDir);
   const byteBudget = budget.byteBudget ?? createCaptureDownloadBudget();
   let savedCount = 0;
   const savedHashes = new Set<string>(); // Deduplicate by content
@@ -87,14 +91,13 @@ export async function saveLottieAnimations(
       }
 
       if (jsonData) {
-        // Deduplicate by content hash (first 100 chars of stringified JSON)
-        const hash = jsonData.slice(0, 200);
+        const hash = createHash("sha256").update(jsonData).digest("hex");
         if (savedHashes.has(hash)) continue;
         savedHashes.add(hash);
 
         if (!validLottieJson(jsonData)) continue;
 
-        writeFileSync(join(lottieDir, `animation-${savedCount}.json`), jsonData, "utf-8");
+        writeCaptureFileSync(join(lottieDir, `animation-${savedCount}.json`), jsonData, "utf-8");
         savedCount++;
       }
     } catch {
@@ -129,7 +132,7 @@ export async function renderLottiePreviews(
     layers: number;
   }> = [];
   const previewDir = join(lottieDir, "previews");
-  mkdirSync(previewDir, { recursive: true });
+  ensureCaptureDirSync(outputDir, previewDir);
 
   for (const file of readdirSync(lottieDir)) {
     if (!file.endsWith(".json")) continue;
@@ -144,59 +147,56 @@ export async function renderLottiePreviews(
       // Render a mid-frame thumbnail using Puppeteer + lottie-web
       // Skip huge Lottie files for preview (CDP has a ~256MB message limit)
       const fileSize = statSync(join(lottieDir, file)).size;
-      if (fileSize > 2_000_000) continue;
-
-      let previewPage;
-      try {
-        if (liveRemainingMs(budget, 1) <= 0) break;
-        previewPage = await chromeBrowser.newPage();
-        if (liveRemainingMs(budget, 1) <= 0) break;
-        await guardLottiePreviewRequests(previewPage);
-        await previewPage.setViewport({ width: 400, height: 400 });
-        const animData = JSON.parse(readFileSync(join(lottieDir, file), "utf-8"));
-        const midFrame = Math.floor(((raw.op || 0) - (raw.ip || 0)) * 0.3);
-        // Load the shell page first (no untrusted data in the HTML)
-        await previewPage.setContent(
-          `<!DOCTYPE html>
+      if (fileSize <= 2_000_000) {
+        let previewPage;
+        try {
+          if (liveRemainingMs(budget, 1) <= 0) break;
+          previewPage = await chromeBrowser.newPage();
+          if (liveRemainingMs(budget, 1) <= 0) break;
+          await guardLottiePreviewRequests(previewPage);
+          await previewPage.setViewport({ width: 400, height: 400 });
+          const animData = JSON.parse(readFileSync(join(lottieDir, file), "utf-8"));
+          const midFrame = Math.floor(((raw.op || 0) - (raw.ip || 0)) * 0.3);
+          // Load the shell page first (no untrusted data in the HTML)
+          await previewPage.setContent(
+            `<!DOCTYPE html>
 <html><head>
 <script src="${LOTTIE_RUNTIME_URL}"></script>
 <style>*{margin:0;padding:0;background:transparent}#c{width:400px;height:400px}</style>
 </head><body><div id="c"></div></body></html>`,
-          { waitUntil: "load", timeout: 10000 },
-        );
-        // Pass animation data safely via parameterized evaluate (no string interpolation)
-        await previewPage.evaluate(
-          (data: unknown, frame: number) => {
-            const a = (window as any).lottie.loadAnimation({
-              container: document.getElementById("c"),
-              renderer: "svg",
-              loop: false,
-              autoplay: false,
-              animationData: data,
-            });
-            a.addEventListener("DOMLoaded", () => {
-              a.goToAndStop(frame, true);
-              (window as any).__READY = true;
-            });
-          },
-          animData,
-          midFrame,
-        );
-        await previewPage
-          .waitForFunction(() => (window as any).__READY === true, { timeout: 5000 })
-          .catch(() => {});
-        if (liveRemainingMs(budget, 1) > 0) {
-          await previewPage.screenshot({
-            path: join(previewDir, previewName),
-            type: "png",
-            omitBackground: true,
-          });
-          preview = `assets/lottie/previews/${previewName}`;
+            { waitUntil: "load", timeout: 10000 },
+          );
+          // Pass animation data safely via parameterized evaluate (no string interpolation)
+          await previewPage.evaluate(
+            (data: unknown, frame: number) => {
+              const a = (window as any).lottie.loadAnimation({
+                container: document.getElementById("c"),
+                renderer: "svg",
+                loop: false,
+                autoplay: false,
+                animationData: data,
+              });
+              a.addEventListener("DOMLoaded", () => {
+                a.goToAndStop(frame, true);
+                (window as any).__READY = true;
+              });
+            },
+            animData,
+            midFrame,
+          );
+          await previewPage
+            .waitForFunction(() => (window as any).__READY === true, { timeout: 5000 })
+            .catch(() => {});
+          if (liveRemainingMs(budget, 1) > 0) {
+            const shot = await previewPage.screenshot({ type: "png", omitBackground: true });
+            writeCaptureFileSync(join(previewDir, previewName), shot);
+            preview = `assets/lottie/previews/${previewName}`;
+          }
+        } catch {
+          /* preview rendering failed — non-critical */
+        } finally {
+          await previewPage?.close().catch(() => {});
         }
-      } catch {
-        /* preview rendering failed — non-critical */
-      } finally {
-        await previewPage?.close().catch(() => {});
       }
 
       manifest.push({
@@ -214,7 +214,7 @@ export async function renderLottiePreviews(
     }
   }
   if (manifest.length > 0) {
-    writeFileSync(
+    writeCaptureFileSync(
       join(outputDir, "extracted", "lottie-manifest.json"),
       JSON.stringify(manifest, null, 2),
       "utf-8",
@@ -283,7 +283,7 @@ async function downloadVideoBody(
     }
     if (total < 1024) return null; // too small to be a real video (likely an error blob)
     const safe = /\.[a-z0-9]+$/i.test(filename) ? filename.replace(/[^\w.-]/g, "_") : `video${ext}`;
-    writeFileSync(join(videosDir, safe), Buffer.concat(chunks));
+    writeCaptureFileSync(join(videosDir, safe), Buffer.concat(chunks));
     return `assets/videos/${safe}`;
   } catch {
     return null;
@@ -472,9 +472,9 @@ export async function captureVideoManifest(
   if (merged.length === 0) return;
 
   const videoManifestDir = join(outputDir, "assets", "videos");
-  mkdirSync(videoManifestDir, { recursive: true });
+  ensureCaptureDirSync(outputDir, videoManifestDir);
   const previewDir = join(videoManifestDir, "previews");
-  mkdirSync(previewDir, { recursive: true });
+  ensureCaptureDirSync(outputDir, previewDir);
 
   const videoManifest: Array<{
     index: number;
@@ -522,8 +522,8 @@ export async function captureVideoManifest(
         if (rect && rect.width >= 10) {
           await new Promise((r) => setTimeout(r, 200)); // let decoder settle
           if (liveRemainingMs(opts ?? {}, 1) > 0) {
-            await page.screenshot({
-              path: join(previewDir, previewName),
+            const shot = await page.screenshot({
+              type: "png",
               clip: {
                 x: Math.max(0, rect.x),
                 y: Math.max(0, rect.y),
@@ -531,6 +531,7 @@ export async function captureVideoManifest(
                 height: Math.min(rect.height, 1080),
               },
             });
+            writeCaptureFileSync(join(previewDir, previewName), shot);
             preview = `assets/videos/previews/${previewName}`;
           }
         }
@@ -573,7 +574,7 @@ export async function captureVideoManifest(
   }
 
   if (videoManifest.length > 0) {
-    writeFileSync(
+    writeCaptureFileSync(
       join(outputDir, "extracted", "video-manifest.json"),
       JSON.stringify(videoManifest, null, 2),
       "utf-8",

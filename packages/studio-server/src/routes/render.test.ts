@@ -324,6 +324,69 @@ describe("POST /projects/:id/render — fps wire format", () => {
   });
 });
 
+describe("POST /projects/:id/render — crf", () => {
+  async function post(body: Record<string, unknown>) {
+    const spy = vi.fn();
+    const { app, cleanup } = buildApp(spy);
+    try {
+      const res = await app.request("http://localhost/projects/demo/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fps: 30, quality: "standard", ...body }),
+      });
+      return { res, opts: spy.mock.calls[0]?.[0] };
+    } finally {
+      cleanup();
+    }
+  }
+
+  it("forwards a valid crf for mp4 and webm", async () => {
+    expect((await post({ format: "mp4", crf: 12 })).opts.crf).toBe(12);
+    expect((await post({ format: "webm", crf: 63 })).opts.crf).toBe(63);
+  });
+
+  it("omits crf when the request does not specify one", async () => {
+    const { res, opts } = await post({ format: "mp4" });
+    expect(res.status).toBe(200);
+    expect(opts).not.toHaveProperty("crf");
+  });
+
+  it("ignores crf for mov, which has no CRF", async () => {
+    const { res, opts } = await post({ format: "mov", crf: 12 });
+    expect(res.status).toBe(200);
+    expect(opts).not.toHaveProperty("crf");
+  });
+
+  it("forwards the other encoder options and refuses crf with a bitrate", async () => {
+    const { opts } = await post({
+      format: "mp4",
+      videoBitrate: "10M",
+      videoFrameFormat: "png",
+      hdrMode: "force-sdr",
+    });
+    expect(opts).toMatchObject({
+      videoBitrate: "10M",
+      videoFrameFormat: "png",
+      hdrMode: "force-sdr",
+    });
+    const both = await post({ format: "mp4", crf: 12, videoBitrate: "10M" });
+    expect(both.res.status).toBe(400);
+    expect(both.opts).toBeUndefined();
+  });
+
+  it.each([
+    ["mp4", 52],
+    ["mp4", -1],
+    ["mp4", 12.5],
+    ["mp4", "12"],
+    ["webm", 64],
+  ])("rejects %s crf %j with 400 and does not start a render", async (format, crf) => {
+    const { res, opts } = await post({ format, crf });
+    expect(res.status).toBe(400);
+    expect(opts).toBeUndefined();
+  });
+});
+
 describe("POST /projects/:id/render — composition path safety", () => {
   const tmpDirs: string[] = [];
 
@@ -454,6 +517,103 @@ describe("GET /projects/:id/renders/file/* — path safety", () => {
   afterEach(() => {
     for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
     tmpDirs.length = 0;
+  });
+
+  it("serves non-Latin-1 filenames with RFC 6266 content dispositions", async () => {
+    const filename = "測試.mp4";
+    const { app, rendersDir } = buildApp();
+    const outputPath = join(rendersDir, filename);
+    writeFileSync(outputPath, "render-bytes");
+
+    const listResponse = await app.request("http://localhost/projects/demo/renders");
+    expect(listResponse.status).toBe(200);
+    const jobId = encodeURIComponent(filename.replace(/\.mp4$/, ""));
+    const expectedFilename = `filename="__.mp4"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+    const responses = [
+      {
+        response: await app.request(`http://localhost/render/${jobId}/view`),
+        disposition: "inline",
+      },
+      {
+        response: await app.request(`http://localhost/render/${jobId}/download`),
+        disposition: "attachment",
+      },
+      {
+        response: await app.request(
+          `http://localhost/projects/demo/renders/file/${encodeURIComponent(filename)}`,
+        ),
+        disposition: "inline",
+      },
+    ];
+
+    for (const { response, disposition } of responses) {
+      expect(response.status).toBe(200);
+      const header = response.headers.get("Content-Disposition");
+      expect(header).toBe(`${disposition}; ${expectedFilename}`);
+      expect(header).toMatch(/^[\x20-\x7e]+$/);
+    }
+  });
+
+  it("refuses the desktop app's records when renders/ is linked into .hyperframes/", async () => {
+    const project = mkdtempSync(join(tmpdir(), "hf-renders-project-"));
+    tmpDirs.push(project);
+    mkdirSync(join(project, ".hyperframes"));
+    writeFileSync(join(project, ".hyperframes", "app-history.jsonl"), '{"asked":"secret"}');
+    if (!tryCreateSymlink(join(project, ".hyperframes"), join(project, "renders"), "dir")) return;
+    const app = new Hono();
+    registerRenderRoutes(app, {
+      listProjects: () => [],
+      resolveProject: async (id: string) => ({ id, dir: project }),
+      bundle: async () => null,
+      lint: async () => ({ findings: [] }),
+      runtimeUrl: "/api/runtime.js",
+      rendersDir: () => join(project, "renders"),
+      startRender: (opts) => ({
+        id: opts.jobId,
+        status: "rendering",
+        progress: 0,
+        outputPath: opts.outputPath,
+      }),
+    });
+    const res = await app.request("http://localhost/projects/demo/renders/file/app-history.jsonl");
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain("secret");
+  });
+
+  it("never lists, views or downloads a render that links to the app's records", async () => {
+    const project = mkdtempSync(join(tmpdir(), "hf-renders-project-"));
+    tmpDirs.push(project);
+    mkdirSync(join(project, ".hyperframes"));
+    mkdirSync(join(project, "renders"));
+    writeFileSync(join(project, ".hyperframes", "app-history.jsonl"), '{"asked":"secret"}');
+    writeFileSync(join(project, "renders", "real.mp4"), "render-bytes");
+    const leak = join(project, "renders", "leak.mp4");
+    if (!tryCreateSymlink(join(project, ".hyperframes", "app-history.jsonl"), leak, "file")) return;
+    const app = new Hono();
+    registerRenderRoutes(app, {
+      listProjects: () => [],
+      resolveProject: async (id: string) => ({ id, dir: project }),
+      bundle: async () => null,
+      lint: async () => ({ findings: [] }),
+      runtimeUrl: "/api/runtime.js",
+      rendersDir: () => join(project, "renders"),
+      startRender: (opts) => ({
+        id: opts.jobId,
+        status: "rendering",
+        progress: 0,
+        outputPath: opts.outputPath,
+      }),
+    });
+    const list = (await (await app.request("http://localhost/projects/demo/renders")).json()) as {
+      renders: { id: string }[];
+    };
+    expect(list.renders.map((r) => r.id)).toEqual(["real"]);
+    for (const kind of ["view", "download"]) {
+      const res = await app.request(`http://localhost/render/leak/${kind}`);
+      expect(res.status).toBe(404);
+      expect(await res.text()).not.toContain("secret");
+      expect((await app.request(`http://localhost/render/real/${kind}`)).status).toBe(200);
+    }
   });
 
   it("serves a render file that lives inside rendersDir", async () => {
@@ -625,6 +785,69 @@ describe("POST /projects/:id/render — telemetryDistinctId forwarding", () => {
     }
   });
 
+  // WYSIWYG: the browser says whether its preview could blur; only `false` is a signal, and the
+  // route hands every adapter the final render value.
+  it.each([
+    [false, "off"],
+    [true, undefined],
+    ["false", undefined],
+    [undefined, undefined],
+  ])("maps previewMotionBlur %s to pageMotionBlur %s", async (flag, expected) => {
+    const spy = vi.fn();
+    const { app, cleanup } = buildApp(spy);
+    try {
+      await app.request("http://localhost/projects/demo/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          fps: 30,
+          quality: "standard",
+          format: "mp4",
+          previewMotionBlur: flag,
+        }),
+      });
+      expect(spy.mock.calls[0][0].pageMotionBlur).toBe(expected);
+      expect(spy.mock.calls[0][0]).not.toHaveProperty("previewMotionBlur");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("preserves explicit page motion blur off over preview capability", async () => {
+    const spy = vi.fn();
+    const { app, cleanup } = buildApp(spy);
+    try {
+      const res = await app.request("http://localhost/projects/demo/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageMotionBlur: "off", previewMotionBlur: true }),
+      });
+      expect(res.status).toBe(200);
+      expect(spy.mock.calls[0][0].pageMotionBlur).toBe("off");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it.each(["on", "", false, true, null, 0])(
+    "rejects invalid page motion blur %s before starting a render",
+    async (pageMotionBlur) => {
+      const spy = vi.fn();
+      const { app, cleanup } = buildApp(spy);
+      try {
+        const res = await app.request("http://localhost/projects/demo/render", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ pageMotionBlur }),
+        });
+        expect(res.status).toBe(400);
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        cleanup();
+      }
+    },
+  );
+
   // An old client omits the flag, and a non-boolean is not a signal either.
   // Defaulting those to "opted out" would silently drop every pre-upgrade
   // render outcome.
@@ -723,6 +946,99 @@ describe("POST /projects/:id/render — variables forwarding", () => {
         expect(res.status).toBe(400);
       }
       expect(spy).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("POST /projects/:id/render — GPU encoding", () => {
+  it("passes gpu: true on an MP4 export to the adapter as useGpu, and anything else as off", async () => {
+    const spy = vi.fn();
+    const { app, cleanup } = buildApp(spy);
+    try {
+      const requests = [
+        { format: "mp4", gpu: true },
+        { format: "mp4" },
+        { format: "mp4", gpu: "true" },
+        { format: "mp4", gpu: 1 },
+        { format: "webm", gpu: true },
+        { format: "mov", gpu: true },
+      ];
+      for (const body of requests) {
+        const res = await app.request("http://localhost/projects/demo/render", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect(res.status).toBe(200);
+      }
+      expect(spy.mock.calls.map(([opts]) => opts.useGpu)).toEqual([
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+      ]);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("audioLoweredDb — the limiter's attenuation reaches the host", () => {
+  async function completedJobProgress(audioLoweredDb: number | undefined): Promise<string> {
+    const spy = vi.fn();
+    const { adapter, rendersDir } = createAdapter(spy);
+    const baseStartRender = adapter.startRender.bind(adapter);
+    adapter.startRender = (opts) => {
+      const state = baseStartRender(opts);
+      state.status = "complete";
+      state.progress = 100;
+      if (audioLoweredDb !== undefined) state.audioLoweredDb = audioLoweredDb;
+      return state;
+    };
+    const app = new Hono();
+    registerRenderRoutes(app, adapter);
+    try {
+      const started = await app.request("http://localhost/projects/demo/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fps: 30, quality: "standard", format: "mp4" }),
+      });
+      const { jobId } = (await started.json()) as { jobId: string };
+      return await (await app.request(`http://localhost/render/${jobId}/progress`)).text();
+    } finally {
+      rmSync(rendersDir, { recursive: true, force: true });
+    }
+  }
+
+  it("carries audioLoweredDb in the complete progress event", async () => {
+    const body = await completedJobProgress(1.44);
+    expect(body).toContain('"status":"complete"');
+    expect(body).toContain('"audioLoweredDb":1.44');
+  });
+
+  it("omits it when the limiter did not engage", async () => {
+    expect(await completedJobProgress(undefined)).not.toContain("audioLoweredDb");
+  });
+
+  it("lists it on the render record from the sidecar, and omits it otherwise", async () => {
+    const { app, rendersDir, cleanup } = buildApp(vi.fn());
+    try {
+      writeFileSync(join(rendersDir, "loud.mp4"), "x");
+      writeFileSync(
+        join(rendersDir, "loud.meta.json"),
+        JSON.stringify({ status: "complete", audioLoweredDb: 1.44 }),
+      );
+      writeFileSync(join(rendersDir, "quiet.mp4"), "x");
+      writeFileSync(join(rendersDir, "quiet.meta.json"), JSON.stringify({ status: "complete" }));
+      const { renders } = (await (
+        await app.request("http://localhost/projects/demo/renders")
+      ).json()) as { renders: Array<{ id: string; audioLoweredDb?: number }> };
+      expect(renders.find((r) => r.id === "loud")?.audioLoweredDb).toBe(1.44);
+      expect(renders.find((r) => r.id === "quiet")).not.toHaveProperty("audioLoweredDb");
     } finally {
       cleanup();
     }

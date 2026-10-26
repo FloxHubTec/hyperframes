@@ -10,10 +10,12 @@
 import { type Page } from "puppeteer-core";
 import { promises as fs } from "fs";
 import { type FrameLookupTable } from "./videoFrameExtractor.js";
+import { touchCacheDir } from "./extractionCache.js";
 import { injectVideoFramesBatch, syncVideoFrameVisibility } from "./screenshotService.js";
 import { type BeforeCaptureHook } from "./frameCapture.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import {
+  HF_COLOR_GRADING_ATTR,
   HF_COLOR_GRADING_CANVAS_ID_PREFIX,
   RENDER_FRAME_ID_PREFIX,
   RENDER_FRAME_ID_SUFFIX,
@@ -151,7 +153,19 @@ function createFrameSourceCache(
   };
 }
 
-export const __testing = { createFrameSourceCache };
+/**
+ * How often a running render re-touches a shared extraction-cache entry it is
+ * still reading from. The entry's LRU clock is set once, when the extractor's
+ * lookup hits it, and never again — so a render holding a compiled-dir symlink
+ * into that entry for hours looks abandoned to a concurrent GC sweep, which
+ * can evict the directory out from under it. Re-touching on read turns each
+ * captured frame into a lease renewal. Far under the 1-hour GC floor
+ * (`EXTRACT_CACHE_MIN_AGE_MS` in videoFrameExtractor.ts) while still keeping
+ * the `utimesSync` rare.
+ */
+const CACHE_TOUCH_THROTTLE_MS = 5 * 60 * 1000;
+
+export const __testing = { createFrameSourceCache, CACHE_TOUCH_THROTTLE_MS };
 
 /**
  * Creates a BeforeCaptureHook that injects pre-extracted video frames
@@ -174,10 +188,31 @@ export function createVideoFrameInjector(
   const bytesLimit = bytesLimitMb * 1024 * 1024;
   const frameCache = createFrameSourceCache(entryLimit, bytesLimit, config?.frameSrcResolver);
   const lastInjectedFrameByVideo = new Map<string, number>();
+  const lastCacheTouchByDir = new Map<string, number>();
+
+  /**
+   * Renew this render's lease on an extraction-cache entry it reads from. Called
+   * on every frame for every entry the render holds, including clips not on
+   * screen yet (one that first shows an hour in still needs its frames), so it
+   * throttles per directory.
+   */
+  function renewCacheLease(cacheDir: string): void {
+    const now = Date.now();
+    const lastTouch = lastCacheTouchByDir.get(cacheDir);
+    if (lastTouch !== undefined && now - lastTouch < CACHE_TOUCH_THROTTLE_MS) return;
+    touchCacheDir(cacheDir);
+    lastCacheTouchByDir.set(cacheDir, now);
+  }
 
   // fallow-ignore-next-line complexity
-  return async (page: Page, time: number) => {
+  const inject: BeforeCaptureHook = async (page: Page, time: number, heldVideoTime?: number) => {
+    for (const cacheDir of frameLookup.frameDirs()) renewCacheLease(cacheDir);
     const activePayloads = frameLookup.getActiveFramePayloads(time);
+    if (heldVideoTime !== undefined) {
+      for (const [videoId, payload] of frameLookup.getActiveFramePayloads(heldVideoTime)) {
+        if (activePayloads.has(videoId)) activePayloads.set(videoId, payload);
+      }
+    }
 
     const updates: Array<{ videoId: string; dataUri: string; frameIndex: number }> = [];
     const activeIds = new Set<string>();
@@ -235,6 +270,7 @@ export function createVideoFrameInjector(
       }
     }
   };
+  return Object.assign(inject, { fresh: () => createVideoFrameInjector(frameLookup, config) });
 }
 
 // ── HDR compositing utilities ─────────────────────────────────────────────────
@@ -306,6 +342,74 @@ async function setVideoElementsVisibility(
     HF_COLOR_GRADING_CANVAS_ID_PREFIX,
     visible,
   );
+}
+
+export interface ShownBox {
+  width: number;
+  height: number;
+}
+
+/**
+ * Seeks to each of `times`; returns each video's largest drawn box in device pixels. Videos that are
+ * graded, sampled by a canvas, `object-fit: none | scale-down` or never laid out get none (full size).
+ */
+export async function measureVideoShownBoxes(
+  page: Page,
+  videoIds: readonly string[],
+  times: readonly number[],
+): Promise<Map<string, ShownBox>> {
+  if (videoIds.length === 0 || times.length === 0) return new Map();
+  const boxes = await page.evaluate(
+    async (
+      ids: string[],
+      seekTimes: number[],
+      gradingAttr: string,
+      gradingCanvasPrefix: string,
+    ) => {
+      const hf = (window as Window & { __hf?: { seek?: (t: number) => void } }).__hf;
+      if (typeof hf?.seek !== "function") return [];
+      const waitForSeek = (window as Window & { __hfWaitForSeekCompletion?: () => Promise<void> })
+        .__hfWaitForSeekCompletion;
+      const largest = new Map<string, ShownBox>();
+      const fullSize = new Set<string>();
+      const keepsFullSize = (video: Element): boolean => {
+        if (video.hasAttribute(gradingAttr)) return true;
+        const fit = window.getComputedStyle(video).objectFit;
+        return fit === "none" || fit === "scale-down";
+      };
+      const measure = (id: string): void => {
+        const video = window.__hfMediaEl?.(id) ?? document.getElementById(id);
+        if (!video || keepsFullSize(video)) {
+          fullSize.add(id);
+          return;
+        }
+        const rect = video.getBoundingClientRect();
+        const box = largest.get(id) ?? { width: 0, height: 0 };
+        box.width = Math.max(box.width, rect.width * window.devicePixelRatio);
+        box.height = Math.max(box.height, rect.height * window.devicePixelRatio);
+        largest.set(id, box);
+      };
+      const pageHasCanvas = (): boolean =>
+        Array.from(document.querySelectorAll("canvas")).some(
+          (canvas) => !canvas.id.startsWith(gradingCanvasPrefix),
+        );
+      for (const t of seekTimes) {
+        hf.seek(t);
+        await waitForSeek?.();
+        // A canvas could sample any video, so every video keeps full size.
+        if (pageHasCanvas()) return [];
+        for (const id of ids) measure(id);
+      }
+      return Array.from(largest).filter(
+        ([id, box]) => !fullSize.has(id) && box.width > 0 && box.height > 0,
+      );
+    },
+    [...videoIds],
+    [...times],
+    HF_COLOR_GRADING_ATTR,
+    HF_COLOR_GRADING_CANVAS_ID_PREFIX,
+  );
+  return new Map(boxes);
 }
 
 /**

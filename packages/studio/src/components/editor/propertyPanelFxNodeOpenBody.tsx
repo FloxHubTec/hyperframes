@@ -1,3 +1,4 @@
+import { useTrackDesignInput } from "../../contexts/DesignPanelInputContext";
 /**
  * An effect row's open face: the derived or primary one-knob control, and
  * Details underneath it.
@@ -54,6 +55,7 @@ function FxNodeDerivedKnob({
   onUpdate(index: number, patch: Partial<HfAudioFxNode>): void;
   trackKind?: string;
 }) {
+  const trackInput = useTrackDesignInput();
   if (!derived) return null;
   return (
     <>
@@ -66,6 +68,7 @@ function FxNodeDerivedKnob({
           onCommit={(_k, v) => {
             trackProfileCommitted(node.type, Number(v), { trackKind });
             onUpdate(index, { params: applyAudioFxProfile(node.type, Number(v), params) });
+            trackInput("slider", "profile-strength");
           }}
         />
       </div>
@@ -242,11 +245,11 @@ export function FxNodeOpenBody({
           onClick={onToggleDetails}
         >
           <span aria-hidden="true">{details ? "▾" : "▸"}</span>
-          Details — {registryDef.label}
+          Details: {registryDef.label}
         </button>
       ) : (
         <p className="hf-fx-node-mechanism border-t border-panel-border-input px-1.5 pt-1 font-mono text-[9px] uppercase tracking-wide text-panel-text-2">
-          Details — {registryDef.label}
+          Details: {registryDef.label}
         </p>
       )}
       {details || !oneKnob ? (

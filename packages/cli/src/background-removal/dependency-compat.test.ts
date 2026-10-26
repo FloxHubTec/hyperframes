@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { OPTIONAL_PACKAGES } from "../utils/optionalPackages.js";
 
 const require = createRequire(import.meta.url);
 
@@ -13,10 +14,17 @@ describe("background-removal native dependency compatibility", () => {
       dependencies?: Record<string, string>;
     };
 
-    expect(packageJson.dependencies).toMatchObject({
-      "adm-zip": "^0.6.0",
-      sharp: "^0.35.0",
-    });
+    expect(packageJson.dependencies).toMatchObject({ "adm-zip": "^0.6.0" });
+  });
+
+  it("keeps sharp optional in the CLI and studio-server, so a host may ship without it", () => {
+    for (const manifest of ["../../package.json", "../../../studio-server/package.json"]) {
+      const packageJson = JSON.parse(
+        readFileSync(fileURLToPath(new URL(manifest, import.meta.url)), "utf8"),
+      ) as { dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> };
+      expect(packageJson.dependencies, manifest).not.toHaveProperty("sharp");
+      expect(packageJson.optionalDependencies?.["sharp"], manifest).toBe("^0.35.0");
+    }
   });
 
   it("keeps every Node server consumer above the patched security floor", () => {
@@ -39,12 +47,18 @@ describe("background-removal native dependency compatibility", () => {
     const packagePath = fileURLToPath(new URL("../../package.json", import.meta.url));
     const packageJson = JSON.parse(readFileSync(packagePath, "utf8")) as {
       dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
 
     // 1.22+ pulls vulnerable adm-zip <0.6.0, while later releases also drop
     // the Intel macOS binary. Return to a newer ONNX release once it satisfies
     // both the clean dependency graph and the six-platform binary contract.
-    expect(packageJson.dependencies?.["onnxruntime-node"]).toBe("1.21.1");
+    expect(OPTIONAL_PACKAGES["onnxruntime-node"]).toBe("1.21.1");
+
+    // Installed on first use, so it must not ride along with `npx hyperframes`; the devDependency
+    // only supplies types and the binding listing below, at the same pinned version.
+    expect(packageJson.dependencies).not.toHaveProperty("onnxruntime-node");
+    expect(packageJson.devDependencies).toMatchObject(OPTIONAL_PACKAGES);
 
     const bindingEntry = require.resolve("onnxruntime-node");
     const packageRoot = join(dirname(bindingEntry), "..");

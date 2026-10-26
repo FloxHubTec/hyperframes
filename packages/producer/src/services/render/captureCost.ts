@@ -116,11 +116,8 @@ function combineCaptureCostEstimates(
  * - Auto-sized renders only (`requestedWorkers === undefined`) — the field
  *   failure was auto sizing, and an explicit `--workers N` is the operator's
  *   own call.
- * - Not enforced as a cap yet — the per-worker budget constant is derived
- *   from one field report; the `workers_heap_*` telemetry emitted with the
- *   sizing decides whether to enforce (see the TODO on HEAP_PER_WORKER_MB in
- *   @hyperframes/engine's parallelCoordinator). The message gives the
- *   operator the actionable knobs today.
+ * - Auto sizing is capped at the heap budget (computeWorkerSizing), so the
+ *   warning cannot fire today; it stays for a budget that stops being a cap.
  *
  * Pure so the message shape + firing condition are unit-testable with a
  * synthetic `WorkerSizing` (the real one depends on the host's heap).
@@ -156,7 +153,7 @@ export function resolveRenderWorkerCount(
   const reasonCodes = new Set(compiled.renderModeHints.reasons.map((r) => r.code));
   if (reasonCodes.has("htmlInCanvas")) {
     log.warn(
-      "[Render] html-in-canvas (drawElementImage) detected — pinning to 1 worker (Chrome concurrency limitation).",
+      "[Render] html-in-canvas (drawElementImage) detected, pinning to 1 worker (Chrome concurrency limitation).",
       { requestedWorkers },
     );
     return 1;
@@ -169,7 +166,7 @@ export function resolveRenderWorkerCount(
   // every path into capture.
   if (cfg.lowMemoryMode && requestedWorkers === undefined) {
     log.info(
-      "[Render] Low-memory profile — pinning to 1 capture worker (auto-worker calibration skipped).",
+      "[Render] Low-memory profile, pinning to 1 capture worker (auto-worker calibration skipped).",
     );
     return 1;
   }

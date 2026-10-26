@@ -11,7 +11,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import {
@@ -21,7 +21,8 @@ import {
   extractVideoFramesRange,
   extractionFrameCountForDuration,
   createFrameLookupTable,
-  resolveProjectRelativeSrc,
+  FrameLookupTable,
+  rebaseVideoToWindow,
   resolveFrameFormat,
   codecMayHaveAlpha,
   decoderForCodec,
@@ -54,10 +55,17 @@ import {
   extractVideoMetadata,
   type VideoMetadata,
 } from "../utils/ffprobe.js";
-import { runFfmpeg } from "../utils/runFfmpeg.js";
+import { ffmpegStatsReader, runFfmpeg, type RunFfmpegOptions } from "../utils/runFfmpeg.js";
+
+// Pass-through, so a test can tell whether extraction ran ffmpeg.
+vi.mock("../utils/runFfmpeg.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../utils/runFfmpeg.js")>();
+  return { ...real, runFfmpeg: vi.fn(real.runFfmpeg) };
+});
 import { COMPLETE_SENTINEL, GC_MARKER, SCHEMA_PREFIX } from "./extractionCache.js";
 import { resolveRuntimeMediaClipDuration } from "../../../core/src/runtime/media.js";
-import { compileTimingAttrs } from "@hyperframes/core";
+import { compileTimingAttrs, sourceTimeAt } from "@hyperframes/core";
+import { RATE_RANGE } from "@hyperframes/core/audio-automation";
 
 // ffmpeg is not preinstalled on GitHub's ubuntu-24.04 runners. The producer
 // regression test at packages/producer/tests/vfr-screen-recording/ runs inside
@@ -66,6 +74,16 @@ import { compileTimingAttrs } from "@hyperframes/core";
 // below run too — they exercise the extractor in isolation against a
 // synthesized VFR fixture.
 const HAS_FFMPEG = spawnSync("ffmpeg", ["-version"]).status === 0;
+const HAS_ZSCALE =
+  HAS_FFMPEG &&
+  /\szscale\s/.test(spawnSync("ffmpeg", ["-hide_banner", "-filters"]).stdout.toString());
+const FFMPEG_ENCODERS = HAS_FFMPEG
+  ? spawnSync("ffmpeg", ["-hide_banner", "-encoders"]).stdout.toString()
+  : "";
+// Homebrew's ffmpeg has libsvtav1 but not libaom-av1. Either one writes an untagged AV1 stream.
+const AV1_ENCODER = ["libaom-av1", "libsvtav1"].find((name) =>
+  new RegExp(`\\s${name}\\s`).test(FFMPEG_ENCODERS),
+);
 
 describe("resolveVideoExtractionDuration", () => {
   const metadata = (
@@ -123,6 +141,72 @@ describe("resolveVideoExtractionDuration", () => {
     ).toMatchObject({
       compositionStart: 0,
       mediaStart: 1,
+      durationSeconds: 4,
+      timelineDurationSeconds: 2,
+    });
+  });
+
+  it("extracts the source span a ramped slot consumes: 2s of 1x to 3x reads 2*(3-1)/ln 3 source seconds", () => {
+    const rate = {
+      target: "rate",
+      points: [
+        { t: 0, v: 1 },
+        { t: 2, v: 3 },
+      ],
+    };
+    expect(
+      resolveVideoExtractionWindow(video({ end: 2, playbackRate: rate }), metadata(8), 2),
+    ).toMatchObject({ compositionStart: 0, mediaStart: 0, timelineDurationSeconds: 2 });
+    const { durationSeconds } = resolveVideoExtractionWindow(
+      video({ end: 2, playbackRate: rate }),
+      metadata(8),
+      2,
+    );
+    expect(durationSeconds).toBeCloseTo(3.6411, 3);
+  });
+
+  const RAMP = {
+    target: "rate",
+    points: [
+      { t: 0, v: 1 },
+      { t: 4, v: 3 },
+    ],
+  };
+
+  it("starts a ramped clip that begins before the timeline at the integrated source time of the trimmed part", () => {
+    // geometric 1x to 3x over 4s: source(t) = 4(3^(t/4)-1)/ln 3; 1s trimmed reads 1.1508, all 4s read 7.2819
+    const window = resolveVideoExtractionWindow(
+      video({ start: -1, end: 3, playbackRate: RAMP }),
+      metadata(20),
+      3,
+    );
+    expect(window.mediaStart).toBeCloseTo(1.1508, 3);
+    expect(window.durationSeconds).toBeCloseTo(6.1311, 3);
+  });
+
+  it("rebases a ramped clip so lookup reads the same source second the untrimmed lane would", () => {
+    const clip = video({ start: -1, end: 3, playbackRate: RAMP });
+    rebaseVideoToWindow(clip, resolveVideoExtractionWindow(clip, metadata(20), 3));
+    // composition second 2 is 3s into the authored lane: source 4.6586
+    const seconds = clip.mediaStart + sourceTimeAt(clip.playbackRate ?? 1, 2 - clip.start);
+    expect(seconds).toBeCloseTo(4.6586, 3);
+  });
+
+  it("snaps a float-noise composition start to the timeline origin so the first frame is kept", () => {
+    const clip = video({ start: -1, end: 8, playbackRate: 0.7 });
+    rebaseVideoToWindow(clip, { compositionStart: 2.2e-16, mediaStart: 0.7, durationSeconds: 5 });
+    expect(clip.start).toBe(0);
+  });
+
+  it("reports the natural timeline duration of a ramped clip through the lane", () => {
+    const flat = {
+      target: "rate",
+      points: [
+        { t: 0, v: 2 },
+        { t: 1, v: 2 },
+      ],
+    };
+    expect(resolveVideoExtractionWindow(video({ playbackRate: flat }), metadata(4))).toMatchObject({
       durationSeconds: 4,
       timelineDurationSeconds: 2,
     });
@@ -331,6 +415,34 @@ describe("resolveVideoExtractionDuration", () => {
   it("rejects a media start at video-stream EOF even when the container continues", () => {
     expect(() =>
       resolveVideoExtractionWindow(video({ mediaStart: 3 }), metadata(60, 3), 10),
+    ).toThrowError(expect.objectContaining({ kind: "media_start_out_of_range", retryable: false }));
+  });
+
+  it("plans a one-frame held tail when an explicit non-looping slot starts past EOF", () => {
+    expect(resolveVideoExtractionWindow(video({ end: 6, mediaStart: 5 }), metadata(2))).toEqual({
+      compositionStart: 0,
+      mediaStart: 1.999999,
+      durationSeconds: 0.000001,
+      preserveTimelineEnd: true,
+      ensureFinalFrame: true,
+    });
+  });
+
+  it("keeps the playable suffix when an explicit non-looping slot starts just inside EOF", () => {
+    expect(
+      resolveVideoExtractionWindow(video({ end: 6, mediaStart: 1.9 }), metadata(2), 6),
+    ).toEqual({
+      compositionStart: 0,
+      mediaStart: 1.9,
+      durationSeconds: 0.10000000000000009,
+      preserveTimelineEnd: true,
+      ensureFinalFrame: true,
+    });
+  });
+
+  it("rejects a looping explicit slot that starts at source EOF", () => {
+    expect(() =>
+      resolveVideoExtractionWindow(video({ end: 6, mediaStart: 2, loop: true }), metadata(2), 6),
     ).toThrowError(expect.objectContaining({ kind: "media_start_out_of_range", retryable: false }));
   });
 
@@ -581,109 +693,46 @@ describe("resolveFrameFormat", () => {
     expect(resolveFrameFormat(metadata({ hasAlpha: true }), "jpg")).toBe("png");
     expect(resolveFrameFormat(metadata({ videoCodec: "vp9" }), "jpg")).toBe("png");
   });
-});
 
-// Regression: a long-standing footgun where `<video src="../assets/foo">`
-// inside a sub-composition silently dropped the video from extraction. The
-// browser's URL resolver clamps `..` at the served origin's root (so the
-// page renders fine in the studio), but `path.join(projectDir, "../assets/foo")`
-// normalizes to <parentOfProjectDir>/assets/foo, which doesn't exist —
-// extraction skipped, no frame injection, rendered output shows the video's
-// first decoded frame for the whole clip duration. The resolver now mirrors
-// browser semantics by clamping any traversal that escapes the project root.
-describe("resolveProjectRelativeSrc — sub-composition path clamping", () => {
-  let tmp: string;
-
-  beforeAll(() => {
-    tmp = mkdtempSync(join(tmpdir(), "hf-resolver-"));
-    mkdirSync(join(tmp, "project", "assets"), { recursive: true });
-    writeFileSync(join(tmp, "project", "assets", "foo.mp4"), "");
-  });
-  afterAll(() => {
-    rmSync(tmp, { recursive: true, force: true });
-  });
-
-  it("returns the literal join when the file exists at projectDir/src", () => {
-    const projectDir = join(tmp, "project");
-    expect(resolveProjectRelativeSrc("assets/foo.mp4", projectDir)).toBe(
-      join(projectDir, "assets/foo.mp4"),
+  it("keeps ProRes without an alpha plane on jpg and ProRes with one on png", () => {
+    expect(resolveFrameFormat(metadata({ videoCodec: "prores" }), undefined)).toBe("jpg");
+    expect(resolveFrameFormat(metadata({ videoCodec: "prores", hasAlpha: true }), "jpg")).toBe(
+      "png",
     );
   });
 
-  it("resolves a browser root-absolute URL from the project root", () => {
-    const projectDir = join(tmp, "project");
-    expect(resolveProjectRelativeSrc("/assets/foo.mp4", projectDir)).toBe(
-      join(projectDir, "assets/foo.mp4"),
-    );
-  });
+  type FormatCase = Pick<VideoMetadata, "videoCodec" | "hasAlpha" | "alphaPlaneDecoded"> & {
+    requested: "auto" | "jpg" | "png";
+  };
+  const formatCases: FormatCase[] = ["vp9", "vp8", "h264", "prores"].flatMap((videoCodec) =>
+    [true, false].flatMap((hasAlpha) =>
+      [true, false, undefined].flatMap((alphaPlaneDecoded) =>
+        (["auto", "jpg", "png"] as const).map((requested) => ({
+          videoCodec,
+          hasAlpha,
+          alphaPlaneDecoded,
+          requested,
+        })),
+      ),
+    ),
+  );
+  function expectedFormat({ videoCodec, hasAlpha, alphaPlaneDecoded, requested }: FormatCase) {
+    const sidecar = videoCodec === "vp9" || videoCodec === "vp8";
+    const keepsPng = hasAlpha || (sidecar && alphaPlaneDecoded !== false);
+    return keepsPng || requested === "png" ? "png" : "jpg";
+  }
 
-  it("clamps a leading `../` so `../assets/foo.mp4` resolves to assets/foo.mp4", () => {
-    const projectDir = join(tmp, "project");
-    expect(resolveProjectRelativeSrc("../assets/foo.mp4", projectDir)).toBe(
-      join(projectDir, "assets/foo.mp4"),
-    );
-  });
-
-  it("clamps multiple leading `../../../` segments", () => {
-    const projectDir = join(tmp, "project");
-    expect(resolveProjectRelativeSrc("../../../assets/foo.mp4", projectDir)).toBe(
-      join(projectDir, "assets/foo.mp4"),
-    );
-  });
-
-  it("clamps mid-path traversal that escapes baseDir (not just leading `..`)", () => {
-    // `assets/../../foo.mp4` collapses past projectDir via path.join — this
-    // case used to silently escape; the resolver now strips embedded `..`
-    // segments and re-anchors at the project root.
-    const projectDir = join(tmp, "project");
-    expect(resolveProjectRelativeSrc("assets/../../assets/foo.mp4", projectDir)).toBe(
-      join(projectDir, "assets/foo.mp4"),
-    );
-  });
-
-  it("returns the (non-existent) base-dir path on miss so callers get a stable error message", () => {
-    const projectDir = join(tmp, "project");
-    expect(resolveProjectRelativeSrc("../assets/missing.mp4", projectDir)).toBe(
-      join(projectDir, "../assets/missing.mp4"),
-    );
-  });
-
-  it("prefers compiled-dir over base-dir when the file exists in both", () => {
-    const projectDir = join(tmp, "project");
-    const compiledDir = join(tmp, "compiled");
-    mkdirSync(join(compiledDir, "assets"), { recursive: true });
-    writeFileSync(join(compiledDir, "assets", "foo.mp4"), "");
-    expect(resolveProjectRelativeSrc("assets/foo.mp4", projectDir, compiledDir)).toBe(
-      join(compiledDir, "assets/foo.mp4"),
-    );
-  });
-
-  it("resolves percent-encoded non-Latin filenames across scripts", () => {
-    const projectDir = join(tmp, "project");
-    const cases = [
-      ["arabic", "%D9%87%D9%86%D8%A7-%D9%85%D8%B1%D9%88%D8%A7.mp4"],
-      ["japanese", "%E6%97%A5%E6%9C%AC%E8%AA%9E.mp4"],
-      ["cyrillic", "%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82.mp4"],
-      ["korean", "%ED%95%9C%EA%B8%80.mp4"],
-    ] as const;
-
-    for (const [, encodedFilename] of cases) {
-      const filename = decodeURIComponent(encodedFilename);
-      writeFileSync(join(projectDir, "assets", filename), "");
-
-      expect(resolveProjectRelativeSrc(`assets/${encodedFilename}`, projectDir)).toBe(
-        join(projectDir, "assets", filename),
-      );
+  it("lets VP8/VP9 leave png only when a decode probe found no alpha plane", () => {
+    expect(formatCases).toHaveLength(72);
+    for (const { requested, ...fields } of formatCases) {
+      const actual = resolveFrameFormat(metadata(fields), requested);
+      expect(actual, JSON.stringify(fields)).toBe(expectedFormat({ requested, ...fields }));
     }
-  });
-
-  it("falls back to literal filenames when percent sequences are malformed", () => {
-    const projectDir = join(tmp, "project");
-    const filename = "100%-discount.mp4";
-    writeFileSync(join(projectDir, "assets", filename), "");
-
-    expect(resolveProjectRelativeSrc(`assets/${filename}`, projectDir)).toBe(
-      join(projectDir, "assets", filename),
+    expect(resolveFrameFormat(metadata({ videoCodec: "vp9", alphaPlaneDecoded: false }))).toBe(
+      "jpg",
+    );
+    expect(resolveFrameFormat(metadata({ videoCodec: "vp8", alphaPlaneDecoded: false }))).toBe(
+      "jpg",
     );
   });
 });
@@ -743,9 +792,29 @@ describe("parseVideoElements", () => {
     );
 
     expect(fast?.playbackRate).toBe(2);
-    expect(low?.playbackRate).toBe(0.1);
-    expect(high?.playbackRate).toBe(5);
+    expect(low?.playbackRate).toBe(RATE_RANGE.min);
+    expect(high?.playbackRate).toBe(RATE_RANGE.max);
     expect(invalid?.playbackRate).toBe(1);
+  });
+
+  it("parses a rate lane from data-automation into the clip's rate", () => {
+    const automation = JSON.stringify({
+      version: 1,
+      lanes: [
+        {
+          target: "rate",
+          points: [
+            { t: 0, v: 1 },
+            { t: 2, v: 3 },
+          ],
+        },
+      ],
+    });
+    const [ramped] = parseVideoElements(
+      `<video id="ramped" src="clip.mp4" data-automation='${automation}'></video>`,
+    );
+
+    expect(ramped?.playbackRate).toMatchObject({ target: "rate" });
   });
 
   it("parses videos without an id or data-start attribute", () => {
@@ -852,6 +921,21 @@ describe("parseVideoElements", () => {
     expect(videos.find((v) => v.id === "main")?.start).toBe(9);
   });
 
+  it("resolves a reference inside its own composition when another composition reuses the id", () => {
+    const videos = parseVideoElements(
+      '<div data-composition-id="main">' +
+        '<div data-composition-id="scene-a" data-start="0" data-duration="4">' +
+        '<div id="intro" data-start="0" data-duration="2"></div>' +
+        "</div>" +
+        '<div data-composition-id="scene-b" data-start="4" data-duration="4">' +
+        '<div id="intro" data-start="0" data-duration="3"></div>' +
+        '<video id="clip" src="b.mp4" data-start="intro" data-duration="1"></video>' +
+        "</div>" +
+        "</div>",
+    );
+    expect(videos.find((v) => v.id === "clip")?.start).toBe(3);
+  });
+
   it("falls back to 0 (never NaN) for an unknown reference target", () => {
     const videos = parseVideoElements(
       '<video id="orphan" src="a.mp4" data-start="does-not-exist" data-duration="5"></video>',
@@ -935,6 +1019,31 @@ describe("FrameLookupTable", () => {
     expect(table.getActiveFramePayloads(0.5).get("hero")?.frameIndex).toBe(15);
     expect(table.getActiveFramePayloads(1.5).get("hero")?.frameIndex).toBe(15);
     expect(table.getActiveFramePayloads(4.5).get("hero")?.frameIndex).toBe(15);
+  });
+
+  it("shows a copy starting on a float sum at that instant, as the preview does", () => {
+    const copyStart = 0.1 + 0.2;
+    const clip = (id: string, start: number) => ({
+      id,
+      src: `${id}.webm`,
+      start,
+      end: start + 0.2,
+      mediaStart: 0,
+      loop: false,
+      hasAudio: false,
+    });
+    const frames = (videoId: string) => ({ ...fakeExtracted(30, 30), videoId });
+    const table = () =>
+      createFrameLookupTable(
+        [clip("a", 0.1), clip("copy", copyStart)],
+        [frames("a"), frames("copy")],
+      );
+
+    expect(table().getActiveFramePayloads(0.3).get("copy")?.frameIndex).toBe(0);
+    const stepping = table();
+    stepping.getActiveFramePayloads(0.2);
+    expect(stepping.getActiveFramePayloads(0.3).get("copy")?.frameIndex).toBe(0);
+    expect(getFrameAtTime(frames("copy"), 0.3, copyStart)).toBe("frame-0.jpg");
   });
 
   it("selects source frames at the authored constant playback rate", () => {
@@ -1027,10 +1136,7 @@ describe("FrameLookupTable", () => {
     expect(table.getActiveFramePayloads(31).has("main")).toBe(false); // after resolved end (30)
   });
 
-  it("holds the last frame at the inclusive clip end (t === end)", () => {
-    // clip [1,3] with exactly 2s of source frames (60 @ 30fps). The frame
-    // landing on t === end used to deactivate one frame early and render blank,
-    // while the runtime keeps the element visible on its last frame.
+  it("shows the last frame just before the end and leaves at t === end, as the runtime does", () => {
     const table = createFrameLookupTable(
       [
         {
@@ -1045,10 +1151,10 @@ describe("FrameLookupTable", () => {
       ],
       [fakeExtracted(60, 30)],
     );
-    const atEnd = table.getActiveFramePayloads(3.0).get("hero");
-    expect(atEnd?.frameIndex).toBe(59);
-    // mid-clip is unaffected
     expect(table.getActiveFramePayloads(2.5).get("hero")?.frameIndex).toBe(45);
+    expect(table.getActiveFramePayloads(2.99).get("hero")?.frameIndex).toBe(59);
+    expect(table.getActiveFramePayloads(3.0).has("hero")).toBe(false);
+    expect(table.getFrame("hero", 3.0)).toBeNull();
   });
 
   it("holds the last frame across the tail when the source is shorter than the window", () => {
@@ -1069,7 +1175,7 @@ describe("FrameLookupTable", () => {
       [fakeExtracted(30, 30)],
     );
     expect(table.getActiveFramePayloads(1.5).get("hero")?.frameIndex).toBe(29);
-    expect(table.getActiveFramePayloads(5.0).get("hero")?.frameIndex).toBe(29);
+    expect(table.getActiveFramePayloads(4.99).get("hero")?.frameIndex).toBe(29);
   });
 
   it("holds the last frame when the source is a sub-frame shorter than the slot", () => {
@@ -1096,27 +1202,67 @@ describe("FrameLookupTable", () => {
     expect(table.getActiveFramePayloads(3.4).get("hero")?.frameIndex).toBe(42);
     // source exhausted but within tolerance of the end → hold, don't blank
     expect(table.getActiveFramePayloads(3.44).get("hero")?.frameIndex).toBe(42);
-    expect(table.getActiveFramePayloads(3.45).get("hero")?.frameIndex).toBe(42);
   });
 
-  it("keeps both clips active at a shared adjacent boundary, matching the runtime", () => {
-    // clip A ends at 3.0, clip B starts at 3.0. The runtime shows both at the
-    // shared instant; the active set must too.
-    const table = createFrameLookupTable(
-      [
-        { id: "a", src: "a.webm", start: 0, end: 3, mediaStart: 0, loop: false, hasAudio: false },
-        { id: "b", src: "b.webm", start: 3, end: 6, mediaStart: 0, loop: false, hasAudio: false },
-      ],
-      // createFrameLookupTable maps each clip to extracted frames by id.
-      [
-        { ...fakeExtracted(90, 30), videoId: "a" },
-        { ...fakeExtracted(90, 30), videoId: "b" },
-      ],
-    );
-    const payloads = table.getActiveFramePayloads(3.0);
-    expect(payloads.has("a")).toBe(true);
-    expect(payloads.has("b")).toBe(true);
+  it("gives a frame a hair before two clips meet to the clip export shows there", () => {
+    const clip = (id: string, start: number, end: number) => ({
+      id,
+      src: `${id}.webm`,
+      start,
+      end,
+      mediaStart: 0,
+      loop: false,
+      hasAudio: false,
+    });
+    const table = () =>
+      createFrameLookupTable(
+        [clip("a", 0, 1.00001), clip("b", 1.00001, 2)],
+        [
+          { ...fakeExtracted(90, 30), videoId: "a" },
+          { ...fakeExtracted(90, 30), videoId: "b" },
+        ],
+        30,
+      );
+    const stepping = table();
+    stepping.getActiveFramePayloads(29 / 30);
+    const payloads = stepping.getActiveFramePayloads(1);
+
+    expect([...payloads.keys()]).toEqual(["b"]);
+    expect(payloads.get("b")?.frameIndex).toBe(0);
+    expect([...table().getActiveFramePayloads(1).keys()]).toEqual(["b"]);
+    expect(table().getFrame("a", 1)).toBeNull();
   });
+
+  it.each([
+    ["an exact", 0.1, 0.3, 0.3],
+    ["a float-sum", 0.1, 0.1 + 0.2, 9 / 30],
+  ])(
+    "hands %s shared boundary to the incoming clip only, as the runtime does",
+    (_, aStart, aEnd, t) => {
+      const clip = (id: string, start: number, end: number) => ({
+        id,
+        src: `${id}.webm`,
+        start,
+        end,
+        mediaStart: 0,
+        loop: false,
+        hasAudio: false,
+      });
+      const table = () =>
+        createFrameLookupTable(
+          [clip("a", aStart, aEnd), clip("b", 0.3, 0.5)],
+          [
+            { ...fakeExtracted(90, 30), videoId: "a" },
+            { ...fakeExtracted(90, 30), videoId: "b" },
+          ],
+        );
+      const stepping = table();
+      expect([...stepping.getActiveFramePayloads(8 / 30).keys()]).toEqual(["a"]);
+      expect([...stepping.getActiveFramePayloads(t).keys()]).toEqual(["b"]);
+      expect([...table().getActiveFramePayloads(t).keys()]).toEqual(["b"]);
+      expect(table().getFrame("a", t)).toBeNull();
+    },
+  );
 });
 
 describe("analyzeClipMediaFit", () => {
@@ -1207,6 +1353,15 @@ const RED_SAMPLE_PIXELS = [
   [178, 92],
 ] as const;
 
+function pngChunkTypes(path: string): string[] {
+  const bytes = readFileSync(path);
+  const types: string[] = [];
+  for (let offset = 8; offset + 8 <= bytes.length; offset += 12 + bytes.readUInt32BE(offset)) {
+    types.push(bytes.toString("latin1", offset + 4, offset + 8));
+  }
+  return types;
+}
+
 function readFirstFramePixel(mediaPath: string, x: number, y: number): Rgb {
   const result = spawnSync(
     "ffmpeg",
@@ -1283,7 +1438,7 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
 
   afterAll(() => {
     if (existsSync(FIXTURE_DIR)) rmSync(FIXTURE_DIR, { recursive: true, force: true });
-  });
+  }, 30_000);
 
   function fixtureVideo(): VideoElement {
     return {
@@ -1296,6 +1451,125 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
       hasAudio: false,
     };
   }
+
+  it("extracts into a work directory whose name holds a printf code", async () => {
+    const outDir = join(FIXTURE_DIR, "x 12% Up");
+    mkdirSync(outDir, { recursive: true });
+    const result = await extractAllVideoFrames([fixtureVideo()], FIXTURE_DIR, {
+      fps: 1,
+      outputDir: outDir,
+    });
+    expect(result.errors).toEqual([]);
+    const frame = result.extracted[0]!.framePaths.get(0)!;
+    expect(frame.startsWith(outDir)).toBe(true);
+    expect(existsSync(frame)).toBe(true);
+  });
+
+  it("keeps the rightmost 8 columns of a 1080-wide (16n + 8) jpg extraction", async () => {
+    const source = join(FIXTURE_DIR, "white-1080.mp4");
+    const synth = await runFfmpeg([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=white:s=1080x16:d=1:r=1",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-crf",
+      "0",
+      "-pix_fmt",
+      "yuv420p",
+      source,
+    ]);
+    expect(synth.success).toBe(true);
+    const outDir = join(FIXTURE_DIR, "out-white-1080");
+    mkdirSync(outDir, { recursive: true });
+    const result = await extractAllVideoFrames(
+      [{ ...fixtureVideo(), id: "white", src: source }],
+      FIXTURE_DIR,
+      { fps: 1, outputDir: outDir },
+    );
+    expect(result.errors).toEqual([]);
+    const frame = result.extracted[0]!.framePaths.get(0)!;
+    expect(frame.endsWith(".jpg")).toBe(true);
+    const lastColumns = (file: string) => [
+      ...spawnSync("ffmpeg", [
+        "-v",
+        "error",
+        "-i",
+        file,
+        "-frames:v",
+        "1",
+        "-vf",
+        "format=gray,crop=8:1:iw-8:8",
+        "-f",
+        "rawvideo",
+        "-",
+      ]).stdout,
+    ];
+    const delivered = lastColumns(frame);
+    const expected = lastColumns(source);
+    expect(delivered).toHaveLength(8);
+    for (const [i, v] of delivered.entries())
+      expect(Math.abs(v - expected[i]!)).toBeLessThanOrEqual(5);
+  }, 60_000);
+
+  async function proresFrame(name: string, pixFmt: string, profile: string, source: string) {
+    const clip = join(FIXTURE_DIR, `${name}.mov`);
+    const synth = await runFfmpeg(
+      ["-y", "-loglevel", "error", "-f", "lavfi", "-i", source].concat([
+        "-c:v",
+        "prores_ks",
+        "-profile:v",
+        profile,
+        "-pix_fmt",
+        pixFmt,
+        clip,
+      ]),
+    );
+    expect(synth.success).toBe(true);
+    const outDir = join(FIXTURE_DIR, `out-${name}`);
+    mkdirSync(outDir, { recursive: true });
+    const result = await extractAllVideoFrames(
+      [{ ...fixtureVideo(), id: name, src: clip }],
+      FIXTURE_DIR,
+      { fps: 1, outputDir: outDir },
+    );
+    expect(result.errors).toEqual([]);
+    return result.extracted[0]!.framePaths.get(0)!;
+  }
+
+  it("extracts ProRes without an alpha plane to jpg", async () => {
+    const frame = await proresFrame("prores422", "yuv422p10le", "2", "testsrc2=s=320x180:d=1:r=1");
+    expect(frame.endsWith(".jpg")).toBe(true);
+  }, 60_000);
+
+  it("keeps the alpha of ProRes 4444 exact in png frames", async () => {
+    const frame = await proresFrame(
+      "prores4444",
+      "yuva444p10le",
+      "4",
+      "color=c=0x00ff00@0.5:s=320x180:d=1:r=1,format=yuva444p10le",
+    );
+    expect(frame.endsWith(".png")).toBe(true);
+    const alpha = spawnSync("ffmpeg", [
+      "-v",
+      "error",
+      "-i",
+      frame,
+      "-vf",
+      "alphaextract,crop=1:1:10:10",
+      "-f",
+      "rawvideo",
+      "-",
+    ]);
+    expect(Math.abs(alpha.stdout[0]! - 128)).toBeLessThanOrEqual(1);
+  }, 60_000);
 
   it("keeps color-sensitive UI reds closer to source when extraction is forced to png", async () => {
     const defaultOut = join(FIXTURE_DIR, "out-default");
@@ -1336,6 +1610,388 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
 
     expect(worstPngDelta).toBeLessThanOrEqual(5);
     expect(worstPngDelta).toBeLessThanOrEqual(worstDefaultDelta);
+  }, 60_000);
+
+  // Chrome runs with --force-color-profile=srgb and colour-manages any frame not tagged sRGB;
+  // the SDR encoder writes the canvas code values as they are, so frames must reach it unconverted.
+  it.each([
+    ["BT.709", "bt709"],
+    ["BT.601", "smpte170m"],
+  ])(
+    "declares png frames of a %s source as sRGB so Chrome shows their code values",
+    async (name, tag) => {
+      const fixture = join(FIXTURE_DIR, `${tag}-shadow.mp4`);
+      const synth = await runFfmpeg([
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        `color=c=0x101010:s=${UI_FIXTURE_WIDTH}x${UI_FIXTURE_HEIGHT}:d=1:r=1`,
+        "-vf",
+        `setparams=color_primaries=${tag}:color_trc=${tag}:colorspace=${tag}:range=tv`,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        fixture,
+      ]);
+      if (!synth.success) {
+        throw new Error(`${name} fixture synthesis failed: ${synth.stderr.slice(-400)}`);
+      }
+      expect((await extractVideoMetadata(fixture)).colorSpace?.colorTransfer).toBe(tag);
+      const outputDir = join(FIXTURE_DIR, `out-png-transfer-${tag}`);
+      mkdirSync(outputDir, { recursive: true });
+
+      const result = await extractAllVideoFrames(
+        [{ ...fixtureVideo(), id: tag, src: fixture }],
+        FIXTURE_DIR,
+        { fps: 1, outputDir, format: "png" },
+      );
+
+      expect(result.errors).toEqual([]);
+      const frame = result.extracted[0]!.framePaths.get(0)!;
+      // Chrome reads cICP before sRGB, and ffmpeg < 6.0 writes no cICP, so only an sRGB chunk
+      // without cICP means "these are sRGB code values" on every ffmpeg.
+      const chunks = pngChunkTypes(frame);
+      expect(chunks).toContain("sRGB");
+      expect(chunks).not.toContain("cICP");
+      expect(readFirstFramePixel(frame, 10, 10)).toEqual(readFirstFramePixel(fixture, 10, 10));
+    },
+    60_000,
+  );
+
+  it("extracts jpg frames of a BT.709 source as the BT.601 full range JPEG readers assume", async () => {
+    const fixture = join(FIXTURE_DIR, "bt709-patch.mp4");
+    const synth = await runFfmpeg([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=0xC83C28:s=${UI_FIXTURE_WIDTH}x${UI_FIXTURE_HEIGHT}:d=1:r=1,format=rgb24,drawbox=x=31:y=0:w=64:h=${UI_FIXTURE_HEIGHT}:c=0x0000FE:t=fill`,
+      "-vf",
+      "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-crf",
+      "0",
+      fixture,
+    ]);
+    if (!synth.success) throw new Error(`fixture synthesis failed: ${synth.stderr.slice(-400)}`);
+    const outputDir = join(FIXTURE_DIR, "out-jpg-matrix");
+    mkdirSync(outputDir, { recursive: true });
+
+    const result = await extractAllVideoFrames(
+      [{ ...fixtureVideo(), id: "bt709-jpg", src: fixture }],
+      FIXTURE_DIR,
+      { fps: 1, outputDir, format: "jpg" },
+    );
+
+    expect(result.errors).toEqual([]);
+    const frame = result.extracted[0]!.framePaths.get(0)!;
+    // x=10 is flat colour; x=32 sits one pixel inside the blue edge.
+    for (const x of [10, 32]) {
+      const source = readFirstFramePixel(fixture, x, 10);
+      const shown = readFirstFramePixel(frame, x, 10);
+      const worst = Math.max(...shown.map((v, i) => Math.abs(v - source[i]!)));
+      expect(worst, `x=${x}: source ${source} jpg ${shown}`).toBeLessThanOrEqual(3);
+    }
+  }, 60_000);
+
+  // Measured in Chrome 152: untagged H.264 plays as BT.601 at 1280x718 and BT.709 at 1280x720 or 406x720;
+  // untagged VP9 and AV1 play as BT.601 at every size.
+  it.each([
+    { codec: "libx264", height: 718, matrix: "bt601", format: "png" },
+    { codec: "libx264", height: 718, matrix: "bt601", format: "jpg" },
+    { codec: "libx264", height: 720, matrix: "bt709", format: "png" },
+    { codec: "libx264", height: 720, matrix: "bt709", format: "jpg" },
+    { codec: "libvpx-vp9", height: 720, matrix: "bt601", format: "png" },
+    ...(AV1_ENCODER
+      ? [{ codec: AV1_ENCODER, height: 720, matrix: "bt601", format: "png" } as const]
+      : []),
+  ] as const)(
+    "reads an untagged $height-line $codec source as $matrix like Chrome's own playback ($format)",
+    async ({ codec, height, matrix, format }) => {
+      const extension = codec === "libvpx-vp9" ? "webm" : "mp4";
+      const fixture = join(FIXTURE_DIR, `untagged-${codec}-${height}.${extension}`);
+      const synth = await runFfmpeg([
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        `color=c=0xC83C28:s=64x${height}:d=1:r=1`,
+        "-vf",
+        "scale=out_color_matrix=bt601:out_range=tv,format=yuv420p,setparams=colorspace=unknown:color_primaries=unknown:color_trc=unknown:range=tv",
+        "-c:v",
+        codec,
+        ...(codec === "libx264" ? ["-qp", "0"] : ["-crf", "0", "-b:v", "0"]),
+        ...(codec === "libaom-av1" ? ["-cpu-used", "8"] : []),
+        fixture,
+      ]);
+      if (!synth.success) throw new Error(`fixture synthesis failed: ${synth.stderr.slice(-400)}`);
+      expect((await extractVideoMetadata(fixture)).colorSpace?.colorSpace ?? "unknown").toBe(
+        "unknown",
+      );
+
+      const result = await extractVideoFramesRange(
+        fixture,
+        `${basename(fixture)}-${format}`,
+        0,
+        1,
+        {
+          fps: 1,
+          outputDir: join(FIXTURE_DIR, "out-untagged"),
+          format,
+        },
+      );
+
+      const pixelAt = (file: string, decode: string): number[] => [
+        ...spawnSync("ffmpeg", [
+          "-v",
+          "error",
+          "-i",
+          file,
+          "-vf",
+          `${decode}format=rgb24,crop=1:1:10:10`,
+          "-frames:v",
+          "1",
+          "-f",
+          "rawvideo",
+          "-",
+        ]).stdout,
+      ];
+      const expected = pixelAt(fixture, `scale=in_color_matrix=${matrix}:in_range=tv,`);
+      const shown = pixelAt(result.framePaths.get(0)!, "");
+      expect([expected.length, shown.length]).toEqual([3, 3]);
+      const worst = Math.max(...shown.map((v, i) => Math.abs(v - expected[i]!)));
+      expect(worst, `${matrix} decode ${expected}, ${format} ${shown}`).toBeLessThanOrEqual(
+        format === "png" ? 1 : 3,
+      );
+    },
+    60_000,
+  );
+
+  it("samples a 29.97 fps source with millisecond timestamps at 30 fps without skipping a frame", async () => {
+    // Each frame writes its index as eight black or white blocks; the mp4 keeps 1/1000 s ticks.
+    const fixture = join(FIXTURE_DIR, "ntsc-ms-ticks.mp4");
+    const synth = await runFfmpeg([
+      ...["-y", "-v", "error", "-f", "lavfi", "-i"],
+      "color=c=black:s=64x8:r=30000/1001:d=2,format=yuv420p,geq=lum='if(mod(floor(N/pow(2\\,floor(X/8)))\\,2)\\,235\\,16)':cb=128:cr=128",
+      ...["-c:v", "libx264", "-qp", "0", "-g", "30", "-bf", "0", "-video_track_timescale", "1000"],
+      fixture,
+    ]);
+    if (!synth.success) throw new Error(`fixture synthesis failed: ${synth.stderr.slice(-400)}`);
+
+    const result = await extractVideoFramesRange(fixture, "ntsc-ms-ticks", 0, 1.5, {
+      fps: 30,
+      outputDir: join(FIXTURE_DIR, "out-ntsc-ms"),
+      format: "png",
+    });
+    const indexOf = (file: string): number => {
+      const row = spawnSync("ffmpeg", [
+        "-v",
+        "error",
+        "-i",
+        file,
+        "-vf",
+        "format=gray,crop=64:1:0:4",
+        "-f",
+        "rawvideo",
+        "-",
+      ]).stdout;
+      return [...Array(8).keys()].reduce(
+        (n, bit) => n + (row[bit * 8 + 4]! > 128 ? 1 << bit : 0),
+        0,
+      );
+    };
+    const shown = [...result.framePaths.keys()]
+      .sort((a, b) => a - b)
+      .map((i) => indexOf(result.framePaths.get(i)!));
+    const steps = shown.slice(1).map((n, i) => n - shown[i]!);
+
+    expect(shown.length).toBeGreaterThanOrEqual(44);
+    expect(
+      steps.filter((step) => step > 1),
+      `source frames ${shown.join(",")}`,
+    ).toEqual([]);
+    expect(steps.filter((step) => step === 0).length).toBeLessThanOrEqual(1);
+  }, 60_000);
+
+  it("samples a millisecond-tick 29.97 fps source the same in segments as in one pass", async () => {
+    const fixture = join(FIXTURE_DIR, "ntsc-ms-ticks-8s.mp4");
+    const synth = await runFfmpeg([
+      ...["-y", "-v", "error", "-f", "lavfi", "-i"],
+      "color=c=black:s=64x8:r=30000/1001:d=8,format=yuv420p,geq=lum='if(mod(floor(N/pow(2\\,floor(X/8)))\\,2)\\,235\\,16)':cb=128:cr=128",
+      ...["-c:v", "libx264", "-qp", "0", "-g", "30", "-bf", "0", "-video_track_timescale", "1000"],
+      fixture,
+    ]);
+    if (!synth.success) throw new Error(`fixture synthesis failed: ${synth.stderr.slice(-400)}`);
+    const indexOf = (file: string): number => {
+      const row = spawnSync("ffmpeg", [
+        "-v",
+        "error",
+        "-i",
+        file,
+        "-vf",
+        "format=gray,crop=64:1:0:4",
+        "-f",
+        "rawvideo",
+        "-",
+      ]).stdout;
+      return [...Array(8).keys()].reduce(
+        (n, bit) => n + (row[bit * 8 + 4]! > 128 ? 1 << bit : 0),
+        0,
+      );
+    };
+    const options = {
+      fps: 30,
+      outputDir: join(FIXTURE_DIR, "out-ntsc-seams"),
+      format: "png" as const,
+    };
+    const single = await extractVideoFramesRange(fixture, "ntsc-single", 0, 7.5, options);
+
+    const seams = [4, 17, 29, 41, 58, 73, 90, 107, 121, 139, 156, 170, 188, 201];
+    const differing: string[] = [];
+    for (const firstFrame of seams) {
+      const segment = await extractVideoFramesRange(fixture, `ntsc-seam-${firstFrame}`, 0, 7.5, {
+        ...options,
+        frameRanges: [{ firstFrame, frames: 12 }],
+      });
+      for (const [slot, path] of segment.framePaths) {
+        const expected = indexOf(single.framePaths.get(slot)!);
+        const shown = indexOf(path);
+        if (shown !== expected) differing.push(`slot ${slot}: ${shown} vs ${expected}`);
+      }
+    }
+    expect(differing).toEqual([]);
+  }, 120_000);
+
+  // ffmpeg < 6.1 drops frame durations from CFR resampling once any -vf is set, so the colour
+  // filters would cut the still that ends this window short.
+  it.each([
+    {
+      name: "full range BT.709",
+      format: "png",
+      codec: "libx264",
+      pixFmt: "yuvj420p",
+      probed: { colorTransfer: "bt709" },
+      tags: "range=pc:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+    },
+    {
+      name: "full range BT.709",
+      format: "jpg",
+      codec: "libx264",
+      pixFmt: "yuvj420p",
+      probed: { colorTransfer: "bt709" },
+      tags: "range=pc:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+    },
+    {
+      name: "BT.470BG gamma 2.8",
+      format: "png",
+      codec: "libx264",
+      pixFmt: "yuv420p",
+      probed: { colorTransfer: "bt470bg" },
+      tags: "color_primaries=bt470bg:color_trc=bt470bg:colorspace=bt470bg",
+    },
+    {
+      name: "RGB",
+      format: "png",
+      codec: "libx264rgb",
+      pixFmt: "rgb24",
+      probed: { colorSpace: "gbr" },
+      tags: "",
+    },
+  ] as const)(
+    "keeps every frame and the colours of a $name VFR window that ends on a still ($format)",
+    async ({ name, format, codec, pixFmt, probed, tags }) => {
+      const fixture = join(FIXTURE_DIR, `vfr-still-${name.replace(/\W+/g, "-")}-${format}.mp4`);
+      const synth = await runFfmpeg([
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        `color=c=0xC83C28:s=${UI_FIXTURE_WIDTH}x${UI_FIXTURE_HEIGHT}:d=2:r=60`,
+        "-vf",
+        `select='not(between(n\\,30\\,89))'${tags ? `,setparams=${tags}` : ""}`,
+        "-fps_mode",
+        "vfr",
+        "-c:v",
+        codec,
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        pixFmt,
+        fixture,
+      ]);
+      if (!synth.success) throw new Error(`fixture synthesis failed: ${synth.stderr.slice(-400)}`);
+      const window = 0.616666;
+      const unfilteredDir = join(FIXTURE_DIR, `out-${basename(fixture)}-unfiltered`);
+      mkdirSync(unfilteredDir, { recursive: true });
+      const unfiltered = await runFfmpeg([
+        "-v",
+        "error",
+        "-ss",
+        "0",
+        "-i",
+        fixture,
+        "-t",
+        String(window),
+        "-fps_mode",
+        "cfr",
+        "-r",
+        "30",
+        join(unfilteredDir, "f_%05d.png"),
+      ]);
+      expect(unfiltered.success).toBe(true);
+
+      const result = await extractVideoFramesRange(fixture, basename(fixture), 0, window, {
+        fps: 30,
+        outputDir: join(FIXTURE_DIR, "out-vfr-still"),
+        format,
+      });
+
+      expect(result.metadata.isVFR).toBe(true);
+      expect(result.metadata.colorSpace).toMatchObject(probed);
+      expect(result.totalFrames).toBe(readdirSync(unfilteredDir).length);
+      const last = result.framePaths.get(result.totalFrames - 1)!;
+      const source = readFirstFramePixel(fixture, 10, 10);
+      const shown = readFirstFramePixel(last, 10, 10);
+      const worst = Math.max(...shown.map((v, i) => Math.abs(v - source[i]!)));
+      expect(worst, `source ${source} ${format} ${shown}`).toBeLessThanOrEqual(
+        format === "png" ? 0 : 3,
+      );
+      if (format === "png") expect(pngChunkTypes(last)).toContain("sRGB");
+    },
+    60_000,
+  );
+
+  it("leaves SDR-to-HDR frames in the HDR colours they were converted to", async () => {
+    const outputDir = join(FIXTURE_DIR, "out-sdr-to-hdr-gate");
+    mkdirSync(outputDir, { recursive: true });
+
+    const result = await extractVideoFramesRange(UI_FIXTURE, "sdr-to-hdr-gate", 0, 1, {
+      fps: 1,
+      outputDir,
+      format: "png",
+      sdrToHdrTransfer: "pq",
+    });
+
+    expect(pngChunkTypes(result.framePaths.get(0)!)).not.toContain("sRGB");
   }, 60_000);
 
   it("keeps jpg and png extraction caches separate", async () => {
@@ -1419,6 +2075,334 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
   }, 60_000);
 });
 
+// Each output slot shows the frame on screen at its time, as the preview does.
+describe.skipIf(!HAS_FFMPEG)("frame sampling at the output frame rate", () => {
+  const FIXTURE_DIR = mkdtempSync(join(tmpdir(), "hf-video-frame-sampling-"));
+  const WIDTH = 32;
+  const HEIGHT = 16;
+  // Matroska stores whole-millisecond timestamps (a 30 fps frame at 66.67 ms reads 67 ms);
+  // a 1/30 timescale stores each frame exactly on a coarse tick.
+  const SOURCES = {
+    "mp4-60": { fps: 60, file: "index-60fps.mp4", muxer: [] },
+    "mkv-30": { fps: 30, file: "index-30fps.mkv", muxer: [] },
+    "mp4-30-timescale-30": {
+      fps: 30,
+      file: "index-30fps-ts30.mp4",
+      muxer: ["-video_track_timescale", "30"],
+    },
+  } as const;
+  type SourceName = keyof typeof SOURCES;
+  const sourcePath = (name: SourceName) => join(FIXTURE_DIR, SOURCES[name].file);
+
+  beforeAll(async () => {
+    for (const name of Object.keys(SOURCES) as SourceName[]) {
+      // Frame k carries luma 16 + 2k, so each extracted frame names its source index.
+      const result = await runFfmpeg([
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        `nullsrc=s=${WIDTH}x${HEIGHT}:r=${SOURCES[name].fps}:d=1.5,geq=lum='16+2*N':cb=128:cr=128`,
+        "-c:v",
+        "libx264",
+        "-qp",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        ...SOURCES[name].muxer,
+        sourcePath(name),
+      ]);
+      if (!result.success) throw new Error(`index fixture synthesis failed: ${result.stderr}`);
+    }
+  }, 30_000);
+
+  afterAll(() => {
+    rmSync(FIXTURE_DIR, { recursive: true, force: true });
+  }, 30_000);
+
+  function sourceIndexes(extracted: ExtractedFrames): number[] {
+    const decoded = spawnSync("ffmpeg", [
+      "-v",
+      "error",
+      "-i",
+      join(extracted.outputDir, extracted.framePattern),
+      "-f",
+      "rawvideo",
+      "-pix_fmt",
+      "gray",
+      "pipe:1",
+    ]);
+    if (decoded.status !== 0) throw new Error(decoded.stderr.toString());
+    const indexes: number[] = [];
+    for (let offset = 0; offset < decoded.stdout.length; offset += WIDTH * HEIGHT) {
+      indexes.push(Math.round(((decoded.stdout[offset] ?? 0) * 219) / 255 / 2));
+    }
+    return indexes;
+  }
+
+  it.each([
+    { source: "mp4-60", fps: 24, startTime: 0, duration: 0.5 },
+    { source: "mp4-60", fps: 10, startTime: 0.37, duration: 0.6 },
+    { source: "mkv-30", fps: 30, startTime: 0, duration: 0.5 },
+    { source: "mp4-30-timescale-30", fps: 60, startTime: 0, duration: 0.5 },
+  ] as const)(
+    "$source: samples the frame on screen at each $fps fps slot from $startTime s",
+    async (c) => {
+      const extracted = await extractVideoFramesRange(
+        sourcePath(c.source),
+        `${c.source}-${c.fps}`,
+        c.startTime,
+        c.duration,
+        { fps: c.fps, outputDir: FIXTURE_DIR, format: "png" },
+      );
+      const onScreen = Array.from({ length: Math.round(c.duration * c.fps) }, (_, i) =>
+        Math.floor((c.startTime + i / c.fps) * SOURCES[c.source].fps + 1e-9),
+      );
+      expect(sourceIndexes(extracted)).toEqual(onScreen);
+    },
+    30_000,
+  );
+
+  // #5260: one ffmpeg process over a 26-minute clip hit ffmpegProcessTimeout.
+  it.each([
+    // 260 frames: one 240-frame segment, then 20 more.
+    { startTime: 0.5, duration: 130, frames: 260 },
+    // 200.3 - 80.3 is 120.00000000000001 s: exactly one segment, not a second near-empty one.
+    { startTime: 80.3, duration: 200.3 - 80.3, frames: 240 },
+  ])(
+    "extracts $duration s from $startTime s at 2 fps across segments without a gap or repeat",
+    async (c) => {
+      const source = join(FIXTURE_DIR, "index-2fps-long.mp4");
+      if (!existsSync(source)) {
+        const synth = await runFfmpeg([
+          "-y",
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          `nullsrc=s=${WIDTH}x${HEIGHT}:r=2:d=205,geq=lum='16+2*mod(N\\,100)':cb=128:cr=128`,
+          "-c:v",
+          "libx264",
+          "-qp",
+          "0",
+          "-pix_fmt",
+          "yuv420p",
+          source,
+        ]);
+        if (!synth.success) throw new Error(`long fixture synthesis failed: ${synth.stderr}`);
+      }
+      const extracted = await extractVideoFramesRange(
+        source,
+        `long-2fps-${c.startTime}`,
+        c.startTime,
+        c.duration,
+        { fps: 2, outputDir: FIXTURE_DIR, format: "png" },
+      );
+      const onScreen = Array.from(
+        { length: c.frames },
+        (_, i) => Math.floor((c.startTime + i / 2) * 2 + 1e-9) % 100,
+      );
+      expect(extracted.totalFrames).toBe(c.frames);
+      expect(sourceIndexes(extracted)).toEqual(onScreen);
+    },
+    60_000,
+  );
+
+  it("stops extraction only on a stall, and its ffmpeg reports each frame it writes", async () => {
+    const source = join(FIXTURE_DIR, "paced-2s.mp4");
+    const synth = await runFfmpeg([
+      ...["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi"],
+      ...["-i", `testsrc=s=${WIDTH}x${HEIGHT}:r=30:d=2`, "-pix_fmt", "yuv420p", source],
+    ]);
+    if (!synth.success) throw new Error(`paced fixture synthesis failed: ${synth.stderr}`);
+    const { runFfmpeg: real } =
+      await vi.importActual<typeof import("../utils/runFfmpeg.js")>("../utils/runFfmpeg.js");
+    let requested: RunFfmpegOptions | undefined;
+    const reported: number[] = [];
+    const readStats = ffmpegStatsReader(({ frames }) => {
+      if (frames) reported.push(frames);
+    });
+    // Real-time pacing spreads the stats over the run. The stall clock itself is runFfmpeg's to
+    // test; here it is lifted so a starved runner cannot race it.
+    vi.mocked(runFfmpeg).mockImplementation((args, opts) => {
+      requested = opts;
+      return real(["-stats_period", "0.1", "-re", ...args], {
+        ...opts,
+        timeout: 60_000,
+        onStderr: readStats,
+      });
+    });
+    try {
+      const extracted = await extractVideoFramesRange(
+        source,
+        "paced-stall-only",
+        0,
+        2,
+        { fps: 10, outputDir: FIXTURE_DIR, format: "png" },
+        undefined,
+        { ffmpegProcessTimeout: 2000 },
+      );
+      expect(extracted.totalFrames).toBe(20);
+      expect(requested).toMatchObject({ timeout: 2000 });
+      expect(new Set(reported).size).toBeGreaterThan(1);
+    } finally {
+      vi.mocked(runFfmpeg).mockImplementation(real);
+    }
+  }, 30_000);
+
+  it("stops a run that writes no new frame for the stall timeout", async () => {
+    // stdin stays open and empty, so ffmpeg waits for its first frame forever.
+    const stalled = await runFfmpeg(
+      ["-f", "rawvideo", "-pix_fmt", "gray", "-s", "2x2", "-i", "pipe:0", "-f", "null", "-"],
+      { timeout: 500 },
+    );
+    expect(stalled.terminationReason).toBe("inactivity");
+  }, 30_000);
+
+  // A distributed chunk extracts only the frames it renders; they must be the full extraction's.
+  describe("partial extraction", () => {
+    const gopSource = join(FIXTURE_DIR, "gop-30fps.mp4");
+
+    beforeAll(async () => {
+      // Real motion and long GOPs, so range seeks land mid-GOP.
+      const synth = await runFfmpeg([
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=s=64x36:r=30:d=20",
+        "-c:v",
+        "libx264",
+        "-g",
+        "250",
+        "-pix_fmt",
+        "yuv420p",
+        gopSource,
+      ]);
+      if (!synth.success) throw new Error(`gop fixture synthesis failed: ${synth.stderr}`);
+    }, 30_000);
+
+    function frameBytes(dir: string): Map<string, Buffer> {
+      return new Map(readdirSync(dir).map((name) => [name, readFileSync(join(dir, name))]));
+    }
+
+    it.each([
+      { fps: 24, startTime: 1.3, duration: 17 },
+      { fps: 60, startTime: 0, duration: 20 },
+    ])(
+      "frameRanges at $fps fps write the same files as a full extraction",
+      async (c) => {
+        const full = await extractVideoFramesRange(
+          gopSource,
+          `full-${c.fps}`,
+          c.startTime,
+          c.duration,
+          { fps: c.fps, outputDir: FIXTURE_DIR, format: "jpg" },
+        );
+        const last = full.totalFrames;
+        const ranges = [
+          { firstFrame: 0, frames: 5 },
+          { firstFrame: 97, frames: 40 },
+          { firstFrame: last - 3, frames: 3 },
+        ];
+        const partial = await extractVideoFramesRange(
+          gopSource,
+          `partial-${c.fps}`,
+          c.startTime,
+          c.duration,
+          { fps: c.fps, outputDir: FIXTURE_DIR, format: "jpg", frameRanges: ranges },
+        );
+        const fullFrames = frameBytes(full.outputDir);
+        const partialFrames = frameBytes(partial.outputDir);
+        expect(partialFrames.size).toBe(48);
+        for (const [name, bytes] of partialFrames) {
+          expect(fullFrames.get(name)?.equals(bytes), name).toBe(true);
+        }
+      },
+      60_000,
+    );
+
+    it.each([
+      { fps: 24, mediaStart: 3.3 },
+      { fps: 30, mediaStart: 0 },
+      { fps: 60, mediaStart: 7.77 },
+    ])(
+      "a deferred window to the source end at $fps fps reports the full frame count",
+      async (c) => {
+        const video = (): VideoElement => ({
+          id: `defer-${c.fps}`,
+          src: gopSource,
+          start: 0,
+          end: Infinity,
+          mediaStart: c.mediaStart,
+          loop: false,
+          hasAudio: false,
+        });
+        const full = await extractAllVideoFrames([video()], FIXTURE_DIR, {
+          fps: c.fps,
+          outputDir: join(FIXTURE_DIR, `defer-full-${c.fps}`),
+        });
+        const deferred = await extractAllVideoFrames([video()], FIXTURE_DIR, {
+          fps: c.fps,
+          outputDir: join(FIXTURE_DIR, `defer-${c.fps}`),
+          deferRangeExtraction: true,
+        });
+        expect(deferred.errors).toEqual([]);
+        const result = deferred.extracted[0]!;
+        expect(result.totalFrames).toBe(full.extracted[0]!.totalFrames);
+        expect(result.framePaths.size).toBe(0);
+        expect(readdirSync(result.outputDir)).toEqual([]);
+        expect(result.deferredRange).toEqual({
+          startTime: c.mediaStart,
+          durationSeconds: expect.any(Number),
+          format: "jpg",
+        });
+      },
+      60_000,
+    );
+
+    it("halves frames while they still cover the box a video is shown in", async () => {
+      const firstFrameSize = async (
+        videoId: string,
+        shownBox: { width: number; height: number },
+      ) => {
+        const result = await extractVideoFramesRange(gopSource, videoId, 0, 1, {
+          fps: 30,
+          outputDir: FIXTURE_DIR,
+          format: "jpg",
+          frameRanges: [{ firstFrame: 0, frames: 1 }],
+          shownBox,
+        });
+        const [frame] = result.framePaths.values();
+        return spawnSync("ffprobe", [
+          "-v",
+          "error",
+          "-show_entries",
+          "stream=width,height",
+          "-of",
+          "csv=p=0",
+          "--",
+          frame!,
+        ])
+          .stdout.toString()
+          .trim();
+      };
+      // 64x36 source: halved as often as the box allows (even sides round up); never below the box.
+      expect(await firstFrameSize("shown-quarter", { width: 16, height: 9 })).toBe("16,10");
+      expect(await firstFrameSize("shown-third", { width: 20, height: 12 })).toBe("32,18");
+      expect(await firstFrameSize("shown-near-full", { width: 40, height: 20 })).toBe("64,36");
+    }, 30_000);
+  });
+});
+
 describe.skipIf(!HAS_FFMPEG)("held tails on sparse-timestamp sources", () => {
   const fixtureDir = mkdtempSync(join(tmpdir(), "hf-sparse-held-tail-"));
   const cfrFixture = join(fixtureDir, "sub-1fps-cfr.mp4");
@@ -1436,7 +2420,7 @@ describe.skipIf(!HAS_FFMPEG)("held tails on sparse-timestamp sources", () => {
       {
         path: vfrFixture,
         input: "testsrc2=s=64x64:d=10:rate=1/2",
-        filters: ["-vf", "select='eq(n,0)+eq(n,2)'", "-vsync", "vfr"],
+        filters: ["-vf", "select='eq(n,0)+eq(n,2)'", "-fps_mode", "vfr"],
       },
       {
         path: nonZeroStartFixture,
@@ -1483,7 +2467,7 @@ describe.skipIf(!HAS_FFMPEG)("held tails on sparse-timestamp sources", () => {
 
   afterAll(() => {
     rmSync(fixtureDir, { recursive: true, force: true });
-  });
+  }, 30_000);
 
   it.each([
     {
@@ -1548,6 +2532,48 @@ describe.skipIf(!HAS_FFMPEG)("held tails on sparse-timestamp sources", () => {
     },
     30_000,
   );
+
+  it("renders the same final decoded frame just inside and past EOF", async () => {
+    const metadata = await extractVideoMetadata(cfrFixture);
+    const sourceDuration = metadata.videoStreamDurationSeconds;
+    const outputDir = mkdtempSync(join(fixtureDir, "eof-out-"));
+    const videos: VideoElement[] = [
+      {
+        id: "just-inside-eof",
+        src: cfrFixture,
+        start: 0,
+        end: 5,
+        mediaStart: sourceDuration - 0.001,
+        loop: false,
+        hasAudio: false,
+      },
+      {
+        id: "past-eof",
+        src: cfrFixture,
+        start: 0,
+        end: 5,
+        mediaStart: sourceDuration + 1,
+        loop: false,
+        hasAudio: false,
+      },
+    ];
+
+    const result = await extractAllVideoFrames(videos, fixtureDir, {
+      fps: 30,
+      format: "png",
+      outputDir,
+      timelineEnd: 5,
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.extracted).toHaveLength(2);
+    const insideFrame = result.extracted[0]?.framePaths.get(0);
+    const pastFrame = result.extracted[1]?.framePaths.get(0);
+    expect(insideFrame).toBeDefined();
+    expect(pastFrame).toBeDefined();
+    if (!insideFrame || !pastFrame) throw new Error("expected both final-frame outputs");
+    expect(readFileSync(pastFrame)).toEqual(readFileSync(insideFrame));
+  }, 30_000);
 });
 
 // Regression test for the VFR (variable frame rate) freeze bug.
@@ -1566,7 +2592,7 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
 
   beforeAll(async () => {
     // 10s testsrc2 at 60fps, ~40% of frames dropped via select filter and
-    // encoded with -vsync vfr so timestamps are irregular. Declared fps 60,
+    // encoded with -fps_mode vfr so timestamps are irregular. Declared fps 60,
     // actual average ~36 — well over the 10% threshold used by isVFR.
     // The select expression drops four 1-second windows (frames 30-89,
     // 180-239, 330-389, 480-539) to simulate static segments in a screen
@@ -1584,7 +2610,7 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
       "testsrc2=s=320x180:d=10:rate=60",
       "-vf",
       "select='not(between(n\\,30\\,89))*not(between(n\\,180\\,239))*not(between(n\\,330\\,389))*not(between(n\\,480\\,539))'",
-      "-vsync",
+      "-fps_mode",
       "vfr",
       "-c:v",
       "libx264",
@@ -1607,7 +2633,7 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
 
   afterAll(() => {
     if (existsSync(FIXTURE_DIR)) rmSync(FIXTURE_DIR, { recursive: true, force: true });
-  });
+  }, 30_000);
 
   it("skips a clip entirely before time zero without reporting an extraction error", async () => {
     const outputDir = join(FIXTURE_DIR, "out-before-timeline");
@@ -1731,6 +2757,59 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
 
     expect(result.metadata.isVFR).toBe(true);
     expect(result.totalFrames).toBe(3);
+  }, 60_000);
+
+  // With B-frames, mp4 packet durations are decode-order gaps, so a frame can claim 0.5s while
+  // the next one starts 17ms later. Each slot must still show the frame on screen at its time:
+  // `-fps_mode cfr` on ffmpeg 8 held such a frame for 14 slots and cut the still before a gap short.
+  it("samples a B-frame VFR source by timestamp, not by packet duration", async () => {
+    const source = join(FIXTURE_DIR, "vfr_bframes.mp4");
+    const synth = await runFfmpeg([
+      "-y",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=s=320x180:d=4:rate=60",
+      "-vf",
+      "select='not(between(n\\,30\\,89))*not(between(n\\,150\\,179))'",
+      "-fps_mode",
+      "vfr",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "medium",
+      "-bf",
+      "3",
+      "-g",
+      "600",
+      "-pix_fmt",
+      "yuv420p",
+      source,
+    ]);
+    if (!synth.success) throw new Error(`fixture synthesis failed: ${synth.stderr.slice(-400)}`);
+    const distinctFrames = (paths: Iterable<string>) =>
+      new Set([...paths].map((path) => readFileSync(path).toString("base64"))).size;
+
+    // 2.5s to 3s is a still; every 30fps slot after it lands on its own 60fps source frame.
+    const afterGap = await extractVideoFramesRange(source, "vfr-bframes-after-gap", 2.5, 1.5, {
+      fps: 30,
+      outputDir: join(FIXTURE_DIR, "out-vfr-bframes-after-gap"),
+      format: "png",
+    });
+    expect(afterGap.metadata.isVFR).toBe(true);
+    expect(afterGap.totalFrames).toBe(45);
+    const slots = [...afterGap.framePaths.entries()].sort(([a], [b]) => a - b);
+    expect(distinctFrames(slots.slice(0, 15).map(([, path]) => path))).toBe(1);
+    expect(distinctFrames(slots.slice(15).map(([, path]) => path))).toBe(30);
+
+    const endsOnStill = await extractVideoFramesRange(source, "vfr-bframes-still", 0, 3, {
+      fps: 30,
+      outputDir: join(FIXTURE_DIR, "out-vfr-bframes-still"),
+      format: "png",
+    });
+    expect(endsOnStill.totalFrames).toBe(90);
   }, 60_000);
 
   it("produces the expected frame count for a mid-file segment", async () => {
@@ -1932,15 +3011,13 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
     expect(miss.errors).toEqual([]);
     expect(miss.phaseBreakdown.cacheHits).toBe(0);
     expect(miss.phaseBreakdown.cacheMisses).toBe(1);
+    const ffmpegRunsBeforeHit = vi.mocked(runFfmpeg).mock.calls.length;
 
     const hit = await extractWithCache(video, "out-cache-hit", CACHE_DIR);
     expect(hit.errors).toEqual([]);
     expect(hit.phaseBreakdown.cacheHits).toBe(1);
     expect(hit.phaseBreakdown.cacheMisses).toBe(0);
-    // extractMs on a hit is only the cache-lookup bookkeeping; asserting <50ms
-    // is loose enough to survive CI jitter but tight enough to catch a
-    // regression that accidentally triggered ffmpeg again.
-    expect(hit.phaseBreakdown.extractMs).toBeLessThan(50);
+    expect(vi.mocked(runFfmpeg).mock.calls.length).toBe(ffmpegRunsBeforeHit);
     expect(hit.extracted).toHaveLength(1);
     expect(hit.extracted[0]!.totalFrames).toBe(miss.extracted[0]!.totalFrames);
 
@@ -2166,6 +3243,30 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
     expect(
       readFileSync(framePath(result, "sdr", 0)).equals(readFileSync(plain.framePaths.get(0)!)),
     ).toBe(false);
+  }, 60_000);
+
+  it("keeps a finite SDR past-EOF slot in a mixed HDR timeline", async () => {
+    const SDR_SHORT = await synthCfrClip("sdr-past-eof.mp4", 1);
+    const HDR_SHORT = await synthHdrTaggedClip("hdr-past-eof-peer.mp4", 1);
+    const outputDir = join(FIXTURE_DIR, "out-hdr-past-eof");
+    mkdirSync(outputDir, { recursive: true });
+
+    const result = await extractAllVideoFrames(
+      [
+        cfrClipElement("sdr-past-eof", SDR_SHORT, 4, 5),
+        { ...cfrClipElement("hdr-peer", HDR_SHORT, 1), start: 1, end: 2 },
+      ],
+      FIXTURE_DIR,
+      { fps: 30, outputDir },
+    );
+
+    // The SDR slot must survive the mixed-HDR preflight and use the held-tail
+    // path. Reverting its guard to `mediaStart >= playableDuration` records an
+    // out-of-range error here and drops the slot before extraction.
+    expect(result.errors).toEqual([]);
+    expect(result.phaseBreakdown.hdrPreflightCount).toBe(1);
+    expect(extractedFor(result, "sdr-past-eof").totalFrames).toBe(1);
+    expect(extractedFor(result, "hdr-peer").totalFrames).toBeGreaterThan(0);
   }, 60_000);
 
   it("keeps SDR→HDR cache entries distinct from plain SDR entries", async () => {
@@ -2615,6 +3716,525 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
   }, 60_000);
 });
 
+// Release builds print "version 8.1.3" or "n8.1.3"; master builds print "N-<number>" and are newer.
+const FFPROBE_VERSION = spawnSync("ffprobe", ["-version"]).stdout?.toString() ?? "";
+const FFPROBE_RELEASE = FFPROBE_VERSION.match(/version n?(\d+)\.(\d+)/)
+  ?.slice(1)
+  .map(Number);
+const FFPROBE_READS_CONTAINER_TRANSFER =
+  /version N-/.test(FFPROBE_VERSION) ||
+  (FFPROBE_RELEASE !== undefined &&
+    (FFPROBE_RELEASE[0]! > 8 || (FFPROBE_RELEASE[0] === 8 && FFPROBE_RELEASE[1]! >= 1)));
+
+describe.skipIf(!HAS_ZSCALE)("forced-SDR HDR extraction", () => {
+  let fixtureDir = "";
+
+  beforeAll(() => {
+    fixtureDir = mkdtempSync(join(tmpdir(), "hf-forced-sdr-tonemap-test-"));
+  });
+
+  afterAll(() => {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }, 30_000);
+
+  async function synthesizeHlgClip(
+    path: string,
+    vui = "colour_primaries=9:transfer_characteristics=18:matrix_coefficients=9",
+    transfer = "arib-std-b67",
+  ): Promise<void> {
+    const synthesized = await runFfmpeg([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=0xe0b080:s=64x64:r=1:d=1",
+      "-vf",
+      `zscale=pin=bt709:tin=bt709:min=bt709:p=bt2020:t=${transfer}:m=bt2020nc:r=tv,format=yuv420p`,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-color_primaries",
+      "bt2020",
+      "-color_trc",
+      transfer,
+      "-colorspace",
+      "bt2020nc",
+      "-bsf:v",
+      `h264_metadata=${vui}`,
+      path,
+    ]);
+    if (!synthesized.success) {
+      throw new Error(`HLG fixture synthesis failed: ${synthesized.stderr.slice(-400)}`);
+    }
+  }
+
+  it.each([
+    [
+      "HLG",
+      "matrix",
+      "arib-std-b67",
+      "colour_primaries=9:transfer_characteristics=18:matrix_coefficients=2",
+    ],
+    [
+      "HLG",
+      "primaries",
+      "arib-std-b67",
+      "colour_primaries=2:transfer_characteristics=18:matrix_coefficients=9",
+    ],
+    [
+      "HLG",
+      "matrix and primaries",
+      "arib-std-b67",
+      "colour_primaries=2:transfer_characteristics=18:matrix_coefficients=2",
+    ],
+    [
+      "PQ",
+      "matrix and primaries",
+      "smpte2084",
+      "colour_primaries=2:transfer_characteristics=16:matrix_coefficients=2",
+    ],
+    [
+      "HLG",
+      "transfer",
+      "arib-std-b67",
+      "colour_primaries=9:transfer_characteristics=2:matrix_coefficients=9",
+    ],
+  ])(
+    "tone-maps %s footage whose video stream has no %s tag like the fully tagged clip",
+    async (name, missing, transfer, vui) => {
+      const slug = `${name}-no-${missing}`.replace(/\W+/g, "-");
+      const tagged = join(fixtureDir, `${name}-fully-tagged.mp4`);
+      const untagged = join(fixtureDir, `${slug}.mp4`);
+      const vuiTransfer = transfer === "smpte2084" ? 16 : 18;
+      await synthesizeHlgClip(
+        tagged,
+        `colour_primaries=9:transfer_characteristics=${vuiTransfer}:matrix_coefficients=9`,
+        transfer,
+      );
+      await synthesizeHlgClip(untagged, vui, transfer);
+      const extract = (source: string, id: string) =>
+        extractVideoFramesRange(source, id, 0, 1, {
+          fps: 1,
+          outputDir: join(fixtureDir, `out-${id}`),
+          format: "png",
+          toneMapHdrToSdr: true,
+        });
+
+      if (missing === "transfer") {
+        // ffprobe before 8.1 reads the stream's unspecified transfer, so the clip is SDR there, as on main.
+        if (!FFPROBE_READS_CONTAINER_TRANSFER) {
+          await expect(extract(untagged, slug)).resolves.toBeDefined();
+          return;
+        }
+        expect((await extractVideoMetadata(untagged)).colorSpace?.colorTransfer).toBe(transfer);
+      }
+      const reference = await extract(tagged, `ref-${slug}`);
+      const result = await extract(untagged, slug);
+
+      expect(readFileSync(result.framePaths.get(0)!)).toEqual(
+        readFileSync(reference.framePaths.get(0)!),
+      );
+    },
+    60_000,
+  );
+
+  it("probes each source's first frame once, however many cuts of it extract together", async () => {
+    const sources = ["a", "b"].map((name) => join(fixtureDir, `cuts-${name}.mp4`));
+    for (const source of sources) await synthesizeHlgClip(source);
+    const probes = () =>
+      vi.mocked(runFfmpeg).mock.calls.filter(([args]) => args.includes("showinfo")).length;
+    const before = probes();
+    await Promise.all(
+      Array.from({ length: 12 }, (_, cut) =>
+        extractVideoFramesRange(sources[cut % 2]!, `cut-${cut}`, 0, 1, {
+          fps: 1,
+          outputDir: join(fixtureDir, "cuts"),
+          format: "png",
+          toneMapHdrToSdr: true,
+        }),
+      ),
+    );
+    expect(probes() - before).toBe(2);
+  }, 60_000);
+
+  it("probes a source again after its first-frame probe failed", async () => {
+    const source = join(fixtureDir, "probe-retry.mp4");
+    await synthesizeHlgClip(source);
+    const probes = () =>
+      vi.mocked(runFfmpeg).mock.calls.filter(([args]) => args.includes("showinfo")).length;
+    const { runFfmpeg: real } =
+      await vi.importActual<typeof import("../utils/runFfmpeg.js")>("../utils/runFfmpeg.js");
+    vi.mocked(runFfmpeg).mockImplementation((args, opts) =>
+      args.includes("showinfo")
+        ? Promise.resolve({
+            success: false,
+            exitCode: 1,
+            stderr: "",
+            durationMs: 0,
+            terminationReason: "exit",
+          })
+        : real(args, opts),
+    );
+    const extract = (id: string) =>
+      extractVideoFramesRange(source, id, 0, 1, {
+        fps: 1,
+        outputDir: join(fixtureDir, "retry"),
+        format: "png",
+        toneMapHdrToSdr: true,
+      });
+    const before = probes();
+    try {
+      await extract("retry-failed");
+    } finally {
+      vi.mocked(runFfmpeg).mockImplementation(real);
+    }
+    await extract("retry-again");
+    expect(probes() - before).toBe(2);
+  }, 60_000);
+
+  // One stream with HLG frames, then PQ frames: each is tone-mapped with its own transfer.
+  it("tone-maps each frame of a mixed HLG and PQ stream with its own transfer", async () => {
+    const segment = async (name: string, transfer: number) => {
+      const path = join(fixtureDir, `mixed-${name}.h264`);
+      const result = await runFfmpeg([
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=s=160x90:r=25:d=0.2",
+        "-c:v",
+        "libx264",
+        // No B-frames: genpts stamps a raw stream in decode order, so reordered frames get wrong times.
+        "-bf",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-bsf:v",
+        `h264_metadata=colour_primaries=9:transfer_characteristics=${transfer}:matrix_coefficients=9`,
+        "-f",
+        "h264",
+        path,
+      ]);
+      if (!result.success)
+        throw new Error(`segment synthesis failed: ${result.stderr.slice(-400)}`);
+      return readFileSync(path);
+    };
+    const mux = async (name: string, stream: Buffer) => {
+      const raw = join(fixtureDir, `${name}.h264`);
+      const path = join(fixtureDir, `${name}.mp4`);
+      writeFileSync(raw, stream);
+      const result = await runFfmpeg([
+        ...["-y", "-v", "error", "-fflags", "+genpts", "-r", "25", "-f", "h264", "-i", raw],
+        ...["-c", "copy", path],
+      ]);
+      if (!result.success) throw new Error(`mux failed: ${result.stderr.slice(-400)}`);
+      return path;
+    };
+    const hlg = await segment("hlg", 18);
+    const pq = await segment("pq", 16);
+    const mixed = await mux("mixed-hlg-pq", Buffer.concat([hlg, pq]));
+    const pqOnly = await mux("mixed-pq-only", pq);
+    const extract = (source: string, id: string, duration: number) =>
+      extractVideoFramesRange(source, id, 0, duration, {
+        fps: 25,
+        outputDir: join(fixtureDir, `out-${id}`),
+        format: "png",
+        toneMapHdrToSdr: true,
+      });
+
+    const mixedFrames = await extract(mixed, "mixed-hlg-pq", 0.4);
+    const pqFrames = await extract(pqOnly, "mixed-pq-only", 0.2);
+
+    expect(readFileSync(mixedFrames.framePaths.get(5)!)).toEqual(
+      readFileSync(pqFrames.framePaths.get(0)!),
+    );
+  }, 60_000);
+
+  // A stream-copy trim opens on edit-list pre-roll, which ffprobe counts as packets without frames.
+  it("keeps per-frame tags in a mixed HLG and PQ file trimmed with a stream copy", async () => {
+    const run = async (args: string[]) => {
+      const result = await runFfmpeg(["-y", "-v", "error", ...args]);
+      if (!result.success) throw new Error(`fixture failed: ${result.stderr.slice(-400)}`);
+    };
+    const segment = async (name: string, transfer: number) => {
+      const path = join(fixtureDir, `trim-${name}.h264`);
+      await run([
+        ...["-f", "lavfi", "-i", "testsrc2=s=160x90:r=25:d=2"],
+        ...["-c:v", "libx264", "-g", "50", "-bf", "0"],
+        ...["-pix_fmt", "yuv420p", "-bsf:v"],
+        `h264_metadata=colour_primaries=9:transfer_characteristics=${transfer}:matrix_coefficients=9`,
+        ...["-f", "h264", path],
+      ]);
+      return readFileSync(path);
+    };
+    const mux = async (name: string, stream: Buffer) => {
+      const raw = join(fixtureDir, `${name}.h264`);
+      const path = join(fixtureDir, `${name}.mp4`);
+      writeFileSync(raw, stream);
+      await run(["-fflags", "+genpts", "-r", "25", "-f", "h264", "-i", raw, "-c", "copy", path]);
+      return path;
+    };
+    const pq = await segment("pq", 16);
+    const mixed = await mux("trim-hlg-then-pq", Buffer.concat([await segment("hlg", 18), pq]));
+    const pqOnly = await mux("trim-pq-only", pq);
+    const trimmed = join(fixtureDir, "trim-from-hlg.mp4");
+    await run(["-ss", "1", "-i", mixed, "-c", "copy", trimmed]);
+    const extract = (source: string, id: string, start: number) =>
+      extractVideoFramesRange(source, id, start, 0.04, {
+        fps: 25,
+        outputDir: join(fixtureDir, `out-${id}`),
+        format: "png",
+        toneMapHdrToSdr: true,
+      });
+
+    // Trimmed 1.6 s is the mixed file's 2.6 s: the PQ segment's 0.6 s.
+    const fromTrim = await extract(trimmed, "trim-from-hlg", 1.6);
+    const fromPq = await extract(pqOnly, "trim-pq-only", 0.6);
+
+    const shown = readFirstFramePixel(fromTrim.framePaths.get(0)!, 40, 40);
+    const expected = readFirstFramePixel(fromPq.framePaths.get(0)!, 40, 40);
+    expect(Math.max(...shown.map((v, i) => Math.abs(v - expected[i]!)))).toBeLessThanOrEqual(2);
+  }, 60_000);
+
+  it("matches Studio's HLG tone map and isolates transformed cache entries", async () => {
+    const source = join(fixtureDir, "hlg-warm.mp4");
+    await synthesizeHlgClip(source);
+
+    const reference = join(fixtureDir, "studio-reference.png");
+    const referenceResult = await runFfmpeg([
+      "-y",
+      "-ss",
+      "0",
+      "-i",
+      source,
+      "-t",
+      "1",
+      "-vf",
+      "fps=1,zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv",
+      "-q:v",
+      "0",
+      "-compression_level",
+      "1",
+      reference,
+    ]);
+    if (!referenceResult.success) {
+      throw new Error(`Studio reference extraction failed: ${referenceResult.stderr.slice(-400)}`);
+    }
+
+    const cacheDir = join(fixtureDir, "cache");
+    const video = (id: string): VideoElement => ({
+      id,
+      src: source,
+      start: 0,
+      end: 1,
+      mediaStart: 0,
+      loop: false,
+      hasAudio: false,
+    });
+    const extract = (id: string, toneMapHdrToSdr = false) =>
+      extractAllVideoFrames(
+        [video(id)],
+        fixtureDir,
+        {
+          fps: 1,
+          outputDir: join(fixtureDir, id),
+          format: "png",
+          toneMapHdrToSdr,
+        },
+        undefined,
+        { extractCacheDir: cacheDir },
+      );
+
+    const plain = await extract("plain");
+    const toneMapped = await extract("tone-mapped", true);
+    const toneMappedAgain = await extract("tone-mapped-again", true);
+
+    expect(plain.errors).toEqual([]);
+    expect(toneMapped.errors).toEqual([]);
+    expect(toneMapped.phaseBreakdown.cacheHits).toBe(0);
+    expect(toneMapped.phaseBreakdown.cacheMisses).toBe(1);
+    expect(toneMappedAgain.phaseBreakdown.cacheHits).toBe(1);
+    expect(readdirSync(cacheDir).filter((name) => name.startsWith(SCHEMA_PREFIX))).toHaveLength(2);
+
+    const frame = (result: ExtractionResult): Buffer => {
+      const path = result.extracted[0]?.framePaths.get(0);
+      if (!path) throw new Error("expected extracted frame");
+      return readFileSync(path);
+    };
+    // Same pixels as Studio's tone map, declared as sRGB so Chrome shows them unconverted.
+    const rgb = (path: string): Buffer =>
+      spawnSync("ffmpeg", ["-v", "error", "-i", path, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .stdout;
+    const toneMappedPath = toneMapped.extracted[0]!.framePaths.get(0)!;
+    expect(rgb(toneMappedPath)).toEqual(rgb(reference));
+    expect(pngChunkTypes(toneMappedPath)).toContain("sRGB");
+    expect(pngChunkTypes(toneMappedPath)).not.toContain("cICP");
+    expect(frame(plain)).not.toEqual(frame(toneMapped));
+
+    const toneMappedJpg = await extractAllVideoFrames([video("tone-mapped-jpg")], fixtureDir, {
+      fps: 1,
+      outputDir: join(fixtureDir, "tone-mapped-jpg"),
+      format: "jpg",
+      toneMapHdrToSdr: true,
+    });
+    expect(toneMappedJpg.errors).toEqual([]);
+    const jpgPixels = rgb(toneMappedJpg.extracted[0]!.framePaths.get(0)!);
+    const referencePixels = rgb(reference);
+    const worst = Math.max(...[...jpgPixels].map((v, i) => Math.abs(v - referencePixels[i]!)));
+    expect(worst, "tone-mapped jpg against Studio's tone map").toBeLessThanOrEqual(3);
+    expect(frame(toneMappedAgain)).toEqual(frame(toneMapped));
+
+    // A macOS ffmpeg that has zscale uses the same tone map, not VideoToolbox.
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    try {
+      const mac = await extractAllVideoFrames([video("tone-mapped-mac")], fixtureDir, {
+        fps: 1,
+        outputDir: join(fixtureDir, "tone-mapped-mac"),
+        format: "png",
+        toneMapHdrToSdr: true,
+      });
+      expect(mac.errors).toEqual([]);
+      expect(rgb(mac.extracted[0]!.framePaths.get(0)!)).toEqual(rgb(reference));
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  }, 60_000);
+
+  it("warns once and keeps VideoToolbox, under its own cache key, when a macOS ffmpeg has no zscale", async () => {
+    const source = join(fixtureDir, "hlg-no-zscale.mp4");
+    await synthesizeHlgClip(source);
+    const cacheDir = join(fixtureDir, "no-zscale-cache");
+    const clip = (id: string): VideoElement => ({
+      id,
+      src: source,
+      start: 0,
+      end: 1,
+      mediaStart: 0,
+      loop: false,
+      hasAudio: false,
+    });
+    const options = (id: string) => ({
+      fps: 1,
+      outputDir: join(fixtureDir, id),
+      format: "png" as const,
+      toneMapHdrToSdr: true,
+    });
+    const zscale = await extractAllVideoFrames(
+      [clip("zscale")],
+      fixtureDir,
+      options("zscale"),
+      undefined,
+      {
+        extractCacheDir: cacheDir,
+      },
+    );
+    expect(zscale.errors).toEqual([]);
+
+    const realPlatform = process.platform;
+    vi.resetModules();
+    vi.doMock("../utils/psnrFilterAvailability.js", () => ({
+      isFfmpegFilterAvailable: async () => false,
+      isPsnrFilterAvailable: async () => false,
+    }));
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const { extractAllVideoFrames: extractOnMac } = await import("./videoFrameExtractor.js");
+      for (const [i, id] of ["no-zscale-1", "no-zscale-2"].entries()) {
+        const result = await extractOnMac([clip(id)], fixtureDir, options(id), undefined, {
+          extractCacheDir: cacheDir,
+        });
+        // The zscale frames above must not be served for the VideoToolbox path.
+        if (i === 0) expect(result.phaseBreakdown.cacheHits).toBe(0);
+        // Off macOS the VideoToolbox decode itself fails, which proves it was attempted.
+        if (realPlatform !== "darwin")
+          expect(JSON.stringify(result.errors)).toMatch(/videotoolbox/i);
+      }
+      const zscaleWarnings = stderr.mock.calls.filter(([message]) =>
+        String(message).includes("no zscale filter"),
+      );
+      expect(zscaleWarnings).toHaveLength(1);
+    } finally {
+      stderr.mockRestore();
+      Object.defineProperty(process, "platform", platform);
+      vi.doUnmock("../utils/psnrFilterAvailability.js");
+      vi.resetModules();
+    }
+  }, 60_000);
+
+  // A second process would read the frames back without the HDR10 light-level metadata the tone map uses.
+  it("tone-maps a VFR HDR10 window in one process, as the reference tone map would", async () => {
+    const source = join(fixtureDir, "pq-vfr-4000nit.mp4");
+    const synthesized = await runFfmpeg([
+      "-y",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=0xf0e0c0:s=64x64:r=60:d=2",
+      "-vf",
+      "select='not(between(n\\,30\\,89))',zscale=pin=bt709:tin=bt709:min=bt709:p=bt2020:t=smpte2084:m=bt2020nc:r=tv:npl=1000,format=yuv420p10le",
+      "-fps_mode",
+      "vfr",
+      "-c:v",
+      "libx265",
+      "-x265-params",
+      "log-level=error:hdr10=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:max-cll=4000,400:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50)",
+      source,
+    ]);
+    if (!synthesized.success)
+      throw new Error(`PQ fixture synthesis failed: ${synthesized.stderr.slice(-400)}`);
+    const referenceDir = join(fixtureDir, "pq-vfr-reference");
+    mkdirSync(referenceDir, { recursive: true });
+    const reference = await runFfmpeg([
+      "-v",
+      "error",
+      "-ss",
+      "0",
+      "-i",
+      source,
+      "-t",
+      "0.616666",
+      "-vf",
+      "zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,setparams=color_primaries=bt709:color_trc=iec61966-2-1",
+      "-fps_mode",
+      "cfr",
+      "-r",
+      "30",
+      "-q:v",
+      "0",
+      "-compression_level",
+      "1",
+      join(referenceDir, "frame_%05d.png"),
+    ]);
+    expect(reference.success, reference.stderr).toBe(true);
+
+    const result = await extractVideoFramesRange(source, "pq-vfr", 0, 0.616666, {
+      fps: 30,
+      outputDir: join(fixtureDir, "pq-vfr-out"),
+      format: "png",
+      toneMapHdrToSdr: true,
+    });
+
+    expect(result.metadata.isVFR).toBe(true);
+    const referenceFrames = readdirSync(referenceDir).sort();
+    // One slot per 30fps tick before 0.616666s; x265 packet durations cut the reference's still short.
+    expect(result.totalFrames).toBe(19);
+    expect(readFileSync(result.framePaths.get(0)!)).toEqual(
+      readFileSync(join(referenceDir, referenceFrames[0]!)),
+    );
+  }, 60_000);
+});
+
 describe("getFrameAtTime — IEEE 754 boundary precision", () => {
   function makeExtracted(fps: number, totalFrames: number): ExtractedFrames {
     const framePaths = new Map<number, string>();
@@ -2633,6 +4253,37 @@ describe("getFrameAtTime — IEEE 754 boundary precision", () => {
       },
     } as ExtractedFrames;
   }
+
+  it("indexes frames by integrated source time for a rate lane", () => {
+    const extracted = { ...makeExtracted(25, 351), videoId: "ramped" } as ExtractedFrames;
+    const rate = {
+      target: "rate",
+      points: [
+        { t: 0, v: 1 },
+        { t: 2, v: 3 },
+      ],
+    };
+    const table = new FrameLookupTable();
+    table.addVideo(extracted, 0, 10, 0, false, rate);
+    // 2s * (3-1)/ln 3 = 3.6411 source seconds * 25 fps = frame 91
+    expect(table.getFrame("ramped", 2)).toBe("frame-91.jpg");
+    expect(table.getFrame("ramped", 0)).toBe("frame-0.jpg");
+  });
+
+  it("wraps a ramped loop in source space so the lane keeps running across cycles", () => {
+    const extracted = { ...makeExtracted(25, 100), videoId: "looped" } as ExtractedFrames;
+    const rate = {
+      target: "rate",
+      points: [
+        { t: 0, v: 1 },
+        { t: 4, v: 3 },
+      ],
+    };
+    const table = new FrameLookupTable();
+    table.addVideo(extracted, 0, 10, 0, true, rate);
+    // source(3) = 4.6586 on a 4s source wraps to 0.6586 * 25 fps = frame 16
+    expect(table.getFrame("looped", 3)).toBe("frame-16.jpg");
+  });
 
   it("does not produce duplicate frames when data-start is grid-aligned", () => {
     const extracted = makeExtracted(25, 351);
@@ -2675,5 +4326,32 @@ describe("getFrameAtTime — IEEE 754 boundary precision", () => {
   it("returns null after source exhaustion without an authored slot boundary", () => {
     const extracted = makeExtracted(25, 25);
     expect(getFrameAtTime(extracted, 3, 0)).toBeNull();
+  });
+});
+
+describe("parseVideoElements hidden flag", () => {
+  it("marks a video hidden on itself or through a hidden ancestor", () => {
+    const videos = parseVideoElements(
+      `<div data-hidden><video id="a" src="a.mp4" data-has-audio="true"></video></div>` +
+        `<video id="b" src="b.mp4" data-has-audio="true" data-hidden></video>` +
+        `<video id="c" src="c.mp4" data-has-audio="true"></video>`,
+    );
+    expect(videos.map((v) => [v.id, v.hidden])).toEqual([
+      ["a", true],
+      ["b", true],
+      ["c", undefined],
+    ]);
+  });
+
+  it("marks only an audible video hidden when its audio group is hidden", () => {
+    const videos = parseVideoElements(
+      `<hf-audio-group id="g" data-hidden></hf-audio-group>` +
+        `<video id="a" src="a.mp4" data-has-audio="true" data-audio-group="g"></video>` +
+        `<video id="b" src="b.mp4" muted data-audio-group="g"></video>`,
+    );
+    expect(videos.map((v) => [v.id, v.hidden])).toEqual([
+      ["a", true],
+      ["b", undefined],
+    ]);
   });
 });

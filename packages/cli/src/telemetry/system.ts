@@ -1,10 +1,13 @@
-import { cpus, freemem, platform, release } from "node:os";
+import { cpus, platform, release } from "node:os";
 import { existsSync, readFileSync, statfsSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { getSystemTotalMb } from "@hyperframes/engine";
+import { getSystemTotalMb } from "@hyperframes/engine/system-memory";
+
+export { getAvailableMemoryMb } from "@hyperframes/engine/system-memory";
 import {
   detectAgentRuntime,
   detectAgentHints,
+  detectExecutionHarnessHint,
   detectSandboxRuntime,
   type AgentRuntime,
   type SandboxRuntime,
@@ -50,6 +53,8 @@ export interface SystemMeta {
    * null when no agent is detected.
    */
   agent_runtime: AgentRuntime;
+  /** Observed harness context, independent of agent attribution; null if absent. */
+  execution_harness_hint: "harbor" | null;
   /**
    * New-agent discovery signals for the agent_runtime=null bucket, so an agent
    * we have no rule for surfaces on its own instead of vanishing into null.
@@ -60,9 +65,19 @@ export interface SystemMeta {
   agent_hint: string | null;
   term_program: string | null;
   agent_env_hints: string | null;
+  /** App that launched the CLI, from HYPERFRAMES_CLIENT (`<app>/<version>/<channel>`); null from a shell. */
+  client: string | null;
 }
 
 let cached: SystemMeta | null = null;
+
+// Short `<app>/<version>/<channel>`-shaped tags only: the value lands verbatim in the space-delimited feedback string.
+const CLIENT_TAG = /^[a-z0-9][a-z0-9._+-]{0,31}(\/[a-z0-9._+-]{1,32}){0,3}$/i;
+
+function readClientTag(): string | null {
+  const tag = process.env["HYPERFRAMES_CLIENT"]?.trim() ?? "";
+  return CLIENT_TAG.test(tag) ? tag : null;
+}
 
 /**
  * Collect system metadata. Cached after first call.
@@ -95,9 +110,11 @@ export function getSystemMeta(): SystemMeta {
     is_tty: Boolean(process.stdout?.isTTY),
     sandbox_runtime: detectSandboxRuntime(),
     agent_runtime,
+    execution_harness_hint: detectExecutionHarnessHint(),
     agent_hint: hints.agent_hint,
     term_program: hints.term_program,
     agent_env_hints: hints.agent_env_hints,
+    client: readClientTag(),
   };
   return cached;
 }
@@ -236,54 +253,4 @@ export function getPowerState(): PowerState {
     // Same: absence of the reading is itself acceptable.
   }
   return { on_battery, low_power_mode };
-}
-
-/**
- * Get available memory in MB, accounting for OS-level page caching.
- *
- * `os.freemem()` on macOS returns only truly free pages — ignoring
- * inactive/purgeable/speculative pages that the kernel reclaims on demand.
- * On a 24 GB Mac this reports ~0.1 GB "free" when ~5 GB is actually
- * available. Linux has a similar (milder) issue; its kernel exposes the
- * correct value via `MemAvailable` in /proc/meminfo.
- */
-export function getAvailableMemoryMb(): number {
-  const fallback = bytesToMb(freemem());
-
-  if (platform() === "darwin") {
-    try {
-      const raw = execSync("vm_stat", { encoding: "utf-8", timeout: 5000 });
-      const pageSize = parseInt(raw.match(/page size of (\d+)/)?.[1] ?? "0", 10);
-      if (!pageSize) return fallback;
-
-      const pages = (key: string) =>
-        parseInt(raw.match(new RegExp(`${key}:\\s+(\\d+)`))?.[1] ?? "0", 10);
-
-      const available =
-        (pages("Pages free") +
-          pages("Pages inactive") +
-          pages("Pages purgeable") +
-          pages("Pages speculative")) *
-        pageSize;
-
-      return available > 0 ? bytesToMb(available) : fallback;
-    } catch {
-      return fallback;
-    }
-  }
-
-  if (platform() === "linux") {
-    try {
-      const meminfo = readFileSync("/proc/meminfo", "utf-8");
-      const match = meminfo.match(/MemAvailable:\s+(\d+)\s+kB/);
-      if (match) {
-        return Math.trunc(parseInt(match[1]!, 10) / 1024);
-      }
-      return fallback;
-    } catch {
-      return fallback;
-    }
-  }
-
-  return fallback;
 }

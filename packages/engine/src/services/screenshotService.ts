@@ -7,6 +7,7 @@
 
 // fallow-ignore-file code-duplication
 import { type Page } from "puppeteer-core";
+import { withVideoFrameSources, type VideoFrameUpdate } from "./videoFrameTransport.js";
 import { type CaptureOptions } from "../types.js";
 import { COLOR_GRADING_SOURCE_HIDDEN_ATTR } from "@hyperframes/core/color-grading";
 import {
@@ -131,7 +132,7 @@ async function sendBeginFrame(
       }
       if (isPending) {
         throw new Error(
-          `[BeginFrame] Frame still pending after ${PENDING_FRAME_RETRIES} retries — CPU overloaded by parallel renders. ` +
+          `[BeginFrame] Frame still pending after ${PENDING_FRAME_RETRIES} retries: CPU overloaded by parallel renders. ` +
             `Reduce concurrent renders or use --docker for isolation.`,
         );
       }
@@ -279,43 +280,39 @@ export async function captureScreenshotWithAlpha(
 }
 
 /**
- * Set the page background to transparent once for a dedicated HDR DOM session.
- *
- * Call this once after session initialization. Then use captureAlphaPng() per
- * frame instead of captureScreenshotWithAlpha() to skip the per-frame CDP
- * background override round-trips.
- *
- * Only use on sessions that are exclusively dedicated to transparent capture
- * (e.g., the HDR two-pass DOM layer session) — the background will stay
- * transparent for the lifetime of the session.
- *
- * NOTE on the injected stylesheet: `Emulation.setDefaultBackgroundColorOverride`
- * only replaces the *default* page background. Compositions almost always set
- * `body { background: ... }` and `#root { background: ... }`, which paint over
- * the override and ruin alpha capture for layered HDR compositing — the
- * composition root's full-frame background paints across the entire viewport
- * and wipes out HDR content captured beneath it.
- *
- * We force `html`, `body`, and any element marked as a composition root
- * (`[data-composition-id]`) to transparent. In HDR layered compositing the HDR
- * video itself is the backdrop, so DOM layers must only contribute their
- * foreground UI pixels — never a page-spanning solid backdrop.
+ * Make the page transparent for alpha capture, then use captureAlphaPng() per frame. html/body always clear;
+ * [data-composition-id] roots (nested too) keep their background unless clearCompositionRoot (HDR layered pass).
+ * A repeat call rewrites the rule, so the last call wins.
  */
+/** Whether frames must carry alpha. PNG alone does not imply it: motion blur captures opaque output as PNG. */
+export function capturesAlpha(options: Pick<CaptureOptions, "format" | "transparent">): boolean {
+  return options.transparent ?? options.format === "png";
+}
+
 const TRANSPARENT_BG_STYLE_ID = "__hf_transparent_bg__";
 
-export async function initTransparentBackground(page: Page): Promise<void> {
+export async function initTransparentBackground(
+  page: Page,
+  { clearCompositionRoot = false }: { clearCompositionRoot?: boolean } = {},
+): Promise<void> {
   const client = await getCdpSession(page);
   await client.send("Emulation.setDefaultBackgroundColorOverride", {
     color: { r: 0, g: 0, b: 0, a: 0 },
   });
-  await page.evaluate((styleId: string) => {
-    if (document.getElementById(styleId)) return;
-    const style = document.createElement("style");
-    style.id = styleId;
-    style.textContent =
-      "html,body,[data-composition-id]{background:transparent !important;background-color:transparent !important;background-image:none !important;}";
-    document.head.appendChild(style);
-  }, TRANSPARENT_BG_STYLE_ID);
+  await page.evaluate(
+    (styleId: string, clearCompositionRoot: boolean) => {
+      const selector = clearCompositionRoot ? "html,body,[data-composition-id]" : "html,body";
+      let style = document.getElementById(styleId);
+      if (!style) {
+        style = document.createElement("style");
+        style.id = styleId;
+        document.head.appendChild(style);
+      }
+      style.textContent = `${selector}{background:transparent !important;background-color:transparent !important;background-image:none !important;}`;
+    },
+    TRANSPARENT_BG_STYLE_ID,
+    clearCompositionRoot,
+  );
 }
 
 /**
@@ -652,15 +649,25 @@ export async function injectVideoFramesBatch(
   updates: Array<{ videoId: string; dataUri: string }>,
 ): Promise<string[]> {
   if (updates.length === 0) return [];
+  return withVideoFrameSources(page, updates, (resolved) =>
+    injectResolvedVideoFramesBatch(page, resolved),
+  );
+}
+
+async function injectResolvedVideoFramesBatch(
+  page: Page,
+  updates: VideoFrameUpdate[],
+): Promise<string[]> {
   return await page.evaluate(
     // fallow-ignore-next-line complexity
     async (
-      items: Array<{ videoId: string; dataUri: string; frameId: string }>,
+      items: Array<VideoFrameUpdate & { frameId: string }>,
       visualProperties: string[],
       colorGradingSourceHiddenAttr: string,
     ) => {
       const injectedIds: string[] = [];
       const pendingDecodes: Array<Promise<void>> = [];
+      const imagesToPublish: HTMLImageElement[] = [];
       const replacementLayoutProperties = new Set([
         "width",
         "height",
@@ -744,6 +751,15 @@ export async function injectVideoFramesBatch(
             ? 1
             : opacityParsed;
 
+        // Measure first: an in-flow bordered <img> sibling would shrink the video's flex box.
+        const videoRect = video.getBoundingClientRect();
+        const videoBox = {
+          left: Number.isFinite(video.offsetLeft) ? video.offsetLeft : 0,
+          top: Number.isFinite(video.offsetTop) ? video.offsetTop : 0,
+          width: video.offsetWidth > 0 ? video.offsetWidth : videoRect.width,
+          height: video.offsetHeight > 0 ? video.offsetHeight : videoRect.height,
+        };
+
         if (isNewImage) {
           img = document.createElement("img");
           img.classList.add("__render_frame__");
@@ -779,40 +795,41 @@ export async function injectVideoFramesBatch(
         // instead of flowing below it. With position:relative, both elements
         // stack vertically — the <img> lands below the video and gets clipped
         // by any overflow:hidden ancestor (e.g., border-radius wrappers).
-        //
-        // Apply this after visual style copying so the measured used box is
-        // the final authority for replacement frame geometry.
-        {
-          const videoRect = video.getBoundingClientRect();
-          const offsetLeft = Number.isFinite(video.offsetLeft) ? video.offsetLeft : 0;
-          const offsetTop = Number.isFinite(video.offsetTop) ? video.offsetTop : 0;
-          const offsetWidth = video.offsetWidth > 0 ? video.offsetWidth : videoRect.width;
-          const offsetHeight = video.offsetHeight > 0 ? video.offsetHeight : videoRect.height;
-          img.style.position = "absolute";
-          img.style.inset = "auto";
-          img.style.left = `${offsetLeft}px`;
-          img.style.top = `${offsetTop}px`;
-          img.style.right = "auto";
-          img.style.bottom = "auto";
-          img.style.width = `${offsetWidth}px`;
-          img.style.height = `${offsetHeight}px`;
-        }
+        img.style.position = "absolute";
+        img.style.inset = "auto";
+        img.style.left = `${videoBox.left}px`;
+        img.style.top = `${videoBox.top}px`;
+        img.style.right = "auto";
+        img.style.bottom = "auto";
+        img.style.width = `${videoBox.width}px`;
+        img.style.height = `${videoBox.height}px`;
+        // `videoBox` is a border-box even when the video is content-box.
+        img.style.boxSizing = "border-box";
         img.style.objectFit = computedStyle.objectFit;
         img.style.objectPosition = computedStyle.objectPosition;
         img.style.zIndex = computedStyle.zIndex;
 
+        // Publish after full decode so raster cannot race it with a reduced JPEG decode.
+        img.style.setProperty("visibility", "hidden", "important");
         img.decoding = "sync";
         if (img.getAttribute("src") !== item.dataUri) {
+          if (item.crossOrigin) img.crossOrigin = item.crossOrigin;
+          else img.removeAttribute("crossorigin");
           img.src = item.dataUri;
+          const source =
+            item.sourceLabel ?? (item.dataUri.startsWith("data:") ? "inline frame" : item.dataUri);
           pendingDecodes.push(
-            img
-              .decode()
-              .catch(() => undefined)
-              .then(() => undefined),
+            img.decode().catch((error: unknown) => {
+              throw new Error(
+                `Video frame for "${item.videoId}" failed to load (${source}): ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }),
           );
         }
         img.style.opacity = String(computedOpacity);
-        img.style.visibility = "visible";
+        imagesToPublish.push(img);
         // Hide the native <video> with visibility only — never clobber inline
         // opacity, so subsequent reads (and queryElementStacking) see the real
         // GSAP-controlled value.
@@ -823,6 +840,7 @@ export async function injectVideoFramesBatch(
       if (pendingDecodes.length > 0) {
         await Promise.all(pendingDecodes);
       }
+      for (const img of imagesToPublish) img.style.visibility = "visible";
       if (injectedIds.length > 0) {
         const redraw = (window as Window & { __hf?: { colorGrading?: { redraw?: () => void } } })
           .__hf?.colorGrading?.redraw;
@@ -880,7 +898,7 @@ export async function syncVideoFrameVisibility(
         const img = video.nextElementSibling as HTMLElement | null;
         const hasImg = img && img.classList.contains("__render_frame__");
         const ancestorHidden = isVisualAncestorHidden(video);
-        const visible = active.has(video.id) && !ancestorHidden;
+        const visible = active.has(window.__hfMediaId?.(video) || video.id) && !ancestorHidden;
         if (visible) {
           // Active video: show injected <img>, hide native <video>.
           // Do NOT clobber inline opacity here — GSAP-controlled opacity must

@@ -14,8 +14,8 @@ import {
   auditClipDurations,
   extractCompositionErrorsFromLint,
   navigationTimeoutHint,
+  projectPathOfUrl,
   raceMediaReady,
-  resolveNavigationTimeoutMs,
   shouldIgnoreRequestFailure,
   shouldIgnoreHttpError,
 } from "./validate.js";
@@ -337,24 +337,6 @@ describe("extractCompositionErrorsFromLint", () => {
   });
 });
 
-// Regression: `validate` used a hardcoded 10s page-navigation timeout that
-// ignored --timeout, so a composition loading GSAP from a CDN <script> (which
-// blocks domcontentloaded) failed with an opaque "Navigation timeout of 10000ms"
-// even though the full render's larger budget rode it out — with no knob to
-// extend it. resolveNavigationTimeoutMs makes --timeout raise the nav budget
-// (never below the 10s floor); navigationTimeoutHint replaces the opaque error.
-describe("resolveNavigationTimeoutMs", () => {
-  it("keeps the 10s floor when --timeout is unset or smaller", () => {
-    expect(resolveNavigationTimeoutMs(undefined)).toBe(10000);
-    expect(resolveNavigationTimeoutMs(3000)).toBe(10000); // the default --timeout
-    expect(resolveNavigationTimeoutMs(0)).toBe(10000);
-  });
-
-  it("raises the navigation budget to --timeout when it exceeds the floor", () => {
-    expect(resolveNavigationTimeoutMs(30000)).toBe(30000);
-  });
-});
-
 describe("navigationTimeoutHint", () => {
   it("replaces a Puppeteer navigation-timeout error with an actionable CDN/--timeout hint", () => {
     const hinted = navigationTimeoutHint(
@@ -396,5 +378,14 @@ describe("validate command deprecation (U5)", () => {
     const { parsed } = await runAndParseJsonEnvelope(validateCommand);
     expect(parsed.ok).toBe(false);
     expect(parsed._meta.deprecated).toBe(true);
+  });
+});
+
+describe("projectPathOfUrl", () => {
+  it("names a file with a bare percent sign instead of throwing", () => {
+    expect(projectPathOfUrl("http://127.0.0.1:4000/assets/50%.png")).toBe("assets/50%.png");
+    expect(projectPathOfUrl("http://127.0.0.1:4000/assets/50%25%20off.png")).toBe(
+      "assets/50% off.png",
+    );
   });
 });

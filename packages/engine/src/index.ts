@@ -42,12 +42,14 @@ export type {
   CapturePerfSummary,
   CaptureWarning,
   CaptureWarningCode,
+  SubTimelineWaitMemo,
   SubTimelineWaitOutcome,
 } from "./types.js";
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 export {
   resolveConfig,
+  resolvePageNavigationTimeout,
   validateEngineConfigSnapshot,
   DEFAULT_CONFIG,
   scaleProtocolTimeoutForComposition,
@@ -60,6 +62,10 @@ export {
   type EngineConfig,
   type ExtractCacheDirResolution,
 } from "./config.js";
+export {
+  SDR_RGB_TO_BT709_FILTER,
+  SDR_RGB_TO_TAGGED_BT709_FILTER,
+} from "./utils/sdrCaptureColor.js";
 export {
   DEFAULT_VP9_CPU_USED,
   MAX_VP9_CPU_USED,
@@ -74,15 +80,23 @@ export {
 } from "./services/systemMemory.js";
 
 // ── Browser management ─────────────────────────────────────────────────────────
+export { chromeMajorCeiling } from "./services/chromeHostCeiling.js";
 export {
   acquireBrowser,
+  setHostHandlesSigint,
   releaseBrowser,
   drainBrowserPool,
+  closeBrowserPool,
   resolveHeadlessShellPath,
   resolveBrowserGpuMode,
   buildChromeArgs,
+  compositionRequiresWebGpu,
+  assertWebGpuAdapterAvailable,
+  usesSoftwareWebGpu,
+  WebGpuUnavailableError,
   ENABLE_BROWSER_POOL,
   BrowserLeasePool,
+  type GpuProbeLifecycle,
   type BuildChromeArgsOptions,
   type BrowserLaunchFingerprint,
   type BrowserLease,
@@ -128,6 +142,10 @@ export {
   type BeforeCaptureHook,
   type DiscardWarmupInnerCapture,
   type StaticVerificationOutcome,
+  VfxFailureError,
+  waitForImagesReady,
+  evaluateHfDiagnostic,
+  buildZeroDurationDiagnostic,
 } from "./services/frameCapture.js";
 export {
   CaptureFailure,
@@ -136,8 +154,13 @@ export {
   type CaptureFailureKind,
   type CaptureWorkerDiagnostic,
 } from "./services/captureFailure.js";
+export {
+  createChromeMemorySampler,
+  type ChromeMemoryStats,
+} from "./services/chromeMemorySampler.js";
 
 // ── Screenshot (BeginFrame) ─────────────────────────────────────────────────────
+export { installMediaRenderIdBridge } from "./services/mediaRenderIdBridge.js";
 export {
   beginFrameCapture,
   pageScreenshotCapture,
@@ -147,6 +170,7 @@ export {
   cdpSessionCache,
   probeBeginFrameLiveness,
   initTransparentBackground,
+  capturesAlpha,
   captureAlphaPng,
   applyDomLayerMask,
   removeDomLayerMask,
@@ -158,13 +182,20 @@ export {
 export {
   buildEncoderArgs,
   encodeFramesFromDir,
+  buildConcatArgs,
+  concatVideoFiles,
   encodeFramesChunkedConcat,
   muxVideoWithAudio,
   applyFaststart,
+  packageHls,
   detectGpuEncoder,
   ENCODER_PRESETS,
   getEncoderPreset,
+  HLS_MASTER_PLAYLIST,
+  HLS_VIDEO_PLAYLIST,
+  HLS_AUDIO_PLAYLIST,
   type GpuEncoder,
+  type PackageHlsOptions,
 } from "./services/chunkEncoder.js";
 export type { EncoderOptions, EncodeResult, MuxResult } from "./services/chunkEncoder.types.js";
 
@@ -183,14 +214,18 @@ export {
   parseImageElements,
   extractVideoFramesRange,
   extractAllVideoFrames,
+  isVideoPastTimelineEnd,
   resolveTimelineExtractionWindow,
   resolveVideoExtractionWindow,
+  rebaseVideoToWindow,
   resolveFinalFrameExtractionWindow,
+  resolveFrameFormat,
   resolveVideoExtractionDuration,
   resolvePlayableVideoDuration,
   extractionFrameCountForDuration,
   resolveProjectRelativeSrc,
   getFrameAtTime,
+  isVideoHiddenBeforeStreamStart,
   createFrameLookupTable,
   FrameLookupTable,
   analyzeClipMediaFit,
@@ -202,6 +237,8 @@ export {
   type VideoElement,
   type ImageElement,
   type ExtractedFrames,
+  type DeferredFrameRange,
+  type FrameRange,
   type ExtractionOptions,
   type ExtractionResult,
   type ExtractionPhaseBreakdown,
@@ -215,10 +252,14 @@ export {
   type VideoFrameFormat,
   VIDEO_FRAME_FORMATS,
   isVideoFrameFormat,
+  EXTRACT_CACHE_MIN_AGE_MS,
 } from "./services/videoFrameExtractor.js";
+export { isSelfOrAncestorHidden } from "./services/mediaHidden.js";
+export { directorySizeBytes, gcExtractionCache } from "./services/extractionCache.js";
 
 export {
   resolveReferencedStart,
+  resolveReferencedDuration,
   type RefResolverEl,
   type RefResolverDoc,
 } from "./services/referenceResolver.js";
@@ -228,14 +269,19 @@ export { createVideoFrameInjector } from "./services/videoFrameInjector.js";
 export {
   MIXED_AUDIO_FILENAME,
   parseAudioElements,
+  parseMasterFxChain,
   processCompositionAudio,
+  videoAudioId,
 } from "./services/audioMixer.js";
+export { audioFailureDiagnostics } from "./services/audioFailureDiagnostic.js";
 export { cloneCaptureWarning, cloneCaptureWarnings } from "./services/captureWarning.js";
 export type {
   AudioElement,
   AudioFailureReason,
   AudioFailureStage,
   AudioProcessingFailure,
+  AudioFailureDiagnostic,
+  AudioSubprocessEvidence,
   AudioTrack,
   AudioVolumeKeyframe,
   MixResult,
@@ -252,10 +298,12 @@ export {
   executeParallelCapture,
   mergeWorkerFrames,
   getSystemResources,
+  shouldDisableBrowserPoolForParallelWorker,
   type WorkerTask,
   type WorkerResult,
   type WorkerSizing,
   type WorkerSizingBound,
+  type LandedFrame,
   type ParallelProgress,
 } from "./services/parallelCoordinator.js";
 
@@ -268,6 +316,11 @@ export {
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 export { quantizeTimeToFrame, MEDIA_VISUAL_STYLE_PROPERTIES } from "@hyperframes/core";
+export { frameFileExtension } from "./services/frameCapture.js";
+export { appendSoftwareEncoderThreadsArg } from "./services/softwareEncoderThreads.js";
+export { frameSequencePath } from "./services/extractedFrameIndex.js";
+export type { MotionBlurOptions, MotionBlurBlendSpace } from "./services/motionBlur.js";
+export type { PageMotionBlurOff } from "./types.js";
 
 export {
   assertSwiftShader,
@@ -283,6 +336,10 @@ export {
   extractVideoMetadata,
   extractFinalVideoFrameTimestamp,
   extractAudioMetadata,
+  declareContentAddressedUrl,
+  declareProbeFactsUrl,
+  PROBE_FACTS_VERSION,
+  buildProbeFactsText,
   probeMediaProfile,
   analyzeKeyframeIntervals,
   type VideoMetadata,
@@ -315,10 +372,12 @@ export {
 export {
   runFfmpeg,
   formatFfmpegError,
+  describeFfmpegFailure,
   isExternalFfmpegInterruption,
   type RunFfmpegOptions,
   type RunFfmpegResult,
 } from "./utils/runFfmpeg.js";
+export { aacSegmentCount, encodeAac } from "./services/aacEncode.js";
 export {
   ManagedChildProcess,
   type ManagedChildProcessOptions,
@@ -334,6 +393,7 @@ export {
 } from "./utils/ffmpegBinaries.js";
 
 export { trackChildProcess, killTrackedProcesses } from "./utils/processTracker.js";
+export { renameWithRetry, renameWithRetryAsync } from "./utils/renameWithRetry.js";
 
 // drawElement self-verify comparison — shared by the streaming drain
 // (producer) and the parallel disk-path verify (parallelCoordinator).
@@ -391,6 +451,8 @@ export {
   showVideoElements,
   queryVideoElementBounds,
   queryElementStacking,
+  measureVideoShownBoxes,
+  type ShownBox,
   type VideoElementBounds,
   type ElementStackingInfo,
 } from "./services/videoFrameInjector.js";
@@ -400,9 +462,14 @@ export {
   detectTransfer,
   getHdrEncoderColorParams,
   analyzeCompositionHdr,
+  findHdrAutoPromotion,
+  formatHdrAutoPromotionWarning,
+  sanitizeHdrAutoPromotionAsset,
   DEFAULT_HDR10_MASTERING,
+  HDR_AUTO_PROMOTION_PIPELINE,
   type HdrTransfer,
   type HdrEncoderColorParams,
+  type HdrAutoPromotion,
   type CompositionHdrInfo,
   type HdrMasteringMetadata,
 } from "./utils/hdr.js";

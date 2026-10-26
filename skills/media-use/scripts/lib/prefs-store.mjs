@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { globalMediaDir } from "./media-home.mjs";
 
 /**
  * Remembered defaults — the lightweight tier of HyperFrames user memory.
@@ -15,7 +15,7 @@ import { basename, dirname, join, resolve } from "node:path";
  *   project files can't see each other, so the cross-project count has to live
  *   user-side.
  *
- * Consumption contract (brief-contract § 2, Remembered defaults): a remembered
+ * Consumption contract (media-use references/memory.md): a remembered
  * value becomes the recommended option with a receipt naming its source — it
  * never skips a question, and explicit request content always wins.
  */
@@ -41,7 +41,7 @@ export function projectPrefsPath(projectDir) {
 }
 
 export function userPrefsPath() {
-  return join(homedir(), ".media", PREFS_FILE);
+  return join(globalMediaDir(), PREFS_FILE);
 }
 
 function emptyFile() {

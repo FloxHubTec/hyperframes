@@ -12,7 +12,7 @@ import {
   cpSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, resolve, join } from "node:path";
+import { dirname, resolve, join, extname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -25,7 +25,7 @@ import {
   compareAudioEnvelopes,
   computeAudioResidualRmsDb,
 } from "./utils/audioRegression.js";
-import { parseFps, fpsToNumber } from "@hyperframes/core";
+import { type DistributedFps, parseFps, fpsToNumber } from "@hyperframes/core";
 import {
   checkDistributedSupport,
   type HarnessMode,
@@ -179,7 +179,7 @@ type TestResult = {
   passed: boolean;
   /**
    * Set when `--mode=distributed-simulated` skips a fixture that the
-   * distributed pipeline can't run (HDR, NTSC fps, fps∉{24,30,60}).
+   * distributed pipeline can't run (HDR, NTSC fps, fps outside DISTRIBUTED_FPS).
    * `passed` is `true` for skipped fixtures — skipping is a clean outcome,
    * not a failure — but the summary distinguishes them.
    */
@@ -539,11 +539,17 @@ function copyFixtureSupportFiles(suite: TestSuite, tempRoot: string): void {
 
 // ── FFmpeg Utilities ─────────────────────────────────────────────────────────
 
-function runFfmpeg(args: string[], label: string): { stdout: Buffer; stderr: string } {
+function runFfmpeg(
+  args: string[],
+  label: string,
+  cwd?: string,
+): { stdout: Buffer; stderr: string } {
   const result = spawnSync("ffmpeg", args, {
+    cwd,
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 256 * 1024 * 1024,
     encoding: "buffer",
+    windowsHide: true,
   });
   const stderr = result.stderr.toString("utf-8");
   if (result.status !== 0) {
@@ -581,6 +587,8 @@ function extractFrameAsImage(
 export function frameIndexForCheckpoint(checkpointSec: number, fps: number): number {
   return Math.max(0, Math.round(checkpointSec * fps));
 }
+
+const STATS_FILE_NAME = "psnr.log";
 
 /**
  * PSNR for a set of frame indices, in a single ffmpeg pass.
@@ -628,12 +636,8 @@ export function psnrAtFrames(
   if (wanted.length === 0) return new Map();
 
   const statsDir = mkdtempSync(join(tmpdir(), "hf-psnr-"));
-  const statsFile = join(statsDir, "psnr.log");
+  const statsFile = join(statsDir, STATS_FILE_NAME);
   try {
-    // ffmpeg treats `:` and `\` in filter option values as syntax, so a temp
-    // path containing either would break the filtergraph. mkdtemp under
-    // tmpdir() does not produce those on POSIX, but escape defensively.
-    const escaped = statsFile.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
     const selectExpr = wanted.map((frame) => `eq(n\\,${frame})`).join("+");
     const stream = (index: number, label: string) =>
       `[${index}:v]select='${selectExpr}',settb=1/1,setpts=N[${label}]`;
@@ -643,9 +647,9 @@ export function psnrAtFrames(
         "-loglevel",
         "error",
         "-i",
-        renderedVideo,
+        resolve(renderedVideo),
         "-i",
-        snapshotVideo,
+        resolve(snapshotVideo),
         "-filter_complex",
         // shortest=1:repeatlast=0 makes framesync stop at the first stream to
         // end instead of holding its last frame. Without them, an input that
@@ -656,12 +660,14 @@ export function psnrAtFrames(
         // [0,15,45] emit 3 rows under the defaults (row 3 comparing frame 45
         // against a repeated frame 15, 16.65 dB) and 2 rows with these set.
         `${stream(0, "rv")};${stream(1, "gv")};` +
-          `[rv][gv]psnr=shortest=1:repeatlast=0:stats_file=${escaped}`,
+          `[rv][gv]psnr=shortest=1:repeatlast=0:stats_file=${STATS_FILE_NAME}`,
         "-f",
         "null",
         "-",
       ],
       "Checkpoint PSNR",
+      // A bare name in cwd keeps every path out of the filtergraph and its escaping rules.
+      statsDir,
     );
 
     const values: number[] = [];
@@ -757,6 +763,10 @@ function saveFailureDetails(
 ): void {
   const failuresDir = join(suite.dir, "failures");
   mkdirSync(failuresDir, { recursive: true });
+
+  if (result.visual && existsSync(renderedVideoPath) && statSync(renderedVideoPath).isFile()) {
+    copyFileSync(renderedVideoPath, join(failuresDir, `actual${extname(renderedVideoPath)}`));
+  }
 
   // Save compilation failures
   if (result.compilation && !result.compilation.passed) {
@@ -967,7 +977,7 @@ export function createRegressionTempRoot(suiteId: string, parent: string = tmpdi
   return mkdtempSync(join(parent, `hyperframes-test-${suiteId}-`));
 }
 
-async function runTestSuite(
+export async function runTestSuite(
   suite: TestSuite,
   options: {
     update: boolean;
@@ -1108,10 +1118,10 @@ async function runTestSuite(
         result.skipped = { reason: support.reason };
         return result;
       }
-      // `checkDistributedSupport` already narrowed fps to {24,30,60}; the
+      // `checkDistributedSupport` already narrowed fps to DISTRIBUTED_FPS; the
       // cast surfaces that guarantee to TS. webm is now distributed-
       // supported via closed-GOP concat-copy, so the format passes through.
-      const fpsNum = suite.meta.renderConfig.fps.num as 24 | 30 | 60;
+      const fpsNum = suite.meta.renderConfig.fps.num as DistributedFps;
       const distributedInput = {
         projectDir: tempSrcDir,
         tempRoot,
@@ -1366,7 +1376,16 @@ async function runTestSuite(
       const renderedAudio = extractMonoPcm16(renderedOutputPath);
       const snapshotAudio = extractMonoPcm16(snapshotVideoPath);
 
-      if (renderedAudio.length > 0 && snapshotAudio.length > 0) {
+      const renderedHasAudio = renderedAudio.length > 0;
+      const snapshotHasAudio = snapshotAudio.length > 0;
+      if (renderedHasAudio !== snapshotHasAudio) {
+        audioPassed = false;
+        audioCorrelation = -1;
+        logPretty(
+          `Audio stream mismatch: rendered=${renderedHasAudio ? "present" : "missing"}, snapshot=${snapshotHasAudio ? "present" : "missing"}`,
+          "✗",
+        );
+      } else if (renderedHasAudio && snapshotHasAudio) {
         const renderedEnvelope = buildRmsEnvelope(renderedAudio);
         const snapshotEnvelope = buildRmsEnvelope(snapshotAudio);
         const audio = compareAudioEnvelopes(

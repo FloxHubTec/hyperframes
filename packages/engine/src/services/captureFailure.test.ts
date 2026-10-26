@@ -17,6 +17,13 @@ describe("classifyCaptureFailure", () => {
     ["JavaScript heap out of memory", "memory_exhaustion"],
     ["drawElement self-verify failed", "verification"],
     ["Composition has zero duration. Runtime ready: true", "authoring"],
+    ["Protocol error (Page.captureScreenshot): Unable to capture screenshot", "transient_browser"],
+    [
+      "[Parallel] Capture failed: Worker 0: Protocol error (Page.captureScreenshot): Unable to capture screenshot",
+      "transient_browser",
+    ],
+    // The timed-out variant of the same call stays protocol_timeout (checked first).
+    ["Protocol error (Page.captureScreenshot): waiting for debugger timed out", "protocol_timeout"],
   ] as const)("classifies %s as %s", (message, kind) => {
     expect(classifyCaptureFailure(new Error(message)).kind).toBe(kind);
   });
@@ -62,6 +69,20 @@ describe("classifyCaptureFailure", () => {
     expect(Object.isFrozen(failure.workerDiagnostics[0]?.lines)).toBe(true);
   });
 
+  it("classifies a broken encoder pipe as io, not authoring", () => {
+    // The streaming encoder's stdin write fails this way when ffmpeg dies
+    // first. Bucketed as authoring, PostHog blamed the composition for a host
+    // event and the cohort could not be root-caused.
+    for (const code of ["EPIPE", "EOF", "ECONNRESET"]) {
+      const withCode = Object.assign(new Error(`write ${code}`), { code });
+      expect(classifyCaptureFailure(withCode).kind).toBe("io");
+      // Flattened through a worker-pool message boundary the code is lost;
+      // the message alone must still classify.
+      expect(classifyCaptureFailure(new Error(`[Parallel] write ${code}`)).kind).toBe("io");
+    }
+    expect(classifyCaptureFailure(new Error("write to EPIPEline")).kind).toBe("authoring");
+  });
+
   it("classifies repeated operation text in linear time", () => {
     const repeatedCopy = "copy".repeat(25_000);
 
@@ -79,5 +100,24 @@ describe("classifyCaptureFailure", () => {
         new CaptureFailure({ kind: "protocol_timeout", message: "protocol timeout" }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("classifyCaptureFailure page errors", () => {
+  it("carries the page's error lines onto the classified failure", () => {
+    const failure = classifyCaptureFailure(new Error("Target closed"), {
+      pageErrorLines: ["[Browser:PAGEERROR] script threw"],
+    });
+    expect(failure.pageErrorLines).toEqual(["[Browser:PAGEERROR] script threw"]);
+  });
+
+  it("keeps the lines when an existing failure is reclassified", () => {
+    const original = new CaptureFailure({
+      kind: "transient_browser",
+      message: "Target closed",
+      pageErrorLines: ["[Browser:PAGEERROR] script threw"],
+    });
+    const failure = classifyCaptureFailure(original, { workerDiagnostics: [] });
+    expect(failure.pageErrorLines).toEqual(["[Browser:PAGEERROR] script threw"]);
   });
 });

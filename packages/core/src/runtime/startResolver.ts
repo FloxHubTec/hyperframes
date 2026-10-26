@@ -1,20 +1,28 @@
 import type { RuntimeTimelineLike } from "./types";
-import { swallow } from "./diagnostics";
+import { readTimelineDurationSeconds } from "./timelineDuration";
 import { resolveAuthoredTimingWindow } from "./authoredTiming";
 // Straight from playbackRate, not through media.ts's re-export: media.ts
 // imports mediaVolumeEnvelope, which needs this resolver, and the round trip
 // would be an import cycle.
 import {
   parseStrictFiniteTimingNumber,
-  readElementPlaybackRate,
-  readMediaStart,
+  resolveNaturalMediaTimelineDuration,
+  resolveTimedImageDurationSeconds,
 } from "./playbackRate";
 import { isMediaElement } from "./domRealm";
 import { parseStartExpression } from "./startExpression";
-import { MEDIA_START_BASIS_ATTR, resolveAbsoluteMediaStartSeconds } from "../mediaTiming";
+import {
+  compositionOriginSeconds,
+  hostInPointSeconds,
+  type HostSlot,
+  isRootGlobalMediaStart,
+  MEDIA_START_BASIS_ATTR,
+  resolveMediaStartSeconds,
+  type MediaStartInput,
+} from "../mediaTiming";
 
 export function createRuntimeStartTimeResolver(params: {
-  timelineRegistry?: Record<string, RuntimeTimelineLike | undefined>;
+  timelineRegistry?: Record<string, Pick<RuntimeTimelineLike, "duration"> | undefined>;
   includeAuthoredTimingAttrs?: boolean;
   /**
    * The document that reference lookups (`data-start="intro + 2"`) resolve
@@ -27,6 +35,9 @@ export function createRuntimeStartTimeResolver(params: {
   resolveStartForElement: (element: Element, fallback?: number) => number;
   resolveDurationForElement: (element: Element) => number | null;
   resolveMediaStartForElement: (element: Element) => number;
+  resolveHostStartForElement: (element: Element) => number;
+  resolveHostSlotsForElement: (element: Element) => HostSlot[];
+  isRootGlobalMediaStartForElement: (element: Element) => boolean;
 } {
   const timelineRegistry = params.timelineRegistry ?? {};
   const includeAuthoredTimingAttrs = params.includeAuthoredTimingAttrs ?? false;
@@ -35,81 +46,113 @@ export function createRuntimeStartTimeResolver(params: {
   const durationCache = new WeakMap<Element, number | null>();
   const visiting = new Set<Element>();
 
-  const findReferenceTarget = (refId: string): Element | null => {
+  const compositionScopeOf = (element: Element): Element | null =>
+    (element.hasAttribute("data-composition-id") ? element.parentElement : element)?.closest(
+      "[data-composition-id]",
+    ) ?? null;
+
+  const findReferenceTarget = (refId: string, from: Element): Element | null => {
+    const scope = compositionScopeOf(from);
+    if (scope) {
+      for (const candidate of scope.querySelectorAll(`[id="${refId}"]`)) {
+        if (compositionScopeOf(candidate) === scope) return candidate;
+      }
+    }
     const byId = doc.getElementById(refId);
     if (byId) return byId;
     return (
-      (doc.querySelector(`[data-composition-id="${CSS.escape(refId)}"]`) as Element | null) ?? null
+      Array.from(doc.querySelectorAll("[data-composition-id]")).find(
+        (element) => element.getAttribute("data-composition-id") === refId,
+      ) ?? null
     );
+  };
+
+  const authoredAttr = (element: Element, name: string) =>
+    includeAuthoredTimingAttrs ? element.getAttribute(name) : null;
+
+  const resolveAuthoredDuration = (element: Element): number | null =>
+    resolveAuthoredTimingWindow({
+      start: 0,
+      duration: element.getAttribute("data-duration"),
+      authoredDuration: authoredAttr(element, "data-hf-authored-duration"),
+    })?.duration ??
+    resolveAuthoredTimingWindow({
+      start: resolveStartForElementInternal(element, 0),
+      end: element.getAttribute("data-end"),
+      authoredEnd: authoredAttr(element, "data-hf-authored-end"),
+    })?.duration ??
+    null;
+
+  const positive = (value: number | null | undefined): number | null =>
+    value != null && Number.isFinite(value) && value > 0 ? value : null;
+
+  const resolveRegisteredTimelineDuration = (element: Element): number | null => {
+    const compositionId = element.getAttribute("data-composition-id");
+    return compositionId
+      ? positive(readTimelineDurationSeconds(timelineRegistry[compositionId]))
+      : null;
   };
 
   const resolveDurationForElement = (element: Element): number | null => {
     const cached = durationCache.get(element);
     if (cached !== undefined) return cached;
-    let resolved: number | null = null;
-    const durationTiming = resolveAuthoredTimingWindow({
-      start: 0,
-      duration: element.getAttribute("data-duration"),
-      authoredDuration: includeAuthoredTimingAttrs
-        ? element.getAttribute("data-hf-authored-duration")
-        : null,
-    });
-    if (durationTiming?.duration != null && durationTiming.duration > 0) {
-      resolved = durationTiming.duration;
-    }
-    if (resolved == null || resolved <= 0) {
-      const start = resolveStartForElementInternal(element, 0);
-      const endTiming = resolveAuthoredTimingWindow({
-        start,
-        end: element.getAttribute("data-end"),
-        authoredEnd: includeAuthoredTimingAttrs
-          ? element.getAttribute("data-hf-authored-end")
+    const resolved =
+      resolveAuthoredDuration(element) ??
+      positive(
+        isMediaElement(element)
+          ? resolveNaturalMediaTimelineDuration(element, element.duration)
           : null,
-      });
-      if (endTiming?.duration != null && endTiming.duration > 0) {
-        resolved = endTiming.duration;
-      }
-    }
-    if ((resolved == null || resolved <= 0) && isMediaElement(element)) {
-      const playbackStart = readMediaStart(element);
-      if (Number.isFinite(element.duration) && element.duration > playbackStart) {
-        resolved = (element.duration - playbackStart) / readElementPlaybackRate(element);
-      }
-    }
-    if (resolved == null || resolved <= 0) {
-      const compositionId = element.getAttribute("data-composition-id");
-      if (compositionId) {
-        const timeline = timelineRegistry[compositionId] ?? null;
-        if (timeline && typeof timeline.duration === "function") {
-          try {
-            const timelineDuration = Number(timeline.duration());
-            if (Number.isFinite(timelineDuration) && timelineDuration > 0) {
-              resolved = timelineDuration;
-            }
-          } catch (err) {
-            // ignore broken timeline impls
-            swallow("runtime.startResolver.site1", err);
-          }
-        }
-      }
-    }
-    if (resolved != null && Number.isFinite(resolved) && resolved > 0) {
-      durationCache.set(element, resolved);
-      return resolved;
-    }
-    durationCache.set(element, null);
-    return null;
+      ) ??
+      positive(resolveTimedImageDurationSeconds(element)) ??
+      resolveRegisteredTimelineDuration(element);
+    durationCache.set(element, resolved);
+    return resolved;
   };
 
+  const isCompositionHost = (element: Element): boolean =>
+    element.hasAttribute("data-composition-src") ||
+    element.hasAttribute("data-composition-id") ||
+    element.hasAttribute("data-composition-file");
+
+  // A mounted composition root without its own `data-start` takes its timing from the host it was
+  // loaded into: the host may use a different id than the file, or none (an anonymous host).
+  const inheritedTimingHost = (element: Element): Element | null => {
+    const parent = element.parentElement;
+    if (!parent || !element.hasAttribute("data-composition-id")) return null;
+    if (parseStartExpression(element.getAttribute("data-start"))) return null;
+    return isCompositionHost(parent) ? parent : null;
+  };
+
+  const resolveCompositionOrigin = (compositionRoot: Element, fallback: number): number =>
+    compositionOriginSeconds(
+      resolveStartForElementInternal(compositionRoot, fallback),
+      inheritedTimingHost(compositionRoot) ?? compositionRoot,
+    );
+
   const resolveHostOffsetForElement = (element: Element, fallback: number): number => {
-    if (element.hasAttribute("data-composition-id")) {
-      const parentComposition = element.parentElement?.closest("[data-composition-id]");
-      if (!parentComposition) return 0;
-      return resolveStartForElementInternal(parentComposition, fallback);
+    const compositionRoot = element.hasAttribute("data-composition-id")
+      ? element.parentElement?.closest("[data-composition-id]")
+      : element.closest("[data-composition-id]");
+    return compositionRoot ? resolveCompositionOrigin(compositionRoot, fallback) : 0;
+  };
+
+  const computeStart = (element: Element, fallback: number): number => {
+    const expression = parseStartExpression(element.getAttribute("data-start"));
+    if (!expression) {
+      const host = inheritedTimingHost(element);
+      return host ? resolveStartForElementInternal(host, fallback) : fallback;
     }
-    const compositionRoot = element.closest("[data-composition-id]");
-    if (!compositionRoot) return 0;
-    return resolveStartForElementInternal(compositionRoot, fallback);
+    if (expression.kind === "absolute") {
+      // Negative when a host's in-point is past its start; the host's slot cuts that part.
+      return resolveHostOffsetForElement(element, fallback) + Math.max(0, expression.value);
+    }
+    const target = findReferenceTarget(expression.refId, element);
+    if (!target) return fallback;
+    const targetStart = resolveStartForElementInternal(target, 0);
+    const targetDuration = resolveDurationForElement(target) ?? 0;
+    // Clamped at local 0, as a numeric start is, once an in-point puts local 0 before 0.
+    const floor = Math.min(0, resolveHostOffsetForElement(element, 0));
+    return Math.max(floor, targetStart + targetDuration + expression.offset);
   };
 
   const resolveStartForElementInternal = (element: Element, fallback: number): number => {
@@ -122,53 +165,7 @@ export function createRuntimeStartTimeResolver(params: {
     }
     visiting.add(element);
     try {
-      const expression = parseStartExpression(element.getAttribute("data-start"));
-      if (!expression) {
-        // If this element is a loaded composition inner root (has data-composition-id
-        // but no data-start), walk up to the host parent which carries the actual
-        // timing. This happens when the host uses a different data-composition-id
-        // than the loaded file — e.g. host="montage" but file has "scene-10", or
-        // when the host itself has no data-composition-id at all (an "anonymous"
-        // host) and the composition's own id was restored onto the inlined wrapper.
-        // Check data-composition-src (runtime, not yet inlined), data-composition-id
-        // (bundled/compiled host with its own id), and data-composition-file (the
-        // marker every inlined host gets, compiled or bundled, once
-        // data-composition-src is stripped — covers the anonymous-host case).
-        if (element.hasAttribute("data-composition-id")) {
-          const parent = element.parentElement;
-          if (
-            parent &&
-            (parent.hasAttribute("data-composition-src") ||
-              parent.hasAttribute("data-composition-id") ||
-              parent.hasAttribute("data-composition-file"))
-          ) {
-            const parentStart = resolveStartForElementInternal(parent, fallback);
-            startCache.set(element, parentStart);
-            return parentStart;
-          }
-        }
-        startCache.set(element, fallback);
-        return fallback;
-      }
-      if (expression.kind === "absolute") {
-        const absolute = Math.max(0, expression.value);
-        const resolved = Math.max(0, resolveHostOffsetForElement(element, fallback) + absolute);
-        startCache.set(element, resolved);
-        return resolved;
-      }
-      const target = findReferenceTarget(expression.refId);
-      if (!target) {
-        startCache.set(element, fallback);
-        return fallback;
-      }
-      const targetStart = resolveStartForElementInternal(target, 0);
-      const targetDuration = resolveDurationForElement(target);
-      if (targetDuration == null || targetDuration <= 0) {
-        const unresolved = Math.max(0, targetStart + expression.offset);
-        startCache.set(element, unresolved);
-        return unresolved;
-      }
-      const resolved = Math.max(0, targetStart + targetDuration + expression.offset);
+      const resolved = computeStart(element, fallback);
       startCache.set(element, resolved);
       return resolved;
     } finally {
@@ -187,28 +184,48 @@ export function createRuntimeStartTimeResolver(params: {
    * cache, WebAudio scheduling — must come through here, or the timeline the
    * editor draws stops matching the timeline that plays.
    */
-  const resolveMediaStartForElement = (element: Element): number => {
+  const mediaStartInput = (element: Element): MediaStartInput => {
     const compositionRoot = element.closest("[data-composition-id]");
-    const hostStart = compositionRoot ? resolveStartForElementInternal(compositionRoot, 0) : 0;
-    const authoredStart = parseStrictFiniteTimingNumber(element.getAttribute("data-start"));
-    // No literal start (absent, or a `data-start="intro + 2"` reference), an
-    // auto-injected start, or a host at t=0 — nothing for the basis to
-    // disambiguate, so the ordinary start resolution is already correct.
-    if (element.hasAttribute("data-hf-auto-start") || authoredStart == null || hostStart <= 0) {
-      return resolveStartForElementInternal(element, hostStart);
-    }
-    return resolveAbsoluteMediaStartSeconds({
-      authoredStart,
-      hostStart,
+    return {
+      authoredStart: parseStrictFiniteTimingNumber(element.getAttribute("data-start")),
+      hostStart: compositionRoot ? resolveCompositionOrigin(compositionRoot, 0) : 0,
+      hasAutoStart: element.hasAttribute("data-hf-auto-start"),
       basis: element.getAttribute(MEDIA_START_BASIS_ATTR),
+    };
+  };
+
+  const resolveMediaStartForElement = (element: Element): number => {
+    const input = mediaStartInput(element);
+    return resolveMediaStartSeconds({
+      ...input,
+      ordinaryStart: () => resolveStartForElementInternal(element, input.hostStart),
     });
   };
+
+  // Hosts with an in-point, found by their composition attributes so an anonymous one counts too.
+  const resolveHostSlotsForElement = (element: Element): HostSlot[] => {
+    const slots: HostSlot[] = [];
+    for (let node = element.parentElement; node; node = node.parentElement) {
+      if (!isCompositionHost(node) || inheritedTimingHost(node)) continue;
+      if (hostInPointSeconds(node) <= 0) continue;
+      const start = resolveStartForElementInternal(node, 0);
+      const duration = resolveAuthoredDuration(node);
+      slots.push({ start, end: duration ? start + duration : Infinity });
+    }
+    return slots;
+  };
+
+  const isRootGlobalMediaStartForElement = (element: Element): boolean =>
+    isMediaElement(element) && isRootGlobalMediaStart(mediaStartInput(element));
 
   return {
     resolveStartForElement: (element: Element, fallback = 0) =>
       resolveStartForElementInternal(element, Math.max(0, fallback)),
     resolveDurationForElement: (element: Element) => resolveDurationForElement(element),
     resolveMediaStartForElement,
+    resolveHostStartForElement: (element: Element) => resolveHostOffsetForElement(element, 0),
+    resolveHostSlotsForElement,
+    isRootGlobalMediaStartForElement,
   };
 }
 

@@ -1,7 +1,7 @@
-import { memo, useState, useCallback, useRef } from "react";
+import { memo, useEffect, useState, useCallback, useRef } from "react";
+import { useLivePreviewIframe } from "../../player/store/previewIframeStore";
 import { useCaptionStore } from "../store";
 import { usePlayerStore } from "../../player";
-import { useMountEffect } from "../../hooks/useMountEffect";
 import { shouldHandleCaptionNudgeKey, isEditableEventTarget } from "../keyboard";
 import {
   readWordBoxes,
@@ -32,6 +32,7 @@ function syncToStore(segmentId: string, el: HTMLElement, iframeWin: Window) {
 
 export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: CaptionOverlayProps) {
   const isEditMode = useCaptionStore((s) => s.isEditMode);
+  const livePreviewIframe = useLivePreviewIframe();
   const model = useCaptionStore((s) => s.model);
   const selectedSegmentIds = useCaptionStore((s) => s.selectedSegmentIds);
   const selectSegment = useCaptionStore((s) => s.selectSegment);
@@ -81,7 +82,9 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
     | null
   >(null);
 
-  useMountEffect(() => {
+  // The observer and message filter bind to the live iframe element, which a promoted reload replaces.
+  // eslint-disable-next-line no-restricted-syntax
+  useEffect(() => {
     if (!isEditMode) return;
 
     // Let undo/redo (useAppHotkeys) reapply restored models to this iframe.
@@ -240,7 +243,8 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
       window.removeEventListener("keydown", handleKeyDown);
       cancelDragRef.current = null;
     };
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [livePreviewIframe]);
 
   const getCssScale = useCallback(() => {
     const iframe = iframeRef.current;
@@ -404,7 +408,7 @@ export const CaptionOverlay = memo(function CaptionOverlay({ iframeRef }: Captio
       {wordBoxes.length === 0 && model && model.segments.size > 0 && (
         <div className="absolute inset-x-0 top-3 flex justify-center pointer-events-none">
           <span className="px-2.5 py-1 rounded-full bg-black/60 border border-neutral-700 text-2xs text-neutral-300">
-            No captions visible at this frame — scrub to a caption, or select one in the track below
+            No captions visible at this frame. Scrub to a caption, or select one in the track below
           </span>
         </div>
       )}

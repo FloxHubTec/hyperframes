@@ -27,6 +27,16 @@
     return Math.round(value * 100) / 100;
   }
 
+  function horizontalOverflow(subject, container, tolerance) {
+    if (subject.width <= container.width + tolerance) return null;
+    const overflow = overflowFor(subject, container, tolerance);
+    if (!overflow) return null;
+    const horizontal = {};
+    if (overflow.left != null) horizontal.left = overflow.left;
+    if (overflow.right != null) horizontal.right = overflow.right;
+    return Object.keys(horizontal).length > 0 ? horizontal : null;
+  }
+
   function overflowFor(subject, container, tolerance, vTolerance) {
     // Horizontal axis uses `tolerance`; vertical axis uses `vTolerance` (defaults to the same).
     // A separate vertical tolerance lets text overflow checks absorb glyph ink that exceeds a
@@ -97,20 +107,29 @@
     return `${uniqueSelectorFor(parent)} > ${element.tagName.toLowerCase()}:nth-of-type(${index})`;
   }
 
+  // Color grading paints an <img>/<video> into a canvas the runtime inserts right after it; that canvas answers
+  // to the element the author wrote. ponytail: render-frame siblings sit between them only in render, not check.
+  const GRADED_STAND_IN = "[data-hf-color-grading-canvas]";
+  function authoredElement(element) {
+    return (element.matches(GRADED_STAND_IN) && element.previousElementSibling) || element;
+  }
+
   function hasIgnoreFlag(element) {
-    return !!element.closest("[data-layout-ignore], [data-layout-check='ignore']");
+    return !!authoredElement(element).closest("[data-layout-ignore], [data-layout-check='ignore']");
   }
 
   function hasAllowOverflowFlag(element) {
-    return !!element.closest("[data-layout-allow-overflow]");
+    return !!authoredElement(element).closest("[data-layout-allow-overflow]");
   }
 
   function hasAllowCaptionZoneFlag(element) {
-    return !!element.closest("[data-layout-allow-caption-zone]");
+    return !!authoredElement(element).closest("[data-layout-allow-caption-zone]");
   }
 
   function hasTextClipOptOut(element) {
-    return hasAllowOverflowFlag(element) || element.hasAttribute("data-layout-bleed");
+    return (
+      hasAllowOverflowFlag(element) || authoredElement(element).hasAttribute("data-layout-bleed")
+    );
   }
 
   function opacityChain(element) {
@@ -444,7 +463,7 @@
     const overflow = {};
     if (overflowX > tolerance) overflow.right = round(overflowX);
     if (overflowY > tolerance) overflow.bottom = round(overflowY);
-    const selector = selectorFor(element);
+    const selector = uniqueSelectorFor(element);
     const text = textContentFor(element);
     const rect = toRect(element.getBoundingClientRect());
     const fontSize = parsePx(style.fontSize);
@@ -461,66 +480,111 @@
     };
   }
 
-  // An ancestor (up to and including `stopAt`) that clips its overflow makes any
-  // text spilling past it invisible — that clipping IS the layout mechanism
-  // (odometer/ticker reels, masked windows), not a defect to report.
-  function clippedByAncestor(element, stopAt) {
-    for (let current = element; current; current = current.parentElement) {
-      if (current !== element && clipsOverflow(getComputedStyle(current))) return true;
-      if (current === stopAt) break;
-    }
-    return false;
+  function capitalizeWords(text) {
+    const words = new Intl.Segmenter(undefined, { granularity: "word" }).segment(text);
+    return Array.from(words, ({ segment, isWordLike }) => {
+      if (!isWordLike) return segment;
+      const [first, ...rest] = segment;
+      return first.toUpperCase() + rest.join("");
+    }).join("");
+  }
+
+  function horizontalTextMetrics(element, style) {
+    if (style.writingMode && style.writingMode !== "horizontal-tb") return null;
+    const context = document.createElement("canvas").getContext("2d");
+    if (!context) return null;
+    context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    let text = textContentFor(element, true);
+    if (style.textTransform === "uppercase") text = text.toUpperCase();
+    if (style.textTransform === "lowercase") text = text.toLowerCase();
+    if (style.textTransform === "capitalize") text = capitalizeWords(text);
+    const metrics = context.measureText(text);
+    return metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent > 0 ? metrics : null;
+  }
+
+  function intersectsTextWindow(rect, clip, tolerance) {
+    return (
+      Math.min(rect.right, clip.right) - Math.max(rect.left, clip.left) > tolerance &&
+      Math.min(rect.bottom, clip.bottom) - Math.max(rect.top, clip.top) > tolerance
+    );
+  }
+
+  // The glyphs' own extent inside a Range rect (the font's content area); font metrics scale with the rect.
+  function inkRect(rect, metrics) {
+    const scale = rect.height / (metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent);
+    const top =
+      rect.top + (metrics.fontBoundingBoxAscent - metrics.actualBoundingBoxAscent) * scale;
+    const bottom =
+      rect.bottom - (metrics.fontBoundingBoxDescent - metrics.actualBoundingBoxDescent) * scale;
+    return { ...rect, top, bottom, height: bottom - top };
+  }
+
+  function visibleTextLineRects(element, rects, style, clip, tolerance) {
+    const metrics = horizontalTextMetrics(element, style);
+    const fontHeight = metrics ? metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent : 0;
+    const lineHeight = parsePx(style.lineHeight) || fontHeight;
+    return rects.flatMap((rect) => {
+      if (!metrics) return intersectsTextWindow(rect, clip, tolerance) ? [rect] : [];
+      const scale = rect.height / fontHeight;
+      if (!intersectsTextWindow(inkRect(rect, metrics), clip, tolerance)) return [];
+      // Negative leading belongs outside the used line box. Font metrics scale
+      // with the Range rect, so zoomed cards retain the same clipping decision.
+      const inset = Math.max(0, (rect.height - lineHeight * scale) / 2);
+      return [
+        toRect({
+          ...rect,
+          top: rect.top + inset,
+          bottom: rect.bottom - inset,
+          height: rect.height - 2 * inset,
+        }),
+      ];
+    });
   }
 
   function textOverflowIssues(element, root, rootRect, time, tolerance, clippedIssue) {
-    const textRect = textRectFor(element, true);
+    const lineRects = textClientRects(element, true).map(toRect);
+    const textRect = unionRects(lineRects);
     if (!textRect) return [];
     const text = textContentFor(element, true);
-    const selector = selectorFor(element);
+    const selector = uniqueSelectorFor(element);
     const issues = [];
 
     const container = nearestConstraint(element, root, rootRect);
     const containerRect = container === root ? rootRect : toRect(container.getBoundingClientRect());
-    // Glyph ink (ascenders / descenders / accents / heavy display faces) routinely exceeds a
-    // snug line-height box by a few px, proportional to font size. When the constraining box
-    // does NOT clip, that vertical spill is normal typography — it shows in the padding, nothing
-    // is hidden — not a layout defect (it false-flagged caption words). Allow a font-metric
-    // vertical tolerance there; keep it tight when the box actually clips (a real cut-off) and
-    // always tight horizontally (too-wide text is a real wrap/legibility issue).
     const elementStyle = getComputedStyle(element);
     const containerClips = clipsOverflow(
       container === root ? getComputedStyle(root) : getComputedStyle(container),
     );
+    const visibleTextRect = containerClips
+      ? unionRects(visibleTextLineRects(element, lineRects, elementStyle, containerRect, tolerance))
+      : textRect;
     const verticalTolerance = containerClips
       ? tolerance
       : Math.max(tolerance, parsePx(elementStyle.fontSize) * 0.2);
-    const containerOverflow = overflowFor(textRect, containerRect, tolerance, verticalTolerance);
+    const containerOverflow = visibleTextRect
+      ? overflowFor(visibleTextRect, containerRect, tolerance, verticalTolerance)
+      : null;
     const billedAsClippedText =
       container === element &&
       clippedIssue != null &&
       containerOverflow != null &&
       containerOverflow.left == null &&
       containerOverflow.top == null;
-    if (
-      containerOverflow &&
-      !billedAsClippedText &&
-      !hasTextClipOptOut(element) &&
-      !clippedByAncestor(element, container)
-    ) {
+    if (containerOverflow && !billedAsClippedText && !hasTextClipOptOut(element)) {
       const style = elementStyle;
       issues.push({
         code: "text_box_overflow",
         severity: "error",
         time,
         selector,
-        containerSelector: selectorFor(container),
+        containerSelector: uniqueSelectorFor(container),
         text,
         message: "Text extends outside its nearest visual/container box.",
-        rect: textRect,
+        rect: visibleTextRect,
         containerRect,
         overflow: containerOverflow,
         fixHint: textOverflowFixHint(
-          textRect,
+          visibleTextRect,
           containerRect,
           containerOverflow,
           parsePx(style.fontSize),
@@ -536,7 +600,7 @@
         severity: "info",
         time,
         selector,
-        containerSelector: selectorFor(root),
+        containerSelector: uniqueSelectorFor(root),
         text,
         message: "Text extends outside the composition canvas.",
         rect: textRect,
@@ -550,28 +614,50 @@
     return issues;
   }
 
+  function isNowrapTextChild(child) {
+    if (!isVisibleElement(child) || hasAllowOverflowFlag(child)) return false;
+    if (getComputedStyle(child).whiteSpace !== "nowrap") return false;
+    return (child.textContent || "").trim().length > 0;
+  }
+
+  function hasNowrapTextChild(element) {
+    return Array.from(element.children).some(isNowrapTextChild);
+  }
+
   function containerOverflowIssues(root, time, tolerance) {
     const issues = [];
     const containers = Array.from(root.querySelectorAll("*")).filter((element) => {
       if (!isVisibleElement(element) || hasAllowOverflowFlag(element)) return false;
       const style = getComputedStyle(element);
-      return clipsOverflow(style) || element.hasAttribute("data-layout-boundary");
+      return (
+        clipsOverflow(style) ||
+        element.hasAttribute("data-layout-boundary") ||
+        hasNowrapTextChild(element)
+      );
     });
 
     for (const container of containers) {
+      const style = getComputedStyle(container);
+      const checksEveryChild =
+        clipsOverflow(style) || container.hasAttribute("data-layout-boundary");
       const containerRect = toRect(container.getBoundingClientRect());
       for (const child of Array.from(container.children)) {
         if (!isVisibleElement(child) || hasAllowOverflowFlag(child)) continue;
+        if (!checksEveryChild && !isNowrapTextChild(child)) continue;
         const childRect = toRect(child.getBoundingClientRect());
-        const overflow = overflowFor(childRect, containerRect, tolerance);
+        const overflow = checksEveryChild
+          ? overflowFor(childRect, containerRect, tolerance)
+          : horizontalOverflow(childRect, containerRect, tolerance);
         if (!overflow) continue;
         issues.push({
           code: "container_overflow",
           severity: "warning",
           time,
-          selector: selectorFor(child),
-          containerSelector: selectorFor(container),
-          message: "Element extends outside a clipping layout container.",
+          selector: uniqueSelectorFor(child),
+          containerSelector: uniqueSelectorFor(container),
+          message: checksEveryChild
+            ? "Element extends outside a clipping layout container."
+            : "Nowrap text is wider than its container.",
           rect: childRect,
           containerRect,
           overflow,
@@ -585,10 +671,14 @@
   }
 
   function hasAllowOverlapFlag(element) {
-    // Overlap intent belongs to the text block that participates in the
-    // layering. Inheriting this marker from a scene/root would turn one local
-    // waiver into a blanket exemption for every collision in that subtree.
-    return element.hasAttribute("data-layout-allow-overlap");
+    // The marker applies to the element that carries it and to text inside
+    // that container. It stops at the composition root: a waiver on the scene
+    // itself would exempt every collision in the subtree.
+    for (let current = element; current; current = current.parentElement) {
+      if (current.hasAttribute("data-composition-id")) return false;
+      if (current.hasAttribute("data-layout-allow-overlap")) return true;
+    }
+    return false;
   }
 
   function isTransparentColor(color) {
@@ -623,9 +713,24 @@
     return colorAlpha(getComputedStyle(element).color) >= 0.35;
   }
 
+  const RUNTIME_HIDDEN_CLIP = "[data-hf-clip-hidden]";
+
+  // Core's timedClipHide rule hides these clips' whole subtrees: skipping them bounds work by what is on screen.
+  function elementsOnScreenScenes(root) {
+    const elements = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+      acceptNode: (element) =>
+        element.matches(RUNTIME_HIDDEN_CLIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    });
+    for (let element = walker.nextNode(); element; element = walker.nextNode()) {
+      elements.push(element);
+    }
+    return elements;
+  }
+
   function collectSolidTextBlocks(root) {
     const blocks = [];
-    for (const element of Array.from(root.querySelectorAll("*"))) {
+    for (const element of elementsOnScreenScenes(root)) {
       if (!isSolidTextBlock(element)) continue;
       const rects = visibleTextClientRects(element, true);
       const rect = unionRects(rects);
@@ -654,6 +759,20 @@
       for (const bRect of b) total += intersectionArea(aRect, bRect);
     }
     return total;
+  }
+
+  function overlapsByAFifth(a, b) {
+    return fragmentIntersectionArea(a, b) > Math.min(rectsArea(a), rectsArea(b)) * 0.2;
+  }
+
+  // Collision is judged on the glyphs: at line-height < 1 the content areas of stacked lines overlap
+  // while the words do not touch. Measured only for pairs whose content areas already overlap.
+  function glyphRects(block) {
+    if (!block.glyphRects) {
+      const metrics = horizontalTextMetrics(block.element, getComputedStyle(block.element));
+      block.glyphRects = metrics ? block.rects.map((rect) => inkRect(rect, metrics)) : block.rects;
+    }
+    return block.glyphRects;
   }
 
   function isNested(a, b) {
@@ -691,8 +810,8 @@
   function overlapIssue(a, b, time) {
     if (isNested(a.element, b.element)) return null;
     if (isManagedFlowOverlap(a.element, b.element)) return null;
-    const area = fragmentIntersectionArea(a.rects, b.rects);
-    if (area <= Math.min(rectsArea(a.rects), rectsArea(b.rects)) * 0.2) return null;
+    if (!overlapsByAFifth(a.rects, b.rects)) return null;
+    if (!overlapsByAFifth(glyphRects(a), glyphRects(b))) return null;
     return {
       // Warning at the per-sample level: a single-sample overlap is usually an
       // entrance/exit transient (two blocks crossing mid-animation), not a real
@@ -709,16 +828,48 @@
       message: "Two text blocks overlap and may render unreadable.",
       rect: a.rect,
       fixHint:
-        "Give each block its own zone, or mark intentional layering with data-layout-allow-overlap.",
+        "Give each block its own zone, or put data-layout-allow-overlap on the text or on a container inside the scene. A marker on the scene root does not apply.",
+    };
+  }
+
+  function hiddenVisibilityAncestor(element) {
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      const visibility = getComputedStyle(parent).visibility;
+      if (visibility === "hidden" || visibility === "collapse") return parent;
+    }
+    return null;
+  }
+
+  function visibilityEscapeIssue(block, hiddenAncestor, time) {
+    return {
+      code: "visibility_escapes_segment",
+      severity: "warning",
+      time,
+      selector: uniqueSelectorFor(block.element),
+      containerSelector: uniqueSelectorFor(hiddenAncestor),
+      text: textContentFor(block.element),
+      message:
+        "This text stays on screen after its segment ends. visibility:visible here overrides an ancestor's visibility:hidden, so the runtime hide does not reach it.",
+      rect: block.rect,
+      fixHint: "Remove the explicit visibility:visible so this element hides with its ancestor.",
     };
   }
 
   function contentOverlapIssues(root, time) {
     const blocks = collectSolidTextBlocks(root);
     const issues = [];
-    for (let i = 0; i < blocks.length; i++) {
-      for (let j = i + 1; j < blocks.length; j++) {
-        const issue = overlapIssue(blocks[i], blocks[j], time);
+    const participating = [];
+    for (const block of blocks) {
+      const hiddenAncestor = hiddenVisibilityAncestor(block.element);
+      if (hiddenAncestor) {
+        issues.push(visibilityEscapeIssue(block, hiddenAncestor, time));
+        continue;
+      }
+      participating.push(block);
+    }
+    for (let i = 0; i < participating.length; i++) {
+      for (let j = i + 1; j < participating.length; j++) {
+        const issue = overlapIssue(participating[i], participating[j], time);
         if (issue) issues.push(issue);
       }
     }
@@ -729,8 +880,10 @@
     let imageAlpha = 0;
     if (style.backgroundImage && style.backgroundImage !== "none") {
       if (style.backgroundImage.includes("url(")) return true;
-      // A gradient only occludes as much as its colours — a 4%-alpha grid/scrim must not count.
-      imageAlpha = gradientLayersAlpha(style.backgroundImage);
+      // A gradient only occludes as much as its colours — a 4%-alpha grid/scrim
+      // must not count, and neither must a solid-color dot a couple of pixels
+      // wide tiled across a much larger background-size.
+      imageAlpha = gradientLayersAlpha(style.backgroundImage, style.backgroundSize);
     }
     const colorValue = isTransparentColor(style.backgroundColor)
       ? 0
@@ -740,12 +893,66 @@
   }
 
   // background-image layers stack: two 0.5-alpha gradients paint at 1-(1-.5)^2 = .75.
-  function gradientLayersAlpha(backgroundImage) {
+  function gradientLayersAlpha(backgroundImage, backgroundSize) {
     let combined = 0;
     for (const layer of splitTopLevelCommas(backgroundImage)) {
-      combined = 1 - (1 - combined) * (1 - gradientMaxAlpha(layer));
+      const coverage = gradientStopCoverage(layer, backgroundSize);
+      combined = 1 - (1 - combined) * (1 - gradientMaxAlpha(layer) * coverage);
     }
     return combined;
+  }
+
+  // Share of a radial dot's tile. A linear fill, or an opaque stop after a
+  // transparent one, stays fully painted. A 1.6px dot on a 38px tile does not.
+  function gradientStopCoverage(layer, backgroundSize) {
+    if (!/radial-gradient/i.test(layer) || namesAColor(withoutScoredColors(layer))) return 1;
+    const stops = [
+      ...layer.matchAll(/(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|transparent)\s+([\d.]+)(px|%)/gi),
+    ];
+    const tile = pxTile(backgroundSize);
+    const reach = tile ? leadingOpaqueRadius(stops, tile) : null;
+    if (reach === null) return 1;
+    return Math.min(1, (Math.PI * reach * reach) / (tile * tile));
+  }
+
+  function pxTile(backgroundSize) {
+    const sizeMatch = String(backgroundSize || "").match(/([\d.]+)px/);
+    return sizeMatch ? Number(sizeMatch[1]) : 0;
+  }
+
+  function leadingOpaqueRadius(stops, tile) {
+    const walked = walkOpaquePrefix(stops, tile);
+    if (!walked || !walked.sawOpaque || !walked.sawTransparent) return null;
+    return walked.reach;
+  }
+
+  function walkOpaquePrefix(stops, tile) {
+    const state = { reach: 0, sawOpaque: false, sawTransparent: false };
+    for (const stop of stops) {
+      if (!takeRadiusStop(state, stop, tile)) return null;
+    }
+    return state;
+  }
+
+  function takeRadiusStop(state, stop, tile) {
+    if (stopAlpha(stop[1] || "") <= 0.6) {
+      state.sawTransparent = true;
+      return true;
+    }
+    if (state.sawTransparent) return false;
+    state.sawOpaque = true;
+    state.reach = Math.max(state.reach, stopLength(stop, tile));
+    return true;
+  }
+
+  function stopAlpha(color) {
+    if (color === "transparent") return 0;
+    if (color.startsWith("#")) return 1;
+    return colorAlpha(color);
+  }
+
+  function stopLength(stop, tile) {
+    return stop[3] === "%" ? (Number(stop[2]) / 100) * tile : Number(stop[2]);
   }
 
   function splitTopLevelCommas(value) {
@@ -771,6 +978,7 @@
       .replace(/(?:repeating-)?(?:linear|radial|conic)-gradient\(/gi, "(")
       .replace(/rgba?\([^)]*\)/gi, "");
     if (/[a-z][a-z-]+\(/i.test(known)) return 1;
+    if (namesAColor(known)) return 1;
     const colors = backgroundImage.match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}\b|\btransparent\b/g);
     if (!colors) return 1;
     let max = 0;
@@ -791,6 +999,18 @@
       }
     }
     return max;
+  }
+
+  function withoutScoredColors(layer) {
+    return layer.replace(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}\b/g, " ");
+  }
+
+  function namesAColor(known) {
+    const words = known.replace(
+      /\b(?:to|top|bottom|left|right|center|circle|ellipse|closest-side|farthest-side|closest-corner|farthest-corner|from|deg|rad|turn|grad|transparent|repeating|linear|radial|conic|gradient)\b/gi,
+      " ",
+    );
+    return /\b[a-z]{3,}\b/i.test(words);
   }
 
   const RASTER_TAGS = new Set(["IMG", "VIDEO", "CANVAS"]);
@@ -830,14 +1050,46 @@
     return { x: objectPositionOffset(x, freeX), y: objectPositionOffset(y, freeY) };
   }
 
-  // Return the alpha painted by an <img> at a viewport point. `null` means the
-  // browser would not let us inspect the image (not loaded or cross-origin), in
-  // which case callers preserve the conservative opaque fallback.
-  function imageAlphaAt(element, x, y) {
-    const sourceWidth = element.naturalWidth;
-    const sourceHeight = element.naturalHeight;
+  const IDENTITY_FLIP = { flipX: false, flipY: false };
+
+  // 2D CSS matrix components [a, b, c, d], or null when the transform is 3D or unparsed.
+  function transformMatrix(value) {
+    if (!value || value === "none") return [1, 0, 0, 1];
+    const match = /^matrix\(([^)]*)\)$/.exec(value.trim());
+    if (!match) return null;
+    const parts = match[1].split(",").map(Number);
+    return parts.length === 6 && parts.every(Number.isFinite) ? parts.slice(0, 4) : null;
+  }
+
+  // Which axes the element's paint is mirrored on, or null when a rotation, skew or 3D transform
+  // (on it or an ancestor) means its bounding box no longer maps axis-aligned onto its pixels.
+  function paintFlips(element) {
+    let flipX = false;
+    let flipY = false;
+    for (let current = element; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      const matrix = transformMatrix(style.transform);
+      if (!matrix) return null;
+      const [a, b, c, d] = matrix;
+      if (Math.abs(b) > 1e-6 || Math.abs(c) > 1e-6) return null;
+      if (style.rotate && style.rotate !== "none" && parseFloat(style.rotate) !== 0) return null;
+      const scale = String(style.scale || "none")
+        .trim()
+        .split(/\s+/)
+        .map(Number);
+      const scaleX = Number.isFinite(scale[0]) ? scale[0] : 1;
+      const scaleY = Number.isFinite(scale[1]) ? scale[1] : scaleX;
+      if (a * scaleX < 0) flipX = !flipX;
+      if (d * scaleY < 0) flipY = !flipY;
+    }
+    return flipX || flipY ? { flipX, flipY } : IDENTITY_FLIP;
+  }
+
+  function paintedSourceMapping(element, sourceWidth, sourceHeight) {
     const rect = element.getBoundingClientRect();
     if (!sourceWidth || !sourceHeight || !rect.width || !rect.height) return null;
+    const flips = paintFlips(element);
+    if (!flips) return null;
 
     const style = getComputedStyle(element);
     const fit = style.objectFit || "fill";
@@ -865,9 +1117,48 @@
       rect.width - paintedWidth,
       rect.height - paintedHeight,
     );
-    const localX = x - rect.left - offsets.x;
-    const localY = y - rect.top - offsets.y;
-    if (localX < 0 || localY < 0 || localX >= paintedWidth || localY >= paintedHeight) return 0;
+    return {
+      rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      offsets,
+      ...flips,
+      paintedWidth,
+      paintedHeight,
+      scaleX,
+      scaleY,
+      sourceWidth,
+      sourceHeight,
+    };
+  }
+
+  // The source pixel painted at a viewport point, or null outside the painted content box.
+  function sourcePixelAt(mapping, x, y) {
+    const { rect, offsets } = mapping;
+    const localX = (mapping.flipX ? rect.right - x : x - rect.left) - offsets.x;
+    const localY = (mapping.flipY ? rect.bottom - y : y - rect.top) - offsets.y;
+    if (
+      localX < 0 ||
+      localY < 0 ||
+      localX >= mapping.paintedWidth ||
+      localY >= mapping.paintedHeight
+    ) {
+      return null;
+    }
+    return {
+      x: Math.min(mapping.sourceWidth - 1, Math.max(0, Math.floor(localX / mapping.scaleX))),
+      y: Math.min(mapping.sourceHeight - 1, Math.max(0, Math.floor(localY / mapping.scaleY))),
+    };
+  }
+
+  // Return the alpha painted by an <img> at a viewport point. `null` means the
+  // browser would not let us inspect the image (not loaded or cross-origin), in
+  // which case callers preserve the conservative opaque fallback.
+  function imageAlphaAt(element, x, y) {
+    const sourceWidth = element.naturalWidth;
+    const sourceHeight = element.naturalHeight;
+    const mapping = paintedSourceMapping(element, sourceWidth, sourceHeight);
+    if (!mapping) return null;
+    const pixel = sourcePixelAt(mapping, x, y);
+    if (!pixel) return 0;
 
     try {
       let cached = imageAlphaCanvases.get(element);
@@ -887,12 +1178,114 @@
         cached = { context, width: sourceWidth, height: sourceHeight, source };
         imageAlphaCanvases.set(element, cached);
       }
-      const sourceX = Math.min(sourceWidth - 1, Math.max(0, Math.floor(localX / scaleX)));
-      const sourceY = Math.min(sourceHeight - 1, Math.max(0, Math.floor(localY / scaleY)));
-      return cached.context.getImageData(sourceX, sourceY, 1, 1).data[3] / 255;
+      return cached.context.getImageData(pixel.x, pixel.y, 1, 1).data[3] / 255;
     } catch {
       return null;
     }
+  }
+
+  const OCCLUDING_ALPHA = 0.6;
+  const VIDEO_ALPHA_MAX_SIDE = 480;
+  let videoAlphaFrames = new Map();
+  let videoAlphaScratch = null;
+
+  function videoAlphaContext(width, height) {
+    if (!videoAlphaScratch) {
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) return null;
+      videoAlphaScratch = { canvas, context };
+    }
+    videoAlphaScratch.canvas.width = width;
+    videoAlphaScratch.canvas.height = height;
+    return videoAlphaScratch.context;
+  }
+
+  // Read once per audit call, so per sample time, and only for a video some text probe lands under.
+  function videoAlphaFrame(video) {
+    let frame = videoAlphaFrames.get(video);
+    if (!frame) {
+      frame = readVideoAlphaFrame(video);
+      videoAlphaFrames.set(video, frame);
+    }
+    return frame;
+  }
+
+  function unreadVideoFrame(reason) {
+    return { kind: "unread", reason };
+  }
+
+  // "opaque" keeps a video's whole box occluding; "matte" judges each point by the decoded
+  // frame's alpha; "unread" falls back to opaque and is reported, never guessed.
+  function readVideoAlphaFrame(video) {
+    if (video.seeking) return unreadVideoFrame("the seek had not landed");
+    if (video.readyState < 2) return unreadVideoFrame("no frame was decoded at this time");
+    if (!video.videoWidth || !video.videoHeight)
+      return unreadVideoFrame("the video has no frame size");
+    const mapping = paintedSourceMapping(video, video.videoWidth, video.videoHeight);
+    if (!mapping) return unreadVideoFrame("it is rotated, skewed or transformed in 3D");
+    const downscale = Math.min(
+      1,
+      VIDEO_ALPHA_MAX_SIDE / Math.max(mapping.sourceWidth, mapping.sourceHeight),
+    );
+    const width = Math.max(1, Math.round(mapping.sourceWidth * downscale));
+    const height = Math.max(1, Math.round(mapping.sourceHeight * downscale));
+    let rgba;
+    try {
+      const context = videoAlphaContext(width, height);
+      if (!context) return unreadVideoFrame("no 2D canvas was available");
+      context.clearRect(0, 0, width, height);
+      context.drawImage(video, 0, 0, width, height);
+      rgba = context.getImageData(0, 0, width, height).data;
+    } catch (error) {
+      return unreadVideoFrame(
+        error && error.name === "SecurityError"
+          ? "its source is cross-origin"
+          : "its frame could not be drawn",
+      );
+    }
+    return classifyVideoAlpha(rgba, width, height, mapping, opacityChain(video));
+  }
+
+  function classifyVideoAlpha(rgba, width, height, mapping, opacity) {
+    const alpha = new Uint8Array(width * height);
+    let clear = 0;
+    let painted = 0;
+    for (let index = 0; index < alpha.length; index++) {
+      alpha[index] = rgba[index * 4 + 3];
+      if (alpha[index] < OCCLUDING_ALPHA * 255) clear += 1;
+      if (alpha[index] > 0) painted += 1;
+    }
+    if (clear === 0) return { kind: "opaque" };
+    if (painted === 0) return unreadVideoFrame("its frame read back fully transparent");
+    return {
+      kind: "matte",
+      alpha,
+      width,
+      height,
+      opacity,
+      mapping: {
+        ...mapping,
+        sourceWidth: width,
+        sourceHeight: height,
+        scaleX: mapping.paintedWidth / width,
+        scaleY: mapping.paintedHeight / height,
+      },
+    };
+  }
+
+  function matteOccludesAt(frame, x, y) {
+    const pixel = sourcePixelAt(frame.mapping, x, y);
+    if (!pixel) return false;
+    return (frame.alpha[pixel.y * frame.width + pixel.x] / 255) * frame.opacity >= OCCLUDING_ALPHA;
+  }
+
+  // A video with an opaque CSS background paints that background behind its clear pixels.
+  function matteFrameFor(element) {
+    if (element.tagName !== "VIDEO") return null;
+    if (hasOpaqueBackground(getComputedStyle(element))) return null;
+    const frame = videoAlphaFrame(element);
+    return frame.kind === "matte" ? frame : null;
   }
 
   // An element hides text beneath it when it paints opaque pixels at near-full
@@ -900,18 +1293,20 @@
   // background colour. Low-opacity overlays (grain, scrims) do not occlude.
   function isOpaqueOccluder(element, x, y) {
     const opacity = opacityChain(element);
-    if (opacity < 0.6) return false;
+    if (opacity < OCCLUDING_ALPHA) return false;
     if (IGNORE_TAGS.has(element.tagName)) return false;
     if (element.tagName === "IMG") {
       const alpha = imageAlphaAt(element, x, y);
-      if (alpha !== null) return alpha * opacity >= 0.6;
+      if (alpha !== null) return alpha * opacity >= OCCLUDING_ALPHA;
     }
+    const matte = matteFrameFor(element);
+    if (matte) return matteOccludesAt(matte, x, y);
     if (RASTER_TAGS.has(element.tagName)) return true;
     return hasOpaqueBackground(getComputedStyle(element));
   }
 
   function hasAllowOcclusionFlag(element) {
-    return !!element.closest("[data-layout-allow-occlusion]");
+    return element.hasAttribute("data-layout-allow-occlusion");
   }
 
   // A foreign element is one painted independently of the text — not the text
@@ -954,7 +1349,7 @@
   // there is related to the text, non-opaque, sharing a 3D context with it, or
   // part of a transient crossfade overlap.
   // fallow-ignore-next-line complexity
-  function occluderAt(element, x, y) {
+  function occluderAt(element, x, y, seenMattes) {
     // Walk the paint-ordered stack: a transparent layer on top must not mask an opaque one below it.
     const stack =
       typeof document.elementsFromPoint === "function"
@@ -967,6 +1362,8 @@
       // Pair-specific exemptions excuse this hit only; keep walking for deeper occluders.
       if (sharedPreserve3d(element, hit)) continue;
       if (isCrossSceneTransitionOverlap(element, hit)) continue;
+      const matte = seenMattes && matteFrameFor(hit);
+      if (matte && !seenMattes.has(matte)) seenMattes.set(matte, hit);
       if (isOpaqueOccluder(hit, x, y)) return hit;
     }
     return null;
@@ -1000,21 +1397,162 @@
   function occlusionCoverage(element, textRects) {
     let occluder = null;
     let hits = 0;
+    let opaqueHits = 0;
+    // Every matte above the text, including where its alpha is clear: a feature narrower than the
+    // probe grid (an arm, a mic stand) can hide a word between two probe columns.
+    const seenMattes = new Map();
     for (const textRect of textRects) {
       for (const yFraction of OCCLUSION_PROBE_Y_FRACTIONS) {
         const y = textRect.top + textRect.height * yFraction;
         for (const xFraction of OCCLUSION_PROBE_X_FRACTIONS) {
-          const hit = occluderAt(element, textRect.left + textRect.width * xFraction, y);
+          const x = textRect.left + textRect.width * xFraction;
+          const hit = occluderAt(element, x, y, seenMattes);
           if (!hit) continue;
           hits += 1;
           if (!occluder) occluder = hit;
+          if (!matteFrameFor(hit)) opaqueHits += 1;
         }
       }
     }
+    const judgeByMatte = opaqueHits === 0 && seenMattes.size > 0;
     return {
-      occluder,
+      occluder: occluder || (judgeByMatte ? seenMattes.values().next().value : null),
       coveredFraction: round(hits / (OCCLUSION_GRID_POINTS * textRects.length)),
+      mattes: judgeByMatte ? [...seenMattes.keys()] : [],
     };
+  }
+
+  // Thresholds from measuring rendered words against real subject mattes: a word reads as
+  // deliberately tucked behind the subject at 30-55% covered, and is lost at 80%, or when it
+  // and its neighbour are both half covered.
+  const MATTE_WORD_LOST_COVERAGE = 0.8;
+  const MATTE_PAIR_LOST_COVERAGE = 0.5;
+  const MATTE_MAX_SAMPLES_PER_AXIS = 48;
+
+  function wordClientRects(element) {
+    const words = [];
+    for (const node of directTextNodes(element)) {
+      for (const match of (node.textContent || "").matchAll(/\S+/g)) {
+        const range = document.createRange();
+        range.setStart(node, match.index);
+        range.setEnd(node, match.index + match[0].length);
+        const rects = Array.from(range.getClientRects()).filter(
+          (rect) => rect.width > 0.5 && rect.height > 0.5,
+        );
+        range.detach();
+        if (rects.length > 0) words.push({ word: match[0], rects });
+      }
+    }
+    return words;
+  }
+
+  function matteSampleCount(length, mattes) {
+    const pitch = Math.max(1, Math.min(...mattes.map((matte) => matte.mapping.scaleX)));
+    return Math.max(1, Math.min(MATTE_MAX_SAMPLES_PER_AXIS, Math.ceil(length / pitch)));
+  }
+
+  // Area-weighted share of the rects under any matte's occluding alpha, sampled at the matte's resolution.
+  function matteCoverage(rects, mattes) {
+    let coveredArea = 0;
+    let totalArea = 0;
+    for (const rect of rects) {
+      const cols = matteSampleCount(rect.width, mattes);
+      const rows = matteSampleCount(rect.height, mattes);
+      let covered = 0;
+      for (let row = 0; row < rows; row++) {
+        const y = rect.top + ((row + 0.5) * rect.height) / rows;
+        for (let col = 0; col < cols; col++) {
+          const x = rect.left + ((col + 0.5) * rect.width) / cols;
+          if (mattes.some((matte) => matteOccludesAt(matte, x, y))) covered += 1;
+        }
+      }
+      const area = rect.width * rect.height;
+      coveredArea += (area * covered) / (rows * cols);
+      totalArea += area;
+    }
+    return totalArea > 0 ? round(coveredArea / totalArea) : 0;
+  }
+
+  function lostNeighbourPair(words) {
+    for (let index = 1; index < words.length; index++) {
+      const pair = [words[index - 1], words[index]];
+      if (pair.every((word) => word.coverage >= MATTE_PAIR_LOST_COVERAGE)) return pair;
+    }
+    return null;
+  }
+
+  function percent(fraction) {
+    return `${Math.round(fraction * 100)}%`;
+  }
+
+  function lostWordsMessage(lostWord, pair) {
+    if (lostWord) {
+      return `"${lostWord.word}" is ${percent(lostWord.coverage)} behind a transparent video's matte.`;
+    }
+    return `Neighbouring words "${pair[0].word}" and "${pair[1].word}" are ${percent(pair[0].coverage)} and ${percent(pair[1].coverage)} behind a transparent video's matte.`;
+  }
+
+  function markMatteWordsLost(issue, lostWord, pair) {
+    issue.severity = "error";
+    issue.message = lostWordsMessage(lostWord, pair);
+    issue.fixHint =
+      "Move or resize the text so no word is 80% behind the matte and no two neighbouring words are each half behind it, or mark intentional layering with data-layout-allow-occlusion.";
+  }
+
+  // Text behind a cutout is judged per rendered word against the decoded alpha: partial cover is
+  // reported as info with its share, a lost word is an error.
+  function matteOcclusionIssue(element, time, textRect, text, occluder, mattes) {
+    const words = wordClientRects(element).map(({ word, rects }) => ({
+      word,
+      coverage: matteCoverage(rects, mattes),
+    }));
+    if (words.length === 0) return null;
+    const peak = words.reduce((top, word) => (word.coverage > top.coverage ? word : top));
+    if (peak.coverage <= 0) return null;
+    const issue = {
+      code: "text_occluded",
+      severity: "info",
+      time,
+      selector: uniqueSelectorFor(element),
+      containerSelector: uniqueSelectorFor(occluder),
+      text,
+      message: `Text sits partly behind a transparent video's matte; its most covered word "${peak.word}" is ${percent(peak.coverage)} hidden.`,
+      rect: textRect,
+      coveredFraction: peak.coverage,
+    };
+    const lostWord = peak.coverage >= MATTE_WORD_LOST_COVERAGE ? peak : null;
+    const pair = lostNeighbourPair(words);
+    if (lostWord || pair) markMatteWordsLost(issue, lostWord, pair);
+    return { issue, first: words[0], last: words[words.length - 1] };
+  }
+
+  // Captions often render one word per element, so the neighbour rule also spans sibling elements.
+  function markLostSiblingWords(matteResults) {
+    for (const [element, result] of matteResults) {
+      const next = element.nextElementSibling && matteResults.get(element.nextElementSibling);
+      if (!next) continue;
+      const pair = [result.last, next.first];
+      if (!pair.every((word) => word.coverage >= MATTE_PAIR_LOST_COVERAGE)) continue;
+      for (const { issue } of [result, next]) {
+        if (issue.severity !== "error") markMatteWordsLost(issue, null, pair);
+      }
+    }
+  }
+
+  function unreadVideoIssues(time) {
+    const issues = [];
+    for (const [video, frame] of videoAlphaFrames) {
+      if (frame.kind !== "unread") continue;
+      issues.push({
+        code: "video_alpha_unread",
+        severity: "info",
+        time,
+        selector: uniqueSelectorFor(video),
+        message: `Could not read this video's frame alpha (${frame.reason}), so text under it was judged as if the video were opaque.`,
+        rect: toRect(video.getBoundingClientRect()),
+      });
+    }
+    return issues;
   }
 
   // pointer-events:none hides elements from elementFromPoint — both probed text AND occluders.
@@ -1044,18 +1582,23 @@
   }
 
   // text_occluded: atomic labels flag at any hit; prose needs coveredFraction >= proseCoverageFloor (default 0.15).
-  function occludedTextIssue(element, time, proseCoverageFloor) {
+  function occludedTextIssue(element, time, proseCoverageFloor, matteResults) {
     if (hasAllowOcclusionFlag(element)) return null;
     if (!hasVisibleTextInk(element)) return null;
     const textRect = textRectFor(element, true);
     if (!textRect) return null;
     const textRects = textClientRects(element, true);
     const text = textContentFor(element, true);
-    const { occluder, coveredFraction } = occlusionCoverage(
+    const { occluder, coveredFraction, mattes } = occlusionCoverage(
       element,
       textRects.length > 0 ? textRects : [textRect],
     );
     if (!occluder) return null;
+    if (mattes.length > 0) {
+      const result = matteOcclusionIssue(element, time, textRect, text, occluder, mattes);
+      if (result) matteResults.set(element, result);
+      return result ? result.issue : null;
+    }
     if (!isAtomicLabel(text) && coveredFraction < proseCoverageFloor) return null;
     return {
       code: "text_occluded",
@@ -1070,6 +1613,134 @@
       fixHint:
         "Give the text its own zone, raise its stacking order above the covering element, or mark intentional layering with data-layout-allow-occlusion.",
     };
+  }
+
+  function layoutOffset(element) {
+    let left = 0;
+    let top = 0;
+    for (let current = element; current instanceof HTMLElement; current = current.offsetParent) {
+      left += current.offsetLeft;
+      top += current.offsetTop;
+      if (current !== element) {
+        left += current.clientLeft;
+        top += current.clientTop;
+      }
+    }
+    return { left, top };
+  }
+
+  function ancestorBackgroundPaintsText(element, textRect) {
+    // Chromium 150+ includes independently painted descendants in text masks;
+    // older builds drop their glyphs: https://github.com/heygen-com/hyperframes/issues/5117.
+    const chromium = window.navigator.userAgent.match(/(?:HeadlessChrome|Chrome)\/(\d+)/);
+    const chromiumVersion = chromium ? Number(chromium[1]) : 0;
+    if (!chromiumVersion || !(element instanceof HTMLElement)) return false;
+
+    for (
+      let ancestor = element.parentElement;
+      ancestor instanceof HTMLElement;
+      ancestor = ancestor.parentElement
+    ) {
+      const style = getComputedStyle(ancestor);
+      const clips = splitTopLevelCommas(
+        style.webkitBackgroundClip || style.backgroundClip || "border-box",
+      ).map((clip) => clip.trim());
+      if (!clips.includes("text")) continue;
+      if (chromiumVersion < 150 && hasIndependentTextPaint(element, ancestor)) continue;
+      // Chromium builds the mask before descendant transforms, so moving the
+      // child must not move its glyphs out of the mask for this check.
+      const offset = layoutOffset(element);
+      const parentOffset = layoutOffset(ancestor);
+      const elementRect = element.getBoundingClientRect();
+      const scaleX = elementRect.width > 0 ? element.offsetWidth / elementRect.width : 1;
+      const scaleY = elementRect.height > 0 ? element.offsetHeight / elementRect.height : 1;
+      const backgroundRect = rectFromOrigin(0, 0, ancestor.offsetWidth, ancestor.offsetHeight);
+      const overlaps =
+        element.offsetWidth > 0 && element.offsetHeight > 0
+          ? textClientRects(element, true).some((rect) => {
+              const layoutRect = rectFromOrigin(
+                offset.left - parentOffset.left + (rect.left - elementRect.left) * scaleX,
+                offset.top - parentOffset.top + (rect.top - elementRect.top) * scaleY,
+                rect.width * scaleX,
+                rect.height * scaleY,
+              );
+              return intersectionArea(layoutRect, backgroundRect) > 0;
+            })
+          : !overflowFor(textRect, ancestor.getBoundingClientRect(), 2);
+      if (!overlaps) continue;
+
+      const images = splitTopLevelCommas(style.backgroundImage || "none");
+      const imagePaints = images.some(
+        (image, index) =>
+          clips[index % clips.length] === "text" &&
+          (/url\(/i.test(image) ||
+            (/(?:linear|radial|conic)-gradient\(/i.test(image) && gradientMaxAlpha(image) > 0.05)),
+      );
+      const colorPaints =
+        clips[(images.length - 1) % clips.length] === "text" &&
+        colorAlpha(style.backgroundColor || "rgba(0, 0, 0, 0)") > 0.05;
+      if (imagePaints || colorPaints) return true;
+    }
+    return false;
+  }
+
+  // Plain descendants share a text mask on older Chromium; independently
+  // painted descendants do not. Check the whole path to the mask, including
+  // wrappers: https://github.com/chromium/chromium/blob/148.0.7778.97/third_party/blink/renderer/core/layout/layout_inline.cc.
+  function hasIndependentTextPaint(element, background) {
+    for (let current = element; current !== background; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.position && style.position !== "static") return true;
+      if (Number.parseFloat(style.opacity || "1") < 1) return true;
+      const isInline = style.display === "inline";
+      if (
+        [
+          style.filter,
+          style.backdropFilter,
+          style.webkitBackdropFilter,
+          style.maskImage,
+          style.webkitMaskImage,
+          style.clipPath,
+          style.webkitClipPath,
+          style.viewTransitionName,
+        ].some((value) => value && value !== "none")
+      )
+        return true;
+      if (
+        !isInline &&
+        [style.transform, style.translate, style.rotate, style.scale, style.perspective].some(
+          (value) => value && value !== "none",
+        )
+      )
+        return true;
+      if (style.isolation === "isolate") return true;
+      if (style.mixBlendMode && style.mixBlendMode !== "normal") return true;
+      if (
+        !isInline &&
+        (style.backfaceVisibility === "hidden" || style.transformStyle === "preserve-3d")
+      )
+        return true;
+      if (!isInline && /\b(?:paint|layout|content|strict)\b/.test(style.contain || "")) return true;
+      if (style.contentVisibility && style.contentVisibility !== "visible") return true;
+      if (
+        (style.willChange || "")
+          .split(",")
+          .some(
+            (property) =>
+              /^(?:opacity|filter|backdrop-filter|position|isolation|mix-blend-mode|mask|mask-image|clip-path)$/.test(
+                property.trim(),
+              ) ||
+              (!isInline &&
+                /^(?:transform|translate|rotate|scale|perspective)$/.test(property.trim())),
+          )
+      )
+        return true;
+      if (style.zIndex && style.zIndex !== "auto" && current.parentElement) {
+        const display = getComputedStyle(current.parentElement).display;
+        if (/^(?:inline-)?(?:flex|grid)$/.test(display)) return true;
+      }
+    }
+    return false;
   }
 
   // Text whose glyphs paint with an effectively transparent fill renders
@@ -1103,11 +1774,12 @@
       // clipped text. If nothing paints, fall through and report it.
       if (paintsGlyphs) return null;
     }
+    if (ancestorBackgroundPaintsText(element, textRect)) return null;
     return {
       code: "text_not_painted",
       severity: "error",
       time,
-      selector: selectorFor(element),
+      selector: uniqueSelectorFor(element),
       text,
       message:
         "Text paints with an effectively transparent fill (-webkit-text-fill-color / color), so its glyphs are invisible.",
@@ -1151,8 +1823,8 @@
         code: "escaped_container",
         severity: "warning",
         time,
-        selector: selectorFor(element),
-        containerSelector: selectorFor(parent),
+        selector: uniqueSelectorFor(element),
+        containerSelector: uniqueSelectorFor(parent),
         text: textContentFor(element),
         message:
           "Positioned element renders far outside its offset parent — its coordinates were likely computed in a different frame (canvas/viewport pixels).",
@@ -1228,8 +1900,8 @@
         code: "panel_out_of_canvas",
         severity: rectArea(rect) >= rootArea * PANEL_HERO_AREA_FRACTION ? "warning" : "info",
         time,
-        selector: selectorFor(element),
-        containerSelector: selectorFor(root),
+        selector: uniqueSelectorFor(element),
+        containerSelector: uniqueSelectorFor(root),
         text: textContentFor(element).slice(0, 48),
         message: "Painted panel extends outside the composition canvas.",
         rect,
@@ -1237,6 +1909,123 @@
         overflow,
         fixHint:
           "Move the panel inward, or mark intentional off-canvas animation with data-layout-allow-overflow.",
+      });
+    }
+    return issues;
+  }
+
+  // Pixels drawn into a <canvas> have no DOM box, so text the frame edge cuts is invisible to
+  // canvas_overflow. Read a thin band just inside each covered frame edge and count sharp steps.
+  const CANVAS_EDGE_STEP = 96;
+  const CANVAS_EDGE_MIN_STEPS = 2;
+  // Monospace and bitmap glyph cells end in a gap, so the outermost column alone can read empty.
+  const CANVAS_EDGE_BAND_PX = 4;
+
+  function coveredFrameEdges(rect, rootRect, tolerance) {
+    const top = Math.max(rect.top, rootRect.top);
+    const bottom = Math.min(rect.bottom, rootRect.bottom);
+    const left = Math.max(rect.left, rootRect.left);
+    const right = Math.min(rect.right, rootRect.right);
+    if (bottom - top < CANVAS_EDGE_BAND_PX || right - left < CANVAS_EDGE_BAND_PX) return [];
+    const band = CANVAS_EDGE_BAND_PX;
+    const rows = { y: top, height: bottom - top, width: band, vertical: true };
+    const cols = { x: left, width: right - left, height: band, vertical: false };
+    const edges = [];
+    if (rect.left <= rootRect.left + tolerance) edges.push({ side: "left", x: left, ...rows });
+    if (rect.right >= rootRect.right - tolerance)
+      edges.push({ side: "right", x: right - band, ...rows });
+    if (rect.top <= rootRect.top + tolerance) edges.push({ side: "top", y: top, ...cols });
+    if (rect.bottom >= rootRect.bottom - tolerance)
+      edges.push({ side: "bottom", y: bottom - band, ...cols });
+    return edges;
+  }
+
+  // Draw the band into a scratch canvas (never getContext on the film's own canvas, which would
+  // claim it as 2D). A WebGL canvas without preserveDrawingBuffer reads blank: no finding.
+  function canvasEdgeBand(canvas, rect, edge) {
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const off = document.createElement("canvas");
+    off.width = Math.max(1, Math.round(edge.width * scaleX));
+    off.height = Math.max(1, Math.round(edge.height * scaleY));
+    const ctx = off.getContext("2d");
+    if (!ctx) return null;
+    const sx = Math.max(0, Math.floor((edge.x - rect.left) * scaleX));
+    const sy = Math.max(0, Math.floor((edge.y - rect.top) * scaleY));
+    ctx.drawImage(canvas, sx, sy, off.width, off.height, 0, 0, off.width, off.height);
+    return {
+      data: ctx.getImageData(0, 0, off.width, off.height).data,
+      width: off.width,
+      height: off.height,
+    };
+  }
+
+  // Collapse the band across its thickness (brightest wins), then count steps along the edge:
+  // luma over black plus alpha, compared two pixels back so anti-aliased glyph edges still step.
+  function sharpSteps(band, vertical) {
+    const length = vertical ? band.height : band.width;
+    const thickness = vertical ? band.width : band.height;
+    const levels = [];
+    for (let along = 0; along < length; along++) {
+      let luma = 0;
+      let alpha = 0;
+      for (let across = 0; across < thickness; across++) {
+        const i = 4 * (vertical ? along * band.width + across : across * band.width + along);
+        const a = band.data[i + 3];
+        const l =
+          (0.299 * band.data[i] + 0.587 * band.data[i + 1] + 0.114 * band.data[i + 2]) * (a / 255);
+        luma = Math.max(luma, l);
+        alpha = Math.max(alpha, a);
+      }
+      levels.push([luma, alpha]);
+    }
+    let steps = 0;
+    for (let i = 2; i < levels.length; i++) {
+      const [luma, alpha] = levels[i];
+      const [backLuma, backAlpha] = levels[i - 2];
+      if (Math.max(Math.abs(luma - backLuma), Math.abs(alpha - backAlpha)) < CANVAS_EDGE_STEP)
+        continue;
+      steps++;
+      i += 2;
+    }
+    return steps;
+  }
+
+  function canvasEdgeHasContent(canvas, rect, edge) {
+    try {
+      const band = canvasEdgeBand(canvas, rect, edge);
+      return !!band && sharpSteps(band, edge.vertical) >= CANVAS_EDGE_MIN_STEPS;
+    } catch {
+      return false;
+    }
+  }
+
+  // ponytail: maps through the bounding box, exact for scale and translate; a rotated or skewed
+  // canvas reads the wrong pixels. Add a matrix inverse if that bites.
+  function canvasEdgeIssues(root, rootRect, time, tolerance) {
+    const issues = [];
+    for (const canvas of Array.from(root.querySelectorAll("canvas"))) {
+      // A graded stand-in shows the author's media, not drawn art; the media itself is never read here.
+      if (canvas.matches(GRADED_STAND_IN)) continue;
+      if (!isVisibleElement(canvas) || hasAllowOverflowFlag(canvas)) continue;
+      if (!canvas.width || !canvas.height) continue;
+      const rect = toRect(canvas.getBoundingClientRect());
+      if (!rect.width || !rect.height) continue;
+      const sides = coveredFrameEdges(rect, rootRect, tolerance)
+        .filter((edge) => canvasEdgeHasContent(canvas, rect, edge))
+        .map((edge) => edge.side);
+      if (sides.length === 0) continue;
+      issues.push({
+        code: "canvas_content_at_edge",
+        severity: "warning",
+        time,
+        selector: uniqueSelectorFor(canvas),
+        containerSelector: uniqueSelectorFor(root),
+        message: `Canvas content touches the frame edge (${sides.join(", ")}).`,
+        rect,
+        containerRect: rootRect,
+        fixHint:
+          "Keep drawn text inside the visible part of the canvas, or mark intentional full-bleed art with data-layout-allow-overflow.",
       });
     }
     return issues;
@@ -1259,7 +2048,7 @@
     );
   }
 
-  /** Raw `d`-space endpoints (no CTM) — the mapping authors use when they paste screen coords into `d`. */
+  // Raw `d`-space endpoints (no CTM), as authors paste screen coords into `d`, plus the path length.
   function pathUserEndpoints(path) {
     if (typeof path.getTotalLength !== "function" || typeof path.getPointAtLength !== "function") {
       return null;
@@ -1273,7 +2062,7 @@
     if (!Number.isFinite(total) || total <= 0) return null;
     const start = path.getPointAtLength(0);
     const end = path.getPointAtLength(total);
-    return { start: { x: start.x, y: start.y }, end: { x: end.x, y: end.y } };
+    return { start: { x: start.x, y: start.y }, end: { x: end.x, y: end.y }, total };
   }
 
   // Screen endpoints via getScreenCTM (viewBox, preserveAspectRatio, group transforms).
@@ -1325,85 +2114,97 @@
     return { compact, painted };
   }
 
-  // Flag only the documented bug: rendered endpoints miss, but user-space-as-screen would attach.
-  function connectorDetachmentIssues(root, rootRect, time) {
-    const issues = [];
-    let anchors = null;
-    // Attach near-miss tolerance (screen px). Separate from the closed-glyph chord floor.
-    const threshold = Math.max(32, Math.min(rootRect.width, rootRect.height) * 0.02);
-    const MIN_CONNECTOR_CHORD_PX = 8;
+  // Attach near-miss tolerance (screen px) for both connector findings; not the glyph chord floor.
+  function connectorAttachThreshold(rootRect) {
+    return Math.max(32, Math.min(rootRect.width, rootRect.height) * 0.02);
+  }
+
+  // The one connector enumeration for connector_detached and connector_orphan. Skips dash-hidden
+  // shafts; reports `painted` for callers to gate on, and `chord`, the rendered span in screen px.
+  function* connectorShafts(root) {
     for (const svg of Array.from(root.querySelectorAll("svg"))) {
       if (!isVisibleElement(svg)) continue;
       for (const path of Array.from(svg.querySelectorAll("path"))) {
         if (path.closest(CONNECTOR_SKIP_CONTAINERS)) continue;
         if (!isConnectorPath(svg, path)) continue;
         const user = pathUserEndpoints(path);
+        if (!user || shaftDashHidden(path, user.total)) continue;
         const rendered = pathScreenEndpoints(svg, path, user);
-        if (!user || !rendered) continue;
-        // Closed/glyph paths collapse to one point — compare in screen px (not user units).
-        const renderedChord = Math.hypot(
+        if (!rendered) continue;
+        const chord = Math.hypot(
           rendered.end.x - rendered.start.x,
           rendered.end.y - rendered.start.y,
         );
-        if (renderedChord < MIN_CONNECTOR_CHORD_PX) continue;
-        if (anchors === null) anchors = connectorAnchorRects(root, rootRect);
-        if (anchors.compact.length < 2) return issues;
-        // Stable DOM identity across painted (inside) and compact (near-miss) tiers.
-        const attachmentKey = (point) => {
-          for (const anchor of anchors.painted) {
-            if (!anchor.element.contains(svg) && distanceToRect(point, anchor.rect) === 0) {
-              return anchor.element;
-            }
-          }
-          for (const anchor of anchors.compact) {
-            if (distanceToRect(point, anchor.rect) <= threshold) return anchor.element;
-          }
-          return null;
-        };
-        const attached = (point) => attachmentKey(point) !== null;
-        // Half-attached as drawn is allowed; only full render-miss proceeds.
-        if (attached(rendered.start) || attached(rendered.end)) continue;
-        // Paste-into-`d` bug: both raw endpoints land on distinct anchors as screen pixels.
-        const userStartKey = attachmentKey(user.start);
-        const userEndKey = attachmentKey(user.end);
-        const pasteBug = Boolean(userStartKey && userEndKey && userStartKey !== userEndKey);
-        // Guessed marked shaft: both frames miss. Same-anchor grazes attach in user-space
-        // and must stay skipped. Name-only decorative flow/arrow paths stay skipped.
-        // 80px keeps short marker glyphs (chevrons, tips) out.
-        const markedMiss =
-          renderedChord >= 80 &&
-          !userStartKey &&
-          !userEndKey &&
-          (path.hasAttribute("marker-start") || path.hasAttribute("marker-end"));
-        if (!pasteBug && !markedMiss) continue;
-        const gap = Math.round(
-          Math.min(
-            Math.min(...anchors.compact.map((a) => distanceToRect(rendered.start, a.rect))),
-            Math.min(...anchors.compact.map((a) => distanceToRect(rendered.end, a.rect))),
-          ),
-        );
-        issues.push({
-          code: "connector_detached",
-          severity: "warning",
-          time,
-          selector: selectorFor(path),
-          containerSelector: selectorFor(svg),
-          message: pasteBug
-            ? `Connector path endpoints render ${gap}px from the nearest anchorable element, but the path's user-space coordinates would attach if read as screen pixels — screen/viewport numbers were likely written into SVG \`d\` without inverting the CTM.`
-            : `Connector path endpoints render ${gap}px from the nearest anchorable element — a marked shaft that meets no node.`,
-          rect: toRect({
-            left: Math.min(rendered.start.x, rendered.end.x),
-            top: Math.min(rendered.start.y, rendered.end.y),
-            right: Math.max(rendered.start.x, rendered.end.x),
-            bottom: Math.max(rendered.start.y, rendered.end.y),
-            width: Math.abs(rendered.end.x - rendered.start.x),
-            height: Math.abs(rendered.end.y - rendered.start.y),
-          }),
-          fixHint: pasteBug
-            ? "Convert measured screen coordinates into the SVG's user space (subtract the SVG rect / invert getScreenCTM) before writing path `d`, and keep the SVG a direct child of the stage."
-            : "Measure the settled node boxes and write `d` in the SVG's user space (invert getScreenCTM), or grow a layout-owned shaft from the source node.",
-        });
+        yield { svg, path, user, rendered, chord, painted: shaftIsPainted(path) };
       }
+    }
+  }
+
+  // Flag only the documented bug: rendered endpoints miss, but user-space-as-screen would attach.
+  function connectorDetachmentIssues(root, rootRect, time) {
+    const issues = [];
+    let anchors = null;
+    const threshold = connectorAttachThreshold(rootRect);
+    const MIN_CONNECTOR_CHORD_PX = 8;
+    for (const { svg, path, user, rendered, chord } of connectorShafts(root)) {
+      if (chord < MIN_CONNECTOR_CHORD_PX) continue;
+      if (anchors === null) anchors = connectorAnchorRects(root, rootRect);
+      if (anchors.compact.length < 2) return issues;
+      // Stable DOM identity across painted (inside) and compact (near-miss) tiers.
+      const attachmentKey = (point) => {
+        for (const anchor of anchors.painted) {
+          if (!anchor.element.contains(svg) && distanceToRect(point, anchor.rect) === 0) {
+            return anchor.element;
+          }
+        }
+        for (const anchor of anchors.compact) {
+          if (distanceToRect(point, anchor.rect) <= threshold) return anchor.element;
+        }
+        return null;
+      };
+      const attached = (point) => attachmentKey(point) !== null;
+      // Half-attached as drawn is allowed; only full render-miss proceeds.
+      if (attached(rendered.start) || attached(rendered.end)) continue;
+      // Paste-into-`d` bug: both raw endpoints land on distinct anchors as screen pixels.
+      const userStartKey = attachmentKey(user.start);
+      const userEndKey = attachmentKey(user.end);
+      const pasteBug = Boolean(userStartKey && userEndKey && userStartKey !== userEndKey);
+      // Guessed marked shaft: both frames miss. Same-anchor grazes attach in user-space
+      // and must stay skipped. Name-only decorative flow/arrow paths stay skipped.
+      // 80px keeps short marker glyphs (chevrons, tips) out.
+      const markedMiss =
+        chord >= 80 &&
+        !userStartKey &&
+        !userEndKey &&
+        (path.hasAttribute("marker-start") || path.hasAttribute("marker-end"));
+      if (!pasteBug && !markedMiss) continue;
+      const gap = Math.round(
+        Math.min(
+          Math.min(...anchors.compact.map((a) => distanceToRect(rendered.start, a.rect))),
+          Math.min(...anchors.compact.map((a) => distanceToRect(rendered.end, a.rect))),
+        ),
+      );
+      issues.push({
+        code: "connector_detached",
+        severity: "warning",
+        time,
+        selector: uniqueSelectorFor(path),
+        containerSelector: uniqueSelectorFor(svg),
+        message: pasteBug
+          ? `Connector path endpoints render ${gap}px from the nearest anchorable element, but the path's user-space coordinates would attach if read as screen pixels — screen/viewport numbers were likely written into SVG \`d\` without inverting the CTM.`
+          : `Connector path endpoints render ${gap}px from the nearest anchorable element — a marked shaft that meets no node.`,
+        rect: toRect({
+          left: Math.min(rendered.start.x, rendered.end.x),
+          top: Math.min(rendered.start.y, rendered.end.y),
+          right: Math.max(rendered.start.x, rendered.end.x),
+          bottom: Math.max(rendered.start.y, rendered.end.y),
+          width: Math.abs(rendered.end.x - rendered.start.x),
+          height: Math.abs(rendered.end.y - rendered.start.y),
+        }),
+        fixHint: pasteBug
+          ? "Convert measured screen coordinates into the SVG's user space (subtract the SVG rect / invert getScreenCTM) before writing path `d`, and keep the SVG a direct child of the stage."
+          : "Measure the settled node boxes and write `d` in the SVG's user space (invert getScreenCTM), or grow a layout-owned shaft from the source node.",
+      });
     }
     return issues;
   }
@@ -1421,19 +2222,63 @@
     return opacityChain(path) >= 0.2;
   }
 
-  function shaftDashHidden(path) {
-    if (typeof path.getTotalLength !== "function") return false;
-    let total;
-    try {
-      total = path.getTotalLength();
-    } catch {
-      return false;
-    }
-    if (!Number.isFinite(total) || total <= 0) return false;
+  // True when the visible dash window [offset, offset + length] sits in one gap (an unstarted
+  // draw-on), allowing 10% overlap. Zero-length dashes paint only with a round or square linecap.
+  // Distances are in `pathLength` units when set; a `pathLength` resolving to 0 paints solid.
+  function shaftDashHidden(path, total) {
     const style = getComputedStyle(path);
-    const offset = Number.parseFloat(style.strokeDashoffset || "0");
-    const dash = Number.parseFloat(String(style.strokeDasharray || "").split(/[\s,]+/)[0] || "0");
-    return offset >= total * 0.9 && dash >= total * 0.9;
+    const dashes = dashArrayLengths(style.strokeDasharray, path);
+    if (dashes === null) return false;
+    const authored = path.pathLength?.baseVal; // SVGAnimatedNumber; 0 when unset or unparseable
+    if (authored === 0 && path.hasAttribute("pathLength")) return false;
+    const dotsPaint = (style.strokeLinecap || "butt") !== "butt";
+    const dashPaints = (index) => index % 2 === 0 && (dashes[index] > 0 || dotsPaint);
+    if (!dashes.some((_, index) => dashPaints(index))) return true; // only butt-capped dots
+    const period = dashes.reduce((sum, dash) => sum + dash, 0);
+    const length = authored > 0 ? authored : total;
+    const offset = dashLength(style.strokeDashoffset, path); // unparseable reads as 0
+    // Wrap into [0, period); adding the period only to negatives keeps `0.9 % 2` exact.
+    const wrapped = Number.isFinite(offset) ? offset % period : 0;
+    const start = wrapped < 0 ? wrapped + period : wrapped;
+    const end = start + length;
+    let painted = 0;
+    let segmentStart = 0;
+    // Two periods cover any window that starts inside the first.
+    for (let i = 0; i < dashes.length * 2; i++) {
+      const segmentEnd = segmentStart + dashes[i % dashes.length];
+      if (dashPaints(i % dashes.length)) {
+        if (segmentStart >= start && segmentEnd <= end) return false;
+        painted += Math.max(0, Math.min(segmentEnd, end) - Math.max(segmentStart, start));
+      }
+      segmentStart = segmentEnd;
+    }
+    return painted <= length * 0.1;
+  }
+
+  // Computed `stroke-dasharray` as an even-length list of user-unit lengths, or null when the
+  // stroke is solid: `none`, an all-zero list, or any negative/unparseable entry (which the spec
+  // renders as `none`). Odd lists repeat, per spec.
+  function dashArrayLengths(value, path) {
+    const text = String(value || "none").trim();
+    if (text === "none") return null;
+    const lengths = text.split(/[\s,]+/).map((token) => dashLength(token, path));
+    if (lengths.some((length) => !Number.isFinite(length) || length < 0)) return null;
+    if (lengths.every((length) => length === 0)) return null;
+    return lengths.length % 2 === 0 ? lengths : lengths.concat(lengths);
+  }
+
+  // One dash length in user units. Computed lengths are already px; a percentage is relative to
+  // the normalised diagonal of the owning SVG viewport (viewBox when set, else the layout box).
+  function dashLength(token, path) {
+    const text = String(token).trim();
+    const value = Number.parseFloat(text);
+    if (!Number.isFinite(value) || !text.endsWith("%")) return value;
+    const svg = path.ownerSVGElement;
+    if (!svg) return NaN;
+    const box = svg.viewBox && svg.viewBox.baseVal;
+    const { width, height } =
+      box && box.width > 0 && box.height > 0 ? box : svg.getBoundingClientRect();
+    return (value / 100) * (Math.hypot(width, height) / Math.SQRT2);
   }
 
   function connectorEndpointCandidates(root, rootRect) {
@@ -1456,57 +2301,45 @@
   function connectorOrphanIssues(root, rootRect, time) {
     const issues = [];
     let candidates = null;
-    const threshold = Math.max(32, Math.min(rootRect.width, rootRect.height) * 0.02);
-    for (const svg of Array.from(root.querySelectorAll("svg"))) {
-      if (!isVisibleElement(svg)) continue;
-      for (const path of Array.from(svg.querySelectorAll("path"))) {
-        if (path.closest(CONNECTOR_SKIP_CONTAINERS)) continue;
-        if (!isConnectorPath(svg, path)) continue;
-        if (!shaftIsPainted(path) || shaftDashHidden(path)) continue;
-        const user = pathUserEndpoints(path);
-        const rendered = pathScreenEndpoints(svg, path, user);
-        if (!user || !rendered) continue;
-        const renderedChord = Math.hypot(
-          rendered.end.x - rendered.start.x,
-          rendered.end.y - rendered.start.y,
-        );
-        if (renderedChord < 80) continue;
-        if (candidates === null) candidates = connectorEndpointCandidates(root, rootRect);
-        const dark = [];
-        for (const point of [rendered.start, rendered.end]) {
-          let best = null;
-          let attached = false;
-          for (const candidate of candidates) {
-            const gap = distanceToRect(point, candidate.rect);
-            if (gap > threshold) continue;
-            if (isVisibleElement(candidate.element)) {
-              attached = true;
-              break;
-            }
-            if (best === null || gap < best.gap) best = { gap, candidate };
+    const threshold = connectorAttachThreshold(rootRect);
+    for (const { svg, path, rendered, chord, painted } of connectorShafts(root)) {
+      if (!painted) continue;
+      if (chord < 80) continue;
+      if (candidates === null) candidates = connectorEndpointCandidates(root, rootRect);
+      const dark = [];
+      for (const point of [rendered.start, rendered.end]) {
+        let best = null;
+        let attached = false;
+        for (const candidate of candidates) {
+          const gap = distanceToRect(point, candidate.rect);
+          if (gap > threshold) continue;
+          if (isVisibleElement(candidate.element)) {
+            attached = true;
+            break;
           }
-          if (!attached && best !== null) dark.push(best.candidate);
+          if (best === null || gap < best.gap) best = { gap, candidate };
         }
-        if (dark.length === 0) continue;
-        issues.push({
-          code: "connector_orphan",
-          severity: "warning",
-          time,
-          selector: selectorFor(path),
-          containerSelector: selectorFor(svg),
-          message: `Connector shaft is visible while ${dark.length === 2 ? "both endpoints are" : `its endpoint ${selectorFor(dark[0].element)} is`} not on stage.`,
-          rect: toRect({
-            left: Math.min(rendered.start.x, rendered.end.x),
-            top: Math.min(rendered.start.y, rendered.end.y),
-            right: Math.max(rendered.start.x, rendered.end.x),
-            bottom: Math.max(rendered.start.y, rendered.end.y),
-            width: Math.abs(rendered.end.x - rendered.start.x),
-            height: Math.abs(rendered.end.y - rendered.start.y),
-          }),
-          fixHint:
-            "Show the shaft only after both ends are on, and hide it with the earlier exit. Do not give the line its own clock.",
-        });
+        if (!attached && best !== null) dark.push(best.candidate);
       }
+      if (dark.length === 0) continue;
+      issues.push({
+        code: "connector_orphan",
+        severity: "warning",
+        time,
+        selector: uniqueSelectorFor(path),
+        containerSelector: uniqueSelectorFor(svg),
+        message: `Connector shaft is visible while ${dark.length === 2 ? "both endpoints are" : `its endpoint ${uniqueSelectorFor(dark[0].element)} is`} not on stage.`,
+        rect: toRect({
+          left: Math.min(rendered.start.x, rendered.end.x),
+          top: Math.min(rendered.start.y, rendered.end.y),
+          right: Math.max(rendered.start.x, rendered.end.x),
+          bottom: Math.max(rendered.start.y, rendered.end.y),
+          width: Math.abs(rendered.end.x - rendered.start.x),
+          height: Math.abs(rendered.end.y - rendered.start.y),
+        }),
+        fixHint:
+          "Show the shaft only after both ends are on, and hide it with the earlier exit. Do not give the line its own clock.",
+      });
     }
     return issues;
   }
@@ -1592,6 +2425,8 @@
       isVisibleElement(element, 0.05),
     );
     const issues = [];
+    const matteResults = new Map();
+    videoAlphaFrames = new Map();
 
     const restoreHits = restoreHitTesting(root);
     try {
@@ -1600,7 +2435,7 @@
         const clipped = clippedTextIssue(element, time, tolerance);
         if (clipped) issues.push(clipped);
         issues.push(...textOverflowIssues(element, root, rootRect, time, tolerance, clipped));
-        const occluded = occludedTextIssue(element, time, proseCoverageFloor);
+        const occluded = occludedTextIssue(element, time, proseCoverageFloor, matteResults);
         if (occluded) issues.push(occluded);
         const invisible = invisibleTextIssue(element, time);
         if (invisible) issues.push(invisible);
@@ -1608,12 +2443,15 @@
     } finally {
       restoreHits();
     }
+    markLostSiblingWords(matteResults);
+    issues.push(...unreadVideoIssues(time));
 
     issues.push(...containerOverflowIssues(root, time, tolerance));
     issues.push(...contentOverlapIssues(root, time));
     const escaped = escapedContainerIssues(root, time);
     issues.push(...escaped.issues);
     issues.push(...panelOutOfCanvasIssues(root, rootRect, time, tolerance, escaped.flagged));
+    issues.push(...canvasEdgeIssues(root, rootRect, time, tolerance));
     issues.push(...connectorDetachmentIssues(root, rootRect, time));
     issues.push(...connectorOrphanIssues(root, rootRect, time));
     return issues;
@@ -1629,78 +2467,206 @@
     return contentOverlapIssues(root, time);
   };
 
-  // Frozen-sweep guard (#U10, checkPipeline.ts): a compact per-sample
-  // fingerprint of every visible element's box + opacity, in DOM order. Node
-  // calls this once per seeked grid point and compares the strings across the
-  // whole run — if every sample produces the identical string, the seek never
-  // actually moved anything and the whole audit run is unreliable. Deliberately
-  // a single opaque string (not a structured array) since Node only ever needs
-  // equality, not per-element diffing.
-  // Pixel-only media motion (a 2D/WebGL canvas repainting or a playing video
-  // without any element moving) is invisible to a geometry+opacity fingerprint
-  // and false-positives sweep_static. Downsample each visible canvas/video to
-  // 8x8 and fold its pixels into the fingerprint. Tainted, zero-sized, or
-  // unreadable media hashes to a constant — no worse than geometry-only
-  // detection and never a new false negative for DOM-motion compositions.
-  // Media inside iframes is intentionally outside this fingerprint: it lives
-  // in a separate document, and cross-origin frames are inaccessible under SOP.
-  function mediaPixelHash(element) {
-    try {
-      const rect = element.getBoundingClientRect();
-      const sourceWidth = element.videoWidth || element.width || rect.width;
-      const sourceHeight = element.videoHeight || element.height || rect.height;
-      if (!sourceWidth || !sourceHeight) return "x";
-      const off = document.createElement("canvas");
-      off.width = 8;
-      off.height = 8;
-      const ctx = off.getContext("2d");
-      if (!ctx) return "x";
-      ctx.drawImage(element, 0, 0, 8, 8);
-      const data = ctx.getImageData(0, 0, 8, 8).data;
-      let hash = 0;
-      for (let i = 0; i < data.length; i++) hash = (hash * 31 + data[i]) >>> 0;
-      return String(hash);
-    } catch {
-      return "x";
-    }
+  // Craft sampling for check's craft section (utils/craftAudit.ts judges it in Node). One call per seek:
+  // every painted text element with its reading block, rendered font size and opacity; whether a data-hold
+  // element is on screen; whether anything besides the background paints; and the keepsMoving liveness
+  // signature from motion-signature.browser.js, so a still stretch here is the stillness motion_frozen sees.
+  const craftKeys = new WeakMap();
+  const craftAnchors = new WeakMap();
+  let craftNextKey = 0;
+  const INLINE_LEVEL_DISPLAY = /^(inline|inline-block|inline-flex|inline-grid|contents|ruby)$/;
+  const CRAFT_PAINTED_OPACITY = 0.2;
+  const PAINT_OPTIONS = { opacityProperty: true, visibilityProperty: true };
+
+  function craftKey(element) {
+    if (!craftKeys.has(element)) craftKeys.set(element, ++craftNextKey);
+    return craftKeys.get(element);
   }
 
-  window.__hyperframesLayoutGeometry = function collectLayoutGeometry() {
+  // Sampled at every seek of a dense grid, so the selector walk runs once per element.
+  function craftAnchor(element) {
+    if (!craftAnchors.has(element)) {
+      const source = element
+        .closest("[data-composition-file]")
+        ?.getAttribute("data-composition-file");
+      craftAnchors.set(element, {
+        selector: uniqueSelectorFor(element),
+        sourceFile: source || "index.html",
+      });
+    }
+    return craftAnchors.get(element);
+  }
+
+  // Mirrors trackKindOf in @hyperframes/parsers (data-track-kind, legacy caption hosts) plus the caption
+  // stages __hyperframesGeometryCandidates already skips.
+  function isCaptionsText(element) {
+    for (let current = element; current; current = current.parentElement) {
+      if ((current.getAttribute("data-track-kind") || "").trim().toLowerCase() === "captions") {
+        return true;
+      }
+      const host =
+        current.hasAttribute("data-composition-id") || current.hasAttribute("data-composition-src");
+      if (!host) continue;
+      if (current.getAttribute("data-composition-id") === "captions") return true;
+      if (/(?:^|\s)caption[-_]/.test(current.getAttribute("class") || "")) return true;
+    }
+    return !!element.closest(".caption-layer, #caption-stage");
+  }
+
+  // The line a reader takes in at once: the nearest block-level ancestor-or-self, so a headline split into
+  // inline word or character spans is one line, while flex items and positioned spans stay their own.
+  function readingBlock(element, root) {
+    let current = element;
+    while (
+      current !== root &&
+      current.parentElement &&
+      !current.hasAttribute("data-composition-id") &&
+      INLINE_LEVEL_DISPLAY.test(getComputedStyle(current).display)
+    ) {
+      current = current.parentElement;
+    }
+    return current;
+  }
+
+  function scaleProperty(style) {
+    const parts = (style.scale || "none")
+      .split(/\s+/)
+      .map((part) => Number.parseFloat(part))
+      .filter(Number.isFinite);
+    if (parts.length === 0) return 1;
+    return Math.sqrt(Math.abs(parts[0] * (parts.length > 1 ? parts[1] : parts[0])));
+  }
+
+  // A transform scales glyphs without changing the computed font-size: multiply in every ancestor's area
+  // scale (rotation-invariant), or the SVG screen matrix for SVG text.
+  function renderedFontPx(element, style) {
+    const font = parsePx(style.fontSize);
+    if (typeof element.getScreenCTM === "function" && element.ownerSVGElement) {
+      const ctm = element.getScreenCTM();
+      return ctm ? font * Math.sqrt(Math.abs(ctm.a * ctm.d - ctm.b * ctm.c)) : font;
+    }
+    let scale = 1;
+    for (let current = element; current; current = current.parentElement) {
+      const currentStyle = current === element ? style : getComputedStyle(current);
+      if (currentStyle.transform && currentStyle.transform !== "none") {
+        try {
+          const matrix = new DOMMatrixReadOnly(currentStyle.transform);
+          scale *= Math.sqrt(Math.abs(matrix.a * matrix.d - matrix.b * matrix.c));
+        } catch {
+          // An unparsable transform leaves the size as computed.
+        }
+      }
+      scale *= scaleProperty(currentStyle);
+    }
+    return font * scale;
+  }
+
+  function intersectsRect(rect, frame) {
+    return (
+      rect.right > frame.left &&
+      rect.left < frame.right &&
+      rect.bottom > frame.top &&
+      rect.top < frame.bottom
+    );
+  }
+
+  function craftTextParts(root, rootRect) {
+    const candidates = [];
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      if (!hasOwnTextCandidate(element, true) || !isVisibleElement(element, 0.05, false)) continue;
+      const rect = unionRects(visibleTextClientRects(element, true));
+      if (!rect || !intersectsRect(rect, rootRect)) continue;
+      candidates.push({ element, rect });
+    }
+    const clipped = candidates.filter((candidate) => hasClipPath(candidate.element));
+    const clippedAway = new Set();
+    if (clipped.length > 0) {
+      const restoreHits = restoreHitTesting(root);
+      try {
+        for (const candidate of clipped) {
+          if (isClippedAway(candidate.element)) clippedAway.add(candidate.element);
+        }
+      } finally {
+        restoreHits();
+      }
+    }
+    return candidates
+      .filter((candidate) => !clippedAway.has(candidate.element))
+      .map(({ element, rect }) => {
+        const block = readingBlock(element, root);
+        return {
+          key: craftKey(element),
+          block: craftKey(block),
+          ...craftAnchor(element),
+          blockSelector: craftAnchor(block).selector,
+          text: textContentFor(element, true),
+          opacity: round(opacityChain(element)),
+          fontPx: round(renderedFontPx(element, getComputedStyle(element))),
+          rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+          captions: isCaptionsText(element),
+        };
+      });
+  }
+
+  function isPaintedBox(element, rootRect) {
+    if (typeof element.checkVisibility === "function" && !element.checkVisibility(PAINT_OPTIONS)) {
+      return false;
+    }
+    const style = getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (opacityChain(element) < CRAFT_PAINTED_OPACITY) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width >= 4 && rect.height >= 4 && intersectsRect(rect, rootRect);
+  }
+
+  function paintsContent(root, rootRect, parts) {
+    if (parts.some((part) => part.opacity >= CRAFT_PAINTED_OPACITY)) return true;
+    for (const element of Array.from(root.querySelectorAll("img, video, canvas, svg"))) {
+      if (element.parentElement?.closest("svg")) continue;
+      if (isPaintedBox(element, rootRect)) return true;
+    }
+    return false;
+  }
+
+  window.__hyperframesCraftSample = function collectCraftSample() {
     const root =
       document.querySelector("[data-composition-id][data-width][data-height]") ||
       document.querySelector("[data-composition-id]") ||
       document.body;
-    const elements = Array.from(root.querySelectorAll("*")).filter((element) =>
-      isVisibleElement(element),
+    const rootRect = rootRectFor(root);
+    const parts = craftTextParts(root, rootRect);
+    const holds = [root, ...Array.from(root.querySelectorAll("[data-hold]"))].filter((element) =>
+      element.hasAttribute("data-hold"),
     );
-    const parts = elements.map((element) => {
-      const rect = toRect(element.getBoundingClientRect());
-      const opacity = round(opacityChain(element));
-      // Variable-font axis animation (font-variation-settings) is a real,
-      // visible motion channel that moves no geometry and no opacity, so a
-      // box+opacity fingerprint reads it as a frozen timeline. Worse in a
-      // DUPLEXED face (Recursive holds an identical advance width at every
-      // weight by design), where not even the line width shifts — the whole
-      // run then false-positives sweep_static. Fold the computed axis string
-      // in; it is "normal" for every element that does not use it, so this
-      // adds nothing to the fingerprint of an ordinary composition.
-      const axes = getComputedStyle(element).fontVariationSettings;
-      return `${rect.left},${rect.top},${rect.width},${rect.height},${opacity},${
-        axes && axes !== "normal" ? axes : ""
-      }`;
-    });
-    // img shares the same pixel-only-motion blind spot as canvas/video: an
-    // equal-size, equal-position opaque src/visibility swap moves no
-    // geometry and no opacity. mediaPixelHash already handles it generically
-    // (drawImage accepts any CanvasImageSource; width/height fall back to
-    // rect.width/height same as canvas/video), so only the element selector
-    // needed widening.
-    for (const media of root.querySelectorAll("canvas, video, img")) {
-      if (!isVisibleElement(media)) continue;
-      parts.push(`p:${mediaPixelHash(media)}`);
-    }
-    return parts.join("|");
+    const shared = window.__hyperframesMotionSignature;
+    return {
+      parts,
+      held: holds.some((element) => isPaintedBox(element, rootRect)),
+      painted: paintsContent(root, rootRect, parts),
+      signature: shared
+        ? shared.compositionSignature(shared.compositionRoot(), { quantize: true })
+        : "",
+    };
   };
+
+  // Sound the render mixes: any unmuted <audio>, and a <video> the timing compiler marks audible
+  // (data-has-audio="true", or no data-has-audio on an unmuted video).
+  window.__hyperframesCraftFilm = function collectCraftFilm() {
+    let soundSources = 0;
+    for (const media of Array.from(document.querySelectorAll("audio, video"))) {
+      if (media.hasAttribute("muted")) continue;
+      const declared = media.getAttribute("data-has-audio");
+      const audible =
+        media.tagName.toUpperCase() === "AUDIO" || declared === null || declared === "true";
+      if (audible) soundSources += 1;
+    }
+    return { soundSources };
+  };
+
+  // The frozen-sweep fingerprint (window.__hyperframesLayoutGeometry, #U10 in
+  // checkPipeline.ts) lives in motion-signature.browser.js, the single owner
+  // of "what counts as motion" shared with motion-sample.browser.js's
+  // liveness signature.
 
   // Rotation-pivot sampling (rotation_pivot_drift). Per sample, report every
   // rotatable candidate's bbox center, size, and current rotation angle. Node
@@ -1742,7 +2708,7 @@
       const box = element.getBoundingClientRect();
       if (box.width * box.height <= 400) continue;
       samples.push({
-        selector: selectorFor(element),
+        selector: uniqueSelectorFor(element),
         cx: round(box.left + box.width / 2),
         cy: round(box.top + box.height / 2),
         w: round(box.width),
@@ -1930,7 +2896,7 @@
         hubCache.set(svg, hub);
       }
       samples.push({
-        selector: selectorFor(element),
+        selector: uniqueSelectorFor(element),
         ax: round(a.x),
         ay: round(a.y),
         bx: round(b.x),

@@ -11,8 +11,14 @@
  */
 
 import type { RuntimeTimelineLike } from "./types";
-import { parseStrictFiniteTimingNumber, resolveNaturalMediaTimelineDuration } from "./playbackRate";
+import {
+  parseStrictFiniteTimingNumber,
+  resolveNaturalMediaTimelineDuration,
+  resolveTimedImageDurationSeconds,
+} from "./playbackRate";
 import { isMediaElement } from "./domRealm";
+import { readTimelineDurationSeconds } from "./timelineDuration";
+import { findRootCompositionElement } from "./compositionDimension";
 
 export interface ClipNode {
   readonly id: string;
@@ -62,13 +68,17 @@ function durationFromTimeline(
 ): number | null {
   const compId = el.getAttribute("data-composition-id");
   if (!compId) return null;
-  const d = Number(registry[compId]?.duration?.());
-  return Number.isFinite(d) && d > 0 ? d : null;
+  const d = readTimelineDurationSeconds(registry[compId]);
+  return d != null && d > 0 ? d : null;
 }
 
 function durationFromMedia(el: Element): number | null {
-  if (!isMediaElement(el) || !Number.isFinite(el.duration)) return null;
-  return resolveNaturalMediaTimelineDuration(el, el.duration);
+  if (isMediaElement(el)) {
+    return Number.isFinite(el.duration)
+      ? resolveNaturalMediaTimelineDuration(el, el.duration)
+      : null;
+  }
+  return resolveTimedImageDurationSeconds(el);
 }
 
 // Used only to filter out zero-duration (decorative) elements at build time.
@@ -110,7 +120,7 @@ export function createClipTree(params: {
   const { startResolver, timelineRegistry, rootDuration } = params;
   const elementToNode = new Map<Element, MutableClipNode>();
 
-  const root = document.querySelector("[data-composition-id]");
+  const root = findRootCompositionElement();
   let ordinal = 0;
 
   for (const el of document.querySelectorAll("[data-start]")) {

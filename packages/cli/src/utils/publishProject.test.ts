@@ -1,8 +1,17 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, posix, relative } from "node:path";
 import AdmZip from "adm-zip";
+import { parseHTML } from "linkedom";
 
 const authMocks = vi.hoisted(() => ({
   tryResolveCredential: vi.fn(),
@@ -20,12 +29,26 @@ vi.mock("./projectLink.js", () => ({
   writeProjectLink: linkMocks.writeProjectLink,
 }));
 
+const oauthMocks = vi.hoisted(() => ({
+  refreshTokens: vi.fn(),
+}));
+
+vi.mock("../auth/oauth.js", () => ({
+  refreshTokens: oauthMocks.refreshTokens,
+}));
+
+import { ErrRefreshFailed } from "../auth/errors.js";
+import { setupTempAuthEnv } from "../auth/_test-utils.js";
+import { writeStore } from "../auth/store.js";
+
 import {
   buildPublishFileMap,
   createPublishArchive,
   getPublishApiBaseUrl,
   localizeExternalAssets,
   publishProjectArchive,
+  readStaged,
+  stagePublishFiles,
   uploadTimeoutMs,
   zipPublishFileMap,
 } from "./publishProject.js";
@@ -129,6 +152,9 @@ function publishedResponse(overrides?: Record<string, unknown>): Response {
   );
 }
 
+/** What the server returns when it accepted the credential and owns the project. */
+const OWNED = { claim_token: "", claimed: true };
+
 /** Full staged flow: upload, S3 PUT, complete. */
 function stagedFetch(completeData?: Record<string, unknown>, uploadData?: Record<string, unknown>) {
   return vi
@@ -199,6 +225,117 @@ async function runAuthenticatedPublish(
 }
 
 describe("createPublishArchive", () => {
+  it.each([
+    { filename: "poster art.svg", reference: "poster%20art.svg" },
+    { filename: "封面.svg", reference: "%E5%B0%81%E9%9D%A2.svg" },
+    { filename: "100%.svg", reference: "100%.svg" },
+    { filename: "poster%20art.svg", reference: "poster%20art.svg" },
+    { filename: "poster#art.svg", reference: "poster%23art.svg" },
+    { filename: "poster#art.svg", reference: "poster#art.svg" },
+  ])("archives $filename referenced as $reference", ({ filename, reference }) => {
+    const projectDir = makeProjectDir();
+    const extDir = mkdtempSync(join(tmpdir(), "hf-ext-"));
+    try {
+      const entryPath = "compositions/scene.html";
+      const htmlDir = join(projectDir, dirname(entryPath));
+      mkdirSync(htmlDir, { recursive: true });
+      stageExternalAsset(extDir, htmlDir, filename, "POSTER_DATA");
+      if (reference !== filename) {
+        stageExternalAsset(extDir, htmlDir, reference, "LITERAL_DECOY");
+      }
+      const assetPath = relative(htmlDir, join(extDir, reference)).replaceAll("\\", "/");
+      const html = `<html><body><img src="${assetPath}"><video src="../clip.mp4" poster="${assetPath}"></video></body></html>`;
+      writeFileSync(join(projectDir, "index.html"), "<html></html>");
+      writeFileSync(join(projectDir, entryPath), html);
+      writeFileSync(join(projectDir, "clip.mp4"), "MP4_DATA");
+
+      const archive = createPublishArchive(projectDir);
+      const zip = new AdmZip(archive.buffer);
+      const { document } = parseHTML(zip.readAsText(entryPath));
+      const src = document.querySelector("img")?.getAttribute("src");
+      if (!src) throw new Error("Archived image has no src");
+      expect(document.querySelector("video")?.getAttribute("poster")).toBe(src);
+      const url = new URL(src, `https://archive.example/${entryPath}`);
+      expect(url.hash).toBe("");
+      expect(url.search).toBe("");
+      const archivedPath = decodeURIComponent(url.pathname.slice(1));
+      expect(archivedPath).toMatch(/^_ext\//);
+      expect(posix.basename(archivedPath)).toBe(filename);
+      expect(zip.readFile(archivedPath)).toEqual(Buffer.from("POSTER_DATA"));
+      expect(archive.fileCount).toBe(4);
+      expect(readFileSync(join(projectDir, entryPath), "utf-8")).toBe(html);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+      rmSync(extDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["index.html", "compositions/scene.html"])(
+    "includes external video posters referenced from %s",
+    (entryPath) => {
+      const projectDir = makeProjectDir();
+      const extDir = mkdtempSync(join(tmpdir(), "hf-ext-"));
+      try {
+        const htmlDir = join(projectDir, dirname(entryPath));
+        mkdirSync(htmlDir, { recursive: true });
+        if (entryPath !== "index.html") {
+          writeFileSync(join(projectDir, "index.html"), "<html></html>");
+        }
+        const posterPath = stageExternalAsset(extDir, htmlDir, "poster.png", "PNG_DATA");
+        const videoPath = posix.relative(posix.dirname(entryPath), "clip.mp4");
+        const html = `<html><body><video src="${videoPath}" poster="${posterPath}"></video></body></html>`;
+        writeFileSync(join(projectDir, entryPath), html);
+        writeFileSync(join(projectDir, "clip.mp4"), "MP4_DATA");
+
+        const archive = createPublishArchive(projectDir);
+        const zip = new AdmZip(archive.buffer);
+        const posterEntries = zip
+          .getEntries()
+          .filter((entry) => entry.entryName.startsWith("_ext/") && entry.name === "poster.png");
+
+        expect(posterEntries).toHaveLength(1);
+        const archivedPoster = posterEntries[0]!;
+        expect(archivedPoster.getData()).toEqual(Buffer.from("PNG_DATA"));
+        expect(zip.readAsText(entryPath)).toContain(
+          `poster="${posix.relative(posix.dirname(entryPath), archivedPoster.entryName)}"`,
+        );
+        expect(zip.readAsText(entryPath)).toContain(`src="${videoPath}"`);
+        expect(archive.fileCount).toBe(entryPath === "index.html" ? 3 : 4);
+        expect(readFileSync(join(projectDir, entryPath), "utf-8")).toBe(html);
+      } finally {
+        rmSync(projectDir, { recursive: true, force: true });
+        rmSync(extDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("preserves internal, remote, and inline video posters", () => {
+    const projectDir = makeProjectDir();
+    try {
+      const posters = [
+        "poster.png",
+        "poster%20art.png",
+        "https://cdn.example.com/poster.png",
+        "https://cdn.example.com/poster%20art.png",
+        "data:image/png;base64,AA==",
+      ];
+      const html = `<html><body>${posters.map((poster) => `<video src="clip.mp4" poster="${poster}"></video>`).join("")}</body></html>`;
+      writeFileSync(join(projectDir, "index.html"), html);
+      writeFileSync(join(projectDir, "poster.png"), "PNG_DATA");
+      writeFileSync(join(projectDir, "poster art.png"), "ENCODED_PNG_DATA");
+      writeFileSync(join(projectDir, "clip.mp4"), "MP4_DATA");
+
+      const archive = createPublishArchive(projectDir);
+      const zip = new AdmZip(archive.buffer);
+
+      expect(archive.fileCount).toBe(4);
+      expect(zip.readAsText("index.html")).toBe(html);
+      expect(zip.getEntries().some((entry) => entry.entryName.startsWith("_ext/"))).toBe(false);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it("packages the project and skips hidden files and node_modules", () => {
     const dir = makeProjectDir();
     try {
@@ -597,6 +734,7 @@ describe("uploadTimeoutMs", () => {
 // nested in a describe) so the reset logic isn't duplicated per group.
 beforeEach(() => {
   authMocks.tryResolveCredential.mockReset().mockResolvedValue(null);
+  oauthMocks.refreshTokens.mockReset();
   linkMocks.writeProjectLink.mockReset();
   vi.stubEnv("HYPERFRAMES_PUBLISHED_PROJECTS_API_URL", "");
   vi.stubEnv("HEYGEN_API_URL", "");
@@ -671,9 +809,33 @@ describe("publishProjectArchive", () => {
 });
 
 describe("publishProjectArchive", () => {
+  it("keeps server-sent upload headers in any case without adding duplicates", async () => {
+    const dir = makeProjectDir();
+    const serverHeaders = {
+      "Content-Type": "application/zip",
+      "Content-Length": "123",
+      "X-Amz-Server-Side-Encryption": "AES256",
+    };
+    const fetchMock = stagedFetch(
+      { file_count: 1 },
+      { upload_url: signedStagedS3Url, upload_headers: serverHeaders },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await publishProjectArchive(dir);
+      expect(fetchMock.mock.calls[1]![1].headers).toEqual(serverHeaders);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("publishProjectArchive", () => {
   it("authenticates staged metadata requests but not the presigned S3 upload", async () => {
     const dir = makeProjectDir();
-    const fetchMock = stagedFetch();
+    const fetchMock = stagedFetch(OWNED);
 
     try {
       await runAuthenticatedPublish(fetchMock, dir);
@@ -689,7 +851,7 @@ describe("publishProjectArchive", () => {
 
   it("authenticates the direct fallback request", async () => {
     const dir = makeProjectDir();
-    const fetchMock = directFetch();
+    const fetchMock = directFetch(OWNED);
 
     try {
       await runAuthenticatedPublish(fetchMock, dir);
@@ -986,8 +1148,7 @@ function ownedStagedFetch() {
   return stagedFetch({
     project_id: "hfp_stable",
     url: "https://hyperframes.dev/p/hfp_stable",
-    claim_token: "",
-    claimed: true,
+    ...OWNED,
   });
 }
 
@@ -1020,7 +1181,7 @@ describe("publishProjectArchive", () => {
   it("never sends a project id or persists a link when anonymous", async () => {
     // Default credential is null (anonymous).
     const dir = makeProjectDir();
-    const fetchMock = ownedStagedFetch();
+    const fetchMock = stagedFetch();
     vi.stubGlobal("fetch", fetchMock);
 
     try {
@@ -1065,5 +1226,273 @@ describe("publishProjectArchive", () => {
     const anon = await publishWithTeamSpace(false);
     expect(anon.mock.calls[0]![1].headers).not.toHaveProperty("x-space-id");
     expect(anon.mock.calls[2]![1].headers).not.toHaveProperty("x-space-id");
+  });
+});
+
+describe("publishProjectArchive with a credential the server rejects", () => {
+  const EXPIRED = "Your login expired. Run hyperframes auth login, then publish again.";
+  const unauthorized = () =>
+    new Response(JSON.stringify({ message: "Unauthorized" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+
+  async function publishExpecting(fetchMock: ReturnType<typeof vi.fn>, message: string) {
+    const dir = makeProjectDir();
+    try {
+      await expect(runAuthenticatedPublish(fetchMock, dir)).rejects.toThrow(message);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("stops at the first request, before any upload, with a re-login message", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(unauthorized());
+    await publishExpecting(fetchMock, EXPIRED);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expectAuthorizedHeaders(fetchMock, 0);
+  });
+
+  it("says the same when the final publish request is refused", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(uploadResponse())
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(unauthorized());
+    await publishExpecting(fetchMock, EXPIRED);
+  });
+
+  it("says the same on the legacy multipart publish", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("not found", { status: 404 }))
+      .mockResolvedValueOnce(unauthorized());
+    await publishExpecting(fetchMock, EXPIRED);
+  });
+
+  it("asks a signed-out publish to log in when the upload route answers 401, with no fallback", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(unauthorized());
+    vi.stubGlobal("fetch", fetchMock);
+    const dir = makeProjectDir();
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await expect(publishProjectArchive(dir)).rejects.toThrow(
+        "Publishing needs an account. Run hyperframes auth login to publish.",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toMatch(/\/publish\/upload$/);
+  });
+
+  it("does not blame the login for a 401 from the storage upload, which carries no credential", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(uploadResponse())
+      .mockResolvedValueOnce(new Response("denied", { status: 401 }));
+    await publishExpecting(fetchMock, "Failed to upload project archive");
+  });
+
+  it("refuses an anonymous result for a signed-in publish and links nothing", async () => {
+    await publishExpecting(stagedFetch(), EXPIRED);
+    await publishExpecting(directFetch(), EXPIRED);
+    expect(linkMocks.writeProjectLink).not.toHaveBeenCalled();
+  });
+
+  it("publishes with an API key, which the server never marks as owned, and links nothing", async () => {
+    const dir = makeProjectDir();
+    try {
+      authMocks.tryResolveCredential.mockResolvedValue({
+        type: "api_key",
+        key: "k",
+        source: "env",
+      });
+      vi.stubGlobal("fetch", stagedFetch());
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      const result = await publishProjectArchive(dir);
+      expect(result.claimToken).toBe("claim-token");
+      expect(linkMocks.writeProjectLink).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("names the environment API key instead of asking for a login it would not use", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(unauthorized());
+    const dir = makeProjectDir();
+    try {
+      authMocks.tryResolveCredential.mockResolvedValue({
+        type: "api_key",
+        key: "k",
+        source: "env",
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await expect(publishProjectArchive(dir)).rejects.toThrow(
+        "HEYGEN_API_KEY was rejected. Fix or unset it, then publish again.",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("names a rejected host access token instead of asking for a login it would not use", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(unauthorized());
+    const dir = makeProjectDir();
+    try {
+      authMocks.tryResolveCredential.mockResolvedValue({
+        type: "oauth",
+        access_token: "host-token",
+        source: "env_oauth",
+        refreshable: false,
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await expect(publishProjectArchive(dir)).rejects.toThrow(
+        "HEYGEN_ACCESS_TOKEN was rejected. Fix or unset it, then publish again.",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("publishProjectArchive with an expired login it can refresh", () => {
+  const expiredLogin = {
+    type: "oauth",
+    access_token: "stale-token",
+    refresh_token: "refresh-token",
+    source: "file_json",
+    refreshable: true,
+  };
+
+  it("refreshes the login and publishes with the new token", async () => {
+    oauthMocks.refreshTokens.mockResolvedValueOnce({ access_token: "fresh-token" });
+    authMocks.tryResolveCredential.mockResolvedValue(expiredLogin);
+    const fetchMock = stagedFetch(OWNED);
+    vi.stubGlobal("fetch", fetchMock);
+    const dir = makeProjectDir();
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await publishProjectArchive(dir);
+      expect(oauthMocks.refreshTokens).toHaveBeenCalledWith("refresh-token");
+      expect(fetchMock.mock.calls[0]![1].headers).toEqual(
+        expect.objectContaining({ authorization: "Bearer fresh-token" }),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The command checks the login before a proxy bake that can outlast it.
+  it("refreshes a passed login that expired since it was checked, without resolving again", async () => {
+    oauthMocks.refreshTokens.mockResolvedValueOnce({ access_token: "fresh-token" });
+    const fetchMock = stagedFetch(OWNED);
+    vi.stubGlobal("fetch", fetchMock);
+    const dir = makeProjectDir();
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await publishProjectArchive(dir, {
+        credential: {
+          ...expiredLogin,
+          expires_at: new Date(Date.now() - 1000),
+          refreshable: false,
+        },
+      } as never);
+      expect(authMocks.tryResolveCredential).not.toHaveBeenCalled();
+      expect(fetchMock.mock.calls[0]![1].headers).toEqual(
+        expect.objectContaining({ authorization: "Bearer fresh-token" }),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("asks for a new login, without sending anything, when a passed login expired and cannot refresh", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { refresh_token: _none, ...noRefresh } = expiredLogin;
+    const dir = makeProjectDir();
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await expect(
+        publishProjectArchive(dir, {
+          credential: { ...noRefresh, expires_at: new Date(Date.now() - 1000), refreshable: false },
+        } as never),
+      ).rejects.toThrow("Your login expired. Run hyperframes auth login, then publish again.");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("asks for a new login, without sending anything, when the refresh is refused", async () => {
+    oauthMocks.refreshTokens.mockRejectedValueOnce(ErrRefreshFailed("invalid_grant"));
+    authMocks.tryResolveCredential.mockResolvedValue(expiredLogin);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const dir = makeProjectDir();
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await expect(publishProjectArchive(dir)).rejects.toThrow(
+        "Your login expired. Run hyperframes auth login, then publish again.",
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("publishProjectArchive with an expired login and no refresh token", () => {
+  let fixture: Awaited<ReturnType<typeof setupTempAuthEnv>>;
+
+  beforeEach(async () => {
+    fixture = await setupTempAuthEnv("hf-publish-expired-");
+    const { tryResolveCredential } =
+      await vi.importActual<typeof import("../auth/resolver.js")>("../auth/resolver.js");
+    authMocks.tryResolveCredential.mockImplementation(tryResolveCredential);
+  });
+
+  afterEach(async () => {
+    await fixture.restore();
+  });
+
+  it("asks for a new login instead of publishing anonymously", async () => {
+    const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    await writeStore({ oauth: { access_token: "stale-token", expires_at: past } });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const dir = makeProjectDir();
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await expect(publishProjectArchive(dir)).rejects.toThrow(
+        "Your login expired. Run hyperframes auth login, then publish again.",
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("readStaged", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "hf-staged-"));
+    writeFileSync(join(dir, "index.html"), "<html></html>");
+    writeFileSync(join(dir, "clip.bin"), "staged bytes");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("reads a file left on disk only while it is the file that was staged", () => {
+    const staged = stagePublishFiles(dir, 4).get("clip.bin")!;
+    expect(Buffer.isBuffer(staged)).toBe(false);
+    expect(readStaged(staged).toString()).toBe("staged bytes");
+
+    writeFileSync(join(dir, "swap.bin"), "other  bytes");
+    utimesSync(join(dir, "swap.bin"), 1, 1);
+    renameSync(join(dir, "swap.bin"), join(dir, "clip.bin"));
+    expect(() => readStaged(staged)).toThrow(/changed on disk/);
   });
 });

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -24,8 +25,10 @@ import {
   markCacheEntryComplete,
   partialCacheEntryDir,
   publishCacheEntry,
+  readContentSha256,
   readKeyStat,
   rehydrateCacheEntry,
+  touchCacheDir,
   type CacheKeyInput,
 } from "./extractionCache.js";
 
@@ -64,8 +67,8 @@ function seedPartialDir(entry: { dir: string; keyHash: string }, frameContent: s
 }
 
 describe("extractionCache constants", () => {
-  it("exposes the v4 schema prefix", () => {
-    expect(SCHEMA_PREFIX).toBe("hfcache-v4-");
+  it("exposes the v7 schema prefix", () => {
+    expect(SCHEMA_PREFIX).toBe("hfcache-v8-");
   });
 
   it("exposes the frame filename prefix shared with the extractor", () => {
@@ -136,6 +139,34 @@ describe("computeCacheKey", () => {
   it("produces a 64-char hex SHA-256 digest", () => {
     const key = computeCacheKey(base(sourceFile));
     expect(key).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("keys a path-keyed source exactly as before content keys existed", () => {
+    const input = base(sourceFile);
+    const legacyBlob = JSON.stringify({
+      p: input.videoPath,
+      m: input.mtimeMs,
+      s: input.size,
+      ms: 0,
+      d: 3,
+      f: "30",
+      fmt: "jpg",
+    });
+    expect(computeCacheKey(input)).toBe(createHash("sha256").update(legacyBlob).digest("hex"));
+  });
+
+  it("keys a content-addressed source by its bytes, not its path or mtime", () => {
+    const moved = join(tmpRoot, "moved.mp4");
+    writeFileSync(moved, "fake-video-bytes", "utf-8");
+    const original = computeCacheKey({ ...base(sourceFile), contentSha256: "a1" });
+    expect(computeCacheKey({ ...base(moved), mtimeMs: 1, contentSha256: "a1" })).toBe(original);
+    expect(computeCacheKey({ ...base(sourceFile), contentSha256: "b2" })).not.toBe(original);
+  });
+
+  it("hashes a file's bytes for its content key, or skips the cache when unreadable", async () => {
+    const expected = createHash("sha256").update("fake-video-bytes").digest("hex");
+    expect(await readContentSha256(sourceFile)).toBe(expected);
+    expect(await readContentSha256(join(tmpRoot, "missing.mp4"))).toBeNull();
   });
 
   it("changes when path changes (moved files re-extract)", () => {
@@ -249,6 +280,19 @@ describe("lookupCacheEntry / markCacheEntryComplete", () => {
     const staleV3Dir = join(tmpRoot, `hfcache-v3-${keyHash.slice(0, 16)}`);
     mkdirSync(staleV3Dir, { recursive: true });
     writeFileSync(join(staleV3Dir, COMPLETE_SENTINEL), "", "utf-8");
+
+    const lookup = lookupCacheEntry(tmpRoot, input);
+    expect(lookup.hit).toBe(false);
+    expect(lookup.entry.dir).toBe(join(tmpRoot, `${SCHEMA_PREFIX}${keyHash.slice(0, 16)}`));
+  });
+
+  it("does not reuse a complete v6 entry, whose VFR frames were sampled by packet duration", () => {
+    const input = base(sourceFile);
+    const keyHash = computeCacheKey(input);
+    const staleV6Dir = join(tmpRoot, `hfcache-v6-${keyHash.slice(0, 16)}`);
+    mkdirSync(staleV6Dir, { recursive: true });
+    writeFileSync(join(staleV6Dir, "frame_00001.jpg"), "old", "utf-8");
+    writeFileSync(join(staleV6Dir, COMPLETE_SENTINEL), "", "utf-8");
 
     const lookup = lookupCacheEntry(tmpRoot, input);
     expect(lookup.hit).toBe(false);
@@ -377,6 +421,21 @@ describe("publishCacheEntry", () => {
     expect(statSync(join(cacheEntry.dir, "frame_00001.jpg")).size).toBe("fresh".length);
     expect(existsSync(join(cacheEntry.dir, COMPLETE_SENTINEL))).toBe(true);
   });
+
+  it("replaces a sentineled winner whose frames are gone instead of discarding fresh frames", () => {
+    const cacheEntry = entry();
+    ensureCacheEntryDir(cacheEntry);
+    markCacheEntryComplete(cacheEntry);
+    expect(lookupCacheEntry(tmpRoot, keyFor(sourceFile)).hit).toBe(false);
+    const partialDir = seedPartialDir(cacheEntry, "fresh");
+
+    const result = publishCacheEntry(cacheEntry, partialDir);
+
+    expect(result).toEqual({ dir: cacheEntry.dir, published: true });
+    expect(existsSync(partialDir)).toBe(false);
+    expect(lookupCacheEntry(tmpRoot, keyFor(sourceFile)).hit).toBe(true);
+    expect(statSync(join(cacheEntry.dir, "frame_00001.jpg")).size).toBe("fresh".length);
+  });
 });
 
 describe("gcExtractionCache", () => {
@@ -415,6 +474,19 @@ describe("gcExtractionCache", () => {
     expect(stats.evictedEntries).toBe(1);
   });
 
+  it("counts the same evictions in a dry run and removes nothing", () => {
+    const old = makeEntry("old", 60, 120_000);
+    const young = makeEntry("young", 60, 1_000);
+    const options = { maxBytes: 0, minAgeMs: 60_000 };
+
+    const planned = gcExtractionCache(tmpRoot, { ...options, dryRun: true });
+    expect(existsSync(old)).toBe(true);
+    expect(gcExtractionCache(tmpRoot, options)).toEqual(planned);
+    expect(planned.evictedEntries).toBe(1);
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(young)).toBe(true);
+  });
+
   it("evicts oldest complete entries first until under maxBytes while respecting minAge", () => {
     const oldest = makeEntry("oldest", 60, 120_000);
     const middle = makeEntry("middle", 60, 90_000);
@@ -441,6 +513,23 @@ describe("gcExtractionCache", () => {
     expect(existsSync(freshPartial)).toBe(true);
   });
 
+  // A render still writing into its own (unpublished) partial dir depends on
+  // it exactly like a symlinked complete entry does. The aged-partial check
+  // reads the DIRECTORY's own mtime, not any sentinel — touchCacheDir must
+  // renew that too, or a long-lived partial dir is just as vulnerable to a
+  // concurrent GC sweep as an untouched complete entry.
+  it("touchCacheDir renews a partial directory's own mtime so a live writer survives the aged-partial sweep", () => {
+    const dependedOnPartial = join(tmpRoot, `${SCHEMA_PREFIX}ghi.partial-1234-cafef00d`);
+    mkdirSync(dependedOnPartial, { recursive: true });
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(dependedOnPartial, old, old);
+
+    touchCacheDir(dependedOnPartial);
+    gcExtractionCache(tmpRoot, { maxBytes: 1_000_000, minAgeMs: 60_000 });
+
+    expect(existsSync(dependedOnPartial)).toBe(true);
+  });
+
   it("ignores non-cache-prefix directories under the same root", () => {
     const animatedGif = join(tmpRoot, "animated-gif");
     mkdirSync(animatedGif, { recursive: true });
@@ -457,5 +546,18 @@ describe("gcExtractionCache", () => {
     expect(() =>
       gcExtractionCache(join(tmpRoot, "missing"), { maxBytes: 1, minAgeMs: 60_000 }),
     ).not.toThrow();
+  });
+
+  // A render can keep reading an entry long after the one-time touch its
+  // cache-hit lookup performed. touchCacheDir is how a live reader proves the
+  // entry is still in use — without it, an in-use entry idle past minAge is
+  // indistinguishable from an abandoned one and gets swept like `oldest` above.
+  it("touchCacheDir renews an entry's LRU clock so a live dependent survives the sweep", () => {
+    const dependedOnDir = makeEntry("depended-on", 60, 120_000);
+
+    touchCacheDir(dependedOnDir);
+    gcExtractionCache(tmpRoot, { maxBytes: 1, minAgeMs: 60_000 });
+
+    expect(existsSync(dependedOnDir)).toBe(true);
   });
 });

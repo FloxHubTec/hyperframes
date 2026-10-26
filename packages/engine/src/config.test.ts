@@ -13,6 +13,7 @@ import {
   resolveExtractCacheDir,
   defaultExtractCacheDir,
   EXTRACT_CACHE_DIR_DISABLED_ALIASES,
+  validateEngineConfigSnapshot,
 } from "./config.js";
 import type { EngineConfig } from "./config.js";
 import { isLowMemorySystem } from "./services/systemMemory.js";
@@ -53,6 +54,7 @@ describe("resolveConfig", () => {
     expect(config.browserGpuMode).toBe("software");
     expect(config.enableStreamingEncode).toBe(true);
     expect(config.streamingEncodeMaxDurationSeconds).toBe(240);
+    expect(config.streamingEncodeDurationCapEnabled).toBe(false);
     expect((config as Record<string, unknown>).vp9CpuUsed).toBe(4);
     expect(config.audioGain).toBe(1);
     expect(config.debug).toBe(false);
@@ -84,6 +86,12 @@ describe("resolveConfig", () => {
     expect(config.enableBrowserPool).toBe(true);
   });
 
+  it("keeps software WebGPU off unless PRODUCER_ALLOW_SOFTWARE_WEBGPU opts in", () => {
+    expect(resolveConfig().allowSoftwareWebGpu).toBe(false);
+    setEnv("PRODUCER_ALLOW_SOFTWARE_WEBGPU", "true");
+    expect(resolveConfig().allowSoftwareWebGpu).toBe(true);
+  });
+
   it("lets env vars opt out of default streaming encode", () => {
     setEnv("PRODUCER_ENABLE_STREAMING_ENCODE", "false");
 
@@ -103,6 +111,18 @@ describe("resolveConfig", () => {
 
     const config = resolveConfig();
     expect(config.streamingEncodeMaxDurationSeconds).toBe(0);
+  });
+
+  it("reads the streaming duration cap enable flag from env", () => {
+    setEnv("PRODUCER_STREAMING_ENCODE_DURATION_CAP_ENABLED", "true");
+
+    const config = resolveConfig();
+    expect(config.streamingEncodeDurationCapEnabled).toBe(true);
+  });
+
+  it("keeps the streaming duration cap disabled when the flag is unset", () => {
+    const config = resolveConfig();
+    expect(config.streamingEncodeDurationCapEnabled).toBe(false);
   });
 
   it("reads VP9 cpu-used from env", () => {
@@ -242,6 +262,24 @@ describe("resolveConfig", () => {
   // which is worse than no reason.
   describe("explainDrawElementDisabled (names the silent refusals)", () => {
     const base = { browserGpuMode: "hardware" as const, workerEncode: true };
+
+    it("turns fast capture off by default on a host capped at Chrome 150, unless opted in", () => {
+      const args = {
+        useDrawElement: true,
+        platform: "darwin" as const,
+        browserGpuMode: "hardware" as const,
+        workerEncode: true,
+        chromeCeiling: 150,
+      };
+      expect(resolveDefaultDrawElement({ ...args, explicitOptIn: false })).toBe(false);
+      expect(resolveDefaultDrawElement({ ...args, explicitOptIn: true })).toBe(true);
+      expect(
+        resolveDefaultDrawElement({ ...args, chromeCeiling: undefined, explicitOptIn: false }),
+      ).toBe(true);
+      expect(explainDrawElementDisabled({ ...base, platform: "darwin", chromeCeiling: 150 })).toBe(
+        "old_chrome",
+      );
+    });
 
     it("names each refusal", () => {
       expect(explainDrawElementDisabled({ ...base, platform: "linux" })).toBe(
@@ -957,5 +995,17 @@ describe("resolveExtractCacheDir", () => {
     // both engine.resolveConfig() and doctor's checkFramesCache() would break
     // silently if the signature drifted to require an env argument.
     expect(() => resolveExtractCacheDir()).not.toThrow();
+  });
+});
+
+describe("validateEngineConfigSnapshot fps", () => {
+  it("accepts every distributed fps, including 25", () => {
+    for (const fps of [24, 25, 30, 60] as const) {
+      expect(() => validateEngineConfigSnapshot({ ...resolveConfig(), fps })).not.toThrow();
+    }
+  });
+
+  it("rejects an fps outside the distributed set", () => {
+    expect(() => validateEngineConfigSnapshot({ ...resolveConfig(), fps: 50 })).toThrow(/fps/);
   });
 });

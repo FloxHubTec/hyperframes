@@ -6,7 +6,15 @@
  * shared ceiling here so Studio, preview, and render cannot drift.
  */
 export const MAX_AUDIO_GAIN_DB = 12;
-export const MAX_AUDIO_GAIN = 10 ** (MAX_AUDIO_GAIN_DB / 20);
+/** Linear gain from a decibel value. Owner of the dB → gain formula. */
+export function audioDbToGain(db: number): number {
+  return 10 ** (db / 20);
+}
+/** Inverse of `audioDbToGain`. Caller must pass a positive finite gain. */
+export function audioGainToDb(gain: number): number {
+  return 20 * Math.log10(gain);
+}
+export const MAX_AUDIO_GAIN = audioDbToGain(MAX_AUDIO_GAIN_DB);
 
 /** Studio fader coordinates. Unity is deliberately the physical midpoint. */
 export const AUDIO_GAIN_FADER_MIN = -100;
@@ -17,6 +25,16 @@ const MIN_AUDIO_GAIN_DB = -60;
 export function clampAudioGain(value: number): number {
   if (!Number.isFinite(value)) return 1;
   return Math.max(0, Math.min(MAX_AUDIO_GAIN, value));
+}
+
+/** `data-volume` is a gain on the volume lane, as clip gain offsets the keyframes in an NLE. */
+export function gainTimesLane(gain: number, lane: number): number {
+  return clampAudioGain(gain * lane);
+}
+
+/** `data-volume` as clip gain, ahead of the FX chain; unity when a GSAP tween's absolute values own the level. */
+export function clipGain(volume: number, tweened: boolean): number {
+  return tweened ? 1 : clampAudioGain(volume);
 }
 
 export function clampNativeMediaVolume(value: number): number {
@@ -87,13 +105,13 @@ export function audioFaderPositionToGain(position: number): number {
     safe < 0
       ? (safe / Math.abs(AUDIO_GAIN_FADER_MIN)) * Math.abs(MIN_AUDIO_GAIN_DB)
       : (safe / AUDIO_GAIN_FADER_MAX) * MAX_AUDIO_GAIN_DB;
-  return 10 ** (db / 20);
+  return audioDbToGain(db);
 }
 
 export function audioGainToFaderPosition(gain: number): number {
   const safe = clampAudioGain(gain);
   if (safe === 0) return AUDIO_GAIN_FADER_MIN;
-  const db = 20 * Math.log10(safe);
+  const db = audioGainToDb(safe);
   const position =
     db < 0
       ? (db / Math.abs(MIN_AUDIO_GAIN_DB)) * Math.abs(AUDIO_GAIN_FADER_MIN)
@@ -104,7 +122,7 @@ export function audioGainToFaderPosition(gain: number): number {
 export function audioGainToText(gain: number): string {
   const safe = clampAudioGain(gain);
   if (safe === 0) return "-∞ dB";
-  const db = 20 * Math.log10(safe);
+  const db = audioGainToDb(safe);
   const rounded = Math.abs(db) < 0.05 ? 0 : db;
   return (rounded > 0 ? "+" : "") + rounded.toFixed(1) + " dB";
 }

@@ -140,7 +140,9 @@ export interface CreateAssetUploadResponse {
    */
   expires_in_seconds: number;
   /**
-   * Maximum allowed upload size in bytes.
+   * Maximum allowed upload size in bytes for this content type: 1.5 GB
+   * (1,500,000,000 bytes) per audio file and 200 MiB (209,715,200 bytes) for
+   * other supported files.
    */
   max_bytes: number;
   /**
@@ -172,6 +174,16 @@ export interface CreateHyperframesRenderRequest {
    * Output container/codec.
    */
   format?: "mp4" | "webm" | "mov";
+  /**
+   * Overrides the quality preset's constant rate factor (lower is higher quality
+   * and a larger file). Integer 0-51 for mp4, 0-63 for webm; ignored for mov.
+   * Omit to use the preset's CRF.
+   */
+  crf?: number | null;
+  /**
+   * Set 'off' to disable page motion blur. Omit or null to keep behavior.
+   */
+  page_motion_blur?: "off" | null;
   /**
    * Output resolution tier. Defaults to '1080p'. Pass '4k' for 4K renders
    * (billed at 1.5x).
@@ -228,11 +240,8 @@ export interface DeleteHyperframesRenderResponse {
 }
 
 /**
- * Output aspect ratio. Only the three ratios already supported end-to-end by
- * the render pipeline are exposed today: ``16:9`` (landscape), ``9:16``
- * (portrait), ``1:1`` (square). ``auto`` and other social-media ratios (4:5,
- * 5:4) are reserved for a follow-up PR that wires composition-dim inference at
- * the controller boundary.
+ * Output aspect ratio. Supported ratios are ``16:9`` (landscape), ``9:16``
+ * (portrait), and ``1:1`` (square).
  */
 export type HyperframesAspectRatio = "16:9" | "9:16" | "1:1";
 
@@ -306,6 +315,13 @@ export interface HyperframesRenderDetail {
    * Error description. Present only when status is 'failed'.
    */
   failure_message?: string | null;
+  /**
+   * Why billing refused a finished render: 'hf_usage_exhausted',
+   * 'hf_subscription_required' or 'api_key_required'. Present only when status
+   * is 'failed' for that reason; nothing was charged, so the render can be sent
+   * again on a HeyGen API key.
+   */
+  failure_code?: string | null;
 }
 
 /**
@@ -314,9 +330,7 @@ export interface HyperframesRenderDetail {
 export type HyperframesRenderStatus = "queued" | "rendering" | "completed" | "failed";
 
 /**
- * Output resolution tier. Pricing diverges only at 4K (1.5x multiplier). The
- * render-pipeline value set is intentionally narrow at launch; 720p and other
- * tiers will follow once the producer/CLI surface catches up.
+ * Output resolution tier. 4K output uses a 1.5x pricing multiplier.
  */
 export type HyperframesResolution = "1080p" | "4k";
 
@@ -337,6 +351,39 @@ export interface StandardAPIError {
    * Link to error documentation
    */
   doc_url?: string | null;
+  /**
+   * Per-item error details for batch/multi-node failures (e.g. graph compilation
+   * errors by node).
+   */
+  errors?: Array<StandardAPIErrorDetail>;
+  /**
+   * Request identifier, also returned in the X-HeyGen-Request-Id response
+   * header. Include it when contacting support.
+   */
+  request_id?: string;
+}
+
+export interface StandardAPIErrorDetail {
+  /**
+   * Machine-readable error code
+   */
+  code: string;
+  /**
+   * Human-readable error message
+   */
+  message: string;
+  /**
+   * Graph node id this error pertains to, if applicable
+   */
+  node_id?: string;
+  /**
+   * Port name on the node this error pertains to, if applicable
+   */
+  port?: string;
+  /**
+   * Field path within the item this error pertains to, if applicable
+   */
+  path?: string;
 }
 
 /**

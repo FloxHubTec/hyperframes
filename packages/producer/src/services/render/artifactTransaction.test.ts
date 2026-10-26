@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   existsSync,
   lstatSync,
@@ -12,7 +12,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { ArtifactTransaction, type ArtifactDurationProbe } from "./artifactTransaction.js";
+import {
+  ArtifactTransaction,
+  buildArtifactExpectation,
+  type ArtifactDurationProbe,
+} from "./artifactTransaction.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "hf-artifact-transaction-"));
@@ -222,10 +226,14 @@ describe("ArtifactTransaction", () => {
   it("does not probe duration when the caller passes no expectation", async () => {
     const dir = tempDir();
     const destination = join(dir, "render.mp4");
-    const transaction = new ArtifactTransaction(destination, "file", undefined, neverCalled);
+    const debug = vi.fn();
+    const transaction = new ArtifactTransaction(destination, "file", undefined, neverCalled, {
+      debug,
+    });
     writeFileSync(transaction.stagingPath, "any-non-empty-bytes");
 
     await expect(transaction.validate()).resolves.toBeUndefined();
+    expect(debug).not.toHaveBeenCalled();
 
     transaction.rollback();
   });
@@ -242,6 +250,268 @@ describe("ArtifactTransaction", () => {
     transaction.rollback();
   });
 
+  it.each([
+    { expectedFrames: 120, capturedFrames: 118, accepted: false },
+    { expectedFrames: 120, capturedFrames: 119, accepted: true },
+    { expectedFrames: 1000, capturedFrames: 998, accepted: true },
+    { expectedFrames: 1000, capturedFrames: 997, accepted: false },
+  ])(
+    "validates $capturedFrames PNG frames against an expectation of $expectedFrames",
+    async ({ expectedFrames, capturedFrames, accepted }) => {
+      const dir = tempDir();
+      const destination = join(dir, "frames");
+      mkdirSync(destination);
+      writeFileSync(join(destination, "frame_000001.png"), "existing-frame");
+      const transaction = new ArtifactTransaction(destination, "directory", undefined, neverCalled);
+      mkdirSync(transaction.stagingPath);
+      for (let frame = 1; frame <= capturedFrames; frame++) {
+        writeFileSync(
+          join(transaction.stagingPath, `frame_${String(frame).padStart(6, "0")}.png`),
+          "frame",
+        );
+      }
+
+      try {
+        const validation = transaction.validate({
+          expectedDurationSeconds: expectedFrames / 30,
+          fps: 30,
+          expectedFrames,
+        });
+        if (accepted) await expect(validation).resolves.toBeUndefined();
+        else await expect(validation).rejects.toThrow(/truncated.*frames/);
+        expect(readFileSync(join(destination, "frame_000001.png"), "utf8")).toBe("existing-frame");
+      } finally {
+        transaction.rollback();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("does not count audio sidecars or unrelated files as PNG frames", async () => {
+    const dir = tempDir();
+    const transaction = new ArtifactTransaction(
+      join(dir, "frames"),
+      "directory",
+      undefined,
+      neverCalled,
+    );
+    mkdirSync(transaction.stagingPath);
+    writeFileSync(join(transaction.stagingPath, "frame_000001.png"), "frame");
+    writeFileSync(join(transaction.stagingPath, "audio.m4a"), "sidecar");
+    writeFileSync(join(transaction.stagingPath, "poster.png"), "poster");
+    const nested = join(transaction.stagingPath, "notes");
+    mkdirSync(nested);
+    writeFileSync(join(nested, "frame_000002.png"), "unrelated-frame");
+
+    try {
+      await expect(
+        transaction.validate({ expectedDurationSeconds: 0.3, fps: 10, expectedFrames: 3 }),
+      ).rejects.toThrow(/truncated.*3 frames.*1 frames/);
+    } finally {
+      transaction.rollback();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an expected PNG sequence containing only a sidecar", async () => {
+    const dir = tempDir();
+    const transaction = new ArtifactTransaction(
+      join(dir, "frames"),
+      "directory",
+      undefined,
+      neverCalled,
+    );
+    mkdirSync(transaction.stagingPath);
+    writeFileSync(join(transaction.stagingPath, "audio.m4a"), "sidecar");
+
+    try {
+      await expect(
+        transaction.validate({ expectedDurationSeconds: 0.3, fps: 10, expectedFrames: 3 }),
+      ).rejects.toThrow(/truncated.*3 frames.*0 frames/);
+    } finally {
+      transaction.rollback();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the one-frame tolerance for long video artifacts", async () => {
+    const dir = tempDir();
+    const probe: ArtifactDurationProbe = async () => ({ durationSeconds: 1000, frames: 9980 });
+    const transaction = new ArtifactTransaction(join(dir, "render.mp4"), "file", undefined, probe);
+    writeFileSync(transaction.stagingPath, "video");
+
+    try {
+      await expect(
+        transaction.validate({ expectedDurationSeconds: 1000, fps: 10, expectedFrames: 10000 }),
+      ).rejects.toThrow(/truncated.*10000 frames.*9980 frames/);
+    } finally {
+      transaction.rollback();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "reports an unavailable frame-count check at debug level for %s frames",
+    async (frames) => {
+      const dir = tempDir();
+      const probe: ArtifactDurationProbe = async () => ({ durationSeconds: 4, frames });
+      const debug = vi.fn();
+      const transaction = new ArtifactTransaction(
+        join(dir, "render.webm"),
+        "file",
+        undefined,
+        probe,
+        { debug },
+      );
+      writeFileSync(transaction.stagingPath, "video");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      try {
+        await expect(
+          transaction.validate({ expectedDurationSeconds: 4, fps: 30, expectedFrames: 120 }),
+        ).resolves.toBeUndefined();
+        expect(debug).toHaveBeenCalledExactlyOnceWith(
+          "[Render] Frame-count validation skipped: no usable frame count was reported.",
+          {
+            event: "artifact_frame_count_unavailable",
+            artifact: transaction.destinationPath,
+            expectedFrames: 120,
+          },
+        );
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+        transaction.rollback();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("keeps stdout and stderr quiet when frame counts are unavailable with the default logger", async () => {
+    const dir = tempDir();
+    const probe: ArtifactDurationProbe = async () => ({ durationSeconds: 4 });
+    const transaction = new ArtifactTransaction(join(dir, "render.webm"), "file", undefined, probe);
+    writeFileSync(transaction.stagingPath, "video");
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const consoleWrites = (["log", "info", "debug", "warn", "error"] as const).map((method) =>
+      vi.spyOn(console, method).mockImplementation(() => {}),
+    );
+
+    try {
+      await expect(
+        transaction.validate({ expectedDurationSeconds: 4, fps: 30, expectedFrames: 120 }),
+      ).resolves.toBeUndefined();
+      expect(stdout).not.toHaveBeenCalled();
+      expect(stderr).not.toHaveBeenCalled();
+      for (const write of consoleWrites) expect(write).not.toHaveBeenCalled();
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+      for (const write of consoleWrites) write.mockRestore();
+      transaction.rollback();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not report unavailable frame counts when only duration is expected", async () => {
+    const dir = tempDir();
+    const probe: ArtifactDurationProbe = async () => ({ durationSeconds: 4 });
+    const debug = vi.fn();
+    const transaction = new ArtifactTransaction(
+      join(dir, "render.webm"),
+      "file",
+      undefined,
+      probe,
+      {
+        debug,
+      },
+    );
+    writeFileSync(transaction.stagingPath, "video");
+
+    try {
+      await expect(transaction.validate({ expectedDurationSeconds: 4 })).resolves.toBeUndefined();
+      expect(debug).not.toHaveBeenCalled();
+    } finally {
+      transaction.rollback();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([120, 119, 90])(
+    "checks a reported count of %s without an unavailable-count event",
+    async (frames) => {
+      const dir = tempDir();
+      const probe: ArtifactDurationProbe = async () => ({ durationSeconds: 4, frames });
+      const debug = vi.fn();
+      const transaction = new ArtifactTransaction(
+        join(dir, "render.mp4"),
+        "file",
+        undefined,
+        probe,
+        {
+          debug,
+        },
+      );
+      writeFileSync(transaction.stagingPath, "video");
+
+      try {
+        const validation = transaction.validate({
+          expectedDurationSeconds: 4,
+          fps: 30,
+          expectedFrames: 120,
+        });
+        if (frames >= 119) await expect(validation).resolves.toBeUndefined();
+        else await expect(validation).rejects.toThrow(/truncated.*120 frames.*90 frames/);
+        expect(debug).not.toHaveBeenCalled();
+      } finally {
+        transaction.rollback();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([1920, 1280])(
+    "preserves validation with a throwing logger and a probed width of %s",
+    async (width) => {
+      const dir = tempDir();
+      const probe: ArtifactDurationProbe = async () => ({
+        durationSeconds: 4,
+        width,
+        height: 1080,
+      });
+      const debug = vi.fn(() => {
+        throw new Error("debug sink unavailable");
+      });
+      const transaction = new ArtifactTransaction(
+        join(dir, "render.webm"),
+        "file",
+        undefined,
+        probe,
+        {
+          debug,
+        },
+      );
+      writeFileSync(transaction.stagingPath, "video");
+
+      try {
+        const validation = transaction.validate({
+          expectedDurationSeconds: 4,
+          fps: 30,
+          expectedFrames: 120,
+          expectedWidth: 1920,
+          expectedHeight: 1080,
+        });
+        if (width === 1920) await expect(validation).resolves.toBeUndefined();
+        else await expect(validation).rejects.toThrow("expected 1920x1080, probed 1280x1080");
+        expect(debug).toHaveBeenCalledOnce();
+      } finally {
+        transaction.rollback();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("rejects a video whose probed duration is far shorter than the captured duration", async () => {
     // Field packet from #3395: expected 52.2s (1566 frames), artifact
     // contained 41.333s (1240 frames). The gate must catch the 11s
@@ -252,7 +522,10 @@ describe("ArtifactTransaction", () => {
       expect(path).toBe(transaction.stagingPath);
       return { durationSeconds: 41.333 };
     };
-    const transaction = new ArtifactTransaction(destination, "file", undefined, probedShortfall);
+    const debug = vi.fn();
+    const transaction = new ArtifactTransaction(destination, "file", undefined, probedShortfall, {
+      debug,
+    });
     writeFileSync(transaction.stagingPath, "fake-mp4-bytes-that-are-non-empty");
 
     await expect(
@@ -262,6 +535,7 @@ describe("ArtifactTransaction", () => {
         expectedFrames: 1566,
       }),
     ).rejects.toThrow(/truncated/);
+    expect(debug).not.toHaveBeenCalled();
 
     transaction.rollback();
   });
@@ -281,6 +555,49 @@ describe("ArtifactTransaction", () => {
         expectedDurationSeconds: 10.0,
         fps: 30,
         expectedFrames: 300,
+      }),
+    ).resolves.toBeUndefined();
+
+    transaction.rollback();
+  });
+
+  it("rejects a video encoded at a different size than the render asked for", async () => {
+    // A 4K export of a 1080x1920 HDR project once published a 1080x1920 file as done.
+    const dir = tempDir();
+    const probe: ArtifactDurationProbe = async () => ({
+      durationSeconds: 2,
+      width: 1080,
+      height: 1920,
+    });
+    const transaction = new ArtifactTransaction(join(dir, "render.mp4"), "file", undefined, probe);
+    writeFileSync(transaction.stagingPath, "fake-mp4-bytes-that-are-non-empty");
+
+    await expect(
+      transaction.validate({
+        expectedDurationSeconds: 2,
+        expectedWidth: 2160,
+        expectedHeight: 3840,
+      }),
+    ).rejects.toThrow("expected 2160x3840, probed 1080x1920");
+
+    transaction.rollback();
+  });
+
+  it("accepts the one-pixel pad a 4:2:0 encode gives an odd side", async () => {
+    const dir = tempDir();
+    const probe: ArtifactDurationProbe = async () => ({
+      durationSeconds: 2,
+      width: 1082,
+      height: 724,
+    });
+    const transaction = new ArtifactTransaction(join(dir, "render.mp4"), "file", undefined, probe);
+    writeFileSync(transaction.stagingPath, "fake-mp4-bytes-that-are-non-empty");
+
+    await expect(
+      transaction.validate({
+        expectedDurationSeconds: 2,
+        expectedWidth: 1081,
+        expectedHeight: 724,
       }),
     ).resolves.toBeUndefined();
 
@@ -344,13 +661,194 @@ describe("ArtifactTransaction", () => {
     const dir = tempDir();
     const destination = join(dir, "render.mp4");
     const probe: ArtifactDurationProbe = async () => ({ durationSeconds: 0 });
-    const transaction = new ArtifactTransaction(destination, "file", undefined, probe);
+    const debug = vi.fn();
+    const transaction = new ArtifactTransaction(destination, "file", undefined, probe, { debug });
     writeFileSync(transaction.stagingPath, "fake-mp4-bytes-that-are-non-empty");
 
-    await expect(transaction.validate({ expectedDurationSeconds: 10.0, fps: 30 })).rejects.toThrow(
-      /no usable duration/,
-    );
+    await expect(
+      transaction.validate({ expectedDurationSeconds: 10.0, fps: 30, expectedFrames: 300 }),
+    ).rejects.toThrow(/no usable duration/);
+    expect(debug).not.toHaveBeenCalled();
 
     transaction.rollback();
+  });
+
+  // ── HLS: a directory artifact that still has to pass the duration gate ────
+  // png-sequence directories have no probeable container, so the directory
+  // branch historically stopped at "non-empty readable files". An HLS package
+  // does have one — its video playlist — and shipping a truncated playlist is
+  // exactly the #3395 failure mode in a new container.
+
+  function stageHlsDirectory(transaction: ArtifactTransaction): void {
+    mkdirSync(transaction.stagingPath);
+    writeFileSync(join(transaction.stagingPath, "master.m3u8"), "#EXTM3U\n");
+    writeFileSync(join(transaction.stagingPath, "video.m3u8"), "#EXTM3U\n#EXTINF:4.000000,\n");
+    writeFileSync(join(transaction.stagingPath, "video_00000.ts"), "ts-bytes");
+  }
+
+  it("probes the named playlist inside an HLS directory", async () => {
+    const dir = tempDir();
+    const destination = join(dir, "render-hls");
+    const probed: string[] = [];
+    const probe: ArtifactDurationProbe = async (path) => {
+      probed.push(path);
+      return { durationSeconds: 4.0 };
+    };
+    const transaction = new ArtifactTransaction(destination, "directory", undefined, probe);
+    stageHlsDirectory(transaction);
+
+    await expect(
+      transaction.validate({
+        expectedDurationSeconds: 4.0,
+        fps: 30,
+        probeTarget: "video.m3u8",
+        requiredFiles: ["master.m3u8"],
+      }),
+    ).resolves.toBeUndefined();
+    expect(probed).toEqual([join(transaction.stagingPath, "video.m3u8")]);
+
+    transaction.rollback();
+  });
+
+  it("rejects a truncated HLS package", async () => {
+    const dir = tempDir();
+    const destination = join(dir, "render-hls");
+    const probe: ArtifactDurationProbe = async () => ({ durationSeconds: 8.0 });
+    const transaction = new ArtifactTransaction(destination, "directory", undefined, probe);
+    stageHlsDirectory(transaction);
+
+    await expect(
+      transaction.validate({
+        expectedDurationSeconds: 20.0,
+        fps: 30,
+        probeTarget: "video.m3u8",
+        requiredFiles: ["master.m3u8"],
+      }),
+    ).rejects.toThrow(/is truncated: expected 20\.000s, probed 8\.000s/);
+
+    transaction.rollback();
+  });
+
+  // ffprobe reports `nb_frames=N/A` through the hls demuxer, so the frame
+  // check is inert for a playlist probe. Assert it stays inert rather than
+  // failing a package whose duration is correct.
+  it("reports a skipped HLS frame-count check without rejecting the package", async () => {
+    const dir = tempDir();
+    const destination = join(dir, "render-hls");
+    const probe: ArtifactDurationProbe = async () => ({ durationSeconds: 4.0 });
+    const debug = vi.fn();
+    const transaction = new ArtifactTransaction(destination, "directory", undefined, probe, {
+      debug,
+    });
+    stageHlsDirectory(transaction);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(
+        transaction.validate({
+          expectedDurationSeconds: 4.0,
+          fps: 30,
+          expectedFrames: 120,
+          probeTarget: "video.m3u8",
+          requiredFiles: ["master.m3u8"],
+        }),
+      ).resolves.toBeUndefined();
+      expect(debug).toHaveBeenCalledExactlyOnceWith(
+        "[Render] Frame-count validation skipped: no usable frame count was reported.",
+        { event: "artifact_frame_count_unavailable", artifact: destination, expectedFrames: 120 },
+      );
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      transaction.rollback();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an HLS package with no master playlist before probing", async () => {
+    const dir = tempDir();
+    const destination = join(dir, "render-hls");
+    const transaction = new ArtifactTransaction(destination, "directory", undefined, neverCalled);
+    mkdirSync(transaction.stagingPath);
+    writeFileSync(join(transaction.stagingPath, "video.m3u8"), "#EXTM3U\n");
+
+    await expect(
+      transaction.validate({
+        expectedDurationSeconds: 4.0,
+        probeTarget: "video.m3u8",
+        requiredFiles: ["master.m3u8"],
+      }),
+    ).rejects.toThrow(/missing master\.m3u8/);
+
+    transaction.rollback();
+  });
+
+  it("surfaces a failed probe of the HLS playlist instead of passing the gate", async () => {
+    const dir = tempDir();
+    const destination = join(dir, "render-hls");
+    const probe: ArtifactDurationProbe = async () => {
+      throw new Error("ffprobe: Invalid data found when processing input");
+    };
+    const transaction = new ArtifactTransaction(destination, "directory", undefined, probe);
+    stageHlsDirectory(transaction);
+
+    await expect(
+      transaction.validate({
+        expectedDurationSeconds: 4.0,
+        probeTarget: "video.m3u8",
+        requiredFiles: ["master.m3u8"],
+      }),
+    ).rejects.toThrow(/duration probe failed for .*video\.m3u8/);
+
+    transaction.rollback();
+  });
+});
+
+describe("buildArtifactExpectation", () => {
+  const base = { durationSeconds: 4, fps: 30, expectedFrames: 120 };
+
+  it("returns no expectation for the formats with nothing probeable", () => {
+    expect(buildArtifactExpectation({ ...base, outputFormat: "gif" })).toBeUndefined();
+  });
+
+  it("passes the captured frame count for PNG sequences without a duration probe target", () => {
+    expect(buildArtifactExpectation({ ...base, outputFormat: "png-sequence" })).toEqual({
+      expectedDurationSeconds: 4,
+      fps: 30,
+      expectedFrames: 120,
+    });
+  });
+
+  it("returns no expectation when the pipeline has no usable duration", () => {
+    for (const durationSeconds of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        buildArtifactExpectation({ ...base, durationSeconds, outputFormat: "mp4" }),
+      ).toBeUndefined();
+    }
+  });
+
+  it("probes the staged file itself for single-file formats", () => {
+    for (const outputFormat of ["mp4", "webm", "mov"] as const) {
+      expect(buildArtifactExpectation({ ...base, outputFormat })).toEqual({
+        expectedDurationSeconds: 4,
+        fps: 30,
+        expectedFrames: 120,
+      });
+    }
+  });
+
+  it("carries the requested output size", () => {
+    expect(
+      buildArtifactExpectation({ ...base, outputFormat: "mp4", width: 2160, height: 3840 }),
+    ).toMatchObject({ expectedWidth: 2160, expectedHeight: 3840 });
+  });
+
+  it("names the video playlist and requires the master for hls", () => {
+    expect(buildArtifactExpectation({ ...base, outputFormat: "hls" })).toEqual({
+      expectedDurationSeconds: 4,
+      fps: 30,
+      expectedFrames: 120,
+      probeTarget: "video.m3u8",
+      requiredFiles: ["master.m3u8"],
+    });
   });
 });

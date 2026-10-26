@@ -13,6 +13,24 @@
       "types": "./dist/utils/alphaBlit.d.ts",
       "environments": ["bun", "node"]
     },
+    "./chrome-host-ceiling": {
+      "source": "./src/services/chromeHostCeiling.ts",
+      "runtime": "./dist/services/chromeHostCeiling.js",
+      "types": "./dist/services/chromeHostCeiling.d.ts",
+      "environments": ["bun", "node"]
+    },
+    "./system-memory": {
+      "source": "./src/services/systemMemory.ts",
+      "runtime": "./dist/services/systemMemory.js",
+      "types": "./dist/services/systemMemory.d.ts",
+      "environments": ["bun", "node"]
+    },
+    "./wsl-host": {
+      "source": "./src/services/wslHost.ts",
+      "runtime": "./dist/services/wslHost.js",
+      "types": "./dist/services/wslHost.d.ts",
+      "environments": ["bun", "node"]
+    },
     "./shader-transitions": {
       "source": "./src/utils/shaderTransitions.ts",
       "runtime": "./dist/utils/shaderTransitions.js",

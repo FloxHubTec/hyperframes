@@ -81,6 +81,8 @@ export {
   getDefaultStageZoom,
 } from "./core.types";
 
+export { DISTRIBUTED_FPS, type DistributedFps, isDistributedFps } from "./distributedFps";
+
 // Templates
 export { generateBaseHtml, getStageStyles } from "./templates/base";
 export {
@@ -175,6 +177,7 @@ export {
   rewriteInlineStyleAssetUrls,
 } from "./compiler/rewriteSubCompPaths";
 export { CSS_URL_RE, isNonRelativeUrl, isPathInside } from "./compiler/assetPaths";
+export { rewriteSrcsetUrls } from "./compiler/srcset";
 export {
   checkSubCompositionUsability,
   type ParsableDocumentLike,
@@ -182,9 +185,20 @@ export {
   type SubCompositionValidityReason,
 } from "./compiler/subCompositionValidity";
 export { RUNTIME_BOOTSTRAP_ATTR, stripEmbeddedRuntimeScripts } from "./compiler/htmlDocument";
+export { COMPOSITION_SOURCE_URL } from "./compiler/scriptRuns";
 export { queryByAttr } from "./utils/cssSelector";
+export {
+  AUDIBLE_MEDIA_SELECTOR,
+  audibleVideoNeedsWebAudio,
+  isAudibleVideoElement,
+} from "./audibleVideo";
 export { decodeUrlPathVariants } from "./utils/urlPath";
-export { parseAnimatedGifMetadata, type AnimatedGifMetadata } from "./media/gif";
+export {
+  clearGifFramesBeforeNext,
+  gifClearsAfterLeavingFrameInPlace,
+  parseAnimatedGifMetadata,
+  type AnimatedGifMetadata,
+} from "./media/gif";
 export {
   HF_COLOR_GRADING_ATTR,
   HF_COLOR_GRADING_ADJUST_KEYS,
@@ -247,6 +261,19 @@ export {
   type ResolvedHfColorGrading,
 } from "./colorGrading";
 export { parseCubeLut, CubeLutParseError, type ParseCubeLutOptions } from "./colorLuts";
+export {
+  firstFrameColourArgs,
+  hdrToSdrToneMapFilter,
+  parseFirstFrameColour,
+  type ToneMapSourceColour,
+} from "./hdrToneMap";
+export {
+  PREVIEW_PROXY_BOX_PARAM,
+  formatPreviewProxyBox,
+  parsePreviewProxyBox,
+  quantizePreviewProxyBox,
+  type PreviewProxyBox,
+} from "./previewProxyBox";
 
 // Inline scripts
 export {
@@ -269,11 +296,27 @@ export {
 export {
   MEDIA_VISUAL_STYLE_PROPERTIES,
   copyMediaVisualStyles,
+  exportClipWindow,
+  quantizeSeekTime,
   quantizeTimeToFrame,
   type MediaVisualStyleProperty,
 } from "./inline-scripts/parityContract";
-export { redactKnownPaths, redactTelemetryString } from "./telemetryRedaction";
-export { isSafePath, resolveWithinProject } from "./safePath";
+export {
+  redactKnownPaths,
+  redactTelemetryString,
+  redactUrlQueryStrings,
+} from "./telemetryRedaction";
+export {
+  folderGone,
+  isProjectRootMissing,
+  isSafePath,
+  mkdirWithinProject,
+  ProjectRootMissingError,
+  realpath,
+  realProjectRoot,
+  resolveWithinProject,
+} from "./safePath";
+export { isHyperframesProject, PROJECT_MARKER_FILES } from "./projectRule";
 export type {
   HyperframePickerApi,
   HyperframePickerBoundingBox,
@@ -292,6 +335,7 @@ export { formatRenderOutputTimestamp } from "./utils/renderOutputTimestamp.js";
 
 // Runtime helpers (composition-side)
 export { getVariables } from "./runtime/getVariables.js";
+export { SCENE_CALLBACK_ERROR_PREFIX } from "./runtime/diagnostics.js";
 export {
   parseStartExpression,
   parseNumeric,
@@ -318,14 +362,19 @@ export {
 // publishConfig entry points at a file the pack doesn't contain
 // (verify:packed-manifests catches exactly that).
 export { createRuntimeStartTimeResolver } from "./runtime/startResolver.js";
+// Also exposed via the ./runtime/clip-window subpath; re-exported here for the same dist-emit reason.
+export { hasClipStarted, isClipVisibleAt, isInClipWindow } from "./runtime/clipWindow.js";
 export {
   normalizePlaybackRate,
+  normalizeRateSpec,
   parseStrictFiniteTimingNumber,
   readElementPlaybackRate,
+  readElementRateSpec,
   readMediaStart,
   resolveNaturalMediaTimelineDuration,
   resolveNaturalMediaTimelineDurationFromValues,
 } from "./runtime/playbackRate.js";
+export { shiftRateLane, sourceTimeAt, timeAtSourceTime, type RateSpec } from "./speedRamp.js";
 
 // Variable validation (CLI / tooling-side)
 export {
@@ -373,3 +422,26 @@ export {
   overdueCanaries,
   type CanaryDefinition,
 } from "./canaryRegistry.js";
+
+// VFX chain (data-vfx-chain) — defs, chain parse/serialize/normalize
+export {
+  HF_VFX_ATTR,
+  HF_VFX_CHAIN_VERSION,
+  HF_VFX,
+  chainCapture,
+  getVfxDef,
+  parseVfxChain,
+  serializeVfxChain,
+  normalizeVfxParams,
+  type HfVfxCapture,
+  type HfVfxChain,
+  type HfVfxDef,
+  type HfVfxNode,
+  type HfVfxParam,
+  type HfVfxParamValues,
+} from "./vfx.js";
+export {
+  PAGE_DEVICE_SCALE_GLOBAL,
+  PAGE_MOTION_BLUR_OFF_GLOBAL,
+  acceleratedCanvasTrackerSource,
+} from "./pageMotionBlur.js";

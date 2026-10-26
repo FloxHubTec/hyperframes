@@ -451,8 +451,7 @@ if (typeof window !== "undefined") {
   // Expose a synchronous flush so headless renderers can drain the queue
   // instantly instead of waiting for rAF-based batch ticks. Also force-
   // publishes the "timelines built" signal immediately (normally deferred
-  // via setTimeout(0)) — the caller guarantees page scripts have finished
-  // loading, so no more operations can arrive after the flush.
+  // via setTimeout(0)). Scripts that wait for fonts queue later; duration() drains them.
   (window as Record<string, unknown>).__hfFlushSync = () => {
     flushPendingOperations();
     if (pendingOperations.length === 0 && window.__hfTimelinesBuilding) {
@@ -464,6 +463,9 @@ if (typeof window !== "undefined") {
   // `gsap.timeline()` before any user script calls it. GSAP is not yet
   // loaded when this stub runs — it loads via a <script> tag in the HTML body.
   let _realGsap: GsapInstance | null = null;
+  // GSAP's browser bundle assigns window.gsap twice: wrapping again would stand a proxy in for a
+  // proxy, and the runtime would compare GSAP's children against the outer one.
+  const wrapped = new WeakSet<GsapInstance>();
   try {
     Object.defineProperty(window, "gsap", {
       configurable: true,
@@ -473,7 +475,8 @@ if (typeof window !== "undefined") {
       },
       set(g: GsapInstance): void {
         _realGsap = g;
-        if (!g || typeof g.timeline !== "function") return;
+        if (!g || typeof g.timeline !== "function" || wrapped.has(g)) return;
+        wrapped.add(g);
         const origTimeline = g.timeline.bind(g) as (params?: unknown) => GsapTimeline;
         g.timeline = (params?: unknown): GsapTimeline => wrapTimeline(origTimeline(params));
         // Tween-target tracking for top-level gsap.to/from/set/fromTo calls

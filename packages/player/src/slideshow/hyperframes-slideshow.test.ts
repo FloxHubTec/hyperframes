@@ -4,8 +4,10 @@ import { handleRuntimeMessage } from "../runtime-message-handler.js";
 import {
   childrenMayStillArrive,
   dropInvalidSlides,
+  HyperframesSlideshow,
   locateSlideshowParts,
 } from "./hyperframes-slideshow.js";
+import { SlideshowController } from "./SlideshowController.js";
 import { slideshowChannelName } from "./slideshowPresenter.js";
 
 // Dynamic import defers custom-element registration until happy-dom is active.
@@ -129,6 +131,44 @@ describe("<hyperframes-slideshow>", () => {
     expect(el.querySelector("[data-hf-breadcrumb-item]")).toBeNull();
     expect(el.querySelector("[data-hf-back]")).toBeNull();
     el.remove();
+  });
+
+  it("keeps Next available until the final slide's fragments are revealed", () => {
+    const player = {
+      currentTime: 0,
+      seek: (time: number) => {
+        player.currentTime = time;
+      },
+      play: vi.fn(),
+      pause: vi.fn(),
+      onTimeUpdate: () => () => {},
+    };
+    const controller = new SlideshowController(player, {
+      slides: [
+        { sceneId: "intro", start: 0, end: 5, fragments: [], hotspots: [] },
+        { sceneId: "closing", start: 5, end: 10, fragments: [6, 8, 9], hotspots: [] },
+      ],
+      sequences: {},
+    });
+    const el = new HyperframesSlideshow();
+    document.body.appendChild(el);
+    el.__setControllerForTest(controller);
+
+    try {
+      controller.goToSlide(1);
+      expect(player.currentTime).toBe(6);
+      expect(el.querySelector("[data-hf-next]")).not.toBeNull();
+
+      el.querySelector<HTMLButtonElement>("[data-hf-next]")?.click();
+      expect(player.currentTime).toBe(8);
+      expect(el.querySelector("[data-hf-next]")).not.toBeNull();
+
+      el.querySelector<HTMLButtonElement>("[data-hf-next]")?.click();
+      expect(player.currentTime).toBe(9);
+      expect(el.querySelector("[data-hf-next]")).toBeNull();
+    } finally {
+      el.remove();
+    }
   });
 
   it("renders an icon-only present button inside the nav cluster in normal mode", () => {
@@ -1749,6 +1789,14 @@ describe("slideshow parts (pure)", () => {
     if (parts.kind !== "ready") return;
     expect(parts.player).toBe(root.querySelector("hyperframes-player"));
     expect(parts.manifest.slides.map((s) => s.sceneId)).toEqual(["intro"]);
+  });
+
+  it("classifies a malformed hotspot as a malformed island before slideshow initialization", () => {
+    const root = subtree(`<hyperframes-player></hyperframes-player>
+      <script type="application/hyperframes-slideshow+json">${JSON.stringify({
+        slides: [{ sceneId: "intro", startTime: 0, endTime: 1, hotspots: [null] }],
+      })}</script>`);
+    expect(locateSlideshowParts(root)).toEqual({ kind: "incomplete", reason: "malformed-island" });
   });
 });
 

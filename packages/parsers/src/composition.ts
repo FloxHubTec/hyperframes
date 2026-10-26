@@ -13,8 +13,13 @@ export { decodeUrlPathVariants } from "./utils/urlPath.js";
 export {
   parseCompositionVariables,
   isCompositionVariable,
+  isFontValue,
+  isImageValue,
   isScalarVariableValue,
   isSafeMediaUrl,
 } from "./compositionVariables.js";
 export { scanVariableUsage, type VariableUsageScan } from "./variableUsage.js";
 export * from "./compositionContract.js";
+
+export * from "./canvasScaffoldPatterns.js";
+export { extractMediaSrcMutations, type MediaSrcMutation } from "./mediaSrcMutation.js";

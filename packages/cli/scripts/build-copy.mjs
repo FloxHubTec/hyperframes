@@ -1,7 +1,17 @@
 // Cross-platform replacement for the previous `mkdir -p … && cp -r …` shell
 // chain, which failed on Windows because `cp` doesn't accept `-r` there.
 
-import { cpSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -37,11 +47,13 @@ function copyDir(src, dest) {
   cpSync(src, dest, { recursive: true, force: true });
 }
 
+// Source maps stay out: the CLI ships none of its own (tsup sourcemap: false).
 function copyDirContents(src, dest) {
   for (const entry of readdirSync(src)) {
     cpSync(join(src, entry), join(dest, entry), {
       recursive: true,
       force: true,
+      filter: (path) => !path.endsWith(".map"),
     });
   }
 }
@@ -55,6 +67,36 @@ function copyMdFiles(srcDir, destDir) {
   }
 }
 
+// Studio preview loads these from the CLI's own server instead of jsDelivr
+// (studioServer.ts serves dist/vendor/npm). They come from the workspace's
+// installed gsap, which must match the version core asks for, or Studio would
+// quietly fall back to the CDN for every preview.
+const GSAP_VENDOR_FILES = ["gsap.min.js", "CustomEase.min.js", "MotionPathPlugin.min.js"];
+
+function copyGsapVendorFiles() {
+  const coreRequire = createRequire(join(REPO_ROOT, "packages", "core", "package.json"));
+  const gsapRoot = dirname(coreRequire.resolve("gsap/package.json"));
+  const { version } = JSON.parse(readFileSync(join(gsapRoot, "package.json"), "utf-8"));
+  const coreSource = readFileSync(
+    join(REPO_ROOT, "packages", "core", "src", "gsapCdn.ts"),
+    "utf-8",
+  );
+  const expected = coreSource.match(/GSAP_CDN_VERSION = "([^"]+)"/)?.[1];
+  if (version !== expected) {
+    throw new Error(
+      `[build-copy] installed gsap ${version} does not match GSAP_CDN_VERSION ${expected}`,
+    );
+  }
+  const vendorDir = join(DIST, "vendor", "npm");
+  rmSync(vendorDir, { recursive: true, force: true });
+  const dest = join(vendorDir, `gsap@${version}`, "dist");
+  mkdirSync(dest, { recursive: true });
+  for (const file of GSAP_VENDOR_FILES) {
+    copyFileSync(join(gsapRoot, "dist", file), join(dest, file));
+    chmodSync(join(dest, file), 0o644);
+  }
+}
+
 // fallow-ignore-next-line complexity
 async function main() {
   for (const sub of ["studio", "docs", "templates", "skills", "docker"]) {
@@ -64,7 +106,11 @@ async function main() {
 
   const studioDist = resolve(CLI_ROOT, "..", "studio", "dist");
   await waitForStudioDist(studioDist);
-  copyDirContents(studioDist, join(DIST, "studio"));
+  // Only the SPA studioServer.ts serves (index.html, /assets, /icons, /favicon.svg);
+  // the rest of studio/dist is the npm library build.
+  for (const entry of ["index.html", "assets", "icons", "favicon.svg"]) {
+    copyDir(join(studioDist, entry), join(DIST, "studio", entry));
+  }
 
   for (const tmpl of ["blank", "from-file", "_shared"]) {
     copyDir(join(CLI_ROOT, "src", "templates", tmpl), join(DIST, "templates", tmpl));
@@ -80,14 +126,28 @@ async function main() {
   // Skills bundled into the published CLI. Branches don't all carry the same
   // skills/ tree (it gets restructured), so each entry is existsSync-guarded:
   // a missing skill dir warns + skips instead of crashing the build.
-  for (const skill of ["hyperframes", "hyperframes-cli", "gsap"]) {
+  for (const skill of ["hyperframes", "hyperframes-cli", "gsap", "media-use"]) {
     const src = join(REPO_ROOT, "skills", skill);
     if (!existsSync(src)) {
       console.warn(`[build-copy] skill not found, skipping: skills/${skill}`);
       continue;
     }
-    copyDir(src, join(DIST, "skills", skill));
+    const destination = join(DIST, "skills", skill);
+    rmSync(destination, { recursive: true, force: true });
+    copyDir(src, destination);
   }
+
+  // The media-use engine lives with the CLI source, but keeps its published
+  // skill-relative layout so the moved .mjs tree can run without a rewrite.
+  const mediaEngine = join(CLI_ROOT, "src", "media-use");
+  const publishedMediaLib = join(DIST, "skills", "media-use", "scripts", "lib");
+  rmSync(publishedMediaLib, { recursive: true, force: true });
+  mkdirSync(publishedMediaLib, { recursive: true });
+  copyDirContents(join(mediaEngine, "lib"), publishedMediaLib);
+  cpSync(
+    join(mediaEngine, "resolve.mjs"),
+    join(DIST, "skills", "media-use", "scripts", "resolve.mjs"),
+  );
 
   const dockerfile = join(CLI_ROOT, "src", "docker", "Dockerfile.render");
   if (existsSync(dockerfile)) {
@@ -102,6 +162,11 @@ async function main() {
   const contrastAuditScript = join(CLI_ROOT, "src", "commands", "contrast-audit.browser.js");
   if (existsSync(contrastAuditScript)) {
     cpSync(contrastAuditScript, join(DIST, "commands", "contrast-audit.browser.js"));
+  }
+
+  const motionSignatureScript = join(CLI_ROOT, "src", "commands", "motion-signature.browser.js");
+  if (existsSync(motionSignatureScript)) {
+    cpSync(motionSignatureScript, join(DIST, "commands", "motion-signature.browser.js"));
   }
 
   const motionSampleScript = join(CLI_ROOT, "src", "commands", "motion-sample.browser.js");
@@ -129,6 +194,8 @@ async function main() {
       console.warn(`[build-copy] player bundle not found, skipping: ${src}`);
     }
   }
+
+  copyGsapVendorFiles();
 
   copyMdFiles(join(CLI_ROOT, "src", "docs"), join(DIST, "docs"));
 

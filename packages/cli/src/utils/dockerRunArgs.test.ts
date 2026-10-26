@@ -29,6 +29,18 @@ const FIXED_INPUT = {
 };
 
 describe("buildDockerRunArgs", () => {
+  it("preserves an explicit page motion blur override inside Docker", () => {
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      options: { ...BASE, pageMotionBlur: "off" },
+    });
+    expect(
+      args.slice(args.indexOf("--page-motion-blur"), args.indexOf("--page-motion-blur") + 2),
+    ).toEqual(["--page-motion-blur", "off"]);
+    expect(buildDockerRunArgs({ ...FIXED_INPUT, options: BASE })).not.toContain(
+      "--page-motion-blur",
+    );
+  });
   it("matches snapshot for the default render", () => {
     expect(buildDockerRunArgs({ ...FIXED_INPUT, options: BASE })).toMatchInlineSnapshot(`
       [
@@ -54,6 +66,14 @@ describe("buildDockerRunArgs", () => {
         "--no-browser-gpu",
       ]
     `);
+  });
+
+  it("tells the container its output reaches a terminal only when the host's stdout is one", () => {
+    const flags = (hostStdoutIsTty?: boolean) =>
+      buildDockerRunArgs({ ...FIXED_INPUT, hostStdoutIsTty, options: BASE }).slice(0, 4);
+    expect(flags(true)).toEqual(["run", "--rm", "-e", "HYPERFRAMES_STDOUT_IS_TTY=1"]);
+    expect(flags(false)).toEqual(["run", "--rm", "--platform", "linux/amd64"]);
+    expect(flags(undefined)).toEqual(["run", "--rm", "--platform", "linux/amd64"]);
   });
 
   it("omits --workers when auto sizing should happen inside the container", () => {
@@ -242,6 +262,24 @@ describe("buildDockerRunArgs", () => {
     const formatIdx = args.indexOf("--format");
     expect(formatIdx).toBeGreaterThanOrEqual(0);
     expect(args[formatIdx + 1]).toBe("png-sequence");
+  });
+
+  it("forwards --format hls and --hls-segment-seconds to the container", () => {
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      outputFilename: "stream",
+      options: { ...BASE, format: "hls", hlsSegmentSeconds: 6 },
+    });
+    const formatIdx = args.indexOf("--format");
+    const segmentIdx = args.indexOf("--hls-segment-seconds");
+    expect(args[formatIdx + 1]).toBe("hls");
+    expect(args[segmentIdx + 1]).toBe("6");
+  });
+
+  it("omits --hls-segment-seconds for other formats", () => {
+    expect(buildDockerRunArgs({ ...FIXED_INPUT, options: BASE })).not.toContain(
+      "--hls-segment-seconds",
+    );
   });
 
   it("forwards --format gif and --gif-loop to the container", () => {
