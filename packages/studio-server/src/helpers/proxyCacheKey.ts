@@ -53,7 +53,9 @@ export async function contentCopyKey(
   const fd = openSync(sourcePath, "r");
   try {
     if (fstatSync(fd).size <= SMALL_FILE_BYTES) hash.update(readFileSync(fd));
-    else for await (const chunk of createReadStream(sourcePath, { fd, autoClose: false, signal })) hash.update(chunk);
+    else
+      for await (const chunk of createReadStream(sourcePath, { fd, autoClose: false, signal }))
+        hash.update(chunk);
   } finally {
     closeSync(fd);
   }
