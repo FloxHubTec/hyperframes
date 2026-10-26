@@ -28,7 +28,7 @@ const CACHE_SCHEMA = "hfheif-v1";
 const DEFAULT_TIMEOUT_MS = 120_000;
 export const HEIF_IMAGE_CONVERSION_FAILED = "HEIF_IMAGE_CONVERSION_FAILED" as const;
 
-/** ISO-BMFF `ftyp` brands that mean a HEVC-coded HEIF still. */
+/** The `ftyp` brands of a HEIF still coded with the hevc codec. */
 const HEIF_BRANDS = new Set(["heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1"]);
 const AVIF_BRANDS = new Set(["avif", "avis"]);
 const DATA_URL_RE = /^data:image\/(?:heic|heif)(?:-sequence)?;base64,(.*)$/is;
@@ -76,7 +76,7 @@ export interface PrepareHeifImageInputsResult {
   preparedImages: PreparedHeifImage[];
 }
 
-/** True when the leading bytes are an ISO-BMFF HEIF file (and not AVIF). */
+/** True when the leading bytes are a HEIF file by its `ftyp` brands, and not an AVIF one. */
 export function isHeifBytes(head: Uint8Array): boolean {
   const bytes = Buffer.from(head.buffer, head.byteOffset, head.byteLength);
   if (bytes.length < 16 || bytes.toString("ascii", 4, 8) !== "ftyp") return false;
@@ -138,12 +138,8 @@ const ROTATION_FILTER = {
   270: "transpose=1",
 } as const;
 
-/**
- * ffmpeg (through 8.0) decodes a tiled HEIC as separate tile streams and does
- * not apply its rotation, so the grid is stacked, cropped to the declared size
- * and rotated here. The result must match the declared size (swapped for a
- * quarter turn); a lone tile never passes.
- */
+// ffmpeg through 8.0 decodes a tiled HEIC as separate tiles and ignores its rotation, so stack, crop and rotate.
+// The JPEG must equal the declared size (swapped for a quarter turn); a lone tile never passes.
 export async function convertHeifToJpeg(request: HeifTranscodeRequest): Promise<void> {
   const probed = await probeJson(request.inputPath, true);
   const grid = probed.stream_groups?.[0]?.components?.[0];

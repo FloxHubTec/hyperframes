@@ -26,11 +26,7 @@ function child(buf: Buffer, parent: Box, type: string, skip = 0): Box[] {
   return [...boxes(buf, parent.start + skip, parent.end)].filter((box) => box.type === type);
 }
 
-/**
- * Counter-clockwise degrees of the `irot` property the primary image item
- * carries. Tiled HEICs decode as raw tiles in ffmpeg, so the rotation has to be
- * applied explicitly; 0 when the file declares none or cannot be read.
- */
+/** Counter-clockwise degrees of the primary item's `irot` property; 0 when none or unreadable. */
 export function readHeifPrimaryRotation(buf: Buffer): 0 | 90 | 180 | 270 {
   try {
     const root: Box = { type: "", start: 0, end: buf.length };
