@@ -18,9 +18,76 @@ const capture = vi.hoisted(() => ({
   shaderTransitions: false,
 }));
 
+type ScriptedFrame = { dir: string; index: number };
+
+function listFrames(tasks: WorkerTask[]): ScriptedFrame[] {
+  return tasks.flatMap((task) =>
+    Array.from({ length: task.endFrame - task.startFrame }, (_, i) => ({
+      dir: task.outputDir,
+      index: task.startFrame + i,
+    })),
+  );
+}
+
+// "spread" lands the first frame of each worker's range, leaving four missing ranges.
+function landedFrames(script: AttemptScript, frames: ScriptedFrame[]): ScriptedFrame[] {
+  if (script === "spread") return frames.filter((frame) => frame.index % 10 === 0);
+  return frames.slice(0, script === "stall" ? 3 : frames.length);
+}
+
+function writeFrame(frame: ScriptedFrame, extension: string): void {
+  mkdirSync(frame.dir, { recursive: true });
+  writeFileSync(
+    join(frame.dir, formatCaptureFrameName(frame.index, extension)),
+    "frame bytes over the 8-byte placeholder floor",
+  );
+}
+
+function neverSettlesUntilAborted(signal: AbortSignal): Promise<never> {
+  return new Promise((_, reject) =>
+    signal?.addEventListener("abort", () => reject(new Error("worker cancelled")), { once: true }),
+  );
+}
+
+function wait(ms: number): Promise<unknown> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function landFrame(
+  frame: ScriptedFrame,
+  extension: string,
+  delayMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  await wait(delayMs);
+  if (signal?.aborted) throw new Error("worker cancelled");
+  writeFrame(frame, extension);
+}
+
+async function runScriptedAttempt(
+  tasks: WorkerTask[],
+  extension: string,
+  signal: AbortSignal,
+  onProgress: (progress: object) => void,
+): Promise<[]> {
+  capture.calls += 1;
+  const script = capture.scripts.shift() ?? "stall";
+  const pace = typeof script === "object" ? script : null;
+  const frames = listFrames(tasks);
+  let captured = 0;
+  for (const frame of landedFrames(script, frames)) {
+    const delayMs = pace && captured === 0 ? pace.firstFrameAfterMs : 1_000;
+    await landFrame(frame, extension, delayMs, signal);
+    captured += 1;
+    onProgress({ capturedFrames: captured, totalFrames: frames.length, activeWorkers: 1 });
+    if (pace) await wait(pace.frameEveryMs - 1_000);
+  }
+  if (!pace) await neverSettlesUntilAborted(signal);
+  return [];
+}
+
 vi.mock("@hyperframes/engine", async (importOriginal) => {
   const engine = await importOriginal<typeof import("@hyperframes/engine")>();
-  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
   return {
     ...engine,
     assertConfiguredFfmpegBinariesExist: () => {},
@@ -32,7 +99,7 @@ vi.mock("@hyperframes/engine", async (importOriginal) => {
     getCapturePerfSummary: () => ({}),
     // Sequential disk: three quick frames, then every frame takes 70 s.
     captureFrame: (_session: unknown, index: number) => wait(index < 3 ? 1_000 : 70_000),
-    executeParallelCapture: async (
+    executeParallelCapture: (
       _url: string,
       _workDir: string,
       tasks: WorkerTask[],
@@ -40,46 +107,7 @@ vi.mock("@hyperframes/engine", async (importOriginal) => {
       _hook: unknown,
       signal: AbortSignal,
       onProgress: (progress: object) => void,
-    ) => {
-      capture.calls += 1;
-      const script = capture.scripts.shift() ?? "stall";
-      const frames = tasks.flatMap((task) =>
-        Array.from({ length: task.endFrame - task.startFrame }, (_, i) => ({
-          dir: task.outputDir,
-          index: task.startFrame + i,
-        })),
-      );
-      const stalls = script === "stall" || script === "spread";
-      // "spread" lands the first frame of each worker's range, leaving four missing ranges.
-      const landed =
-        script === "spread"
-          ? frames.filter((frame) => frame.index % 10 === 0)
-          : frames.slice(0, script === "stall" ? 3 : frames.length);
-      let captured = 0;
-      for (const frame of landed) {
-        await wait(captured === 0 && !stalls ? script.firstFrameAfterMs : 1_000);
-        if (signal?.aborted) throw new Error("worker cancelled");
-        mkdirSync(frame.dir, { recursive: true });
-        writeFileSync(
-          join(
-            frame.dir,
-            formatCaptureFrameName(frame.index, engine.frameFileExtension(options.format)),
-          ),
-          "frame bytes over the 8-byte placeholder floor",
-        );
-        captured += 1;
-        onProgress({ capturedFrames: captured, totalFrames: frames.length, activeWorkers: 1 });
-        if (!stalls) await wait(script.frameEveryMs - 1_000);
-      }
-      if (stalls) {
-        await new Promise((_, reject) =>
-          signal?.addEventListener("abort", () => reject(new Error("worker cancelled")), {
-            once: true,
-          }),
-        );
-      }
-      return [];
-    },
+    ) => runScriptedAttempt(tasks, engine.frameFileExtension(options.format), signal, onProgress),
   };
 });
 vi.mock("./fileServer.js", async (importOriginal) => ({
