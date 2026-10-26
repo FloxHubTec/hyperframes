@@ -9,7 +9,6 @@
 /** Every element matching one selector, mapped to the source file it belongs to
  *  and its occurrence index within that file. One document query fills it. */
 type SelectorOccurrences = Map<Element, { scope: string; index: number }>;
-/** Held by a keeper for the next walk; it drops them on any change that renumbers an occurrence. */
 export type KeptIndexes = Map<Document, Map<string, SelectorOccurrences>>;
 
 interface SelectorIndexPass {
