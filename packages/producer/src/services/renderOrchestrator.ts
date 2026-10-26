@@ -971,9 +971,40 @@ export function buildMissingFrameRetryBatches(
   workDir: string,
   attempt: number,
   rangeStart: number = 0,
+  stride: number = 1,
 ): WorkerTask[][] {
   const workersPerBatch = Math.max(1, Math.floor(maxWorkers));
   const batches: WorkerTask[][] = [];
+  const outputDirFor = (batchIndex: number, workerId: number) =>
+    join(workDir, `retry-${attempt}-batch-${batchIndex}-worker-${workerId}`);
+
+  // A dead interleaved worker leaves every `stride`th frame missing: one stride task per
+  // residue class re-captures them in a single batch, not a one-frame batch per frame.
+  if (stride > 1) {
+    const spans = new Map<number, { first: number; last: number }>();
+    for (const range of ranges) {
+      for (let frame = range.startFrame; frame < range.endFrame; frame++) {
+        const span = spans.get(frame % stride);
+        if (span) span.last = frame;
+        else spans.set(frame % stride, { first: frame, last: frame });
+      }
+    }
+    const strided = [...spans.values()];
+    for (let i = 0; i < strided.length; i += workersPerBatch) {
+      const batchIndex = batches.length;
+      batches.push(
+        strided.slice(i, i + workersPerBatch).map(({ first, last }, workerId) => ({
+          workerId,
+          startFrame: rangeStart + first,
+          endFrame: rangeStart + last + 1,
+          frameStride: stride,
+          outputDir: outputDirFor(batchIndex, workerId),
+          outputFrameOffset: rangeStart,
+        })),
+      );
+    }
+    return batches;
+  }
 
   // `ranges` are 0-indexed within the chunk's frame range (or full timeline
   // when `rangeStart === 0`); translate to absolute composition indices so
@@ -986,7 +1017,7 @@ export function buildMissingFrameRetryBatches(
       workerId,
       startFrame: rangeStart + range.startFrame,
       endFrame: rangeStart + range.endFrame,
-      outputDir: join(workDir, `retry-${attempt}-batch-${batchIndex}-worker-${workerId}`),
+      outputDir: outputDirFor(batchIndex, workerId),
       outputFrameOffset: rangeStart,
     }));
     batches.push(batch);
@@ -1246,6 +1277,7 @@ export async function executeDiskCaptureWithAdaptiveRetry(options: {
           attemptWorkDir,
           attempt,
           rangeStart,
+          options.interleaveFrames ? options.initialWorkerCount : 1,
         )
       : [
           (options.interleaveFrames ? distributeFramesInterleaved : distributeFrames)(
