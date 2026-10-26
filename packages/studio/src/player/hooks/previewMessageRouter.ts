@@ -115,6 +115,12 @@ function handleTimelineMessage(
   } catch {}
 }
 
+const STORE_REPORTS = new Map<string, (data: PreviewMessage) => void>([
+  ["preview-copies", (data) => usePlayerStore.getState().setPreviewCopies(parsePreviewCopies(data.copies))],
+  ["preview-health", (data) => usePlayerStore.getState().setPlaybackHealth(parsePlaybackHealth(data.health))],
+  ["preview-facts", (data) => usePlayerStore.getState().setPreviewFacts(parsePreviewFacts(data.facts))],
+]);
+
 export function createPreviewMessageHandler(
   deps: PreviewMessageRouterDeps,
 ): (e: MessageEvent) => void {
@@ -123,18 +129,8 @@ export function createPreviewMessageHandler(
     const data = acceptedPreviewMessage(e, iframe);
     if (!data) return;
     if (data.type === "state") return handleStateMessage(deps, iframe, data.isPlaying === true);
-    if (data.type === "preview-copies") {
-      usePlayerStore.getState().setPreviewCopies(parsePreviewCopies(data.copies));
-      return;
-    }
-    if (data.type === "preview-health") {
-      usePlayerStore.getState().setPlaybackHealth(parsePlaybackHealth(data.health));
-      return;
-    }
-    if (data.type === "preview-facts") {
-      usePlayerStore.getState().setPreviewFacts(parsePreviewFacts(data.facts));
-      return;
-    }
+    const report = data.type === undefined ? undefined : STORE_REPORTS.get(data.type);
+    if (report) return report(data);
     if (data.type === "ready") {
       const level = usePlayerStore.getState().previewQuality;
       postRuntimeControlMessage(iframe?.contentWindow, "set-preview-quality", { level });
