@@ -8,7 +8,9 @@ import {
   convertHeifToJpeg,
   HEIF_IMAGE_CONVERSION_FAILED,
   HeifImageConversionError,
+  HeifToolUnavailableError,
   isHeifBytes,
+  primaryGrid,
   prepareHeifImageInputs,
   type HeifTranscodeRequest,
 } from "./heifImagePrep.js";
@@ -191,6 +193,52 @@ describe("prepareHeifImageInputs", () => {
     expect(error.message).toContain('"shots/bad.heic"');
     expect(error.message).not.toContain(d.projectDir);
     expect(error.message).toContain("JPEG or PNG");
+  });
+
+  it("blames the host, not the photo, when ffprobe is missing or too old", async () => {
+    const d = project({ "a.heic": Buffer.concat([ftyp("heic", "mif1"), Buffer.alloc(64)]) });
+    for (const said of [
+      "[FFmpeg] ffprobe not found. Please install FFmpeg.",
+      "[FFmpeg] ffprobe exit with code 1: Option not found",
+    ]) {
+      const transcode = async () => {
+        throw new Error(said);
+      };
+      const error = await prepareHeifImageInputs('<img src="a.heic">', { ...d, transcode }).catch(
+        (e) => e,
+      );
+      expect(error).toBeInstanceOf(HeifToolUnavailableError);
+      expect(error.owner).toBe("system");
+      expect(error.message).toContain('"a.heic"');
+      expect(error.message).toContain("7.0 or newer");
+      expect(error.message).not.toContain("Re-export");
+    }
+  });
+
+  it("leaves a failed image as authored and still converts the rest when told to report failures", async () => {
+    const bad = Buffer.concat([ftyp("heic", "mif1"), Buffer.alloc(64)]);
+    const d = project({ "bad.heic": bad, "good.heic": readFileSync(FIXTURE) });
+    const failures: unknown[] = [];
+    const result = await prepareHeifImageInputs('<img src="bad.heic"><img src="good.heic">', {
+      ...d,
+      onFailure: (error) => failures.push(error),
+    });
+    expect(failures).toHaveLength(1);
+    expect(result.html).toContain('src="bad.heic"');
+    expect(result.html).toContain("_heif_images/hfheif-v1-");
+    expect(result.preparedImages).toHaveLength(1);
+  });
+
+  it("converts the primary item's grid, not an auxiliary grid listed first", () => {
+    const grid = (width: number) => ({ components: [{ width, height: 10 }] });
+    const probed = {
+      stream_groups: [
+        { ...grid(111), disposition: { default: 0 } },
+        { ...grid(222), disposition: { default: 1 } },
+      ],
+    };
+    expect(primaryGrid(probed)?.width).toBe(222);
+    expect(primaryGrid({ stream_groups: [grid(5)] })?.width).toBe(5);
   });
 
   it("spawns nothing and writes nothing without a HEIC image", async () => {

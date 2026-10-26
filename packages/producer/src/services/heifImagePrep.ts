@@ -27,6 +27,7 @@ const PREPARED_HEIF_SUBDIR = "_heif_images";
 const CACHE_SCHEMA = "hfheif-v1";
 const DEFAULT_TIMEOUT_MS = 120_000;
 export const HEIF_IMAGE_CONVERSION_FAILED = "HEIF_IMAGE_CONVERSION_FAILED" as const;
+const HEIF_TOOL_UNAVAILABLE = "HEIF_TOOL_UNAVAILABLE" as const;
 
 /** The `ftyp` brands of a HEIF still coded with the hevc codec. */
 const HEIF_BRANDS = new Set(["heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1"]);
@@ -47,6 +48,24 @@ export class HeifImageConversionError extends Error {
   }
 }
 
+/** The host's ffmpeg or ffprobe cannot do the job; a different photo would not help. */
+export class HeifToolUnavailableError extends Error {
+  readonly code = HEIF_TOOL_UNAVAILABLE;
+  readonly owner = "system" as const;
+  readonly retryable = false as const;
+
+  constructor(label: string, reason: string) {
+    super(
+      `Could not convert HEIC/HEIF image ${label}: ${reason}. ` +
+        `Converting HEIC needs ffmpeg and ffprobe 7.0 or newer with the hevc decoder.`,
+    );
+    this.name = "HeifToolUnavailableError";
+  }
+}
+
+const TOOL_FAILURE_RE =
+  /(?:ffmpeg|ffprobe) not found|ENOENT|Option not found|Unrecognized option|Unknown decoder|Decoder \S+ not found/i;
+
 export interface HeifTranscodeRequest {
   inputPath: string;
   outputPath: string;
@@ -62,6 +81,8 @@ export interface PrepareHeifImageInputsOptions {
   sourceAssets?: Map<string, string>;
   timeoutMs?: number;
   transcode?: (input: HeifTranscodeRequest) => Promise<void>;
+  /** Leaves an image whose conversion failed as authored and reports it, instead of throwing. */
+  onFailure?: (error: HeifImageConversionError | HeifToolUnavailableError) => void;
 }
 
 export interface PreparedHeifImage {
@@ -102,7 +123,7 @@ function readHead(path: string): Buffer | null {
   }
 }
 
-interface ProbedStream {
+export interface ProbedStream {
   width?: number;
   height?: number;
   coded_width?: number;
@@ -116,9 +137,9 @@ interface ProbedStream {
   }[];
 }
 
-interface ProbeJson {
+export interface ProbeJson {
   streams?: ProbedStream[];
-  stream_groups?: { components?: ProbedStream[] }[];
+  stream_groups?: { components?: ProbedStream[]; disposition?: { default?: number } }[];
 }
 
 async function probeJson(path: string, withGroups: boolean): Promise<ProbeJson> {
@@ -138,11 +159,17 @@ const ROTATION_FILTER = {
   270: "transpose=1",
 } as const;
 
+/** The primary item's grid: the group ffmpeg marks default, so an auxiliary grid listed first is skipped. */
+export function primaryGrid(probed: ProbeJson): ProbedStream | undefined {
+  const groups = probed.stream_groups ?? [];
+  return (groups.find((g) => g.disposition?.default === 1) ?? groups[0])?.components?.[0];
+}
+
 // ffmpeg through 8.0 decodes a tiled HEIC as separate tiles and ignores its rotation, so stack, crop and rotate.
 // The JPEG must equal the declared size (swapped for a quarter turn); a lone tile never passes.
 export async function convertHeifToJpeg(request: HeifTranscodeRequest): Promise<void> {
   const probed = await probeJson(request.inputPath, true);
-  const grid = probed.stream_groups?.[0]?.components?.[0];
+  const grid = primaryGrid(probed);
   const rotation = readHeifPrimaryRotation(readFileSync(request.inputPath));
   const filters: string[] = [];
   let inputs: string[] = [];
@@ -253,10 +280,10 @@ async function ensurePreparedJpeg(
       if (!isUsableFile(tmpPath)) throw new Error("conversion produced an empty file");
       renameWithRetry(tmpPath, cachePath);
     } catch (error) {
-      throw new HeifImageConversionError(
-        source.label,
-        error instanceof Error ? error.message : String(error),
-      );
+      const reason = error instanceof Error ? error.message : String(error);
+      throw TOOL_FAILURE_RE.test(reason)
+        ? new HeifToolUnavailableError(source.label, reason)
+        : new HeifImageConversionError(source.label, reason);
     } finally {
       rmSync(tmpPath, { force: true });
       rmSync(inlinePath, { force: true });
@@ -296,15 +323,21 @@ export async function prepareHeifImageInputs(
   if (found.length === 0) return { html, preparedAssets, preparedImages };
 
   const unique = new Map(found.map((item) => [item.filename, item.source]));
+  const failed = new Set<string>();
   await Promise.all(
     [...unique].map(([filename, source]) =>
       withMediaProbeSlot(() =>
         ensurePreparedJpeg(source, join(cacheDir, filename), join(outputDir, filename), options),
-      ),
+      ).catch((error: HeifImageConversionError | HeifToolUnavailableError) => {
+        if (!options.onFailure) throw error;
+        failed.add(filename);
+        options.onFailure(error);
+      }),
     ),
   );
 
   for (const { img, src, filename } of found) {
+    if (failed.has(filename)) continue;
     const outputSrc = `${outputSrcPrefix}/${filename}`;
     img.setAttribute("src", outputSrc);
     preparedAssets.set(outputSrc, join(outputDir, filename));
