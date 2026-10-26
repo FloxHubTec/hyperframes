@@ -101,7 +101,7 @@ comp.setVariableValue("brandColor", "#6C5CE7");
 comp.removeElement("hf-old-caption");
 ```
 
-`setStyle()` preserves all declarations of untouched properties in their original order, including `!important` priorities and browser fallbacks such as `display:-moz-box !important;display:block`. Setting a property explicitly replaces all of its declarations with the new value and priority; passing `null` removes them. Undo restores the selected declaration, including its priority spelling.
+`setStyle()` preserves all declarations of untouched properties in their original order, including `!important` priorities and browser fallbacks such as `display:-moz-box !important;display:block`. Setting a property explicitly replaces all of its declarations with the new value and priority; passing `null` removes them. Undo and batch rollback restore the original declarations and their order. For an explicitly edited property with repeated declarations, inverse patches include the original `style` attribute at `/elements/{id}/attributes/style` so host-managed history can restore the fallbacks too.
 
 Use `batch()` when several mutations should become one undo entry, one persist write, and one change notification:
 

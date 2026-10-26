@@ -331,7 +331,7 @@ function trimStyleWhitespace(value: string): string {
   return value.slice(start, end);
 }
 
-function parseStyleDeclarations(styleAttr: string): [string, string][] {
+export function parseStyleDeclarations(styleAttr: string): [string, string][] {
   const declarations: [string, string][] = [];
   for (const decl of splitStyleAtTopLevel(styleAttr, ";")) {
     const idx = decl.indexOf(":");

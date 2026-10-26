@@ -1030,6 +1030,39 @@ describe("editing duplicate inline declarations", () => {
     comp.dispose();
   });
 
+  it.each(["flex", null])(
+    "restores fallback declarations after undoing or rolling back display=%s",
+    async (display) => {
+      const source =
+        '<span data-hf-id="hf-title" style="display:-moz-box !important;display:block;color:red">hello</span>';
+      const comp = await openComposition(source, { coalesceMs: 0 });
+      const before = comp.serialize();
+      comp.setStyle("hf-title", { display });
+      const edited = comp.serialize();
+      comp.undo();
+      expect(comp.serialize()).toBe(before);
+      const reopened = await openComposition(source, { overrides: comp.getOverrides() });
+      expect(reopened.serialize()).toBe(before);
+      reopened.dispose();
+      comp.redo();
+      expect(comp.serialize()).toBe(edited);
+      const redone = await openComposition(source, { overrides: comp.getOverrides() });
+      expect(redone.serialize()).toBe(edited);
+      redone.dispose();
+      comp.undo();
+      const overrides = comp.getOverrides();
+      expect(() =>
+        comp.batch(() => {
+          comp.setStyle("hf-title", { display, color: "blue" });
+          throw new Error("cancelled");
+        }),
+      ).toThrow("cancelled");
+      expect(comp.serialize()).toBe(before);
+      expect(comp.getOverrides()).toEqual(overrides);
+      comp.dispose();
+    },
+  );
+
   it("retains priority when a batch rolls back an unrelated edit", async () => {
     const comp = await openComposition(html, { coalesceMs: 0 });
     expect(() =>
