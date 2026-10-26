@@ -38,7 +38,11 @@ describe("runEnvironmentChecks", () => {
   const originalFfmpegPath = process.env.HYPERFRAMES_FFMPEG_PATH;
   const originalFfprobePath = process.env.HYPERFRAMES_FFPROBE_PATH;
 
+  const realPlatform = process.platform;
+
   beforeEach(() => {
+    // The `--version` tests below describe the Unix path; the Windows block sets its own platform.
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     process.env.HYPERFRAMES_FFMPEG_PATH = process.execPath;
     process.env.HYPERFRAMES_FFPROBE_PATH = process.execPath;
     runProcess.mockReset();
@@ -46,6 +50,7 @@ describe("runEnvironmentChecks", () => {
   });
 
   afterEach(() => {
+    Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
     if (originalFfmpegPath === undefined) delete process.env.HYPERFRAMES_FFMPEG_PATH;
     else process.env.HYPERFRAMES_FFMPEG_PATH = originalFfmpegPath;
     if (originalFfprobePath === undefined) delete process.env.HYPERFRAMES_FFPROBE_PATH;
