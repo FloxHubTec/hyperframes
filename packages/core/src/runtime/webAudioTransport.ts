@@ -1011,9 +1011,6 @@ export class WebAudioTransport {
    * the preview path while the render honoured it — the exact preview/render
    * divergence this ceiling exists to close. Automation lanes hid it, because
    * they schedule ramps onto the param directly and never pass through here.
-   *
-   * `volume` carries the clip's fade as the sync tick reads it; `unfadedVolume` is the same level without it, for a
-   * source whose fades are booked on the audio clock (`fadeNode`), so the fade is not applied twice.
    */
   setElementVolume(
     el: HTMLMediaElement,

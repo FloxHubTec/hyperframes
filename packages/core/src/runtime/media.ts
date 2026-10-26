@@ -376,7 +376,6 @@ export function syncRuntimeMedia(params: {
     effectiveVolume: number,
     authorVolume: number,
     clipGain: number,
-    /** `authorVolume` without the clip's fade, for a transport that books the fade on its own clock. */
     unfadedVolume?: number,
   ) => void;
   /** Is THIS element owned by the Web Audio transport? Owned → mute it (transport
@@ -532,7 +531,6 @@ export function syncRuntimeMedia(params: {
       const effectiveVolume = silencedByHidden ? 0 : clampVolume(authorVolume * userVol);
       if (Math.abs(el.volume - effectiveVolume) > 1e-6) el.volume = effectiveVolume;
       lastRuntimeAppliedVolume.set(el, effectiveVolume);
-      // the level without its fade only where a fade changed it, for a transport that books fades on its own clock
       if (unfadedVolume === authorVolume)
         params.onElementVolume?.(el, effectiveVolume, authorVolume, preFxGain);
       else params.onElementVolume?.(el, effectiveVolume, authorVolume, preFxGain, unfadedVolume);
