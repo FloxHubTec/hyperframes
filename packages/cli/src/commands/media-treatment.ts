@@ -626,7 +626,6 @@ function runCapabilityQuery(args: MediaTreatmentCommandArgs): void {
   console.log(JSON.stringify(withMeta({ ok: true, capabilities }), null, 2));
 }
 
-/** Without --file, the one project file that declares an element matching `selector`: index.html or a mounted scene. */
 function fileDeclaringSelector(projectDir: string, selector: string): string {
   const declaring = projectCompositionFiles(projectDir).filter((file) => {
     try {
@@ -719,7 +718,7 @@ async function prepareMutation(args: MediaTreatmentCommandArgs) {
     payload: {
       ok: true,
       action,
-      file: relative(project.dir, filePath) || "index.html",
+      file: relative(project.dir, filePath).split("\\").join("/") || "index.html",
       selector,
       count: result.targets.length,
       ...(result.targets.length === 1

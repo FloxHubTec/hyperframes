@@ -38,7 +38,6 @@ function fail(message: string, json: boolean, cause?: unknown): never {
   failCommand(1, cause);
 }
 
-/** An audio tag with the project file that declares it. */
 type ProjectAudioTag = AudioTag & { file: string };
 
 function projectAudioTags(projectDir: string): ProjectAudioTag[] {
@@ -71,7 +70,6 @@ interface WriteOutcome {
   wrote: boolean;
   withinTolerance: boolean;
   tolerance: number;
-  /** The project file that declares the target audio, and the one `--write` changed. */
   filePath: string;
 }
 
