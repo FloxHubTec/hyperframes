@@ -11,6 +11,7 @@ import {
   pixelFormatHasAlpha,
   videoStreamHasAlpha,
 } from "@hyperframes/parsers/media-alpha";
+import { playableAudioTrack } from "@hyperframes/core/audible-video";
 import { urlInputArgs } from "./urlInput.js";
 import { runFfmpeg } from "./runFfmpeg.js";
 import { FFPROBE_PATH_ENV, getFfprobeBinary } from "./ffmpegBinaries.js";
@@ -238,6 +239,8 @@ export interface AudioMetadata {
   sampleRate: number;
   channels: number;
   audioCodec: string;
+  /** Which audio stream these fields describe: N in ffmpeg's `0:a:N` (`playableAudioTrack`). */
+  audioTrack: number;
   bitrate?: number;
   /** Seconds after the file's media time 0 at which its last audio or video stream starts. */
   latestStreamLeadSeconds?: number;
@@ -1209,8 +1212,14 @@ export async function extractAudioMetadata(
 
 async function probeAudioMetadata(filePath: string, signal?: AbortSignal): Promise<AudioMetadata> {
   const output = await probeMediaOutput(filePath, signal);
-  const audioStream = output.streams.find((s) => s.codec_type === "audio");
-  if (!audioStream) throw new Error("[FFmpeg] No audio stream found");
+  const audioTrack = playableAudioTrack(output.streams);
+  const audioStream =
+    audioTrack === undefined
+      ? undefined
+      : output.streams.filter((s) => s.codec_type === "audio")[audioTrack];
+  if (audioTrack === undefined || !audioStream) {
+    throw new Error("[FFmpeg] No playable audio stream found");
+  }
 
   let durationSeconds = output.format.duration ? parseFloat(output.format.duration) : 0;
   const streamDuration = audioStream.duration ? parseFloat(audioStream.duration) : undefined;
@@ -1221,6 +1230,7 @@ async function probeAudioMetadata(filePath: string, signal?: AbortSignal): Promi
   if (sampleRate > 0) {
     const decoded = await probeDecodedAudioDuration(
       filePath,
+      audioTrack,
       sampleRate,
       audioStartSeconds(audioStream, output.format),
       durationSeconds,
@@ -1237,6 +1247,7 @@ async function probeAudioMetadata(filePath: string, signal?: AbortSignal): Promi
     sampleRate,
     channels: audioStream.channels || 2,
     audioCodec,
+    audioTrack,
     bitrate: output.format.bit_rate ? parseInt(output.format.bit_rate) : undefined,
     latestStreamLeadSeconds: latestStreamLeadSeconds(output),
     audioStreamLeadSeconds: streamLeadSeconds(output, audioStream),
@@ -1291,6 +1302,7 @@ function reconcileAudioDuration(
  */
 async function probeDecodedAudioDuration(
   filePath: string,
+  audioTrack: number,
   sampleRate: number,
   startSeconds: number,
   containerDurationSeconds: number,
@@ -1301,7 +1313,7 @@ async function probeDecodedAudioDuration(
   ): Promise<{ timestamp: number; nbSamples: number } | undefined> => {
     const args = [
       "-select_streams",
-      "a:0",
+      `a:${audioTrack}`,
       "-show_entries",
       "frame=best_effort_timestamp_time,nb_samples",
       "-of",
