@@ -3,14 +3,17 @@
 export const RemixShelf = ({ items, tall = false }) => {
   // Hover previews follow the visitor's reduced-motion setting, known on the first render; the film is a button, so
   // playing it on purpose works for keyboard and touch, and under reduced motion.
+  // The setting lives in a ref, not state: a preference change must not re-render the shelf, which would remount
+  // every card (RemixCard is declared in here, as Mintlify snippets keep helpers inside the export) and lose a
+  // playing film, focus and open instructions.
   const shelfRef = useRef(null);
-  const [reduced, setReduced] = useState(
-    () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  );
+  const reduced = useRef(null);
+  if (reduced.current === null)
+    reduced.current = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   useEffect(() => {
     const query = window.matchMedia("(prefers-reduced-motion: reduce)");
     const follow = (event) => {
-      setReduced(event.matches);
+      reduced.current = event.matches;
       // Turned on mid-visit: stop any hover preview that is running.
       if (event.matches) for (const v of shelfRef.current?.querySelectorAll("video") ?? []) if (v.dataset.hover) v.pause();
     };
@@ -25,7 +28,7 @@ export const RemixShelf = ({ items, tall = false }) => {
     const preview = (on) => {
       const v = videoRef.current;
       if (!v || chosen) return;
-      if (on && !reduced) {
+      if (on && !reduced.current) {
         v.dataset.hover = "1";
         v.play().catch(() => {});
       } else if (!on) {
