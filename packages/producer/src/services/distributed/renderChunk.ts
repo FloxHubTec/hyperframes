@@ -36,7 +36,7 @@
 
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { cpus } from "node:os";
+import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import {
   assertSwiftShader,
@@ -976,7 +976,11 @@ export async function renderChunk(
           // including error paths. Clear our defensive handle before await.
           const captureSession = session;
           session = null;
-          overlap.current = canEncodeWhileCapturing(encodeInput, chunkWorkerCount, cpus().length)
+          overlap.current = canEncodeWhileCapturing(
+            encodeInput,
+            chunkWorkerCount,
+            availableParallelism(),
+          )
             ? encodeWhileCapturing(encodeInput, framesInChunk)
             : null;
           await runCaptureStage({
