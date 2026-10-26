@@ -108,6 +108,7 @@ import {
   getDrawElementVerificationDetails,
   augmentProtocolTimeoutError,
   augmentPageNavigationTimeoutError,
+  type ChromaSubsampling,
   type MotionBlurOptions,
 } from "@hyperframes/engine";
 import { join, dirname, resolve } from "path";
@@ -133,6 +134,10 @@ import {
   resolveHlsSegmentSeconds,
   validateHlsRenderConfig,
 } from "./render/hlsConfig.js";
+import {
+  assertChromaSubsamplingSdr,
+  validateChromaSubsamplingConfig,
+} from "./render/chromaSubsampling.js";
 import { createMemorySampler, type MemorySampler, updateJobStatus } from "./render/shared.js";
 import { frameCacheOptions } from "./render/frameCacheBudget.js";
 import { buildRenderErrorDetails } from "./render/cleanup.js";
@@ -227,10 +232,7 @@ import {
 } from "./render/stages/encodeStage.js";
 import { recordLimiterAttenuation, runAssembleStage } from "./render/stages/assembleStage.js";
 import { shouldUseLayeredComposite } from "./hdrCompositor.js";
-import {
-  resolveCaptureImageFormat,
-  resolveCaptureJpegQuality,
-} from "./render/captureImageFormat.js";
+import { resolveCaptureSurface } from "./render/captureImageFormat.js";
 import { assertMotionBlurSupported, pageMotionBlurForRoute } from "./render/motionBlurRoute.js";
 import { assertOutputScaleSupported } from "./render/outputScaleRoute.js";
 
@@ -411,6 +413,15 @@ export interface RenderConfig {
   crf?: number;
   /** Target video bitrate (e.g. "10M"). Mutually exclusive with `crf`. */
   videoBitrate?: string;
+  /**
+   * Chroma subsampling of the MP4 output. Defaults to `"420"` (unchanged behavior).
+   * `"444"` encodes libx264 yuv444p (High 4:4:4 Predictive) and captures every frame
+   * as PNG, because Chrome's quality-100 JPEG is already 4:2:0 on beginFrame and
+   * screenshot capture; drawElement is turned off for the render. SDR MP4 with the
+   * software encoder only, and many players cannot decode 4:4:4. Distributed renders
+   * reject it.
+   */
+  chromaSubsampling?: ChromaSubsampling;
   /**
    * Source-video frame extraction format. Defaults to `"auto"`, which preserves
    * the historical behavior: alpha/alpha-capable sources extract as PNG, all
@@ -2878,6 +2889,7 @@ export async function executeRenderJob(
   // Ahead of the work dir / log file / execution context: a config the format
   // cannot honor must fail before anything is written to disk.
   validateHlsRenderConfig(job.config);
+  validateChromaSubsamplingConfig(job.config);
   const debugDir = resolveRenderDebugDir();
   const outputDir = dirname(outputPath);
   if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
@@ -3575,18 +3587,22 @@ async function executeRenderPipeline(input: {
     });
     const videoCaptureBeyondViewport = resolveVideoCaptureBeyondViewport(composition.videos.length);
 
-    const captureImageFormat = resolveCaptureImageFormat({
-      needsAlpha,
-      motionBlur: job.config.motionBlur,
-    });
+    const captureSurface = resolveCaptureSurface(
+      {
+        needsAlpha,
+        motionBlur: job.config.motionBlur,
+        chromaSubsampling: job.config.chromaSubsampling,
+      },
+      job.config.quality,
+    );
+    if (job.config.chromaSubsampling === "444") {
+      log.info("[Render] Capture: png (chromaSubsampling 444, lossless)");
+    }
     const captureOptions: CaptureOptions = {
       width,
       height,
       fps: job.config.fps,
-      format: captureImageFormat,
-      transparent: needsAlpha,
-      quality:
-        captureImageFormat === "png" ? undefined : resolveCaptureJpegQuality(job.config.quality),
+      ...captureSurface,
       variables: job.config.variables,
       deviceScaleFactor,
       motionBlur: job.config.motionBlur,
@@ -3663,6 +3679,7 @@ async function executeRenderPipeline(input: {
     // comps that route to the layered/HDR paths.)
     const nativeHdrIds = new Set([...nativeHdrVideoIds, ...nativeHdrImageIds]);
     const hasHdrContent = Boolean(effectiveHdr && nativeHdrIds.size > 0);
+    assertChromaSubsamplingSdr(job.config, hasHdrContent);
     if (hasHdrContent) assertOutputScaleSupported(deviceScaleFactor, "hdr_layered");
     routePageMotionBlur = pageMotionBlurForRoute({ hasHdrContent, useLayeredComposite: false });
     // DE priority inversion eligibility — evaluated BEFORE capture calibration
@@ -4493,6 +4510,8 @@ async function executeRenderPipeline(input: {
       hasHdrContent: capturePlan.hasHdrContent,
       hasShaderTransitions: compiled.hasShaderTransitions,
       isPngSequence,
+      captureImageFormat: captureOptions.format ?? "jpeg",
+      chromaSubsampling: job.config.chromaSubsampling ?? "420",
     });
     const encoderHdr = hasHdrContent ? effectiveHdr : undefined;
     // png-sequence has no encoder, but the rest of the orchestrator still
@@ -4501,7 +4520,12 @@ async function executeRenderPipeline(input: {
     // are never written to ffmpeg in the png-sequence path.
     const presetFormat: "mp4" | "webm" | "mov" =
       outputFormat === "webm" || outputFormat === "mov" ? outputFormat : "mp4";
-    const preset = getEncoderPreset(job.config.quality, presetFormat, encoderHdr);
+    const preset = getEncoderPreset(
+      job.config.quality,
+      presetFormat,
+      encoderHdr,
+      job.config.chromaSubsampling,
+    );
 
     // CLI overrides (--crf, --video-bitrate) flow through job.config and must
     // win over the preset-derived defaults. The CLI enforces mutual exclusivity
