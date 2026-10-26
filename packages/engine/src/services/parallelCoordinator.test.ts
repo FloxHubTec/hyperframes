@@ -1,4 +1,4 @@
-import { cpus, totalmem } from "os";
+import { availableParallelism, cpus, totalmem } from "os";
 import { getHeapStatistics } from "v8";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
@@ -132,7 +132,13 @@ describe("calculateOptimalWorkers", () => {
 
 vi.mock("os", async (importOriginal) => {
   const os = await importOriginal<typeof import("os")>();
-  return { ...os, default: os, cpus: vi.fn(os.cpus), totalmem: vi.fn(os.totalmem) };
+  return {
+    ...os,
+    default: os,
+    availableParallelism: vi.fn(os.availableParallelism),
+    cpus: vi.fn(os.cpus),
+    totalmem: vi.fn(os.totalmem),
+  };
 });
 vi.mock("v8", async (importOriginal) => {
   const v8 = await importOriginal<typeof import("v8")>();
@@ -141,6 +147,7 @@ vi.mock("v8", async (importOriginal) => {
 
 describe("computeWorkerSizing", () => {
   afterEach(() => {
+    vi.mocked(availableParallelism).mockRestore();
     vi.mocked(cpus).mockRestore();
     vi.mocked(totalmem).mockRestore();
     vi.mocked(getHeapStatistics).mockRestore();
@@ -148,9 +155,7 @@ describe("computeWorkerSizing", () => {
 
   // The field case: a 24GB 14-core Mac, Node's default ~4GB heap, a long 1080x1920 project.
   it("never auto-picks more workers than the V8 heap can feed", () => {
-    vi.mocked(cpus).mockReturnValue(
-      Array.from({ length: 14 }, () => ({}) as ReturnType<typeof cpus>[number]),
-    );
+    vi.mocked(availableParallelism).mockReturnValue(14);
     vi.mocked(totalmem).mockReturnValue(24 * 1024 ** 3);
     vi.mocked(getHeapStatistics).mockReturnValue({
       heap_size_limit: 4192 * 1024 ** 2,
@@ -165,6 +170,14 @@ describe("computeWorkerSizing", () => {
       heap_size_limit: 8192 * 1024 ** 2,
     } as ReturnType<typeof getHeapStatistics>);
     expect(computeWorkerSizing(1300, undefined, { concurrency: "auto" }).workers).toBe(5);
+  });
+
+  it("sizes from the CPU quota, not the host's core count", () => {
+    vi.mocked(cpus).mockReturnValue(Array.from({ length: 32 }, () => ({}) as never));
+    vi.mocked(availableParallelism).mockReturnValue(6);
+    const sizing = computeWorkerSizing(1300, undefined, { concurrency: "auto" });
+    expect(sizing.cpuCount).toBe(6);
+    expect(sizing.cpuBasedWorkers).toBe(4);
   });
 
   it("matches calculateOptimalWorkers and reports every constraint", () => {

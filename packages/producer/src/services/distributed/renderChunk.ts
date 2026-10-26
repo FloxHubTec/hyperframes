@@ -36,7 +36,7 @@
 
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { cpus } from "node:os";
+import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import {
   assertSwiftShader,
@@ -221,15 +221,9 @@ export interface RenderChunkOptions {
    * this many, one browser per 20 frames; never lowers it.
    */
   maxCaptureWorkers?: number;
-  /**
-   * Round-robin the chunk's frames across the capture browsers while the encoder runs, which
-   * shortens wall time but costs CPU. Set it where wall time is billed (Lambda); the default is
-   * contiguous ranges, which bill the least CPU.
-   */
   interleaveCapture?: boolean;
 }
 
-/** Round-robin capture only feeds the overlapped encoder, and only for a caller that bills wall time. */
 export function interleavesCapture(overlapping: boolean, options?: RenderChunkOptions): boolean {
   return overlapping && options?.interleaveCapture === true;
 }
@@ -987,7 +981,11 @@ export async function renderChunk(
           // including error paths. Clear our defensive handle before await.
           const captureSession = session;
           session = null;
-          overlap.current = canEncodeWhileCapturing(encodeInput, chunkWorkerCount, cpus().length)
+          overlap.current = canEncodeWhileCapturing(
+            encodeInput,
+            chunkWorkerCount,
+            availableParallelism(),
+          )
             ? encodeWhileCapturing(encodeInput, framesInChunk)
             : null;
           await runCaptureStage({
