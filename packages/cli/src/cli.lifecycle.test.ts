@@ -151,6 +151,7 @@ describe("CLI lifecycle", () => {
     try {
       for (const [name, argv] of [
         ["open", [dir]],
+        ["open", ["--verbose", dir]],
         ["render", ["render"]],
       ] as const) {
         vi.doMock(`./commands/${name}.js`, () => ({
@@ -163,7 +164,8 @@ describe("CLI lifecycle", () => {
         vi.doUnmock(`./commands/${name}.js`);
         vi.resetModules();
       }
-      expect(run.mock.calls.map(([ctx]) => ctx.rawArgs)).toEqual([[dir], []]);
+      expect(run.mock.calls.map(([ctx]) => ctx.rawArgs)).toEqual([[dir], [dir], []]);
+      expect(process.argv.slice(2)).toEqual(["render"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

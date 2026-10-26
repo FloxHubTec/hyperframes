@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { openShortcutArgv } from "./projectShortcut.js";
+import { commandWordIndex, openShortcutArgv } from "./projectShortcut.js";
 
 const commands = new Set(["open", "render", "lint"]);
 const cwd = mkdtempSync(join(tmpdir(), "hf-shortcut-"));
@@ -24,14 +24,37 @@ describe("openShortcutArgv", () => {
     ]);
   });
 
+  it("finds the folder after root flags, like the command word", () => {
+    expect(openShortcutArgv(["--verbose", "my-video", "--json"], commands, cwd)).toEqual([
+      "--verbose",
+      "open",
+      "my-video",
+      "--json",
+    ]);
+  });
+
+  it("ignores a folder after the -- separator", () => {
+    expect(openShortcutArgv(["--", "my-video"], commands, cwd)).toEqual(["--", "my-video"]);
+  });
+
   it("lets a known command win over a folder with its name", () => {
     expect(openShortcutArgv(["render"], commands, cwd)).toEqual(["render"]);
   });
 
-  it.each([[[]], [["--help"]], [["--json", "my-video"]], [["notes.txt"]], [["nope"]]])(
-    "leaves %j alone",
-    (argv) => {
-      expect(openShortcutArgv(argv, commands, cwd)).toEqual(argv);
-    },
-  );
+  it.each([[[]], [["--help"]], [["notes.txt"]], [["nope"]]])("leaves %j alone", (argv) => {
+    expect(openShortcutArgv(argv, commands, cwd)).toEqual(argv);
+  });
+});
+
+describe("commandWordIndex", () => {
+  it.each([
+    [["render", "x"], 0],
+    [["--verbose", "render"], 1],
+    [["--verbose"], -1],
+    [["--", "render"], -1],
+    [["--verbose", "--", "render"], -1],
+    [[], -1],
+  ] as const)("%j -> %i", (argv, index) => {
+    expect(commandWordIndex(argv)).toBe(index);
+  });
 });
