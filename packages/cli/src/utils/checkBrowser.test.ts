@@ -38,6 +38,7 @@ const mocks = vi.hoisted(() => ({
   },
   proxySignal: undefined as AbortSignal | undefined,
   bundleWithLocalizedFonts: vi.fn(async () => "<html></html>"),
+  prepareFindingInspector: vi.fn(),
   serverClose: vi.fn(async () => undefined),
   resolveProxy:
     vi.fn<
@@ -83,6 +84,10 @@ vi.mock("./bundleWithLocalizedFonts.js", () => ({
   // The real helper cold-loads the producer/font graph, which is covered by its
   // own tests and can exhaust this suite's timeout under Windows CI contention.
   bundleWithLocalizedFonts: mocks.bundleWithLocalizedFonts,
+}));
+
+vi.mock("./checkFindingInspect.js", () => ({
+  prepareFindingInspector: mocks.prepareFindingInspector,
 }));
 
 vi.mock("../capture/captureCompositionFrame.js", async (importOriginal) => ({
@@ -1931,7 +1936,7 @@ describe("finding frame capture", () => {
           captureFindingFrames({ ...PROJECT, dir }, DEFAULT_CHECK_OPTIONS, requests, deadline),
         )
         .catch((error: unknown) => error);
-      expect(result).toHaveLength(40);
+      expect((result as { written: string[] }).written).toHaveLength(40);
       expect(deadline.signal.aborted).toBe(false);
     } finally {
       await deadline.close();
@@ -1950,12 +1955,13 @@ describe("finding frame capture", () => {
       { time: 2, filename: "finding-frame-01.png" },
     ];
     try {
-      const paths = await captureFindingFrames(
+      const { written: paths, inspected } = await captureFindingFrames(
         { ...PROJECT, dir },
         DEFAULT_CHECK_OPTIONS,
         requests,
       );
       expect(paths).toHaveLength(2);
+      expect(inspected).toEqual([]);
       for (const [index, path] of paths.entries()) {
         expect(readFileSync(path, "utf8")).toBe("c3R1Yg==");
         expect(seekCompositionTimeline).toHaveBeenCalledWith(
@@ -1967,6 +1973,63 @@ describe("finding frame capture", () => {
       expect(mocks.serverClose.mock.calls.length).toBe(closeCalls + 1);
       const session = await vi.mocked(openSettledCompositionPage).mock.results.at(-1)?.value;
       expect(closeManagedBrowser).toHaveBeenCalledWith(session.browser);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("inspects each target on the inspector's page right after its frame, keeping going past a failure", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "finding-frames-inspect-"));
+    const page = fakePage();
+    installSessionMock(page);
+    const order: string[] = [];
+    vi.mocked(seekCompositionTimeline).mockImplementation(async (_page, time) => {
+      order.push(`seek ${time}`);
+    });
+    const ready = vi.fn(async () => undefined);
+    mocks.prepareFindingInspector.mockResolvedValue({
+      html: "<html>inspected</html>",
+      ready,
+      inspect: vi.fn(async (_page: unknown, target: { selector?: string; hfId?: string }) => {
+        order.push(`inspect ${target.selector ?? target.hfId}`);
+        return target.selector === "#bad" ? { error: "missing" } : { results: [] };
+      }),
+    });
+    try {
+      const { written, inspected } = await captureFindingFrames(
+        { ...PROJECT, dir },
+        DEFAULT_CHECK_OPTIONS,
+        [
+          { time: 1, filename: "a.png", inspect: [{ selector: "#bad" }, { hfId: "hf-1" }] },
+          { time: 2, filename: "b.png", inspect: [{ selector: "#c" }] },
+        ],
+      );
+      expect(written).toHaveLength(2);
+      expect(vi.mocked(openSettledCompositionPage).mock.calls.at(-1)?.[0]).toBe(
+        "<html>inspected</html>",
+      );
+      expect(ready).toHaveBeenCalledWith(expect.objectContaining({ url: "http://127.0.0.1:3000" }));
+      expect(order).toEqual(["seek 1", "inspect #bad", "inspect hf-1", "seek 2", "inspect #c"]);
+      expect(inspected).toEqual([
+        { time: 1, target: { selector: "#bad" }, inspect: { error: "missing" } },
+        { time: 1, target: { hfId: "hf-1" }, inspect: { results: [] } },
+        { time: 2, target: { selector: "#c" }, inspect: { results: [] } },
+      ]);
+    } finally {
+      vi.mocked(seekCompositionTimeline).mockImplementation(async () => undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not prepare the inspector when no request asks for it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "finding-frames-no-inspect-"));
+    installSessionMock(fakePage());
+    mocks.prepareFindingInspector.mockClear();
+    try {
+      await captureFindingFrames({ ...PROJECT, dir }, DEFAULT_CHECK_OPTIONS, [
+        { time: 1, filename: "a.png", inspect: [] },
+      ]);
+      expect(mocks.prepareFindingInspector).not.toHaveBeenCalled();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

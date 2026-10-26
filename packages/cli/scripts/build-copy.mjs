@@ -195,6 +195,14 @@ async function main() {
     }
   }
 
+  // The bundled inspector reads its page runtime from beside its own chunk.
+  const inspectorRuntime = join(REPO_ROOT, "packages", "inspector", "dist", "inspection.js");
+  if (existsSync(inspectorRuntime)) {
+    cpSync(inspectorRuntime, join(DIST, "inspection.js"));
+  } else {
+    console.warn(`[build-copy] inspector runtime not found, skipping: ${inspectorRuntime}`);
+  }
+
   copyGsapVendorFiles();
 
   copyMdFiles(join(CLI_ROOT, "src", "docs"), join(DIST, "docs"));
