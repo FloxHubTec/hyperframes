@@ -25,9 +25,24 @@ export const RemixShelf = ({ items, tall = false }) => {
     const [open, setOpen] = useState(false);
     const [copied, setCopied] = useState(false);
     const [chosen, setChosen] = useState(false);
+    // One film at a time across the page: any other video starting with sound (another remix, the full-film dialog, a
+    // replica pair) is a deliberate choice, so this card stops and lets go of its own.
+    useEffect(() => {
+      const onPlay = (event) => {
+        const v = event.target;
+        const own = videoRef.current;
+        if (!(v instanceof HTMLVideoElement) || v.muted || v === own || !own) return;
+        own.pause();
+        own.muted = true;
+        setChosen(false);
+      };
+      document.addEventListener("play", onPlay, true);
+      return () => document.removeEventListener("play", onPlay, true);
+    }, []);
     const preview = (on) => {
       const v = videoRef.current;
-      if (!v || chosen) return;
+      const filmWithSound = [...document.querySelectorAll("video")].some((x) => !x.paused && !x.muted);
+      if (!v || chosen || (on && filmWithSound)) return;
       if (on && !reduced.current) {
         v.dataset.hover = "1";
         v.play().catch(() => {});

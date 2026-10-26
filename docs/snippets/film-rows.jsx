@@ -116,7 +116,9 @@ export const FilmRows = () => {
       const mid = window.innerWidth / 2;
       const centre = (v) => { const r = v.getBoundingClientRect(); return Math.abs(r.left + r.width / 2 - mid); };
       // Paused rows, or a full film open in the dialog: no preview plays.
-      const resting = root.classList.contains("is-paused") || root.dataset.watching === "true";
+      // A film playing with sound anywhere on the page (a chosen remix, a replica pair) also rests the previews.
+      const filmWithSound = [...document.querySelectorAll("video")].some((v) => !v.paused && !v.muted);
+      const resting = root.classList.contains("is-paused") || root.dataset.watching === "true" || filmWithSound;
       const first = resting ? null : [...near].sort((a, b) => centre(a) - centre(b))[0];
       for (const v of near) {
         if (v === first) v.play().catch(() => {});
