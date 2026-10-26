@@ -51,7 +51,17 @@ export async function prepareFindingInspector(
     async inspect(page, target) {
       if (failure !== undefined) return { error: normalizeErrorMessage(failure) };
       try {
-        return await live.inspect(runnerFor(page), { targets: [target], descendants: false });
+        const report = await live.inspect(runnerFor(page), {
+          targets: [target],
+          descendants: false,
+        });
+        if (
+          "selector" in target &&
+          report.results.some((result) => result.candidates.length + result.candidatesOmitted > 1)
+        ) {
+          return { error: `ambiguous_selector: ${target.selector} matches multiple elements` };
+        }
+        return report;
       } catch (error) {
         return { error: normalizeErrorMessage(error) };
       }

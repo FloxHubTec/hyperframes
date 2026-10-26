@@ -71,6 +71,15 @@ describe("prepareFindingInspector", () => {
     });
   });
 
+  it("counts candidates omitted by the byte budget when refusing an ambiguous selector", async () => {
+    live.inspect.mockResolvedValue({ results: [{ candidates: [], candidatesOmitted: 2 }] });
+    const inspector = await prepareFindingInspector(dir, async () => "<html><head></head></html>");
+    await inspector.ready(inProcessServer("<served>"));
+    expect(await inspector.inspect(page, { selector: "p" })).toEqual({
+      error: "ambiguous_selector: p matches multiple elements",
+    });
+  });
+
   it("serves the plain page and reports the failure for every target when preparing fails", async () => {
     const inspector = await prepareFindingInspector(dir, async () => {
       throw new Error("bundle failed");
