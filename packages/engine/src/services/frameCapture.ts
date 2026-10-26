@@ -24,6 +24,9 @@ import {
   quantizeTimeToFrame,
   fpsToNumber,
   resolveAuthoredTimingWindow,
+  AUTHORED_SOURCE_BEGIN,
+  AUTHORED_SOURCE_END,
+  RUNTIME_BOOTSTRAP_ATTR,
   SCENE_CALLBACK_ERROR_PREFIX,
   type RawAuthoredTiming,
 } from "@hyperframes/core";
@@ -2061,6 +2064,44 @@ export interface IsolatedComposition {
   elementId: string | null;
 }
 
+// Runs in the page. False once every inline, template and same-origin script is read and none
+// mentions __timelines; an unreadable script or a page still loading answers true.
+export async function authorScriptsMayRegisterTimelines(
+  runtimeAttr: string,
+  authoredBegin: string,
+  authoredEnd: string,
+): Promise<boolean> {
+  if (document.readyState !== "complete") return true;
+  const scripts = [
+    ...Array.from(document.querySelectorAll("script")),
+    ...Array.from(document.querySelectorAll("template")).flatMap((t) =>
+      Array.from(t.content.querySelectorAll("script")),
+    ),
+  ].filter((script) => !script.hasAttribute(runtimeAttr));
+  for (const script of scripts) {
+    if (!script.src) {
+      const text = script.textContent ?? "";
+      const authored = text.includes(authoredBegin)
+        ? text
+            .split(authoredBegin)
+            .slice(1)
+            .map((region) => region.split(authoredEnd)[0])
+            .join("\n")
+        : text;
+      if (authored.includes("__timelines")) return true;
+      continue;
+    }
+    const url = new URL(script.src, location.href);
+    if (url.origin !== location.origin) return true;
+    try {
+      if ((await (await fetch(url)).text()).includes("__timelines")) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
 export interface SubTimelinePollOptions {
   intervalMs?: number;
   // Fail-fast: a script resource that failed to load can never register its timeline,
@@ -2116,7 +2157,13 @@ export async function pollSubCompositionTimelines(
   // A page error is given its grace from when it first appeared, not from when the poll began.
   let errorSeenAt: number | undefined;
   for (;;) {
-    ready = Boolean(await page.evaluate(expression));
+    ready =
+      !(await page.evaluate(
+        authorScriptsMayRegisterTimelines,
+        RUNTIME_BOOTSTRAP_ATTR,
+        AUTHORED_SOURCE_BEGIN,
+        AUTHORED_SOURCE_END,
+      )) || Boolean(await page.evaluate(expression));
     if (ready || shouldStop?.()) break;
     const now = Date.now();
     if (now >= deadline) break;
