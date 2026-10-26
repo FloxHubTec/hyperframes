@@ -73,3 +73,8 @@ export function noteCopy(
 export function failedCopyElements(): HTMLMediaElement[] {
   return [...copies].filter(([, copy]) => copy.state === "failed").map(([el]) => el);
 }
+
+/** True when every lighter copy wanted at this level is ready; true when none are wanted. */
+export function copiesReady(): boolean {
+  return [...copies.values()].every((copy) => copy.state === "ready");
+}

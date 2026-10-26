@@ -54,6 +54,37 @@ describe("preview quality messages", () => {
     expect(usePlayerStore.getState().previewCopies).toBeNull();
   });
 
+  it("keeps the preview's playback health, and clears it when the preview says none", () => {
+    const health = {
+      droppedShare: 0.4,
+      seconds: 3,
+      choppy: true,
+      fps: 18,
+      worstFrameMs: 90,
+      mode: "play",
+    };
+    routeMessage({ source: "hf-preview", type: "preview-health", health });
+    expect(usePlayerStore.getState().playbackHealth).toEqual(health);
+
+    routeMessage({ source: "hf-preview", type: "preview-health", health: null });
+    expect(usePlayerStore.getState().playbackHealth).toBeNull();
+  });
+
+  it("keeps the preview's facts and drops a malformed answer", () => {
+    const facts = {
+      sceneCount: 2,
+      mountedElementCount: 120,
+      durationSeconds: 30,
+      videos: [{ codec: "hevc", width: 3840, height: 2160, bitDepth: 10, count: 2 }],
+      copiesReady: true,
+    };
+    routeMessage({ source: "hf-preview", type: "preview-facts", facts });
+    expect(usePlayerStore.getState().previewFacts).toEqual(facts);
+
+    routeMessage({ source: "hf-preview", type: "preview-facts", facts: { sceneCount: "2" } });
+    expect(usePlayerStore.getState().previewFacts).toBeNull();
+  });
+
   it("sends the chosen quality to a preview that has just loaded", () => {
     usePlayerStore.getState().setPreviewQuality(0.25);
     const postMessage = vi.fn();

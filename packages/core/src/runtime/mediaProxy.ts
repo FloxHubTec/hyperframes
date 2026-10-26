@@ -5,6 +5,7 @@ import { findInjectedRenderFrame } from "./renderFrameSibling";
 import type { RuntimeJson } from "./types";
 import { isVideoElement } from "./domRealm";
 import { swappedElements } from "./proxySrc";
+import { restartPlaybackHealth } from "./playbackHealth";
 import { failedCopyElements, noteCopy, setCopyReportingLevel } from "./previewCopies";
 import { waitForServedProxy } from "./proxyWait";
 import { registerSeekCompletion } from "./adapters/seek-dispatch";
@@ -205,6 +206,7 @@ function restoreOriginal(el: HTMLMediaElement): void {
   }
   lightElements.delete(el);
   evictMediaSyncState(el);
+  restartPlaybackHealth();
   if (original === null) el.removeAttribute("src");
   else el.setAttribute("src", original);
   el.load();
@@ -222,6 +224,7 @@ function loadProxy(
   else boxedElements.delete(el);
   // Sync state measured on the previous file would read the new file's buffering as drift.
   evictMediaSyncState(el);
+  restartPlaybackHealth();
   el.src = href;
   el.load();
 }
@@ -528,7 +531,31 @@ export function setPreviewQuality(level: number): void {
   if (!isPreviewQuality(level) || level === previewQuality) return;
   previewQuality = level;
   setCopyReportingLevel(level);
+  restartPlaybackHealth();
   for (const el of document.querySelectorAll("video")) applyPreviewQuality(el);
+}
+
+/** The video files the composition plays, grouped by what they are, never by name. */
+export function describeVideoSources(): Array<{
+  codec: string;
+  width: number;
+  height: number;
+  bitDepth: number;
+  count: number;
+}> {
+  const groups = new Map<string, ReturnType<typeof describeVideoSources>[number]>();
+  for (const el of document.querySelectorAll("video")) {
+    const key = deriveCodecMapKey(el);
+    const map = window.__HF_MEDIA_CODEC_MAP__;
+    const codec =
+      (map && key !== null ? lookupCodecMapEntry(key, map)?.codecName : null) ?? "unknown";
+    const { width = 0, height = 0, bitDepth = 0 } = sourceFactsOf(el) ?? {};
+    const id = `${codec}|${width}|${height}|${bitDepth}`;
+    const group = groups.get(id) ?? { codec, width, height, bitDepth, count: 0 };
+    group.count += 1;
+    groups.set(id, group);
+  }
+  return [...groups.values()];
 }
 
 /** Asks again for the copies that failed, telling the server to forget why they did. */

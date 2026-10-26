@@ -24,6 +24,8 @@ import {
   lengthIsAuthored,
   stopMediaDownload,
 } from "./preloadMedia";
+import { notePlaybackFrame, restartPlaybackHealth } from "./playbackHealth";
+import { copiesReady } from "./previewCopies";
 import { installRuntimeControlBridge, postRuntimeMessage, setRuntimeProtocolFps } from "./bridge";
 import { instantTolerance } from "../clipFacts";
 import { isInClipWindow } from "./clipWindow";
@@ -95,6 +97,7 @@ import {
   handleMetadataForProxy,
   isRenderMode,
   maybeProxyProactively,
+  describeVideoSources,
   retryPreviewCopies,
   setPreviewQuality,
   setProxyDisplayScale,
@@ -4522,6 +4525,7 @@ export function initSandboxRuntimeModular(): void {
     const wantedNow = (name: string) =>
       heldScenes.has(name) ||
       scenesWanted(windowScenes, state.currentTime, clock.isPlaying()).has(name);
+    restartPlaybackHealth();
     windowWork = (async () => {
       if (landed) await mountScene(landed.name);
       else if (toMount) {
@@ -5620,6 +5624,20 @@ export function initSandboxRuntimeModular(): void {
 
       const t = clock.now();
       state.currentTime = t;
+      if (!window.__HF_EXPORT_RENDER_SEEK_CONFIG) {
+        notePlaybackFrame({
+          nowMs: performance.now(),
+          filmTime: t,
+          fps: state.canonicalFps,
+          rate: state.playbackRate,
+          playing,
+          hidden: document.visibilityState === "hidden",
+          waiting: mediaClipsInWindow.some(
+            ({ el }) => el.tagName === "VIDEO" && !el.paused && el.readyState < 3,
+          ),
+          layoutKey: `${window.innerWidth}x${window.innerHeight}@${window.devicePixelRatio}`,
+        });
+      }
       // During a paused Studio manual-edit drag, the draft writer owns the
       // gestured element's transform (e.g. gsap.set for x/y). Re-seeking the
       // timeline every frame re-applies the animated value and clobbers the
@@ -5975,7 +5993,20 @@ export function initSandboxRuntimeModular(): void {
     onSetDisplayScale: (scale) => {
       setProxyDisplayScale(scale);
       setPreviewRasterScale(scale);
+      restartPlaybackHealth();
     },
+    onRequestPreviewFacts: () =>
+      postRuntimeMessage({
+        source: "hf-preview",
+        type: "preview-facts",
+        facts: {
+          sceneCount: windowScenes.length,
+          mountedElementCount: document.body.querySelectorAll("*").length,
+          durationSeconds: clock.getDuration(),
+          videos: describeVideoSources(),
+          copiesReady: copiesReady(),
+        },
+      }),
     onSetPreviewQuality: setPreviewQuality,
     onRetryPreviewCopies: retryPreviewCopies,
     onSetIdleHeartbeat: (slow) => {

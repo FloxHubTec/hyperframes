@@ -24,6 +24,7 @@ type RuntimeBridgeControlActionBase =
   | "set-display-scale"
   | "set-preview-quality"
   | "retry-preview-copies"
+  | "request-preview-facts"
   | "set-root-duration"
   | "set-play-range"
   | "stop-media"
@@ -262,9 +263,43 @@ export type RuntimePreviewCopiesMessage = {
   } | null;
 };
 
+export type RuntimePreviewHealthMessage = {
+  source: "hf-preview";
+  type: "preview-health";
+  /** How playback went over the last few seconds of play; null while paused, seeking or warming up. */
+  health: {
+    droppedShare: number;
+    seconds: number;
+    choppy: boolean;
+    fps: number;
+    worstFrameMs: number;
+    mode: "play";
+  } | null;
+};
+
+export type RuntimePreviewFactsMessage = {
+  source: "hf-preview";
+  type: "preview-facts";
+  facts: {
+    sceneCount: number;
+    mountedElementCount: number;
+    durationSeconds: number;
+    videos: Array<{
+      codec: string;
+      width: number;
+      height: number;
+      bitDepth: number;
+      count: number;
+    }>;
+    copiesReady: boolean;
+  };
+};
+
 export type RuntimeOutboundMessage =
   | RuntimeStateMessage
   | RuntimePreviewCopiesMessage
+  | RuntimePreviewHealthMessage
+  | RuntimePreviewFactsMessage
   | RuntimeTimelineMessage
   | RuntimeDiagnosticMessage
   | RuntimePickerHoveredMessage

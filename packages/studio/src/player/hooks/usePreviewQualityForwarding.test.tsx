@@ -47,6 +47,15 @@ describe("usePreviewQualityForwarding", () => {
     expect(actions(postMessage).slice(before)).toEqual(["retry-preview-copies"]);
   });
 
+  it("asks the preview for its facts each time they are requested", () => {
+    const postMessage = vi.fn();
+    mount({ postMessage });
+    const before = postMessage.mock.calls.length;
+
+    act(() => usePlayerStore.getState().requestPreviewFacts());
+    expect(actions(postMessage).slice(before)).toEqual(["request-preview-facts"]);
+  });
+
   it("does nothing while there is no preview", () => {
     mount(null);
     expect(() => act(() => usePlayerStore.getState().setPreviewQuality(0.25))).not.toThrow();

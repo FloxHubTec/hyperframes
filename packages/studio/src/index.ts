@@ -35,7 +35,12 @@ export {
 } from "./player";
 export { usePreviewIframeStore } from "./player/store/previewIframeStore";
 export { PREVIEW_QUALITY_LEVELS, type PreviewQuality } from "@hyperframes/core";
-export type { PreviewCopies, PreviewQualityChosenBy } from "./player/store/previewQualitySlice";
+export type {
+  PlaybackHealth,
+  PreviewCopies,
+  PreviewFacts,
+  PreviewQualityChosenBy,
+} from "./player/store/previewQualitySlice";
 export {
   openAudioGainDialog,
   useAudioGainDialogStore,

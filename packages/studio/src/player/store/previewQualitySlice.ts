@@ -11,6 +11,25 @@ export interface PreviewCopies {
   error: string | null;
 }
 
+/** How playback went over the last few seconds of play; null while paused, seeking or warming up. */
+export interface PlaybackHealth {
+  droppedShare: number;
+  seconds: number;
+  choppy: boolean;
+  fps: number;
+  worstFrameMs: number;
+  mode: "play";
+}
+
+/** What the preview holds, counts and classes only, filled when asked for. */
+export interface PreviewFacts {
+  sceneCount: number;
+  mountedElementCount: number;
+  durationSeconds: number;
+  videos: Array<{ codec: string; width: number; height: number; bitDepth: number; count: number }>;
+  copiesReady: boolean;
+}
+
 export type PreviewQualityChosenBy = "person" | "app";
 
 export interface PreviewQualitySlice {
@@ -25,6 +44,13 @@ export interface PreviewQualitySlice {
   /** Bumped by retryPreviewCopies; the preview owner forwards each bump to the runtime. */
   previewCopiesRetry: number;
   retryPreviewCopies: () => void;
+  playbackHealth: PlaybackHealth | null;
+  setPlaybackHealth: (health: PlaybackHealth | null) => void;
+  previewFacts: PreviewFacts | null;
+  setPreviewFacts: (facts: PreviewFacts | null) => void;
+  /** Bumped by requestPreviewFacts; the preview owner forwards each bump and the answer lands in previewFacts. */
+  previewFactsRequests: number;
+  requestPreviewFacts: () => void;
 }
 
 export function createPreviewQualitySlice(
@@ -50,6 +76,13 @@ export function createPreviewQualitySlice(
     previewCopiesRetry: 0,
     retryPreviewCopies: () =>
       set((state) => ({ previewCopiesRetry: state.previewCopiesRetry + 1 })),
+    playbackHealth: null,
+    setPlaybackHealth: (playbackHealth) => set({ playbackHealth }),
+    previewFacts: null,
+    setPreviewFacts: (previewFacts) => set({ previewFacts }),
+    previewFactsRequests: 0,
+    requestPreviewFacts: () =>
+      set((state) => ({ previewFactsRequests: state.previewFactsRequests + 1 })),
   };
 }
 
@@ -65,5 +98,57 @@ export function parsePreviewCopies(value: unknown): PreviewCopies | null {
     failed: failed as number,
     progress,
     error: typeof error === "string" ? error : null,
+  };
+}
+
+export function parsePlaybackHealth(value: unknown): PlaybackHealth | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { droppedShare, seconds, choppy, fps, worstFrameMs } = value as Record<string, unknown>;
+  const numbers = [droppedShare, seconds, fps, worstFrameMs].every((n) => typeof n === "number");
+  if (!numbers || typeof choppy !== "boolean") return null;
+  return {
+    droppedShare: droppedShare as number,
+    seconds: seconds as number,
+    choppy,
+    fps: fps as number,
+    worstFrameMs: worstFrameMs as number,
+    mode: "play",
+  };
+}
+
+export function parsePreviewFacts(value: unknown): PreviewFacts | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { sceneCount, mountedElementCount, durationSeconds, videos, copiesReady } = value as Record<
+    string,
+    unknown
+  >;
+  const numbers = [sceneCount, mountedElementCount, durationSeconds].every(
+    (n) => typeof n === "number",
+  );
+  if (!numbers || !Array.isArray(videos) || typeof copiesReady !== "boolean") return null;
+  const grouped = videos.flatMap((video: unknown) => {
+    if (typeof video !== "object" || video === null) return [];
+    const { codec, width, height, bitDepth, count } = video as Record<string, unknown>;
+    const ok =
+      typeof codec === "string" &&
+      [width, height, bitDepth, count].every((n) => typeof n === "number");
+    return ok
+      ? [
+          {
+            codec,
+            width: width as number,
+            height: height as number,
+            bitDepth: bitDepth as number,
+            count: count as number,
+          },
+        ]
+      : [];
+  });
+  return {
+    sceneCount: sceneCount as number,
+    mountedElementCount: mountedElementCount as number,
+    durationSeconds: durationSeconds as number,
+    videos: grouped,
+    copiesReady,
   };
 }

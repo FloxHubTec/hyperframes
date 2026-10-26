@@ -10,6 +10,12 @@ export function usePreviewQualityForwarding(iframeRef: RefObject<HTMLIFrameEleme
     const frame = iframeRef.current;
     if (frame) postRuntimeControlMessage(frame.contentWindow, "set-preview-quality", { level });
   }, [iframeRef, level]);
+  const factsRequests = usePlayerStore((state) => state.previewFactsRequests);
+  useEffect(() => {
+    const frame = iframeRef.current;
+    if (frame && factsRequests > 0)
+      postRuntimeControlMessage(frame.contentWindow, "request-preview-facts");
+  }, [iframeRef, factsRequests]);
   useEffect(() => {
     const frame = iframeRef.current;
     if (frame && retries > 0)

@@ -12,6 +12,7 @@ const syncRuntimeMedia = (
 import {
   deriveCodecMapKey,
   handleErrorForProxy,
+  describeVideoSources,
   handleMetadataForProxy,
   maybeProxyProactively,
   swapToProxy,
@@ -1068,5 +1069,29 @@ describe("preview quality: lighter copies of heavy files", () => {
     await settle();
 
     expect(isProxied(el)).toBe(false);
+  });
+});
+
+describe("describeVideoSources", () => {
+  it("groups the videos by what they are, counting repeats and never naming a file", () => {
+    window.__HF_MEDIA_CODEC_MAP__ = {
+      "/a.mp4": HEVC_ENTRY,
+      "/b.mp4": HEVC_ENTRY,
+      "/c.mp4": H264_ENTRY,
+    };
+    const facts = { width: 3840, height: 2160, bitDepth: 10, bitrate: 0 };
+    window.__HF_MEDIA_SOURCE_FACTS__ = {
+      "/a.mp4": facts,
+      "/b.mp4": facts,
+      "/c.mp4": { ...facts, width: 1920, height: 1080, bitDepth: 8 },
+    };
+    for (const src of ["/a.mp4", "/b.mp4", "/c.mp4", "/d.mp4"]) createVideo(src);
+
+    expect(describeVideoSources()).toEqual([
+      { codec: "hevc", width: 3840, height: 2160, bitDepth: 10, count: 2 },
+      { codec: "h264", width: 1920, height: 1080, bitDepth: 8, count: 1 },
+      { codec: "unknown", width: 0, height: 0, bitDepth: 0, count: 1 },
+    ]);
+    delete window.__HF_MEDIA_SOURCE_FACTS__;
   });
 });
