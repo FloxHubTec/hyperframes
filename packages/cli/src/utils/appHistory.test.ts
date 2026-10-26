@@ -72,7 +72,7 @@ describe("app history", () => {
     try {
       const dir = mkdtempSync(join(tmpdir(), "hf-project-"));
       handedOverAt(dir, "2026-10-01T00:00:00Z");
-      expect(seenPath(dir).startsWith(localAppData)).toBe(true);
+      expect(seenPath(dir).startsWith(join(localAppData, "hyperframes", "catch-up"))).toBe(true);
       expect(readSeen(dir).at).toBe(Date.parse("2026-10-01T00:00:00Z"));
     } finally {
       if (platform) Object.defineProperty(process, "platform", platform);

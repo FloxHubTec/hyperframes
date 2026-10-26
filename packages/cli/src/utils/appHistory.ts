@@ -63,7 +63,12 @@ export function seenPath(dir: string): string {
     real = resolve(dir);
   }
   const key = createHash("sha256").update(real).digest("hex").slice(0, 32);
-  return join(windowsLocalAppData() ?? join(homedir(), ".hyperframes"), "catch-up", `${key}.json`);
+  const base = windowsLocalAppData();
+  return join(
+    base ? join(base, "hyperframes") : join(homedir(), ".hyperframes"),
+    "catch-up",
+    `${key}.json`,
+  );
 }
 
 export function readSeen(dir: string): Seen {

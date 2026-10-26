@@ -1035,7 +1035,7 @@ describe("background preview lifecycle", () => {
       }),
     ).rejects.toThrow(/did not become ready/i);
 
-    expect(stdio).toHaveLength(3);
+    expect(stdio).toEqual(["ignore", expect.any(Number), expect.any(Number)]);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(blocker));
   });
 
