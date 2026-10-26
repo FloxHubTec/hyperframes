@@ -228,6 +228,31 @@ function summarizeStream(stream: FfprobeStream): string {
   return `${stream.codec_type ?? "?"}:${stream.codec_name ?? "?"}[${flags.join(",")}]`;
 }
 
+type ProbeOutput = {
+  streams?: FfprobeStream[];
+  format?: { duration?: string; bit_rate?: string };
+};
+
+function metadataFromProbe(kind: MediaMetadata["kind"], parsed: ProbeOutput): MediaMetadata {
+  const stream = parsed.streams?.find((item) => {
+    if (kind === "image") return item.codec_type === "video";
+    return item.codec_type === kind && item.disposition?.attached_pic !== 1;
+  });
+  const metadata: MediaMetadata = {
+    kind,
+    color: classifyMediaColor(stream),
+    streams: (parsed.streams ?? []).slice(0, STREAM_SUMMARY_MAX).map(summarizeStream),
+  };
+  if (kind === "video") {
+    metadata.hasAudio = (parsed.streams ?? []).some((item) => item.codec_type === "audio");
+    metadata.hasAlpha = stream !== undefined && videoStreamHasAlpha(stream);
+    const duration = Number(parsed.format?.duration);
+    if (Number.isFinite(duration) && duration > 0) metadata.durationSeconds = duration;
+    metadata.source = sourceFactsOf(stream, parsed.format?.bit_rate);
+  }
+  return metadata;
+}
+
 export async function probeMediaMetadata(
   filePath: string,
   runner: FfprobeRunner = execFileRunner,
@@ -269,27 +294,7 @@ export async function probeMediaMetadata(
   }
 
   try {
-    const parsed = JSON.parse(String(result.stdout || "{}")) as {
-      streams?: FfprobeStream[];
-      format?: { duration?: string; bit_rate?: string };
-    };
-    const stream = parsed.streams?.find((item) => {
-      if (kind === "image") return item.codec_type === "video";
-      return item.codec_type === kind && item.disposition?.attached_pic !== 1;
-    });
-    const metadata: MediaMetadata = {
-      kind,
-      color: classifyMediaColor(stream),
-      streams: (parsed.streams ?? []).slice(0, STREAM_SUMMARY_MAX).map(summarizeStream),
-    };
-    if (kind === "video") {
-      metadata.hasAudio = (parsed.streams ?? []).some((item) => item.codec_type === "audio");
-      metadata.hasAlpha = stream !== undefined && videoStreamHasAlpha(stream);
-      const duration = Number(parsed.format?.duration);
-      if (Number.isFinite(duration) && duration > 0) metadata.durationSeconds = duration;
-      metadata.source = sourceFactsOf(stream, parsed.format?.bit_rate);
-    }
-    return metadata;
+    return metadataFromProbe(kind, JSON.parse(String(result.stdout || "{}")) as ProbeOutput);
   } catch {
     return { kind, color: classifyMediaColor(null), probeError: "ffprobe returned invalid json" };
   }
