@@ -1727,11 +1727,13 @@ describe("WebAudioTransport clip fades on the audio clock", () => {
     value: number;
     setValueAtTime: ReturnType<typeof vi.fn>;
     linearRampToValueAtTime: ReturnType<typeof vi.fn>;
+    cancelScheduledValues: ReturnType<typeof vi.fn>;
   };
   const param = (): Param => ({
     value: 1,
     setValueAtTime: vi.fn(),
     linearRampToValueAtTime: vi.fn(),
+    cancelScheduledValues: vi.fn(),
   });
   /** A context whose gains record their automation; the element gain is the first one made. */
   function setup(currentTime = 100) {
@@ -1788,6 +1790,36 @@ describe("WebAudioTransport clip fades on the audio clock", () => {
     expect(booked()?.linearRampToValueAtTime.mock.calls).toEqual([
       [1, expect.closeTo(100.02, 9)],
       [0, expect.closeTo(101, 9)],
+    ]);
+  });
+
+  it("a clip scheduled ahead of its start holds its fade-in's first level until it starts", async () => {
+    const { transport, gen, booked } = setup(100);
+    await transport.schedulePlayback(faded(), mockBuffer, 5, 0, () => 4.9, 1, gen, 1, 1);
+    const gain = booked();
+    expect(gain?.value).toBe(0);
+    expect(gain?.setValueAtTime.mock.calls[0]).toEqual([0, expect.closeTo(100.1, 9)]);
+  });
+
+  it("a fade-out with no clip end books nothing, so the per-tick volume keeps the fade", async () => {
+    const { transport, gen, gains, booked } = setup(100);
+    const el = faded("0.02", "2");
+    await transport.scheduleMediaElementPlayback(el, 5, 0, 5, 1, gen, 1);
+    expect(booked()).toBeUndefined();
+    transport.setElementVolume(el, 0.4, 1, 0.8);
+    expect(gains[0]!.gain.value).toBeCloseTo(0.4, 9);
+  });
+
+  it("a rate change rebooks the fades on the new rate from where the clip is", async () => {
+    const { transport, mock, gen, booked } = setup(100);
+    await transport.scheduleMediaElementPlayback(faded("0.02", "1"), 5, 0, 5, 1, gen, 2, 10);
+    const gain = booked()!;
+    mock.ctx.currentTime = 101;
+    transport.setRate(1);
+    expect(gain.cancelScheduledValues).toHaveBeenCalled();
+    expect(gain.linearRampToValueAtTime.mock.calls.at(-1)).toEqual([
+      0,
+      expect.closeTo(101 + (10 - 2), 9),
     ]);
   });
 
