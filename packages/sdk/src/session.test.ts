@@ -951,6 +951,37 @@ describe("editing duplicate inline declarations", () => {
   const html =
     '<h1 data-hf-id="hf-title" style="color:red !important;color:blue;font-size:48px">Release notes</h1>';
 
+  it.each([
+    ["display:-moz-box !important;display:block", "display: -moz-box !important; display: block"],
+    ["display:block;display:-moz-box !important", "display: block; display: -moz-box !important"],
+    [
+      "margin-left:10px !important;margin:20px;margin-left:30px",
+      "margin-left: 10px !important; margin: 20px; margin-left: 30px",
+    ],
+  ])(
+    "preserves the declaration order of %s through edit, save, reopen and history",
+    async (style, expected) => {
+      const persist = createMemoryAdapter();
+      const comp = await openComposition(
+        `<span data-hf-id="hf-title" style="${style}">hello</span>`,
+        { persist, coalesceMs: 0 },
+      );
+      comp.setStyle("hf-title", { opacity: "0.5" });
+      await comp.flush();
+      const saved = await persist.read("composition.html");
+      if (saved === undefined) throw new Error("Composition was not saved");
+      expect(saved).toContain(`style="${expected}; opacity: 0.5"`);
+      const reopened = await openComposition(saved);
+      expect(reopened.serialize()).toContain(`style="${expected}; opacity: 0.5"`);
+      comp.undo();
+      expect(comp.serialize()).toContain(`style="${expected}"`);
+      comp.redo();
+      expect(comp.serialize()).toContain(`style="${expected}; opacity: 0.5"`);
+      comp.dispose();
+      reopened.dispose();
+    },
+  );
+
   it("retains a long important value against many later ordinary declarations", async () => {
     const color = `red${" ".repeat(48_000)}!important`;
     const comp = await openComposition(

@@ -898,6 +898,15 @@ describe("setElementStyles key normalization", () => {
     expect(getElementStyles(el).transformOrigin).toBe("top left");
   });
 
+  it("replaces or removes every declaration of an explicitly edited property", () => {
+    const el = elWith("display:-moz-box !important;display:block;color:red");
+    setElementStyles(el, { display: "flex" });
+    expect(el.getAttribute("style")).toBe("display: flex; color: red");
+    el.setAttribute("style", "display:-moz-box !important;display:block;color:red");
+    setElementStyles(el, { display: null });
+    expect(el.getAttribute("style")).toBe("color: red");
+  });
+
   it("preserves semicolon-bearing CSS values when updating another property", () => {
     const el = elWith("background: url(data:image/svg+xml;utf8,<svg></svg>); color: red");
     setElementStyles(el, { color: "blue" });

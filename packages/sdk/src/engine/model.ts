@@ -238,7 +238,6 @@ function toKebab(prop: string): string {
   return prop.replace(/([A-Z])/g, (c) => `-${c.toLowerCase()}`);
 }
 
-/** Parse style attribute string → camelCase map (custom props kept as-is). */
 interface StyleDeclarationScan {
   depth: number;
   quote: "'" | '"' | null;
@@ -332,16 +331,23 @@ function trimStyleWhitespace(value: string): string {
   return value.slice(start, end);
 }
 
-function parseStyleAttr(styleAttr: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  const important = new Set<string>();
+function parseStyleDeclarations(styleAttr: string): [string, string][] {
+  const declarations: [string, string][] = [];
   for (const decl of splitStyleAtTopLevel(styleAttr, ";")) {
     const idx = decl.indexOf(":");
     if (idx === -1) continue;
     const rawProp = decl.slice(0, idx).trim();
     const value = trimStyleWhitespace(decl.slice(idx + 1));
     if (!rawProp) continue;
-    const prop = toCamel(rawProp);
+    declarations.push([toCamel(rawProp), value]);
+  }
+  return declarations;
+}
+
+function parseStyleAttr(styleAttr: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const important = new Set<string>();
+  for (const [prop, value] of parseStyleDeclarations(styleAttr)) {
     const isImportant = hasImportant(value);
     if (important.has(prop) && !isImportant) continue;
     result[prop] = value;
@@ -350,11 +356,8 @@ function parseStyleAttr(styleAttr: string): Record<string, string> {
   return result;
 }
 
-/** Serialize camelCase style map → style attribute string. */
-function serializeStyleAttr(styles: Record<string, string>): string {
-  return Object.entries(styles)
-    .map(([k, v]) => `${toKebab(k)}: ${v}`)
-    .join("; ");
+function serializeStyleAttr(styles: [string, string][]): string {
+  return styles.map(([k, v]) => `${toKebab(k)}: ${v}`).join("; ");
 }
 
 export function getElementStyles(el: Element): Record<string, string> {
@@ -363,18 +366,23 @@ export function getElementStyles(el: Element): Record<string, string> {
 }
 
 export function setElementStyles(el: Element, updates: Record<string, string | null>): void {
-  const current = getElementStyles(el);
-  for (const [prop, value] of Object.entries(updates)) {
-    // Stored map is keyed camelCase (parseStyleAttr); custom props (--foo) stay
-    // verbatim. Normalize the incoming key the same way for both set and delete.
-    const key = toCamel(prop);
-    if (value === null) {
-      delete current[key];
-    } else {
-      current[key] = value;
+  const normalized = new Map(
+    Object.entries(updates).map(([prop, value]) => [toCamel(prop), value]),
+  );
+  const declarations: [string, string][] = [];
+  for (const [prop, value] of parseStyleDeclarations(el.getAttribute("style") ?? "")) {
+    const update = normalized.get(prop);
+    if (update === undefined) {
+      declarations.push([prop, value]);
+      continue;
     }
+    if (update !== null) declarations.push([prop, update]);
+    normalized.set(prop, null);
   }
-  const serialized = serializeStyleAttr(current);
+  for (const [prop, value] of normalized) {
+    if (value !== null) declarations.push([prop, value]);
+  }
+  const serialized = serializeStyleAttr(declarations);
   if (serialized) {
     el.setAttribute("style", serialized);
   } else {
