@@ -5,7 +5,6 @@ const SEVERITY = { info: 0, warning: 1, error: 2 } satisfies Record<
   number
 >;
 
-/** A finding about the whole composition rather than one element. */
 export function findingAtRoot(
   code: string,
   severity: CheckSeverity,
