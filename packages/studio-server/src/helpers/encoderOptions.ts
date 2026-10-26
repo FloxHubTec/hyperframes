@@ -18,7 +18,6 @@ export interface EncoderOptionsBody {
   videoFrameFormat?: unknown;
   hdrMode?: unknown;
   chromaSubsampling?: unknown;
-  /** Read only to refuse 4:4:4 with GPU encoding; callers resolve `gpu` themselves. */
   gpu?: unknown;
 }
 
@@ -55,10 +54,6 @@ function parseRateControl(body: EncoderOptionsBody, format: string): Parsed {
   return { ok: true, options: {} };
 }
 
-/**
- * 4:4:4 needs SDR MP4 from the software encoder; anything else would come back 4:2:0
- * or fail mid-render, so refuse it here with a 400 instead.
- */
 function parseChromaSubsampling(body: EncoderOptionsBody, format: string): Parsed {
   const chromaSubsampling = body.chromaSubsampling;
   if (!isSet(chromaSubsampling)) return { ok: true, options: {} };

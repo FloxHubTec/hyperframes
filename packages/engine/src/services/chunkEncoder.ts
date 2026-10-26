@@ -58,11 +58,6 @@ export const ENCODER_PRESETS = {
   high: { preset: "slow", quality: 15, codec: "h264" as const },
 };
 
-/**
- * Chroma subsampling of SDR MP4 output. "444" keeps full-resolution colour
- * (libx264 picks the High 4:4:4 Predictive profile from yuv444p) for masters with
- * thin coloured text and UI strokes; many players cannot decode it, so it is opt-in.
- */
 export type ChromaSubsampling = "420" | "444";
 
 export interface EncoderPreset {
@@ -140,7 +135,6 @@ async function shouldCopyAacSidecar(
  * Get encoder preset for a given quality and output format.
  * WebM uses VP9 with alpha-capable pixel format; MP4 uses h264 (or h265 for HDR);
  * MOV uses ProRes 4444 with alpha for editor-compatible transparency.
- * `chromaSubsampling` only affects SDR MP4; callers reject other combinations.
  */
 export function getEncoderPreset(
   quality: "draft" | "standard" | "high",

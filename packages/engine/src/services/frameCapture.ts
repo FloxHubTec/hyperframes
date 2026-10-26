@@ -937,11 +937,7 @@ async function waitForCloseWithTimeout(promise: Promise<unknown>): Promise<boole
   return !timedOut;
 }
 
-/**
- * Whether capture clears the page background for a real alpha channel. PNG capture
- * is transparent by default; lossless opaque capture (4:4:4 MP4) opts out with
- * `transparentBackground: false` so its frames keep the page background.
- */
+/** PNG capture clears the page background unless `transparentBackground: false` (opaque 4:4:4). */
 export function wantsTransparentBackground(
   options: Pick<CaptureOptions, "format" | "transparentBackground">,
 ): boolean {
@@ -990,9 +986,7 @@ async function initDrawElementOrTransparentBackground(
   // help, and the safety-net blank guard also stands down under it so diagnostic
   // frames arrive unmodified.
   const forceDE = process.env.HF_FORCE_DRAWELEMENT === "1";
-  // drawElement's self-verification and worker-encode drain are JPEG-only, and its
-  // PNG path is built for transparent output; lossless opaque PNG uses the
-  // launch-mode capture instead.
+  // drawElement verification and worker-encode are JPEG-only; its PNG path is for alpha.
   const opaquePng =
     session.options.format === "png" && !wantsTransparentBackground(session.options);
   const useDrawElement =

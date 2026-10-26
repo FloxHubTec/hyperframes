@@ -171,12 +171,6 @@ export interface CaptureOptions {
   format?: "jpeg" | "png";
   transparent?: boolean;
   quality?: number;
-  /**
-   * Clear the page background so PNG frames carry real alpha. Absent means
-   * `format === "png"` (alpha output and motion blur rely on that). Pass `false`
-   * for lossless PNG capture of an opaque page, such as 4:4:4 MP4 output: the
-   * author's html/body background and Chrome's default white stay in the frame.
-   */
   transparentBackground?: boolean;
   /**
    * Opt into sub-frame multi-sample motion blur (issue #4010). Absent means off and the
