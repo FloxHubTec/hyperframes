@@ -256,10 +256,7 @@ function chromeLaunchFailureDetails(error: unknown): string {
     .join(", ");
 }
 
-/**
- * chrome.exe is a GUI-subsystem binary: `--version` prints nothing and can exit non-zero (21)
- * on a Chrome that renders fine. On Windows ask the browser capture launches instead.
- */
+// Windows chrome.exe prints nothing for --version and can exit 21 while rendering fine: launch it as capture does.
 async function chromeVersionBanner(executablePath: string, signal?: AbortSignal): Promise<string> {
   if (process.platform !== "win32") {
     const { stdout } = await runCancellableProcess(executablePath, ["--version"], {
