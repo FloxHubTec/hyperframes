@@ -595,8 +595,7 @@ async function encodeInChunks(
   for (const piece of pieces) if (existsSync(piece)) unlinkSync(piece);
 }
 
-// A keyframe every second, so a scrub across many cuts lands near its target.
-const KEYFRAME_ARGS = ["-force_key_frames", "expr:gte(t,n_forced*1)"];
+const KEYFRAME_EVERY_SECOND_ARGS = ["-force_key_frames", "expr:gte(t,n_forced*1)"];
 // Fixed recipe; changing either array means bumping PROXY_PARAMS_VERSION.
 const H264_ARGS = [
   "-c:v",
@@ -719,7 +718,7 @@ async function runFfmpeg(
         ...(range ? ["-t", String(range.lengthSeconds)] : []),
         "-vf",
         videoFilter,
-        ...KEYFRAME_ARGS,
+        ...KEYFRAME_EVERY_SECOND_ARGS,
         ...(keepsAlpha ? [...VP8_ARGS, ...vp8Threads(range ? gate.size : 1)] : H264_ARGS),
         target,
       ],

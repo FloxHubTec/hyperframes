@@ -72,7 +72,6 @@ function currentSrcValue(el: HTMLMediaElement): string {
 
 // Below 1, heavy files get lighter copies at the shown box times this level; 1 is the preview as it always was.
 let previewQuality: PreviewQuality = 1;
-// Elements swapped to a copy only because the file is heavy, which level 1 puts back to the original.
 const lightElements = new WeakSet<HTMLMediaElement>();
 
 // How large the host shows this document, in its CSS pixels per ours (player fit x page zoom).
@@ -124,12 +123,19 @@ export function setProxyDisplayScale(scale: number): void {
   for (const el of boxedElements.keys()) keepSized(el, scale);
 }
 
+function codecEntryOf(el: HTMLMediaElement): MediaCodecMapEntry | null {
+  const map = window.__HF_MEDIA_CODEC_MAP__;
+  const key = deriveCodecMapKey(el);
+  return map && key !== null ? lookupCodecMapEntry(key, map) : null;
+}
+
 function sourceFactsOf(el: HTMLMediaElement): PreviewSourceFacts | null {
   const facts = window.__HF_MEDIA_SOURCE_FACTS__;
   const key = deriveCodecMapKey(el);
   return facts && key !== null ? lookupCodecMapEntry(key, facts) : null;
 }
 
+// fallow-ignore-next-line complexity
 function keepSized(el: HTMLMediaElement, scale: number): void {
   const copy = boxedElements.get(el);
   if (!copy) return;
@@ -141,22 +147,31 @@ function keepSized(el: HTMLMediaElement, scale: number): void {
   const lowered = previewQuality < 1;
   const needed = shown && lowered ? scalePreviewProxyBox(shown, previewQuality) : shown;
   if (lowered && !needed) return;
-  if (needed && lowered && copy.light) {
-    const facts = sourceFactsOf(el);
-    if (facts && !isHeavyForPreview(facts, needed)) return restoreOriginal(el);
+  if (needed && lowered && copy.light && lightCopyNoLongerNeeded(el, needed)) {
+    return restoreOriginal(el);
   }
-  const unchanged = lowered
-    ? needed?.width === copy.box.width && needed.height === copy.box.height
-    : needed && needed.width <= copy.box.width && needed.height <= copy.box.height;
-  if (unchanged) return;
-  // At full quality, never smaller on either side than the copy it replaces.
-  const box =
-    lowered || !needed
-      ? needed
-      : {
-          width: Math.max(needed.width, copy.box.width),
-          height: Math.max(needed.height, copy.box.height),
-        };
+  if (boxCovers(copy.box, needed, lowered)) return;
+  requestBox(el, copy, lowered || !needed ? needed : growOnly(needed, copy.box));
+}
+
+function lightCopyNoLongerNeeded(el: HTMLMediaElement, needed: PreviewProxyBox): boolean {
+  const facts = sourceFactsOf(el);
+  return facts !== null && !isHeavyForPreview(facts, needed);
+}
+
+function boxCovers(current: PreviewProxyBox, needed: PreviewProxyBox | null, exact: boolean) {
+  if (exact) return needed?.width === current.width && needed.height === current.height;
+  return needed !== null && needed.width <= current.width && needed.height <= current.height;
+}
+
+function growOnly(needed: PreviewProxyBox, current: PreviewProxyBox): PreviewProxyBox {
+  return {
+    width: Math.max(needed.width, current.width),
+    height: Math.max(needed.height, current.height),
+  };
+}
+
+function requestBox(el: HTMLMediaElement, copy: BoxedCopy, box: PreviewProxyBox | null): void {
   const href = appendProxyParam(copy.originalSrc, copy.variant, box, copy.light);
   if (pendingUpgrades.get(el) === href) return;
   pendingUpgrades.set(el, href);
@@ -348,6 +363,49 @@ function emitUnavailableDiagnostic(
   console.info(`[hyperframes] ${DIAGNOSTIC_UNAVAILABLE_CODE}: "${asset}" (${reason}): ${note}`);
 }
 
+type CopyJob = {
+  originalSrc: string;
+  originalAttr: string | null;
+  variant: string;
+  lightFacts?: PreviewSourceFacts;
+  level: number;
+  live: () => boolean;
+};
+
+// fallow-ignore-next-line complexity
+async function makeCopy(el: HTMLMediaElement, job: CopyJob, scale: number | null) {
+  const { originalSrc, originalAttr, variant, lightFacts, level, live } = job;
+  // Asked once the shown size is known, so the copy is made at that size and only once.
+  const shown = scale === null ? null : shownBox(el, scale);
+  const box = shown && level < 1 ? scalePreviewProxyBox(shown, level) : shown;
+  if (lightFacts && !(box && isHeavyForPreview(lightFacts, box))) {
+    if (proxyRequested.get(el) === originalAttr) proxyRequested.delete(el);
+    return;
+  }
+  const proxiedSrc = appendProxyParam(originalSrc, variant, box, lightFacts !== undefined);
+  const served = await waitForServedProxy(proxiedSrc, live);
+  if (!live()) {
+    if (proxyRequested.get(el) === originalAttr) proxyRequested.delete(el);
+    if (lightFacts && el.isConnected && el.getAttribute("src") === originalAttr) {
+      applyPreviewQuality(el);
+    }
+    return;
+  }
+  if (!served) {
+    emitUnavailableDiagnostic(el, "proxy_playback_failed", originalSrc);
+    return;
+  }
+  swappedElements.set(el, originalAttr);
+  if (lightFacts) lightElements.add(el);
+  loadProxy(el, proxiedSrc, originalSrc, variant, box, lightFacts !== undefined);
+  // The shown size may have grown while this copy was being made.
+  if (displayScale !== null) keepSized(el, displayScale);
+  return new Promise((landed) => {
+    el.addEventListener("loadeddata", landed, { once: true });
+    el.addEventListener("error", landed, { once: true });
+  });
+}
+
 /**
  * Swap `el` to its alpha-aware proxy URL, evict stale per-source sync state, and
  * emit the one-time diagnostic + console line. Safe to call from any of the
@@ -378,37 +436,8 @@ export function swapToProxy(
     el.isConnected &&
     el.getAttribute("src") === originalAttr &&
     (!lightFacts || previewQuality === level);
-  const swap = shownScale().then(async (scale) => {
-    // Asked once the shown size is known, so the copy is made at that size and only once.
-    const shown = scale === null ? null : shownBox(el, scale);
-    const box = shown && level < 1 ? scalePreviewProxyBox(shown, level) : shown;
-    if (lightFacts && !(box && isHeavyForPreview(lightFacts, box))) {
-      if (proxyRequested.get(el) === originalAttr) proxyRequested.delete(el);
-      return;
-    }
-    const proxiedSrc = appendProxyParam(originalSrc, variant, box, lightFacts !== undefined);
-    const served = await waitForServedProxy(proxiedSrc, live);
-    if (!live()) {
-      if (proxyRequested.get(el) === originalAttr) proxyRequested.delete(el);
-      if (lightFacts && el.isConnected && el.getAttribute("src") === originalAttr) {
-        applyPreviewQuality(el);
-      }
-      return;
-    }
-    if (!served) {
-      emitUnavailableDiagnostic(el, "proxy_playback_failed", originalSrc);
-      return;
-    }
-    swappedElements.set(el, originalAttr);
-    if (lightFacts) lightElements.add(el);
-    loadProxy(el, proxiedSrc, originalSrc, variant, box, lightFacts !== undefined);
-    // The shown size may have grown while this copy was being made.
-    if (displayScale !== null) keepSized(el, displayScale);
-    return new Promise((landed) => {
-      el.addEventListener("loadeddata", landed, { once: true });
-      el.addEventListener("error", landed, { once: true });
-    });
-  });
+  const job: CopyJob = { originalSrc, originalAttr, variant, lightFacts, level, live };
+  const swap = shownScale().then((scale) => makeCopy(el, job, scale));
   if (lightFacts) return;
   // A frame capture holds for the copy as it held for a loading video before, up to the same cap.
   registerSeekCompletion(
@@ -447,9 +476,7 @@ export function maybeProxyProactively(el: HTMLMediaElement): void {
   if (isRenderMode(el)) return;
   if (!isVideoElement(el)) return;
   if (swappedElements.has(el)) return;
-  const map = window.__HF_MEDIA_CODEC_MAP__;
-  const key = deriveCodecMapKey(el);
-  const entry = map && key !== null ? lookupCodecMapEntry(key, map) : null;
+  const entry = codecEntryOf(el);
   const canPlay = entry?.representativeMime ? el.canPlayType(entry.representativeMime) : "";
   const playable = canPlay === "probably" || canPlay === "maybe";
   if (entry?.browserHostile && !playable) swapToProxy(el, entry, "proactive");
@@ -466,11 +493,7 @@ function applyPreviewQuality(el: HTMLMediaElement): void {
   if (isRenderMode(el) || !isVideoElement(el)) return;
   if (previewQuality === 1 && lightElements.has(el)) return restoreOriginal(el);
   if (boxedElements.has(el) && displayScale !== null) return keepSized(el, displayScale);
-  if (previewQuality < 1) {
-    const map = window.__HF_MEDIA_CODEC_MAP__;
-    const key = deriveCodecMapKey(el);
-    lightenIfHeavy(el, map && key !== null ? lookupCodecMapEntry(key, map) : null);
-  }
+  if (previewQuality < 1) lightenIfHeavy(el, codecEntryOf(el));
 }
 
 /** The host's preview quality: below 1, heavy videos play lighter copies sized to the shown box times the level. */
