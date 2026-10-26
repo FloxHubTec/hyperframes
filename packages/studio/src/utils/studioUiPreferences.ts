@@ -1,4 +1,4 @@
-import { isPreviewQuality, type PreviewQuality } from "@hyperframes/core";
+import { isPreviewQuality, type PreviewQuality } from "@hyperframes/core/preview-quality";
 import type { SerializedDockview } from "dockview-react";
 import { parseDockLayout } from "../components/dock/dockLayoutSchema";
 
