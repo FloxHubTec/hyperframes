@@ -12,7 +12,7 @@ vi.mock("../telemetry/events.js", () => ({
 
 import { contrastRatio, parseColorRGBA } from "./contrast-bg.js";
 import { createCheckCommand, parseCheckRange } from "./check.js";
-import { CheckDeadlineError } from "../utils/checkDeadline.js";
+import { CheckDeadlineError, CheckStoppedError } from "../utils/checkDeadline.js";
 import { trackCommandFailures } from "../utils/command-failure-tracking.js";
 import type { CommandDef } from "citty";
 
@@ -24,7 +24,7 @@ async function runViaCli(
   const wrapped = await trackCommandFailures(() => Promise.resolve(command))();
   return runCommand(wrapped, opts);
 }
-import { middleOfLongestRun } from "../utils/checkFindingFrames.js";
+import { middleOfLongestRun, withFindingFrameFields } from "../utils/checkFindingFrames.js";
 import {
   DEFAULT_CHECK_OPTIONS,
   checkExitCode,
@@ -1347,6 +1347,19 @@ describe("selectFindingFrames", () => {
     });
   });
 
+  it("ignores invalid sample times instead of capturing a fabricated zero", () => {
+    const findings = [
+      { ...layoutFindingOf("clipped_text", "error", BOX, 4), times: [] },
+      { ...layoutFindingOf("clipped_text", "error", BOX, 4), times: [NaN, Infinity, -1] },
+      { ...layoutFindingOf("clipped_text", "error", BOX, 4), times: [NaN, 2, 2.5, Infinity] },
+    ];
+    const plan = selectFindingFrames(
+      reportWithFindings({ layout: { ...reportWithFindings().layout, findings } }),
+    );
+    expect(plan.requests.map(({ time }) => time)).toEqual([2]);
+    expect(plan.findings).toEqual([{ section: "layout", index: 2, time: 2 }]);
+  });
+
   it("caps distinct times, keeping errors before warnings", () => {
     const findings = Array.from({ length: 64 }, (_, index) =>
       layoutFindingOf("clipped_text", index === 63 ? "error" : "warning", BOX, index),
@@ -1360,12 +1373,30 @@ describe("selectFindingFrames", () => {
   });
 });
 
+it("adds frame metadata only for paths returned by successful captures", () => {
+  const report = reportWithFindings({
+    layout: {
+      ...reportWithFindings().layout,
+      findings: [
+        layoutFindingOf("clipped_text", "error", { x: 1, y: 2, width: 30, height: 40 }, 1),
+        layoutFindingOf("clipped_text", "error", { x: 1, y: 2, width: 30, height: 40 }, 2),
+      ],
+    },
+  });
+  const plan = selectFindingFrames(report);
+  const framed = withFindingFrameFields(report, plan, ["/run/" + plan.requests[0]?.filename]);
+  expect(framed.layout.findings[0]?.frameTime).toBe(1);
+  expect(framed.layout.findings[1]).toEqual(report.layout.findings[1]);
+  expect(report.layout.findings[0]).not.toHaveProperty("frame");
+});
+
 describe("middleOfLongestRun", () => {
   it("picks the middle sample of the longest held run", () => {
     expect(middleOfLongestRun([1, 3, 3.25, 3.5, 3.75, 4, 9])).toBe(3.5);
     expect(middleOfLongestRun([0.125, 0.25, 0.375, 0.5])).toBe(0.25);
     expect(middleOfLongestRun([2, 5, 8])).toBe(2);
     expect(middleOfLongestRun([7])).toBe(7);
+    expect(middleOfLongestRun([5, 1, 6, 2, 2])).toBe(1);
     expect(middleOfLongestRun([1, 1.1, 1.2, 2])).toBe(1.1);
   });
 });
@@ -1826,6 +1857,51 @@ describe("check pipeline", () => {
       { captureFindingCrops: noErrors },
     );
     expect(noErrors).not.toHaveBeenCalled();
+  });
+
+  it("does not capture finding frames when no finding qualifies", async () => {
+    const capture = vi.fn(async () => []);
+    await runScenario(fakeDriver(), { findingFrames: true }, { captureFindingFrames: capture });
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it.each([new CheckDeadlineError(), new Error("screenshot failed")])(
+    "handles a finding frame failure without fabricated metadata: %s",
+    async (error) => {
+      const { report } = await runScenario(
+        fakeDriver({
+          collectLayout: vi.fn(async (time: number) => [layoutIssue("error", { time })]),
+        }),
+        { findingFrames: true },
+        {
+          captureFindingFrames: async () => {
+            throw error;
+          },
+        },
+      );
+      expect(report.layout.findings[0]).not.toHaveProperty("frame");
+      expect(report.runtime.findings.length).toBe(error instanceof CheckDeadlineError ? 1 : 0);
+    },
+  );
+
+  it("reports cancellation during finding frames", async () => {
+    const { report } = await runScenario(
+      fakeDriver({
+        collectLayout: vi.fn(async (time: number) => [
+          layoutIssue("warning", { time, code: "container_overflow" }),
+        ]),
+      }),
+      { findingFrames: true },
+      {
+        captureFindingFrames: async () => {
+          throw new CheckStoppedError("SIGINT");
+        },
+      },
+    );
+    expect(report.ok).toBe(false);
+    expect(report.runtime.findings.some((finding) => finding.message.includes("SIGINT"))).toBe(
+      true,
+    );
   });
 
   it("adds frame and frameTime only with finding frames on, leaving snapshots untouched", async () => {

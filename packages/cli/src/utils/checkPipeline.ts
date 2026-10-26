@@ -1,6 +1,11 @@
 import { BrowserCleanupError, onStopSignal } from "../browser/launch.js";
 import type { CheckProgress } from "./checkProgress.js";
-import { CheckDeadline, CheckDeadlineError, type CheckPhase } from "./checkDeadline.js";
+import {
+  CheckDeadline,
+  CheckDeadlineError,
+  CheckStoppedError,
+  type CheckPhase,
+} from "./checkDeadline.js";
 import {
   checkSnapshotDirectory,
   beginCheckSnapshots,
@@ -1810,7 +1815,7 @@ async function withOptionalFindingFrames(
     const written = await deadline.run(() => capture(project, options, plan.requests, deadline));
     return withFindingFrameFields(report, plan, written);
   } catch (error) {
-    if (error instanceof CheckDeadlineError) {
+    if (error instanceof CheckDeadlineError || error instanceof CheckStoppedError) {
       const finding = runtimeFailure(error);
       return { ...report, ok: false, runtime: section([...report.runtime.findings, finding]) };
     }

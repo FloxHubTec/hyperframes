@@ -25,7 +25,6 @@ export interface CheckOptions {
   skipContrastInMotion?: boolean;
   strict: boolean;
   snapshots: boolean;
-  /** One plain full frame per distinct error/warning finding time; adds `frame`/`frameTime`. */
   findingFrames?: boolean;
   captionZone?: CaptionZoneOptions;
   frameCheck?: FrameCheckOptions;
@@ -142,7 +141,6 @@ export interface CheckFindingCropRequest {
   bbox: CheckBbox;
 }
 
-/** One plain full-frame PNG for `check-review.findingFrames`, shared by every finding framed at `time`. */
 export interface CheckFindingFrameRequest {
   time: number;
   filename: string;

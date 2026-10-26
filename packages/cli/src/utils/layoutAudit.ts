@@ -282,7 +282,6 @@ export function longestContiguousRunMs(times: number[]): number {
   return ((run.at(-1) ?? 0) - (run[0] ?? 0)) * 1000;
 }
 
-/** The sorted unique times of the longest-spanning run with no gap above the held-sample gap; earliest wins ties. */
 export function longestContiguousRun(times: number[]): number[] {
   const sorted = [...new Set(times)].sort((a, b) => a - b);
   let longest: number[] = [];

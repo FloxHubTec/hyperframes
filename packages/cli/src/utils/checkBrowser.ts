@@ -583,7 +583,6 @@ export async function captureFindingCrops(
   });
 }
 
-/** `check-review.findingFrames`: one plain full frame per distinct finding time. */
 export async function captureFindingFrames(
   project: ProjectDir,
   options: CheckOptions,
@@ -595,7 +594,6 @@ export async function captureFindingFrames(
     const written: string[] = [];
     for (const request of requests) {
       await seekCompositionTimeline(page, request.time, SCREENSHOT_SEEK_OPTIONS);
-      // The fast codec only flattens alpha, and these frames are opaque.
       const buffer = await page.screenshot({ type: "png", optimizeForSpeed: true });
       writeFileSync(join(snapshotDir, request.filename), buffer);
       written.push(join(snapshotDir, request.filename));

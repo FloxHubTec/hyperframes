@@ -38,6 +38,7 @@ export function selectFindingFrames(report: CheckReport): FindingFramePlan {
   let skipped = 0;
   for (const { section, index, finding } of candidates) {
     const time = middleOfLongestRun(finding.times ?? [finding.time]);
+    if (time === undefined) continue;
     if (!times.has(time) && times.size >= MAX_FINDING_FRAME_TIMES) {
       skipped += 1;
       continue;
@@ -60,9 +61,9 @@ function hasRealBbox(bbox: CheckBbox): boolean {
 }
 
 /** The middle sample of the longest held run (the `heldMs` gap rule); the earlier of two middles. */
-export function middleOfLongestRun(times: number[]): number {
-  const run = longestContiguousRun(times);
-  return run[Math.floor((run.length - 1) / 2)] ?? 0;
+export function middleOfLongestRun(times: number[]): number | undefined {
+  const run = longestContiguousRun(times.filter((time) => Number.isFinite(time) && time >= 0));
+  return run[Math.floor((run.length - 1) / 2)];
 }
 
 function findingFrameFilename(order: number, time: number): string {
