@@ -26,8 +26,8 @@ describe("pollSubCompositionTimelines fail-fast", () => {
     const page = makeMockPage(() => true);
     const outcome = await pollSubCompositionTimelines(page, 1_000, { intervalMs: 10 });
     expect(outcome).toBe("ready");
-    // Script scan, readiness check, then the __hfForceTimelineRebind call.
-    expect((page.evaluate as ReturnType<typeof vi.fn>).mock.calls.length).toBe(3);
+    // Second evaluate is the __hfForceTimelineRebind call.
+    expect((page.evaluate as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
   });
 
   it("bails after the grace window when a script resource failed to load", async () => {
@@ -152,6 +152,25 @@ describe("pollSubCompositionTimelines when no author script can register a timel
   });
 });
 
+describe("pollSubCompositionTimelines when a script failed on a page nothing can register on", () => {
+  it("keeps the wait, so the failure is named instead of the page passing as ready", async () => {
+    const evaluate = vi.fn(async (expr: string | (() => unknown)) =>
+      typeof expr === "function"
+        ? false
+        : expr.includes("__hfForceTimelineRebind")
+          ? undefined
+          : false,
+    );
+    const outcome = await pollSubCompositionTimelines({ evaluate } as unknown as Page, 60_000, {
+      intervalMs: 10,
+      getScriptLoadFailures: () => [],
+      getPageErrors: () => ["TypeError: x"],
+      scriptErrorGraceMs: 50,
+    });
+    expect(outcome).toBe("script_failure");
+  });
+});
+
 describe("authorScriptsMayRegisterTimelines", () => {
   const RUNTIME_ATTR = "data-hyperframes-preview-runtime";
 
@@ -174,6 +193,7 @@ describe("authorScriptsMayRegisterTimelines", () => {
         AUTHORED_SOURCE_END,
       );
     } finally {
+      delete (globalThis as { __hfAuthorScan?: boolean }).__hfAuthorScan;
       vi.unstubAllGlobals();
     }
   }

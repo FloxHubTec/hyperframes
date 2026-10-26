@@ -375,7 +375,6 @@ const SCOPED_HYPERFRAMES_EXPRESSION = `!__hfBaseHyperframes
         },
       })`;
 
-// Bound the authored part of a wrapped script: the wrapper itself mentions __timelines.
 export const AUTHORED_SOURCE_BEGIN = "/*hf-authored-begin*/";
 export const AUTHORED_SOURCE_END = "/*hf-authored-end*/";
 
