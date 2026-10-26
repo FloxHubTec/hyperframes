@@ -7,6 +7,7 @@ import type { MotionSpec } from "./motionSpec.js";
 import type { ProjectDir } from "./project.js";
 import type { BrowserGpuMode } from "../browser/gpuPolicy.js";
 import type { HdrAutoPromotion } from "@hyperframes/engine";
+import type { ComponentReport } from "@hyperframes/inspector/live";
 import type { PrelaunchedBrowser } from "../capture/captureCompositionFrame.js";
 import type { CheckPhase } from "./checkDeadline.js";
 
@@ -25,6 +26,8 @@ export interface CheckOptions {
   skipContrastInMotion?: boolean;
   strict: boolean;
   snapshots: boolean;
+  findingFrames?: boolean;
+  inspect?: boolean;
   captionZone?: CaptionZoneOptions;
   frameCheck?: FrameCheckOptions;
   /** Opt-in layout-audit knobs (`--layout "proseCoverageFloor=0.05"`). Defaults stay in the browser audit. */
@@ -78,7 +81,15 @@ export interface CheckAnchor {
   time: number;
   times?: number[];
   componentMatch?: boolean;
+  frame?: string;
+  frameTime?: number;
+  inspect?: CheckFindingInspect;
 }
+
+/** The inspector's own report for the finding's element at `frameTime`, or why it could not run. */
+export type CheckFindingInspect = ComponentReport | { error: string };
+
+export type CheckInspectTarget = { hfId: string } | { selector: string };
 
 export interface CheckFinding extends CheckAnchor {
   timeRange?: [number, number];
@@ -136,6 +147,23 @@ export interface CheckFindingCropRequest {
   filename: string;
   time: number;
   bbox: CheckBbox;
+}
+
+export interface CheckFindingFrameRequest {
+  time: number;
+  filename: string;
+  inspect?: CheckInspectTarget[];
+}
+
+export interface CheckFindingFrames {
+  written: string[];
+  inspected: CheckFindingInspection[];
+}
+
+export interface CheckFindingInspection {
+  time: number;
+  target: CheckInspectTarget;
+  inspect: CheckFindingInspect;
 }
 
 export interface CheckGeometryCandidate extends CheckAnchor {
@@ -401,6 +429,12 @@ export interface CheckDependencies {
     requests: CheckFindingCropRequest[],
     deadline?: CheckDeadline,
   ): Promise<string[]>;
+  captureFindingFrames?(
+    project: ProjectDir,
+    options: CheckOptions,
+    requests: CheckFindingFrameRequest[],
+    deadline?: CheckDeadline,
+  ): Promise<CheckFindingFrames>;
   inspectHdrAutoPromotion?(project: ProjectDir): Promise<CheckReport["hdr"]["autoPromotion"]>;
 }
 
