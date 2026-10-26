@@ -368,7 +368,7 @@ type CopyJob = {
   originalAttr: string | null;
   variant: string;
   lightFacts?: PreviewSourceFacts;
-  level: number;
+  level: PreviewQuality;
   live: () => boolean;
 };
 
