@@ -25,7 +25,6 @@ export class HistoryBusyError extends Error {
 const WINDOWS_BUSY = new Set(["EPERM", "EBUSY", "EACCES"]);
 const NO_HARD_LINKS = new Set(["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM"]);
 const TAKING_MS = 2_000;
-/** Boot time read from uptime drifts by a few seconds, so a lock must predate boot by more than this to be stale. */
 const BOOT_SLACK_MS = 60_000;
 
 function busyOnWindows(error: unknown): boolean {
@@ -62,7 +61,6 @@ export function processStart(pid: number): string | null {
   }
 }
 
-/** The start time recorded beside `file` for its owner, kept apart so older readers still see a bare pid. */
 function recordedStart(file: string, pid: number): string | null {
   try {
     const [owner, ...start] = readFileSync(`${file}.start`, "utf-8").split("\n");
