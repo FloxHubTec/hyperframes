@@ -389,16 +389,12 @@ describe("a lighter copy of a file Chrome can play", () => {
     writeFileSync(join(project, "cam.mp4"), "fake video bytes");
     writeFileSync(join(project, "broll.mov"), "fake video bytes");
 
-    const scan = await scanProjectMedia(
-      project,
-      [{ html: videoHtml("cam.mp4", "broll.mov") }],
-      {
-        runner: makeRunner({
-          [join(project, "cam.mp4")]: { codecName: "h264", size: [1920, 1080] },
-          [join(project, "broll.mov")]: { codecName: "hevc", size: [3840, 2160] },
-        }),
-      },
-    );
+    const scan = await scanProjectMedia(project, [{ html: videoHtml("cam.mp4", "broll.mov") }], {
+      runner: makeRunner({
+        [join(project, "cam.mp4")]: { codecName: "h264", size: [1920, 1080] },
+        [join(project, "broll.mov")]: { codecName: "hevc", size: [3840, 2160] },
+      }),
+    });
 
     expect(Object.keys(scan.codecMap)).toEqual(["/broll.mov"]);
     expect(Object.keys(scan.sourceFacts).sort()).toEqual(["/broll.mov", "/cam.mp4"]);

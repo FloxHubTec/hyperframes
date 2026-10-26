@@ -79,9 +79,9 @@ describe("injectMediaCodecMapIntoHtml source facts", () => {
     const { injectMediaCodecMapIntoHtml } = await loadHelper({}, {});
     const page = "<html><head></head><body></body></html>";
 
-    expect(
-      await injectMediaCodecMapIntoHtml(page, tmpProject(), [{ html: "<html></html>" }]),
-    ).toBe(page);
+    expect(await injectMediaCodecMapIntoHtml(page, tmpProject(), [{ html: "<html></html>" }])).toBe(
+      page,
+    );
   });
 });
 

@@ -99,11 +99,7 @@ export async function injectMediaCodecMapIntoHtml(
 ): Promise<string> {
   let scan: ProjectMediaScan;
   try {
-    scan = await scanProjectMedia(
-      projectDir,
-      htmlSources,
-      probeCache ? { cache: probeCache } : {},
-    );
+    scan = await scanProjectMedia(projectDir, htmlSources, probeCache ? { cache: probeCache } : {});
   } catch {
     // Best-effort: a scan failure must never block serving the page.
     return html;

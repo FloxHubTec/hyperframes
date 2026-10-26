@@ -702,7 +702,11 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
     const boxParam = c.req.query(PREVIEW_PROXY_BOX_PARAM);
     const proxyBox = boxParam === undefined ? undefined : parsePreviewProxyBox(boxParam);
     const lightRequested = c.req.query(PREVIEW_PROXY_LIGHT_PARAM) !== undefined;
-    if (proxyBox === null || (proxyBox && proxyParam === undefined) || (lightRequested && !proxyBox)) {
+    if (
+      proxyBox === null ||
+      (proxyBox && proxyParam === undefined) ||
+      (lightRequested && !proxyBox)
+    ) {
       return c.text("not found", 404);
     }
     let proxyVariant: ProxyVariant | undefined;

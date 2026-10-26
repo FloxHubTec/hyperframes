@@ -128,18 +128,21 @@ describe("probeMediaMetadata", () => {
         stderr: "",
       }));
 
-    expect((await probe({ width: 3840, height: 2160, pix_fmt: "yuv420p10le", bit_rate: "9" })).source).toEqual({
+    expect(
+      (await probe({ width: 3840, height: 2160, pix_fmt: "yuv420p10le", bit_rate: "9" })).source,
+    ).toEqual({
       width: 3840,
       height: 2160,
       bitDepth: 10,
       bitrate: 9,
     });
     expect(
-      (await probe({ width: 1920, height: 1080, pix_fmt: "yuv420p" }, { bit_rate: "55000000" })).source,
+      (await probe({ width: 1920, height: 1080, pix_fmt: "yuv420p" }, { bit_rate: "55000000" }))
+        .source,
     ).toEqual({ width: 1920, height: 1080, bitDepth: 8, bitrate: 55_000_000 });
     expect(
-      (await probe({ width: 1920, height: 1080, pix_fmt: "yuv420p", bits_per_raw_sample: "12" })).source
-        ?.bitDepth,
+      (await probe({ width: 1920, height: 1080, pix_fmt: "yuv420p", bits_per_raw_sample: "12" }))
+        .source?.bitDepth,
     ).toBe(12);
     expect((await probe({ pix_fmt: "yuv420p" })).source).toBeUndefined();
   });
