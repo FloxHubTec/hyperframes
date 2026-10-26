@@ -262,9 +262,7 @@ export function analyze(run: Run): Metrics {
   else {
     let heard = 0;
     for (const t of takes) {
-      const startEpoch =
-        timeAtPlayhead(host.samples.length ? host.samples : samples, t.start) ??
-        run.playAt + t.start * 1000;
+      const startEpoch = timeAtPlayhead(samples, t.start) ?? run.playAt + t.start * 1000;
       const inWindow = heardRows.filter(
         (r) => r[6] >= startEpoch + 200 && r[6] <= startEpoch + t.dur * 1000,
       );

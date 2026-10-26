@@ -126,25 +126,32 @@ describe("analyze", () => {
     run.ownership = [[1000, "parent"]];
     const t = edit.takes[1]!;
     expect(t.inPoint).toBeGreaterThan(5);
-    const open = 1000 + t.start * 1000;
-    for (let ms = 0; ms <= (t.start + 4) * 1000; ms += 10)
-      run.host.samples.push([1000 + ms, "x", 0, 0, 0, 1, 1, ms / 1000]);
-    const row = (ms: number, pos: number): Dump["tap"][number] => [
+    // The playhead starts late and the host page has no __player, so its rows carry no playhead.
+    const delay = Math.round(t.dur * 600);
+    const open = 1000 + delay + t.start * 1000;
+    for (let ms = 0; ms <= (t.start + t.dur) * 1000 + delay + 1000; ms += 10) {
+      run.comp.samples.push([1000 + ms, "v0", 0, 0, 0, 1, 1, Math.max(0, ms - delay) / 1000]);
+      run.host.samples.push([1000 + ms, "x", 0, 0, 0, 1, 1, null]);
+    }
+    const row = (at: number, pos: number): Dump["tap"][number] => [
       0,
       48000,
       0.1,
       0,
       Math.floor((pos % 16) / 0.5),
       Math.floor(pos / 16),
-      open + ms,
+      at,
     ];
+    // the previous take is still audible while the delayed playhead has not reached this take
+    for (let ms = 0; ms < delay; ms += 100)
+      run.host.tap.push(row(1000 + t.start * 1000 + ms, (t.inPoint + 25) % 50));
     for (let ms = 0; ms < t.dur * 1000; ms += 100)
-      run.host.tap.push(row(ms, t.inPoint + ms / 1000));
+      run.host.tap.push(row(open + ms, t.inPoint + ms / 1000));
     expect(analyze(run).takesHeard).toBe(1);
     // audio from another stretch of the file (the proxy playing from the wrong offset) is not heard
     run.host.tap = [];
     for (let ms = 0; ms < t.dur * 1000; ms += 100)
-      run.host.tap.push(row(ms, (t.inPoint + 25 + ms / 1000) % 50));
+      run.host.tap.push(row(open + ms, (t.inPoint + 25 + ms / 1000) % 50));
     expect(analyze(run).takesHeard).toBe(0);
   });
 });
