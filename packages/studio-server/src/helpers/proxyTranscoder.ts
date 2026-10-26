@@ -875,7 +875,6 @@ async function transcodeToCache(
   }
 }
 
-/** How far the copy being made for a source has got, from 0 to 1; undefined when none runs or its length is unknown. */
 export function proxyCopyProgress(
   projectDir: string,
   absoluteSourcePath: string,
@@ -889,7 +888,6 @@ export function proxyCopyProgress(
     : undefined;
 }
 
-/** Forgets a remembered failure of a copy, so the next ask makes it again. */
 export function retryProxyCopy(
   projectDir: string,
   absoluteSourcePath: string,
