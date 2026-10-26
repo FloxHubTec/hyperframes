@@ -608,7 +608,17 @@ describe("extractVideoFrameToBuffer", () => {
         execFileSync(ffmpeg!, [
           ...quiet,
           ...["-f", "lavfi", "-i", "testsrc2=d=70:r=30:s=160x90", "-pix_fmt", "yuv420p"],
-          ...["-c:v", "libx265", "-preset", "ultrafast", "-x265-params", x265, "-tag:v", "hvc1", source],
+          ...[
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-x265-params",
+            x265,
+            "-tag:v",
+            "hvc1",
+            source,
+          ],
         ]);
         const clip = join(dir, "cut.mov");
         execFileSync(ffmpeg!, [...quiet, ...["-ss", "31.77", "-i", source, "-c", "copy", clip]]);
