@@ -3647,6 +3647,10 @@ export function initSandboxRuntimeModular(): void {
         userVolume: state.bridgeVolume,
         forceSync,
         cueAheadSeconds,
+        clockAdvancing:
+          clock.getSource() !== "audio" ||
+          lastSyncedMediaTimeSeconds === null ||
+          state.currentTime > lastSyncedMediaTimeSeconds,
         getCompositionDuration: () =>
           getSafeTimelineDurationSeconds(state.capturedTimeline, 0, timingRevision),
         onElementVolume: (el, _effectiveVolume, authorVolume, clipGain, unfadedVolume) =>
