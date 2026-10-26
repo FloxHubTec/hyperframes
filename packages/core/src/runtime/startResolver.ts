@@ -115,11 +115,11 @@ export function createRuntimeStartTimeResolver(params: {
     element.matches(COMPOSITION_HOST_SELECTOR);
 
   // A mounted composition root without its own `data-start` takes its timing from the nearest host
-  // above it, past any neutral wrapper; the host may use another id than the file, or none.
+  // or timed wrapper above it, the clip that shows it; the host may use another id than the file.
   const inheritedTimingHost = (element: Element): Element | null => {
     if (!element.hasAttribute("data-composition-id")) return null;
     if (parseStartExpression(element.getAttribute("data-start"))) return null;
-    return element.parentElement?.closest(COMPOSITION_HOST_SELECTOR) ?? null;
+    return element.parentElement?.closest(`[data-start], ${COMPOSITION_HOST_SELECTOR}`) ?? null;
   };
 
   const resolveCompositionOrigin = (compositionRoot: Element, fallback: number): number =>

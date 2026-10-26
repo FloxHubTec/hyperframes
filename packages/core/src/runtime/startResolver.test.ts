@@ -245,6 +245,18 @@ describe("createRuntimeStartTimeResolver", () => {
       expect(createRuntimeStartTimeResolver({}).resolveStartForElement(inner)).toBe(5);
     });
 
+    it("takes a timed wrapper's start over its host's", () => {
+      document.body.innerHTML = `
+        <div data-composition-id="root" data-start="0">
+          <div data-composition-id="scene" data-start="5">
+            <section data-start="2"><div id="inner" data-composition-id="child"></div></section>
+          </div>
+        </div>`;
+      const inner = document.getElementById("inner")!;
+      // The wrapper shows the inner composition from 2 s into the scene; its clock starts then.
+      expect(createRuntimeStartTimeResolver({}).resolveStartForElement(inner)).toBe(7);
+    });
+
     it("keeps nested references in the host composition timeline", () => {
       const host = document.createElement("div");
       host.id = "slide-5";
