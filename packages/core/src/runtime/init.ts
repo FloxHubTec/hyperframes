@@ -5533,6 +5533,7 @@ export function initSandboxRuntimeModular(): void {
     }
   }
 
+  let lastDisplayScale: number | null = null;
   const transportTick = () => {
     if (state.tornDown || inTransportTick) return;
     inTransportTick = true;
@@ -5993,7 +5994,8 @@ export function initSandboxRuntimeModular(): void {
     onSetDisplayScale: (scale) => {
       setProxyDisplayScale(scale);
       setPreviewRasterScale(scale);
-      restartPlaybackHealth();
+      if (scale !== lastDisplayScale) restartPlaybackHealth();
+      lastDisplayScale = scale;
     },
     onRequestPreviewFacts: () =>
       postRuntimeMessage({
