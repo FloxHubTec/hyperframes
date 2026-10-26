@@ -66,6 +66,7 @@ export { addScenePartsManifest } from "./scenePartsManifest";
 // Script ordering shared by the bundler and the producer coalescers
 export {
   AFTER_FONTS_SCRIPT_TYPE,
+  adjacentStyleGroups,
   compositionStyle,
   cssStyleMergeKey,
   deferScriptsUntilFonts,
@@ -75,7 +76,7 @@ export {
   type CompositionStyle,
   type InlineScriptRun,
 } from "./scriptRuns";
-export { isJavaScriptType } from "./compositionAssembly";
+export { HEAD_HOST_ATTR, isJavaScriptType } from "./compositionAssembly";
 
 // Static guard
 export {
@@ -93,8 +94,10 @@ export {
 
 // Sub-composition inlining (shared between bundler and producer)
 export {
+  emitHeadAssets,
   ensureExternalLinkTag,
   inlineSubCompositions,
+  type HeadAsset,
   type InlineSubCompositionsOptions,
   type InlineSubCompositionsResult,
 } from "./inlineSubCompositions";
