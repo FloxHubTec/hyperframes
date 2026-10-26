@@ -217,7 +217,6 @@ export function createVideoFrameInjector(
     const updates: Array<{ videoId: string; dataUri: string; frameIndex: number }> = [];
     const restyleIds: string[] = [];
     const activeIds = new Set<string>();
-    // A motion-blur sub-sample keeps the style injected at the output frame's time.
     const isBlurSubSample = heldVideoTime !== undefined && heldVideoTime !== time;
     if (activePayloads.size > 0) {
       const pendingReads: Array<Promise<{ videoId: string; dataUri: string; frameIndex: number }>> =
@@ -226,7 +225,6 @@ export function createVideoFrameInjector(
         activeIds.add(videoId);
         const lastFrameIndex = lastInjectedFrameByVideo.get(videoId);
         if (lastFrameIndex === payload.frameIndex) {
-          // Same picture (held past the media's end, or a slower source), but its style may move.
           if (!isBlurSubSample) restyleIds.push(videoId);
           continue;
         }
