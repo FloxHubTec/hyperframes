@@ -56,6 +56,7 @@ export interface UseTimelinePlayerOptions {
 const publishSeek = (time: number, options?: { follow?: boolean }) =>
   options?.follow === false ? liveTime.notify(time) : liveTime.notifySeek(time);
 
+// fallow-ignore-next-line complexity
 export function useTimelinePlayer({
   onShadowPromoted,
   onPreviewReloadFailed,

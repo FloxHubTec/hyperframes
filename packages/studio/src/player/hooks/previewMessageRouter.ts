@@ -116,9 +116,18 @@ function handleTimelineMessage(
 }
 
 const STORE_REPORTS = new Map<string, (data: PreviewMessage) => void>([
-  ["preview-copies", (data) => usePlayerStore.getState().setPreviewCopies(parsePreviewCopies(data.copies))],
-  ["preview-health", (data) => usePlayerStore.getState().setPlaybackHealth(parsePlaybackHealth(data.health))],
-  ["preview-facts", (data) => usePlayerStore.getState().setPreviewFacts(parsePreviewFacts(data.facts))],
+  [
+    "preview-copies",
+    (data) => usePlayerStore.getState().setPreviewCopies(parsePreviewCopies(data.copies)),
+  ],
+  [
+    "preview-health",
+    (data) => usePlayerStore.getState().setPlaybackHealth(parsePlaybackHealth(data.health)),
+  ],
+  [
+    "preview-facts",
+    (data) => usePlayerStore.getState().setPreviewFacts(parsePreviewFacts(data.facts)),
+  ],
 ]);
 
 export function createPreviewMessageHandler(

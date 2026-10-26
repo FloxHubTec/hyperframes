@@ -1,4 +1,5 @@
 import { postRuntimeMessage } from "./bridge";
+import type { RuntimePreviewHealthMessage } from "./types";
 
 /** What counts as a choppy preview; every number of the rule lives here. */
 export const PLAYBACK_HEALTH = {
@@ -32,7 +33,7 @@ let key = "";
 let posted = false;
 let postedAtMs = 0;
 
-function post(health: Record<string, unknown> | null): void {
+function post(health: RuntimePreviewHealthMessage["health"]): void {
   postRuntimeMessage({ source: "hf-preview", type: "preview-health", health });
 }
 
@@ -51,7 +52,7 @@ export function restartPlaybackHealth(): void {
 
 function measure(nowMs: number, fps: number, rate: number): void {
   const windowMs = PLAYBACK_HEALTH.windowSeconds * 1000;
-  while (samples.length > 0 && samples[0].atMs < nowMs - windowMs) samples.shift();
+  while (samples[0] && samples[0].atMs < nowMs - windowMs) samples.shift();
   const first = samples[0];
   if (!first) return;
   const spanMs = nowMs - (first.atMs - first.gapMs);
