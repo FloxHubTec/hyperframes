@@ -29,6 +29,7 @@ import { copiesReady } from "./previewCopies";
 import { installRuntimeControlBridge, postRuntimeMessage, setRuntimeProtocolFps } from "./bridge";
 import { instantTolerance } from "../clipFacts";
 import { isInClipWindow } from "./clipWindow";
+import { mediaElementTime } from "./mediaClock";
 import {
   CLIP_HIDDEN_ATTR,
   revealTimedClipsAfterFirstPass,
@@ -89,7 +90,7 @@ import {
   resolveNaturalMediaTimelineDuration,
   resolveRuntimeMediaClipDuration,
   syncRuntimeMedia,
-  VIDEO_PRESEEK_SECONDS,
+  MEDIA_PRESEEK_SECONDS,
   type RuntimeMediaClip,
 } from "./media";
 import {
@@ -3486,14 +3487,14 @@ export function initSandboxRuntimeModular(): void {
       visiting.add(clip.el);
     }
     if (state.isPlaying && !window.__HF_EXPORT_RENDER_SEEK_CONFIG) {
-      // An endpoint-only pass reaches trimmed video too late: its first visible tick starts a seek.
+      // An endpoint-only pass reaches a trimmed clip too late: its first active tick starts a seek.
       for (const clip of clipsWithEndpointBetween(
         index.byStart,
         (c) => c.start,
         toSeconds,
-        toSeconds + VIDEO_PRESEEK_SECONDS * state.playbackRate,
+        toSeconds + MEDIA_PRESEEK_SECONDS * state.playbackRate,
       )) {
-        if (clip.el.tagName === "VIDEO") visiting.add(clip.el);
+        visiting.add(clip.el);
       }
     }
     return [...visiting];
@@ -3652,6 +3653,7 @@ export function initSandboxRuntimeModular(): void {
           webAudio.setElementVolume(el, authorVolume, clipGain, unfadedVolume),
         isWebAudioOwned: (el) => webAudio.ownsElement(el),
         isWebAudioRouted: (el) => webAudio.routesElement(el),
+        seekUnderDip: (el, target) => webAudio.seekUnderDip(el, target),
         onAutoplayBlocked: () => {
           if (state.mediaAutoplayBlockedPosted) return;
           state.mediaAutoplayBlockedPosted = true;
@@ -5720,7 +5722,7 @@ export function initSandboxRuntimeModular(): void {
       // A seek flushes the decoder even when it lands where the video already is.
       if (Math.abs(clip.el.currentTime - target) <= 0.001) continue;
       try {
-        clip.el.currentTime = target;
+        clip.el.currentTime = mediaElementTime(target);
       } catch {
         // ignore seek restrictions
       }
