@@ -1734,7 +1734,7 @@ pre.shiki {
   object-fit: cover;
 }
 .hf-film-card:focus-visible {
-  outline: 2px solid #16785b;
+  outline: 2px solid var(--hf-brand);
   outline-offset: 2px;
 }
 .hf-film-label {
@@ -1810,6 +1810,13 @@ pre.shiki {
 }
 
 .hf-film-rows.is-paused .hf-film-track { animation-play-state: paused; }
-.hf-film-pause { display: block; margin: 0.5rem 0 0 auto; padding: 0.25rem 0.75rem; border: 1px solid rgb(0 0 0 / 0.15);
+.hf-film-pause { display: block; margin: 0.5rem 0 0 auto; padding: 0.25rem 0.75rem; border: 1px solid var(--hf-border-color-light);
   border-radius: 999px; font-size: 0.8125rem; font-weight: 600; background: transparent; color: inherit; }
-.dark .hf-film-pause { border-color: rgb(255 255 255 / 0.2); }
+
+/* Remix cards in the docs palette: frosted cream on the ground (a Night card in dark mode), ink text, black pill. */
+.hf-remix-card { background: var(--hf-background-light); border-color: var(--hf-ui-border); backdrop-filter: blur(12px); }
+.hf-remix-media { background: var(--hf-surface2); }
+.hf-remix-name { color: var(--hf-heading); }
+.hf-remix-credit, .hf-remix-help { color: var(--hf-text-secondary); }
+.hf-remix-credit a { color: inherit; }
+.hf-remix-btn { background: var(--hf-heading); color: var(--hf-background); }

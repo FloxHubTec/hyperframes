@@ -75,10 +75,10 @@ export const RemixShelf = ({ items, tall = false }) => {
       } catch {}
     };
     return (
-      <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
+      <div className="hf-remix-card overflow-hidden rounded-xl border">
         <button
           type="button"
-          className="relative block w-full cursor-pointer border-0 bg-zinc-100 p-0 dark:bg-zinc-900"
+          className="hf-remix-media relative block w-full cursor-pointer border-0 p-0"
           style={{ aspectRatio: item.ratio }}
           aria-label={`${chosen ? "Pause" : "Play with sound:"} ${item.name}, remixed in HyperFrames`}
           aria-pressed={chosen}
@@ -98,20 +98,20 @@ export const RemixShelf = ({ items, tall = false }) => {
           />
         </button>
         <div className="flex flex-col gap-1.5 p-3">
-          <strong className="text-sm leading-snug">{item.name}</strong>
-          <span className="text-xs text-zinc-500 dark:text-zinc-400">
+          <strong className="hf-remix-name text-sm leading-snug">{item.name}</strong>
+          <span className="hf-remix-credit text-xs">
             Remix of a video by{" "}
             <a href={item.post} target="_blank" rel="noopener noreferrer">{item.handle}</a>
           </span>
           <button
             type="button"
             onClick={() => setOpen(!open)}
-            className="mt-1 self-start rounded-full bg-zinc-900 px-3 py-1 text-xs font-semibold text-white dark:bg-white dark:text-zinc-900"
+            className="hf-remix-btn mt-1 self-start rounded-full px-3 py-1 text-xs font-semibold"
           >
             Remix in Studio
           </button>
           {open && (
-            <div className="text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
+            <div className="hf-remix-help text-xs leading-relaxed">
               Copy the original's link, then paste it in <strong>Reference</strong> on the Studio app's Home.{" "}
               <button type="button" onClick={copy} className="font-semibold underline">
                 {copied ? "Copied" : "Copy link"}
