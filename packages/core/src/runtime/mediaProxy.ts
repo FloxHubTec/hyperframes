@@ -565,9 +565,9 @@ export function describeVideoSources(): Array<{
   for (const el of document.querySelectorAll("video")) {
     const key = deriveCodecMapKey(el);
     const map = window.__HF_MEDIA_CODEC_MAP__;
-    const codec =
-      (map && key !== null ? lookupCodecMapEntry(key, map)?.codecName : null) ?? "unknown";
-    const { width = 0, height = 0, bitDepth = 0 } = sourceFactsOf(el) ?? {};
+    const { width = 0, height = 0, bitDepth = 0, codec: probed } = sourceFactsOf(el) ?? {};
+    const hostile = map && key !== null ? lookupCodecMapEntry(key, map)?.codecName : undefined;
+    const codec = probed ?? hostile ?? "unknown";
     const id = `${codec}|${width}|${height}|${bitDepth}`;
     const group = groups.get(id) ?? { codec, width, height, bitDepth, count: 0 };
     group.count += 1;

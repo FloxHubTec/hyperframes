@@ -51,6 +51,8 @@ export type PreviewSourceFacts = {
   height: number;
   bitDepth: number;
   bitrate: number;
+  /** The probed video codec, when the server knows it. */
+  codec?: string;
 };
 
 export const HEAVY_PIXEL_SHARE = 0.5;

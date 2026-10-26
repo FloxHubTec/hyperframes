@@ -1100,6 +1100,11 @@ describe("describeVideoSources", () => {
       "/b.mp4": facts,
       "/c.mp4": { ...facts, width: 1920, height: 1080, bitDepth: 8 },
     };
+    window.__HF_MEDIA_SOURCE_FACTS__["/c.mp4"] = {
+      ...window.__HF_MEDIA_SOURCE_FACTS__["/c.mp4"],
+      codec: "h264",
+    };
+    window.__HF_MEDIA_CODEC_MAP__ = { "/a.mp4": HEVC_ENTRY, "/b.mp4": HEVC_ENTRY };
     for (const src of ["/a.mp4", "/b.mp4", "/c.mp4", "/d.mp4"]) createVideo(src);
 
     expect(describeVideoSources()).toEqual([
