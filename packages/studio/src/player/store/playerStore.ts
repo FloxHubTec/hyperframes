@@ -98,12 +98,10 @@ interface PlayerState extends PlayerStoreSlices {
   inPoint: number | null;
   /** Work-area out-point (seconds). When set, loop ends here and E jumps here. */
   outPoint: number | null;
-
   activeTool: TimelineTool;
   setActiveTool: (tool: TimelineTool) => void;
   selectLeftward: () => void;
   selectRightward: () => void;
-
   /** Tween-relative percentage of the last-clicked keyframe diamond. Operations
    *  (drag, resize, rotate) target this instead of recomputing from playhead. */
   activeKeyframePct: number | null;
