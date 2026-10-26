@@ -617,9 +617,7 @@ export interface StageStallRule {
  */
 export class RenderStageStalledError extends CaptureFailure {
   readonly code = "RENDER_STAGE_STALLED";
-  // fallow-ignore-next-line unused-class-member
   readonly owner = "system" as const;
-  // fallow-ignore-next-line unused-class-member
   readonly retryable = false as const;
 
   constructor(phase: string, silentMs: number, progress: number) {

@@ -50,6 +50,11 @@ describe("extractSafeRenderErrorCode", () => {
 
   it("transports the stalled-stage contract", () => {
     const error = new RenderStageStalledError("capture_disk", 60_000, 12);
+    expect([error.code, error.owner, error.retryable]).toEqual([
+      "RENDER_STAGE_STALLED",
+      "system",
+      false,
+    ]);
     expect(extractSafeRenderErrorMetadata(error)).toEqual({
       errorCode: "RENDER_STAGE_STALLED",
       errorOwner: "system",

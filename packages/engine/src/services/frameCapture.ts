@@ -1410,7 +1410,6 @@ async function installMediaPageHooks(page: Page, options: CaptureOptions): Promi
   }
 }
 
-// fallow-ignore-next-line unit-size
 export async function createCaptureSession(
   serverUrl: string,
   outputDir: string,
