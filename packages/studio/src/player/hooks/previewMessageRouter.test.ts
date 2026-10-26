@@ -76,12 +76,17 @@ describe("preview quality messages", () => {
       mountedElementCount: 120,
       durationSeconds: 30,
       videos: [{ codec: "hevc", width: 3840, height: 2160, bitDepth: 10, count: 2 }],
+      lighterAt: [0.25, 0.125],
       copiesReady: true,
     };
     routeMessage({ source: "hf-preview", type: "preview-facts", facts });
     expect(usePlayerStore.getState().previewFacts).toEqual(facts);
 
-    routeMessage({ source: "hf-preview", type: "preview-facts", facts: { sceneCount: "2" } });
+    routeMessage({
+      source: "hf-preview",
+      type: "preview-facts",
+      facts: { ...facts, sceneCount: "2" },
+    });
     expect(usePlayerStore.getState().previewFacts).toBeNull();
   });
 

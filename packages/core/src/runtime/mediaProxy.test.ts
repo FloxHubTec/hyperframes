@@ -792,6 +792,21 @@ describe("a copy sized to how large the video shows", () => {
   const boxOf = (el: HTMLMediaElement) =>
     new URL(el.src, document.baseURI).searchParams.get("hf-proxy-box");
 
+  it("names the lower levels at which a video would get a lighter copy", async () => {
+    const { setProxyDisplayScale } = await framedVideo(1080, 1920);
+    const { levelsWithLighterCopies } = await import("./mediaProxy");
+    const facts = { width: 1080, height: 1920, bitDepth: 8, bitrate: 0 };
+    window.__HF_MEDIA_SOURCE_FACTS__ = { "/video.mp4": facts };
+    expect(levelsWithLighterCopies()).toEqual([]);
+
+    setProxyDisplayScale(1);
+    expect(levelsWithLighterCopies()).toEqual([0.25, 0.125]);
+
+    window.__HF_MEDIA_SOURCE_FACTS__ = { "/video.mp4": { ...facts, bitDepth: 10 } };
+    expect(levelsWithLighterCopies()).toEqual([0.5, 0.25, 0.125]);
+    delete window.__HF_MEDIA_SOURCE_FACTS__;
+  });
+
   it("asks only once the host says how large it shows the frame, for that size", async () => {
     const { el, setProxyDisplayScale } = await framedVideo(1080, 1920);
     await settle();

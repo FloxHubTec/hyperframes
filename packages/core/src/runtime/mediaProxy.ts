@@ -13,6 +13,7 @@ import {
   formatPreviewProxyBox,
   isHeavyForPreview,
   isPreviewQuality,
+  PREVIEW_QUALITY_LEVELS,
   PREVIEW_PROXY_BOX_PARAM,
   PREVIEW_PROXY_LIGHT_PARAM,
   PREVIEW_PROXY_RETRY_PARAM,
@@ -533,6 +534,23 @@ export function setPreviewQuality(level: number): void {
   setCopyReportingLevel(level);
   restartPlaybackHealth();
   for (const el of document.querySelectorAll("video")) applyPreviewQuality(el);
+}
+
+/** The lower levels at which at least one video would get a lighter copy, by the same rule that makes them. */
+export function levelsWithLighterCopies(): PreviewQuality[] {
+  if (displayScale === null) return [];
+  const sized = [...document.querySelectorAll("video")].flatMap((el) => {
+    const facts = sourceFactsOf(el);
+    const shown = facts && shownBox(el, displayScale ?? 1);
+    return facts && shown ? [{ facts, shown }] : [];
+  });
+  return PREVIEW_QUALITY_LEVELS.filter(
+    (level) =>
+      level < 1 &&
+      sized.some(({ facts, shown }) =>
+        isHeavyForPreview(facts, scalePreviewProxyBox(shown, level)),
+      ),
+  );
 }
 
 /** The video files the composition plays, grouped by what they are, never by name. */

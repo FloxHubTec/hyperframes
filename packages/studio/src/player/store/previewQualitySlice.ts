@@ -1,5 +1,5 @@
 import type { StoreApi } from "zustand";
-import type { PreviewQuality } from "@hyperframes/core";
+import { isPreviewQuality, type PreviewQuality } from "@hyperframes/core/preview-quality";
 import { readStudioUiPreferences, writeStudioUiPreferences } from "../../utils/studioUiPreferences";
 
 /** The lighter copies of heavy videos the preview wants at its current quality. */
@@ -27,6 +27,7 @@ export interface PreviewFacts {
   mountedElementCount: number;
   durationSeconds: number;
   videos: Array<{ codec: string; width: number; height: number; bitDepth: number; count: number }>;
+  lighterAt: PreviewQuality[];
   copiesReady: boolean;
 }
 
@@ -118,10 +119,8 @@ export function parsePlaybackHealth(value: unknown): PlaybackHealth | null {
 
 export function parsePreviewFacts(value: unknown): PreviewFacts | null {
   if (typeof value !== "object" || value === null) return null;
-  const { sceneCount, mountedElementCount, durationSeconds, videos, copiesReady } = value as Record<
-    string,
-    unknown
-  >;
+  const { sceneCount, mountedElementCount, durationSeconds, videos, copiesReady, lighterAt } =
+    value as Record<string, unknown>;
   const numbers = [sceneCount, mountedElementCount, durationSeconds].every(
     (n) => typeof n === "number",
   );
@@ -145,6 +144,7 @@ export function parsePreviewFacts(value: unknown): PreviewFacts | null {
       : [];
   });
   return {
+    lighterAt: Array.isArray(lighterAt) ? lighterAt.filter(isPreviewQuality) : [],
     sceneCount: sceneCount as number,
     mountedElementCount: mountedElementCount as number,
     durationSeconds: durationSeconds as number,

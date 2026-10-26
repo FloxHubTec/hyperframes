@@ -291,6 +291,8 @@ export type RuntimePreviewFactsMessage = {
       bitDepth: number;
       count: number;
     }>;
+    /** The lower levels at which at least one video gets a lighter copy. */
+    lighterAt: number[];
     copiesReady: boolean;
   };
 };
